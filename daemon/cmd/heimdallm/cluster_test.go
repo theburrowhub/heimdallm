@@ -1193,14 +1193,14 @@ func TestClusterStateReannouncesATakeoverAfterRecovery(t *testing.T) {
 	remote.setHealthy(false)
 	probeUntilConfirmedDown(t, cs)
 	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
-	if cs.notes.claim("srv-a", "takeover:review|theirs/repo") {
+	if cs.notes.claim("srv-a", noticeSubject("takeover:probes_failed", dispatchUnit("review", "theirs/repo"))) {
 		t.Fatal("takeover was not recorded as announced")
 	}
 
 	remote.setHealthy(true)
 	cs.Prober().ProbeAll(context.Background()) // the transition clears the notes
 
-	if !cs.notes.claim("srv-a", "takeover:review|theirs/repo") {
+	if !cs.notes.claim("srv-a", noticeSubject("takeover:probes_failed", dispatchUnit("review", "theirs/repo"))) {
 		t.Error("recovery did not clear the notes; a second outage would go unreported")
 	}
 }
@@ -1373,7 +1373,7 @@ func TestClusterStateUpdatePrunesNotesForRemovedInstances(t *testing.T) {
 	remote.setHealthy(false)
 	probeUntilConfirmedDown(t, cs)
 	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
-	if cs.notes.claim("srv-a", "takeover:review|theirs/repo") {
+	if cs.notes.claim("srv-a", noticeSubject("takeover:probes_failed", dispatchUnit("review", "theirs/repo"))) {
 		t.Fatal("precondition: the takeover should be recorded")
 	}
 
@@ -1391,7 +1391,7 @@ func TestClusterStateUpdatePrunesNotesForRemovedInstances(t *testing.T) {
 	}
 	cs.Update(cfg)
 
-	if !cs.notes.claim("srv-a", "takeover:review|theirs/repo") {
+	if !cs.notes.claim("srv-a", noticeSubject("takeover:probes_failed", dispatchUnit("review", "theirs/repo"))) {
 		t.Error("notes for a removed instance survived the reload")
 	}
 }
@@ -1401,18 +1401,109 @@ func TestClusterStateUpdatePrunesNotesForRemovedInstances(t *testing.T) {
 // whichever fired first silence the other.
 func TestClusterStateNotesAreKeyedPerOperation(t *testing.T) {
 	var n instanceNotes
-	if !n.claim("srv-a", "takeover:review|o/r") {
+	review := noticeSubject("takeover:probes_failed", dispatchUnit("review", "o/r"))
+	triage := noticeSubject("takeover:probes_failed", dispatchUnit("issue_triage", "o/r"))
+	if !n.claim("srv-a", review) {
 		t.Fatal("first review notice suppressed")
 	}
-	if !n.claim("srv-a", "takeover:issue_triage|o/r") {
+	if !n.claim("srv-a", triage) {
 		t.Error("the review notice suppressed the issue-triage notice for the same repo")
 	}
-	if n.claim("srv-a", "takeover:review|o/r") {
+	if n.claim("srv-a", review) {
 		t.Error("the review notice was reported twice")
 	}
 	n.forget("srv-a")
-	if !n.claim("srv-a", "takeover:review|o/r") {
+	if !n.claim("srv-a", review) {
 		t.Error("forget() did not clear the notice")
+	}
+}
+
+// Re-review feedback: the dedup subject must carry the reason. A work unit can
+// hit one reason and later the other — rejected dispatches first, then the
+// instance stops answering probes at all — and those point the operator at
+// different settings, so reporting only whichever fired first made the
+// per-reason messages pointless.
+func TestClusterStateNotesAreKeyedPerTakeoverReason(t *testing.T) {
+	var n instanceNotes
+	unit := dispatchUnit("review", "o/r")
+	if !n.claim("srv-a", noticeSubject("takeover:"+takeoverDispatchRejected.label(), unit)) {
+		t.Fatal("first notice suppressed")
+	}
+	if !n.claim("srv-a", noticeSubject("takeover:"+takeoverProbesFailed.label(), unit)) {
+		t.Error("the dispatch-rejected notice suppressed the probes-failed notice for the same unit")
+	}
+}
+
+// Re-review feedback: clearing the failure count but not the notices left the
+// dispatch-rejected class silent on every recurrence. That owner keeps
+// answering the unauthenticated health probe throughout, so there is never a
+// reachability transition and forget() never runs — the only recovery signal
+// available is a dispatch that succeeds.
+func TestClusterStateSuccessfulDispatchClearsTheUnitsNotices(t *testing.T) {
+	var n instanceNotes
+	unit := dispatchUnit("review", "o/r")
+	other := dispatchUnit("review", "o/other")
+	for _, subject := range []string{
+		noticeSubject("rpc", unit),
+		noticeSubject("defer", unit),
+		noticeSubject("takeover:"+takeoverDispatchRejected.label(), unit),
+	} {
+		if !n.claim("srv-a", subject) {
+			t.Fatalf("precondition: %q should be a first notice", subject)
+		}
+	}
+	if !n.claim("srv-a", noticeSubject("rpc", other)) {
+		t.Fatal("precondition: the other unit's notice should be a first notice")
+	}
+	n.recordFailure("srv-a", unit)
+
+	n.clearUnit("srv-a", unit)
+
+	for _, subject := range []string{
+		noticeSubject("rpc", unit),
+		noticeSubject("defer", unit),
+		noticeSubject("takeover:"+takeoverDispatchRejected.label(), unit),
+	} {
+		if !n.claim("srv-a", subject) {
+			t.Errorf("clearUnit left %q claimed; the next occurrence would be silent", subject)
+		}
+	}
+	if n.recordFailure("srv-a", unit) != 1 {
+		t.Error("clearUnit did not reset the failure count")
+	}
+	if n.claim("srv-a", noticeSubject("rpc", other)) {
+		t.Error("clearUnit dropped a different work unit's notices")
+	}
+}
+
+// End to end through dispatch: an owner that rejects RPCs, is fixed, then
+// starts rejecting again must be announced both times. The instance answers
+// every health probe throughout, so nothing but the successful dispatch can
+// release the notice.
+func TestClusterStateReannouncesADispatchRejectedTakeoverAfterItRecovers(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	unit := dispatchUnit("review", "theirs/repo")
+	subject := noticeSubject("takeover:"+takeoverDispatchRejected.label(), unit)
+
+	remote.setFailNext(true)
+	for i := 0; i < cs.takeoverThreshold(); i++ {
+		cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	}
+	if cs.notes.claim("srv-a", subject) {
+		t.Fatal("precondition: the dispatch-rejected takeover should have been announced")
+	}
+	if cs.confirmedDown("srv-a") {
+		t.Fatal("precondition: the owner answered every health probe, so no reachability transition happened")
+	}
+
+	// Operator fixes the remote.
+	remote.setFailNext(false)
+	if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+		t.Fatal("a successful dispatch reported as not handled")
+	}
+	if !cs.notes.claim("srv-a", subject) {
+		t.Error("a successful dispatch did not clear the takeover notice; the next outage would be silent")
 	}
 }
 

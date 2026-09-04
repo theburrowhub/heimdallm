@@ -154,4 +154,30 @@ void main() {
     expect(find.text('Skipped'), findsOneWidget);
     expect(find.textContaining('Skipped because PR is draft'), findsOneWidget);
   });
+
+  // peer_published only happens in a cluster: another instance had already
+  // published a review for this commit by the time this one reached the
+  // publish boundary (theburrowhub/heimdallm#765). The raw reason reads as
+  // "peer published" through the fallback, which says nothing useful to
+  // someone looking at why their review never appeared.
+  testWidgets('review_skipped explains a peer instance having published', (
+    tester,
+  ) async {
+    final entry = _mk(
+      action: ActivityAction.reviewSkipped,
+      outcome: 'peer_published',
+      details: {'reason': 'peer_published'},
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ActivityEntryTile(entry: entry)),
+      ),
+    );
+    expect(
+      find.textContaining(
+        'Skipped because another instance already reviewed this commit',
+      ),
+      findsOneWidget,
+    );
+  });
 }

@@ -102,11 +102,7 @@ type instanceNotes struct {
 }
 
 // claim reports whether this is the first notice for (instanceID, subject).
-//
-// subject carries the operation as well as the repo ("takeover:review|o/r"):
-// PR review and issue triage are taken over through different call paths, and
-// a repo-only key let whichever fired first silence the other, so the one
-// reported operation was whichever won the race.
+// Build the subject with noticeSubject so clearUnit can find it again.
 func (n *instanceNotes) claim(instanceID, subject string) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -142,10 +138,21 @@ func (n *instanceNotes) recordFailure(instanceID, unit string) int {
 	return units[unit]
 }
 
-// clearFailures resets one work unit's count after a dispatch succeeds. The
-// count has to be *consecutive* failures: a repo that fails once a day is a
-// blip, not an owner that has stopped accepting work.
-func (n *instanceNotes) clearFailures(instanceID, unit string) {
+// clearUnit forgets everything recorded about one work unit: its consecutive
+// failure count and every notice reported about it.
+//
+// Called when a dispatch succeeds, and that is the point. The count has to be
+// *consecutive* failures — a repo that fails once a day is a blip, not an owner
+// refusing work. But clearing the count alone left the notices claimed, and
+// nothing else could clear them in the case that matters most: an owner that
+// rejects authenticated dispatches while still answering the unauthenticated
+// health probe never produces a reachability transition, so forget() never
+// runs. The second time that happened — token rotated again weeks later — the
+// hub took over in complete silence, which is the failure #765 was about.
+//
+// A successful dispatch is as much a recovery signal as a successful probe, so
+// it clears both.
+func (n *instanceNotes) clearUnit(instanceID, unit string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if units := n.failures[instanceID]; units != nil {
@@ -153,6 +160,19 @@ func (n *instanceNotes) clearFailures(instanceID, unit string) {
 		if len(units) == 0 {
 			delete(n.failures, instanceID)
 		}
+	}
+	subjects := n.announced[instanceID]
+	if subjects == nil {
+		return
+	}
+	suffix := "#" + unit
+	for subject := range subjects {
+		if strings.HasSuffix(subject, suffix) {
+			delete(subjects, subject)
+		}
+	}
+	if len(subjects) == 0 {
+		delete(n.announced, instanceID)
 	}
 }
 
@@ -200,6 +220,37 @@ const (
 	// locally on a failed RPC is what it always did.
 	takeoverNoObserver
 )
+
+// label is the reason's stable name, used both in the dedup subject and in the
+// SSE payload so the two can never disagree about which condition fired.
+//
+// It is part of the subject, not just the message: a work unit can hit one
+// reason and later the other (rejected dispatches first, then the instance
+// stops answering probes at all), and those need different fixes. A
+// reason-agnostic key reported only whichever came first, which would have
+// made the per-reason messages below pointless.
+func (r takeoverReason) label() string {
+	switch r {
+	case takeoverDispatchRejected:
+		return "dispatch_rejected"
+	case takeoverNoObserver:
+		return "no_observer"
+	default:
+		return "probes_failed"
+	}
+}
+
+// dispatchUnit names one unit of routed work: one operation on one repo. It is
+// the granularity both the failure count and the notices use, because "this
+// remote does not have this repo configured" is specific to one repo and one
+// operation, not to the instance.
+func dispatchUnit(op, repo string) string { return op + "|" + repo }
+
+// noticeSubject builds the dedup key for one notice about one work unit.
+//
+// The unit always comes last, after "#", so clearUnit can drop every notice
+// about a unit without having to know which notices exist.
+func noticeSubject(notice, unit string) string { return notice + "#" + unit }
 
 // ensureSelfInstance gives a hub an entry for itself when the operator has not
 // written one.
@@ -407,9 +458,9 @@ func (cs *clusterState) dispatch(ctx context.Context, repo, op string, do func(*
 	// out of ownerVerdictFor means the prober gave up on the owner.
 	reason := takeoverProbesFailed
 	if verdict == verdictDispatch {
-		unit := op + "|" + repo
+		unit := dispatchUnit(op, repo)
 		if err := do(cs.clientFactory()(inst)); err == nil {
-			cs.notes.clearFailures(inst.ID, unit)
+			cs.notes.clearUnit(inst.ID, unit)
 			return true
 		} else {
 			cs.noteDispatchFailure(repo, op, inst, err)
@@ -456,7 +507,7 @@ func (cs *clusterState) verdictAfterFailedDispatch(inst instances.Instance, op, 
 	if cs.confirmedDown(inst.ID) {
 		return verdictTakeOver, takeoverProbesFailed
 	}
-	if n := cs.notes.recordFailure(inst.ID, op+"|"+repo); n >= cs.takeoverThreshold() {
+	if n := cs.notes.recordFailure(inst.ID, dispatchUnit(op, repo)); n >= cs.takeoverThreshold() {
 		return verdictTakeOver, takeoverDispatchRejected
 	}
 	return verdictDeferToOwner, takeoverProbesFailed
@@ -469,7 +520,7 @@ func (cs *clusterState) verdictAfterFailedDispatch(inst instances.Instance, op, 
 func (cs *clusterState) noteDispatchFailure(repo, op string, inst instances.Instance, err error) {
 	msg := "cluster: dispatch to owning instance failed"
 	args := []any{"repo", repo, "operation", op, "instance", inst.ID, "err", err}
-	if cs.notes.claim(inst.ID, "rpc:"+op+"|"+repo) {
+	if cs.notes.claim(inst.ID, noticeSubject("rpc", dispatchUnit(op, repo))) {
 		slog.Warn(msg, args...)
 		return
 	}
@@ -525,7 +576,7 @@ func (cs *clusterState) noteDeferral(repo, op string, inst instances.Instance) {
 		"failed_probes", cs.probeFailures(inst.ID),
 		"takeover_after_failed_probes", cs.takeoverThreshold(),
 	}
-	if cs.notes.claim(inst.ID, "defer:"+op+"|"+repo) {
+	if cs.notes.claim(inst.ID, noticeSubject("defer", dispatchUnit(op, repo))) {
 		slog.Info(msg, args...)
 		return
 	}
@@ -543,7 +594,8 @@ func (cs *clusterState) noteDeferral(repo, op string, inst instances.Instance) {
 // instance is up and refusing the work, which is a token or config problem on
 // the remote.
 func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instance, reason takeoverReason) {
-	if !cs.notes.claim(inst.ID, "takeover:"+op+"|"+repo) {
+	label := reason.label()
+	if !cs.notes.claim(inst.ID, noticeSubject("takeover:"+label, dispatchUnit(op, repo))) {
 		return
 	}
 	failures := cs.probeFailures(inst.ID)
@@ -551,17 +603,14 @@ func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instanc
 		"repo", repo, "operation", op, "instance", inst.ID, "instance_name", inst.Name,
 		"failed_probes", failures,
 	}
-	var label string
 	switch reason {
 	case takeoverProbesFailed:
-		label = "probes_failed"
 		slog.Warn("cluster: taking over work from an instance that has stopped answering health probes; "+
 			"if it is alive and merely unreachable from here it is still reviewing this repository, so this work is "+
 			"being duplicated (the publish-boundary check should stop a second review from being posted, but the AI "+
 			"spend is already incurred)",
 			append(args, "base_url_hint", "cluster.instances."+inst.ID+".base_url")...)
 	case takeoverDispatchRejected:
-		label = "dispatch_rejected"
 		slog.Warn("cluster: taking over work from an instance that answers health probes but keeps rejecting our "+
 			"dispatch calls; it is running and refusing this work, so check its cluster token and whether the "+
 			"repository is configured on that instance at all",
@@ -571,6 +620,14 @@ func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instanc
 		// strength of. This is the plain pre-#765 local fallback, so it is not
 		// the operator alarm the other two are, and there is no /instances UI
 		// on a worker for an SSE event to reach.
+		//
+		// It still consumes a claim, because without one this line would repeat
+		// for every routed repo on every poll cycle. A daemon with no prober
+		// also has no recovery callback, so the claim can only be released by
+		// clearUnit on the next successful dispatch — which is the right
+		// release for this path: while the RPC keeps failing there is one
+		// continuous condition to report, not a new one each cycle, and the
+		// per-cycle detail stays available at Debug in noteDispatchFailure.
 		slog.Info("cluster: dispatch failed and this daemon does not probe its peers; handling the work locally",
 			args...)
 		return
