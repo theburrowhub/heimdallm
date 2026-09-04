@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -129,6 +130,15 @@ func (srv *Server) mountClusterRoutes(r chi.Router) {
 	r.Get("/cluster/drift", srv.hubOnly(srv.handleConfigDrift))
 	r.Post("/cluster/propagate", srv.hubOnly(srv.handlePropagateConfig))
 	r.Post("/cluster/dispatch/{op}", srv.hubOnly(srv.handleDispatch))
+
+	// Deliberately NOT hubOnly: a worker is this route's primary audience. The
+	// hub computes the ownership partition (identity + default_instance +
+	// routing.orgs/repos) and pushes it here so Router.Owns on the worker's
+	// side has something to enforce instead of failing open on an unassigned
+	// repo — see cmd/heimdallm/cluster.go's propagatePartition and
+	// theburrowhub/heimdallm#769. hubOnly would 404 the one request that
+	// closes that gap.
+	r.Put("/cluster/partition", srv.handlePutPartition)
 }
 
 // hubOnly hides a control-plane route on a daemon with no cluster wiring.
@@ -621,6 +631,168 @@ func (srv *Server) handlePutRouting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// errPartitionUnchanged signals handlePutPartition's patchClusterTOML mutate
+// closure that nothing needs to change, so writeTOMLUnderLock must abort
+// before validating, writing or triggering a reload. Without it a
+// byte-identical push — which is the common case, since the hub propagates
+// the partition on every reload (see cmd/heimdallm/cluster.go's
+// propagatePartition) — would still rewrite config.toml and reload on every
+// steady-state poll of an already-converged worker.
+var errPartitionUnchanged = errors.New("cluster: partition unchanged")
+
+// putPartitionRequest is the PUT /cluster/partition body: the ownership
+// partition the hub computed for this instance. Every field is a plain value
+// rather than a pointer, unlike putRoutingRequest — this endpoint always
+// replaces the whole partition atomically, on purpose: identity and rules
+// must travel together, or a worker that adopted a new id but not yet the
+// matching rules (or the reverse) would misfilter on whichever half it has.
+type putPartitionRequest struct {
+	InstanceID      string            `json:"instance_id"`
+	DefaultInstance string            `json:"default_instance"`
+	Orgs            map[string]string `json:"orgs"`
+	Repos           map[string]string `json:"repos"`
+	// HubInstanceID and HubVersion are informational only: logged for an
+	// operator diagnosing a mismatch, never validated or stored.
+	HubInstanceID string `json:"hub_instance_id"`
+	HubVersion    string `json:"hub_version"`
+}
+
+type putPartitionResponse struct {
+	InstanceID string `json:"instance_id"`
+	Changed    bool   `json:"changed"`
+	Orgs       int    `json:"orgs,omitempty"`
+	Repos      int    `json:"repos,omitempty"`
+}
+
+// handlePutPartition receives the ownership partition the hub computed for
+// this instance: its assigned identity, default_instance and
+// routing.orgs/routing.repos. See mountClusterRoutes for why this route is
+// deliberately not hubOnly.
+//
+// Never touches role, cluster.instances, any token, probe_interval or
+// routing.mode/round_robin_pool — those describe this machine or the hub's
+// own registry, not the partition (see docs/configuration-guide.md §18.4).
+func (srv *Server) handlePutPartition(w http.ResponseWriter, r *http.Request) {
+	if srv.configPath == "" {
+		httpJSONErr(w, http.StatusServiceUnavailable, "PUT not available — configPath not set")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req putPartitionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpJSONErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	if err := config.ValidateInstanceID(req.InstanceID); err != nil {
+		httpJSONErr(w, http.StatusBadRequest, "instance_id: "+err.Error())
+		return
+	}
+	if req.DefaultInstance != "" {
+		if err := config.ValidateInstanceID(req.DefaultInstance); err != nil {
+			httpJSONErr(w, http.StatusBadRequest, "default_instance: "+err.Error())
+			return
+		}
+	}
+	for org, id := range req.Orgs {
+		if err := config.ValidateOrgSlug(org); err != nil {
+			httpJSONErr(w, http.StatusBadRequest, "orgs: "+err.Error())
+			return
+		}
+		if err := config.ValidateInstanceID(id); err != nil {
+			httpJSONErr(w, http.StatusBadRequest, fmt.Sprintf("orgs.%s: %s", org, err.Error()))
+			return
+		}
+	}
+	for repo, id := range req.Repos {
+		if err := config.ValidateRepoSlug(repo); err != nil {
+			httpJSONErr(w, http.StatusBadRequest, "repos: "+err.Error())
+			return
+		}
+		if err := config.ValidateInstanceID(id); err != nil {
+			httpJSONErr(w, http.StatusBadRequest, fmt.Sprintf("repos.%s: %s", repo, err.Error()))
+			return
+		}
+	}
+
+	// A daemon started with HEIMDALLM_INSTANCE_ID gets that value reapplied on
+	// every load (see config's applyEnvOverrides), so accepting a different id
+	// here would be silently undone on the very next reload — and applying
+	// the rules under an identity none of them name would leave this worker
+	// filtering everything out. Refuse outright rather than accept half a
+	// push that cannot stick.
+	if pinned := config.EnvPinnedInstanceID(); pinned != "" && pinned != req.InstanceID {
+		httpJSONErr(w, http.StatusConflict,
+			fmt.Sprintf("this instance's id is pinned to %q by HEIMDALLM_INSTANCE_ID and cannot be reassigned", pinned))
+		return
+	}
+
+	changed := false
+	_, err := srv.patchClusterTOML(func(cluster map[string]any) error {
+		curID, _ := cluster["instance_id"].(string)
+		curDefault, _ := cluster["default_instance"].(string)
+		routing := childTable(cluster, "routing")
+		curOrgs := stringMapFromAny(routing["orgs"])
+		curRepos := stringMapFromAny(routing["repos"])
+
+		if curID == req.InstanceID && curDefault == req.DefaultInstance &&
+			maps.Equal(curOrgs, req.Orgs) && maps.Equal(curRepos, req.Repos) {
+			return errPartitionUnchanged
+		}
+		changed = true
+
+		cluster["instance_id"] = req.InstanceID
+		if req.DefaultInstance == "" {
+			delete(cluster, "default_instance")
+		} else {
+			cluster["default_instance"] = req.DefaultInstance
+		}
+		// Replaced wholesale, not merged — PUT semantics, matching
+		// handlePutRouting: a rule the hub deleted must disappear here too, or
+		// this worker keeps filtering by a partition the hub no longer agrees
+		// exists.
+		routing["orgs"] = toAnyMap(req.Orgs)
+		routing["repos"] = toAnyMap(req.Repos)
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errPartitionUnchanged) {
+			writeJSON(w, http.StatusOK, putPartitionResponse{InstanceID: req.InstanceID, Changed: false})
+			return
+		}
+		srv.writeClusterErr(w, "update partition", err)
+		return
+	}
+	if req.HubInstanceID != "" {
+		slog.Info("cluster: partition received from hub",
+			"hub_instance_id", req.HubInstanceID, "hub_version", req.HubVersion,
+			"instance_id", req.InstanceID, "orgs", len(req.Orgs), "repos", len(req.Repos))
+	}
+	writeJSON(w, http.StatusOK, putPartitionResponse{
+		InstanceID: req.InstanceID, Changed: changed, Orgs: len(req.Orgs), Repos: len(req.Repos),
+	})
+}
+
+// stringMapFromAny reads a TOML-decoded table (map[string]any, string-valued)
+// as a map[string]string, for comparing against a putPartitionRequest's maps.
+// Values that are not strings are skipped rather than erroring: a hand-edited
+// config.toml with a stray non-string value here must not crash the endpoint
+// that would otherwise fix the file's routing.
+func stringMapFromAny(v any) map[string]string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		if s, ok := val.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
 }
 
 // propagateRequest is the POST /cluster/propagate body.

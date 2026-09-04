@@ -1415,3 +1415,235 @@ func TestSuccessfulDispatchKeepsItsClaim(t *testing.T) {
 		t.Error("the second click was not deduplicated")
 	}
 }
+
+// ------------------------------------------------------- PUT /cluster/partition
+
+// workerFixture is a non-hub daemon: no ClusterDeps at all (srv.cluster stays
+// nil), but a real config.toml and a reload callback — PUT /cluster/partition
+// is deliberately not hubOnly (see mountClusterRoutes), and this is the
+// fixture that actually exercises it on the daemon it targets.
+type workerFixture struct {
+	srv        *server.Server
+	configPath string
+	reloads    int
+	mu         sync.Mutex
+}
+
+func newWorker(t *testing.T, toml string) *workerFixture {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv := server.New(st, nil, nil, testToken)
+	srv.SetConfigPath(cfgPath)
+	f := &workerFixture{srv: srv, configPath: cfgPath}
+	srv.SetReloadFn(func() error {
+		f.mu.Lock()
+		f.reloads++
+		f.mu.Unlock()
+		return nil
+	})
+	return f
+}
+
+func (f *workerFixture) do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	req.Header.Set(instances.HeaderToken, testToken)
+	rec := httptest.NewRecorder()
+	f.srv.Router().ServeHTTP(rec, req)
+	return rec
+}
+
+func (f *workerFixture) reloadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reloads
+}
+
+func (f *workerFixture) readCluster(t *testing.T) map[string]any {
+	t.Helper()
+	m, err := config.ReadTOMLMap(f.configPath)
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	cluster, _ := m["cluster"].(map[string]any)
+	if cluster == nil {
+		return map[string]any{}
+	}
+	return cluster
+}
+
+// The central regression test: PUT /cluster/partition must work on a daemon
+// that is NOT a hub, because a worker is its only realistic audience.
+// hubOnly's usual 404 would silently mean the hub's push never lands,
+// exactly the gap behind theburrowhub/heimdallm#769.
+func TestPutPartitionIsAvailableOnANonHubDaemon(t *testing.T) {
+	f := newWorker(t, "[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"worker\"\n")
+	body := `{"instance_id":"192-168-1-100-3000","default_instance":"hub-1","orgs":{"Muriano":"192-168-1-100-3000"},"repos":{}}`
+	rec := f.do(t, http.MethodPut, "/cluster/partition", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /cluster/partition on a worker = %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPutPartitionWritesIdentityAndRules(t *testing.T) {
+	f := newWorker(t, "[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"worker\"\ninstance_id = \"friday\"\n")
+	body := `{"instance_id":"192-168-1-100-3000","default_instance":"hub-1",` +
+		`"orgs":{"Muriano":"192-168-1-100-3000","freepik-company":"hub-1"},"repos":{"theburrowhub/heimdallm":"hub-1"}}`
+	rec := f.do(t, http.MethodPut, "/cluster/partition", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /cluster/partition = %d: %s", rec.Code, rec.Body)
+	}
+	resp := decode(t, rec)
+	if resp["changed"] != true || resp["instance_id"] != "192-168-1-100-3000" {
+		t.Errorf("response = %v, want changed=true instance_id=192-168-1-100-3000", resp)
+	}
+
+	cluster := f.readCluster(t)
+	if cluster["instance_id"] != "192-168-1-100-3000" {
+		t.Errorf("cluster.instance_id = %v, want the pushed id", cluster["instance_id"])
+	}
+	if cluster["default_instance"] != "hub-1" {
+		t.Errorf("cluster.default_instance = %v, want hub-1", cluster["default_instance"])
+	}
+	routing, _ := cluster["routing"].(map[string]any)
+	orgs, _ := routing["orgs"].(map[string]any)
+	if orgs["Muriano"] != "192-168-1-100-3000" || orgs["freepik-company"] != "hub-1" {
+		t.Errorf("routing.orgs = %v, want both pushed rules", orgs)
+	}
+	repos, _ := routing["repos"].(map[string]any)
+	if repos["theburrowhub/heimdallm"] != "hub-1" {
+		t.Errorf("routing.repos = %v, want the pushed rule", repos)
+	}
+	if f.reloadCount() != 1 {
+		t.Errorf("reloads = %d, want 1", f.reloadCount())
+	}
+}
+
+// PUT semantics: a rule the hub deleted must disappear on the worker too, or
+// the worker keeps filtering by a partition the hub no longer agrees exists.
+func TestPutPartitionReplacesRulesRatherThanMerging(t *testing.T) {
+	f := newWorker(t, "[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"worker\"\ninstance_id = \"srv-a\"\n\n"+
+		"[cluster.routing]\n[cluster.routing.orgs]\nstale = \"srv-a\"\n")
+	body := `{"instance_id":"srv-a","default_instance":"","orgs":{"fresh":"srv-a"},"repos":{}}`
+	rec := f.do(t, http.MethodPut, "/cluster/partition", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /cluster/partition = %d: %s", rec.Code, rec.Body)
+	}
+
+	cluster := f.readCluster(t)
+	routing, _ := cluster["routing"].(map[string]any)
+	orgs, _ := routing["orgs"].(map[string]any)
+	if _, present := orgs["stale"]; present {
+		t.Errorf("routing.orgs = %v, want the stale rule gone", orgs)
+	}
+	if orgs["fresh"] != "srv-a" {
+		t.Errorf("routing.orgs = %v, want the new rule present", orgs)
+	}
+}
+
+// A byte-identical push must not rewrite config.toml or trigger a reload —
+// otherwise every steady-state poll of an already-converged worker (the hub
+// propagates on every reload) becomes a write-and-reload storm.
+func TestPutPartitionIsIdempotentAndSkipsTheReload(t *testing.T) {
+	f := newWorker(t, "[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"worker\"\ninstance_id = \"srv-a\"\n"+
+		"default_instance = \"hub-1\"\n\n[cluster.routing]\n[cluster.routing.orgs]\nacme = \"srv-a\"\n")
+	body := `{"instance_id":"srv-a","default_instance":"hub-1","orgs":{"acme":"srv-a"},"repos":{}}`
+
+	rec := f.do(t, http.MethodPut, "/cluster/partition", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /cluster/partition = %d: %s", rec.Code, rec.Body)
+	}
+	if resp := decode(t, rec); resp["changed"] != false {
+		t.Errorf("response = %v, want changed=false for an identical push", resp)
+	}
+	if f.reloadCount() != 0 {
+		t.Errorf("reloads = %d, want 0 for an idempotent push", f.reloadCount())
+	}
+}
+
+// A daemon started with HEIMDALLM_INSTANCE_ID gets that value reapplied on
+// every load, so accepting a different id here would be silently undone on
+// the very next reload — refuse outright instead of accepting a push that
+// cannot stick.
+func TestPutPartitionRejectsWhenTheIDIsEnvPinned(t *testing.T) {
+	t.Setenv("HEIMDALLM_INSTANCE_ID", "pinned-id")
+	f := newWorker(t, "[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"worker\"\ninstance_id = \"pinned-id\"\n")
+	body := `{"instance_id":"192-168-1-100-3000","default_instance":"","orgs":{},"repos":{}}`
+	rec := f.do(t, http.MethodPut, "/cluster/partition", body)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("PUT /cluster/partition with a different id than the env pin = %d, want 409: %s", rec.Code, rec.Body)
+	}
+	if f.reloadCount() != 0 {
+		t.Error("a rejected push still triggered a reload")
+	}
+}
+
+func TestPutPartitionValidatesSlugsAndIDs(t *testing.T) {
+	f := newWorker(t, "[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"worker\"\n")
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"bad instance_id", `{"instance_id":"has/slash","orgs":{},"repos":{}}`},
+		{"bad default_instance", `{"instance_id":"srv-a","default_instance":"not an id","orgs":{},"repos":{}}`},
+		{"bad org slug", `{"instance_id":"srv-a","orgs":{"not a slug":"hub-1"},"repos":{}}`},
+		{"bad org value", `{"instance_id":"srv-a","orgs":{"acme":"not an id"},"repos":{}}`},
+		{"bad repo slug", `{"instance_id":"srv-a","orgs":{},"repos":{"../escape":"hub-1"}}`},
+		{"bad repo value", `{"instance_id":"srv-a","orgs":{},"repos":{"acme/tools":"not an id"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.do(t, http.MethodPut, "/cluster/partition", tt.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("PUT /cluster/partition(%s) = %d, want 400: %s", tt.name, rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// The endpoint's whole point is narrow: identity and the partition, nothing
+// that describes this machine or the hub's own registry.
+func TestPutPartitionNeverTouchesRoleTokensOrInstances(t *testing.T) {
+	f := newWorker(t, "[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"worker\"\ninstance_id = \"srv-a\"\n\n"+
+		"[cluster.instances.srv-a]\nname = \"srv-a\"\nbase_url = \"http://127.0.0.1:7842\"\ntoken = \"secret-token\"\n")
+	body := `{"instance_id":"192-168-1-100-3000","default_instance":"hub-1","orgs":{"acme":"192-168-1-100-3000"},"repos":{}}`
+	rec := f.do(t, http.MethodPut, "/cluster/partition", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /cluster/partition = %d: %s", rec.Code, rec.Body)
+	}
+
+	cluster := f.readCluster(t)
+	if cluster["role"] != "worker" {
+		t.Errorf("role = %v, want unchanged", cluster["role"])
+	}
+	instancesTbl, _ := cluster["instances"].(map[string]any)
+	srvA, _ := instancesTbl["srv-a"].(map[string]any)
+	if srvA["token"] != "secret-token" {
+		t.Errorf("instances.srv-a.token = %v, want untouched", srvA["token"])
+	}
+}
+
+func TestPutPartitionRequiresToken(t *testing.T) {
+	f := newWorker(t, "[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"worker\"\n")
+	body := `{"instance_id":"srv-a","orgs":{},"repos":{}}`
+	req := httptest.NewRequest(http.MethodPut, "/cluster/partition", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("PUT /cluster/partition without a token = %d, want 401", rec.Code)
+	}
+}

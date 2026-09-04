@@ -1472,12 +1472,24 @@ is what stops two daemons reviewing the same pull request.
 Ownership resolves in this order:
 
 ```
-repository rule  >  organization rule  >  round-robin pool  >  default_instance
+repository rule  >  organization rule  >  default_instance
 ```
 
-A repository with no rule is handed to a pool member round-robin, and the
-assignment is then written back as an ordinary `[cluster.routing.repos]` entry —
-so it is sticky, visible in the UI, and editable like any other rule.
+A `worker` enforces this locally with its own copy of the rules, which the hub
+**pushes** to it (`PUT /cluster/partition`) after every reload — an operator
+never edits a worker's `config.toml` by hand. Until a worker has received
+that push at least once, it holds no rules to enforce and — unlike a `hub` or
+`standalone` daemon, which default to owning everything when nothing is
+configured — a `worker` defaults to owning **nothing**: it waits rather than
+guessing. This asymmetry exists because a worker has no registry of its own
+to fall back on; the hub is the only authority on the partition, and treating
+"no rules yet" as "mine by default" is precisely how a worker with a stale or
+missing push ends up reviewing repositories that were never routed to it
+(theburrowhub/heimdallm#769). A worker sitting idle logs a WARN naming `PUT
+/cluster/partition` — that means exactly this: it has not received its
+partition yet. Trigger a reload on the hub (or "apply to all instances") to
+push it; see §18.4 for when that happens automatically and its one gap
+(a worker that was unreachable during the last reload).
 
 ### 18.2 Configuration
 
@@ -1520,6 +1532,13 @@ theburrowhub = "srv-a"
 [cluster.routing.repos]
 "theburrowhub/heimdallm" = "hub-1"
 ```
+
+A `worker`'s `config.toml` needs only `role = "worker"` — its `instance_id`,
+`default_instance` and `[cluster.routing.orgs]`/`[cluster.routing.repos]` are
+filled in by the hub's push, not hand-written. Registering a worker
+(`[cluster.instances.<id>]` on the hub, `base_url` and a token) is what
+identifies it to the hub; the worker itself never carries `[cluster.instances]`
+or `[cluster.routing]` written by an operator.
 
 Environment equivalents, for containers that should not carry a per-instance
 `config.toml`: `HEIMDALLM_CLUSTER_ROLE`, `HEIMDALLM_INSTANCE_ID`,
@@ -1608,6 +1627,33 @@ These are **never** sent, because they describe one machine:
 A push never aborts on the first failure: one machine rebooting must not hide
 that the others were updated, so the result is reported per instance and the
 API answers `207 Multi-Status`.
+
+**The one exception to `cluster.*` staying local: the partition itself.**
+`instance_id`, `default_instance` and `[cluster.routing.orgs]`/
+`[cluster.routing.repos]` travel to each `worker` through a separate channel,
+`PUT /cluster/partition`, not through "apply to all instances" — that endpoint
+replaces the whole partition atomically (identity and rules together, so a
+worker can never apply one half without the other) and, unlike the general
+push, is available on a non-hub daemon, since a worker is its only real
+audience. The hub sends it automatically after every reload — including the
+one triggered by editing routing rules in the UI — so a worker converges
+without an operator remembering to click anything. A worker that was
+unreachable during that reload only receives the partition on the *next* one;
+it is not (yet) re-pushed the moment it comes back, so an operator who just
+brought a worker back up may want to trigger a reload (or a manual "apply to
+all instances") rather than wait. The registry, tokens, `role` and every other
+`cluster.*` key remain exactly as local as the table above says.
+
+**Mixed-version clusters.** A worker running a daemon old enough to predate
+`PUT /cluster/partition` answers that request with 404. The hub falls back to
+folding the partition into an ordinary config patch, unless that worker's own
+reported identity (from `/health`) does not match the id it is registered
+under — applying rules under an identity the worker does not recognise as
+itself would leave it filtering with the wrong id, so the hub withholds the
+push instead and logs which instance and which two ids disagree. Either way
+the fix is the same: update that worker. Once it runs a version that
+understands `PUT /cluster/partition`, the next push resolves both the
+identity and the rules together.
 
 ### 18.5 The hub proxies; the UI talks to one origin
 

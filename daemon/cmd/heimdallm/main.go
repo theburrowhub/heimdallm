@@ -2644,8 +2644,18 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// operator to remember the manual propagate dialog. Backgrounded so a
 		// slow or unreachable instance never delays the reload that triggered
 		// it; each instance's own PatchConfig/reload cycle applies it.
+		//
+		// propagatePartition is the separate channel that pushes the
+		// ownership partition itself (identity, default_instance,
+		// routing.orgs/repos) — cluster.* is deliberately excluded from the
+		// general push above, so a worker never gets that from
+		// propagateClusterConfig no matter how often it runs. Without this, a
+		// worker with no partition of its own fails closed and does nothing
+		// (see instances.Router's worker gate) — this is what closes
+		// theburrowhub/heimdallm#769.
 		if newCfg.IsHub() {
 			go propagateClusterConfig(runtimeCtx, cfgPath, clusterSt, broker)
+			go propagatePartition(runtimeCtx, clusterSt)
 		}
 
 		cfgMu.Lock()

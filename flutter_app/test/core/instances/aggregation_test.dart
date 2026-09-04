@@ -126,4 +126,103 @@ void main() {
     );
     expect(scoped.label, 'srv-a');
   });
+
+  group('groupByIdentity', () {
+    InstanceScoped<String> scoped(String id, String value) =>
+        InstanceScoped<String>(instanceId: id, instanceName: id, value: value);
+
+    test('collapses the same logical record seen from two instances', () {
+      // theburrowhub/heimdallm#769: the same PR discovered by two instances
+      // must not render as two rows.
+      final items = [scoped('hub-1', 'heimdallm#769'), scoped('srv-a', 'heimdallm#769')];
+      final groups = groupByIdentity<String>(items, keyOf: (v) => v);
+
+      expect(groups, hasLength(1));
+      expect(groups.single.members, hasLength(2));
+      expect(groups.single.isShared, isTrue);
+    });
+
+    test('leaves distinct keys in separate groups', () {
+      final items = [scoped('hub-1', 'a#1'), scoped('srv-a', 'b#2')];
+      final groups = groupByIdentity<String>(items, keyOf: (v) => v);
+
+      expect(groups, hasLength(2));
+      expect(groups.every((g) => !g.isShared), isTrue);
+    });
+
+    test('preserves registration order of both groups and members', () {
+      final items = [
+        scoped('hub-1', 'a'),
+        scoped('hub-1', 'b'),
+        scoped('srv-a', 'a'),
+        scoped('srv-a', 'b'),
+      ];
+      final groups = groupByIdentity<String>(items, keyOf: (v) => v);
+
+      expect(groups.map((g) => g.value), ['a', 'b']);
+      expect(groups.first.members.map((m) => m.instanceId), ['hub-1', 'srv-a']);
+    });
+
+    test('pick selects the primary; without it the first registered wins', () {
+      final items = [scoped('hub-1', 'x'), scoped('srv-a', 'x')];
+
+      final defaulted = groupByIdentity<String>(items, keyOf: (v) => v);
+      expect(defaulted.single.instanceId, 'hub-1');
+
+      final picked = groupByIdentity<String>(
+        items,
+        keyOf: (v) => v,
+        pick: (candidates) => candidates.last,
+      );
+      expect(picked.single.instanceId, 'srv-a');
+    });
+
+    test('duplicate rows within the same instance also collapse', () {
+      final items = [scoped('hub-1', 'x'), scoped('hub-1', 'x')];
+      final groups = groupByIdentity<String>(items, keyOf: (v) => v);
+      expect(groups, hasLength(1));
+      expect(groups.single.members, hasLength(2));
+    });
+
+    test('empty input yields no groups', () {
+      expect(groupByIdentity<String>(const [], keyOf: (v) => v), isEmpty);
+    });
+  });
+
+  group('InstanceGroup', () {
+    test('value and instanceId/instanceName come from the primary', () {
+      final group = InstanceGroup<int>(
+        primary: const InstanceScoped(instanceId: 'srv-a', instanceName: 'Srv A', value: 42),
+        members: const [
+          InstanceScoped(instanceId: 'srv-a', instanceName: 'Srv A', value: 42),
+          InstanceScoped(instanceId: 'hub-1', instanceName: 'Hub', value: 42),
+        ],
+      );
+      expect(group.value, 42);
+      expect(group.instanceId, 'srv-a');
+      expect(group.instanceName, 'Srv A');
+      expect(group.isShared, isTrue);
+      expect(group.others.map((m) => m.instanceId), ['hub-1']);
+    });
+
+    test('a single member is not shared and has no others', () {
+      final group = InstanceGroup<int>(
+        primary: const InstanceScoped(instanceId: 'hub-1', instanceName: '', value: 1),
+        members: const [InstanceScoped(instanceId: 'hub-1', instanceName: '', value: 1)],
+      );
+      expect(group.isShared, isFalse);
+      expect(group.others, isEmpty);
+    });
+
+    test('orderedMembers puts the primary first even when it was not', () {
+      final group = InstanceGroup<int>(
+        primary: const InstanceScoped(instanceId: 'srv-a', instanceName: '', value: 1),
+        members: const [
+          InstanceScoped(instanceId: 'hub-1', instanceName: '', value: 1),
+          InstanceScoped(instanceId: 'srv-a', instanceName: '', value: 1),
+        ],
+      );
+      expect(group.orderedMembers.map((m) => m.instanceId), ['srv-a', 'hub-1']);
+    });
+  });
 }

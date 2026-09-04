@@ -31,6 +31,72 @@ class InstanceScoped<T> {
   );
 }
 
+/// The same logical record — the same PR, the same issue — as seen from
+/// every instance that reported it.
+///
+/// Discovery stays global across the fleet (every instance learns about every
+/// repo), so the same record can legitimately arrive from more than one
+/// instance's [aggregate] call. Without collapsing those into one
+/// [InstanceGroup], the dashboard renders the same PR twice — exactly
+/// theburrowhub/heimdallm#769's visual half. See [groupByIdentity].
+class InstanceGroup<T> {
+  /// The row whose data the UI shows: which instance's [T] value, review
+  /// status, etc. is authoritative for this group. Chosen by the caller's
+  /// `pick` callback — typically the routing owner, falling back to whichever
+  /// member actually has work recorded.
+  final InstanceScoped<T> primary;
+
+  /// Every instance that reported this record, in the order [aggregate]
+  /// produced them. Kept in full (not just ids) because callers need each
+  /// member's own [T] — its locally-scoped id, in particular, to fan an
+  /// action like dismiss out to every instance that has a row for it.
+  final List<InstanceScoped<T>> members;
+
+  const InstanceGroup({required this.primary, required this.members});
+
+  T get value => primary.value;
+  String get instanceId => primary.instanceId;
+  String get instanceName => primary.instanceName;
+
+  /// Whether more than one instance reported this record.
+  bool get isShared => members.length > 1;
+
+  /// Every member except the primary, for rendering "also on: …".
+  List<InstanceScoped<T>> get others =>
+      members.where((m) => m.instanceId != primary.instanceId).toList(growable: false);
+
+  /// [members] reordered so [primary] comes first — the order badges render
+  /// in, since the winner must stay visible even once overflow hides the
+  /// rest.
+  List<InstanceScoped<T>> get orderedMembers => [primary, ...others];
+}
+
+/// Collapses [items] that are the same logical record seen from several
+/// instances into one [InstanceGroup] each, keyed by [keyOf].
+///
+/// Order is preserved: groups appear in the order their key was first seen,
+/// and each group's [InstanceGroup.members] keep [items]' original order —
+/// both matter because [aggregate] already produced a stable, instance-sorted
+/// order that callers (list counts, "N items" headers) depend on.
+///
+/// [pick] chooses the primary among a key's candidates; the default is the
+/// first one registered. Called with at least one candidate, so it never
+/// needs to handle an empty list.
+List<InstanceGroup<T>> groupByIdentity<T>(
+  List<InstanceScoped<T>> items, {
+  required String Function(T value) keyOf,
+  InstanceScoped<T> Function(List<InstanceScoped<T>> candidates)? pick,
+}) {
+  final byKey = <String, List<InstanceScoped<T>>>{};
+  for (final item in items) {
+    (byKey[keyOf(item.value)] ??= []).add(item);
+  }
+  return [
+    for (final members in byKey.values)
+      InstanceGroup<T>(primary: pick != null ? pick(members) : members.first, members: members),
+  ];
+}
+
 /// One instance that could not be read during an aggregation.
 class InstanceFailure {
   final String instanceId;

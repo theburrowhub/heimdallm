@@ -679,3 +679,146 @@ func TestValidateClusterAcceptsRulesReferencingTheSelfID(t *testing.T) {
 		t.Error("Validate() = nil for a rule pointing at an unknown instance")
 	}
 }
+
+// A worker that was once a hub (or is mid-demotion) may still carry a local
+// [cluster.instances] registry from before. It is not the owner of that
+// registry any more — the hub is — so rules the hub pushed referencing ids
+// absent from that stale local registry must still validate. Rejecting them
+// would make the fail-closed gate (Router.Owns on a worker) permanent.
+func TestValidateClusterWorkerAcceptsHubPushedRulesWithLocalRegistry(t *testing.T) {
+	c := baseValidConfig()
+	c.Cluster.Role = RoleWorker
+	c.Cluster.InstanceID = "192-168-1-100-3000"
+	c.Cluster.DefaultInstance = "lt16a-10006-a6b35523a50bcb60"
+	// A stale registry entry that does not include the ids the rules below
+	// reference.
+	c.Cluster.Instances = map[string]InstanceConfig{
+		"old-hub": {BaseURL: "http://10.0.0.9:7842", Token: "t"},
+	}
+	c.Cluster.Routing = RoutingConfig{
+		Orgs:  map[string]string{"Muriano": "192-168-1-100-3000", "freepik-company": "lt16a-10006-a6b35523a50bcb60"},
+		Repos: map[string]string{"theburrowhub/heimdallm": "lt16a-10006-a6b35523a50bcb60"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() on a worker with a stale local registry = %v, want nil", err)
+	}
+}
+
+// Non-regression: a hub still owns its registry, so it must keep rejecting
+// rules that reference an instance id nobody registered.
+func TestValidateClusterHubStillRejectsUnknownInstanceIDs(t *testing.T) {
+	c := baseValidConfig()
+	c.Cluster.Role = RoleHub
+	c.Cluster.InstanceID = "hub-1"
+	c.Cluster.Instances = map[string]InstanceConfig{
+		"srv-a": {BaseURL: "http://10.0.0.11:7842", Token: "t"},
+	}
+	c.Cluster.Routing.Orgs = map[string]string{"acme": "ghost"}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate() = nil on a hub with a rule pointing at an unregistered instance, want an error")
+	}
+}
+
+// A worker with no local registry at all must still validate the *shape* of
+// what the hub pushed: a malformed org/repo slug or a value that is not a
+// valid instance id is a bug in the push, not something to accept silently.
+func TestValidateClusterValidatesSlugsOnAWorkerWithoutARegistry(t *testing.T) {
+	tests := []struct {
+		name string
+		mut  func(*Config)
+		want string
+	}{
+		{
+			name: "bad org slug",
+			mut:  func(c *Config) { c.Cluster.Routing.Orgs = map[string]string{"not a slug": "srv-a"} },
+			want: "cluster.routing.orgs key",
+		},
+		{
+			name: "bad repo slug",
+			mut:  func(c *Config) { c.Cluster.Routing.Repos = map[string]string{"../escape": "srv-a"} },
+			want: "cluster.routing.repos key",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := baseValidConfig()
+			c.Cluster.Role = RoleWorker
+			c.Cluster.InstanceID = "srv-a"
+			tt.mut(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error containing %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Validate() = %q, want it to contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// A routing value that is not itself a valid instance id must be rejected
+// even without a registry to check membership against — an id like
+// "not an id" would silently fail to interpolate into /instances/{id}/... on
+// the hub side and produce a routing hole nobody could explain.
+func TestValidateClusterRejectsRoutingValuesThatAreNotInstanceIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		mut  func(*Config)
+		want string
+	}{
+		{
+			name: "default_instance",
+			mut:  func(c *Config) { c.Cluster.DefaultInstance = "not an id" },
+			want: "cluster.default_instance",
+		},
+		{
+			name: "round_robin_pool member",
+			mut:  func(c *Config) { c.Cluster.Routing.RoundRobinPool = []string{"not an id"} },
+			want: "cluster.routing.round_robin_pool",
+		},
+		{
+			name: "org rule value",
+			mut:  func(c *Config) { c.Cluster.Routing.Orgs = map[string]string{"acme": "not an id"} },
+			want: "cluster.routing.orgs",
+		},
+		{
+			name: "repo rule value",
+			mut:  func(c *Config) { c.Cluster.Routing.Repos = map[string]string{"acme/tools": "not an id"} },
+			want: "cluster.routing.repos",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := baseValidConfig()
+			c.Cluster.Role = RoleWorker
+			c.Cluster.InstanceID = "srv-a"
+			tt.mut(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error containing %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Validate() = %q, want it to contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// The registry-hub scenario ("192-168-1-100-3000", a slugified IP:port) is a
+// real shape produced when an instance is auto-registered by address: the
+// pattern must accept it.
+func TestValidateInstanceIDAcceptsAHostPortStyleID(t *testing.T) {
+	if err := ValidateInstanceID("192-168-1-100-3000"); err != nil {
+		t.Errorf("ValidateInstanceID(host:port slug) = %v, want nil", err)
+	}
+}
+
+func TestEnvPinnedInstanceID(t *testing.T) {
+	if got := EnvPinnedInstanceID(); got != "" {
+		t.Errorf("EnvPinnedInstanceID() = %q, want empty without the env var", got)
+	}
+	t.Setenv("HEIMDALLM_INSTANCE_ID", "  pinned-id  ")
+	if got := EnvPinnedInstanceID(); got != "pinned-id" {
+		t.Errorf("EnvPinnedInstanceID() = %q, want %q (trimmed)", got, "pinned-id")
+	}
+}

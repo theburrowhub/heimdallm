@@ -133,6 +133,43 @@ func (c *Client) PatchConfig(ctx context.Context, patch map[string]any) (map[str
 	return out, nil
 }
 
+// PartitionPush is the PUT /cluster/partition body: the ownership partition
+// this instance should enforce. Mirrors server.putPartitionRequest — kept as
+// a separate type here rather than imported, the same way every other
+// request/response shape in this file is a plain local struct, so this
+// package never depends on internal/server.
+type PartitionPush struct {
+	InstanceID      string            `json:"instance_id"`
+	DefaultInstance string            `json:"default_instance"`
+	Orgs            map[string]string `json:"orgs"`
+	Repos           map[string]string `json:"repos"`
+	HubInstanceID   string            `json:"hub_instance_id"`
+	HubVersion      string            `json:"hub_version"`
+}
+
+// PutPartition pushes push to the instance's PUT /cluster/partition. Unlike
+// PatchConfig this targets a route available on ANY daemon, hub or worker: a
+// worker is its primary audience, since it is the only way a worker's Router
+// learns the partition it must enforce instead of failing open. A 404
+// response (surfaced to the caller as a *StatusError) means the remote
+// predates this endpoint — callers fall back to PatchConfig's [cluster]
+// overlay for that case.
+func (c *Client) PutPartition(ctx context.Context, push PartitionPush) (map[string]any, error) {
+	payload, err := json.Marshal(push)
+	if err != nil {
+		return nil, fmt.Errorf("instances: encoding partition push for %s: %w", c.instance.ID, err)
+	}
+	body, _, err := c.do(ctx, http.MethodPut, "/cluster/partition", payload, true)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &out)
+	}
+	return out, nil
+}
+
 // Reload asks the instance to re-read its config from disk.
 func (c *Client) Reload(ctx context.Context) error {
 	_, _, err := c.do(ctx, http.MethodPost, "/reload", nil, true)
