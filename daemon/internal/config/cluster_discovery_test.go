@@ -99,3 +99,42 @@ func TestClusterDiscoveryEnvOverride(t *testing.T) {
 		t.Fatal("the env override should enable discovery")
 	}
 }
+
+// The container warning tells the operator to set
+// HEIMDALLM_CLUSTER_DISCOVERY=off. A log line whose whole purpose is to be
+// actionable must name a knob that actually works, including when the value
+// arrives in the case or spacing a shell happens to give it.
+func TestClusterDiscoveryEnvOverrideCanTurnDiscoveryOff(t *testing.T) {
+	for _, value := range []string{"off", "OFF", " off ", "Off"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("HEIMDALLM_CLUSTER_DISCOVERY", value)
+			c := &Config{Cluster: ClusterConfig{Role: RoleHub, Discovery: DiscoveryMDNS}}
+			c.applyEnvOverrides()
+
+			if c.DiscoveryEnabled() {
+				t.Fatalf("HEIMDALLM_CLUSTER_DISCOVERY=%q did not turn discovery off", value)
+			}
+			if err := c.validateCluster(); err != nil {
+				t.Fatalf("the value the warning recommends failed validation: %v", err)
+			}
+		})
+	}
+}
+
+// And the other direction, in the shapes a shell or compose file produces.
+func TestClusterDiscoveryEnvOverrideAcceptsMixedCaseMdns(t *testing.T) {
+	for _, value := range []string{"mdns", "MDNS", " mdns "} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("HEIMDALLM_CLUSTER_DISCOVERY", value)
+			c := &Config{}
+			c.applyEnvOverrides()
+
+			if !c.DiscoveryEnabled() {
+				t.Fatalf("HEIMDALLM_CLUSTER_DISCOVERY=%q did not enable discovery", value)
+			}
+			if err := c.validateCluster(); err != nil {
+				t.Fatalf("validation rejected %q: %v", value, err)
+			}
+		})
+	}
+}
