@@ -2,9 +2,11 @@ package lan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/netip"
 	"sync"
 	"testing"
@@ -536,5 +538,196 @@ func TestBrowseDropsAPeerNamingSomethingOffLink(t *testing.T) {
 
 	if got := browseAnswers(t, []dns.RR{ptrRR(), srv, txtRR()}); len(got) != 0 {
 		t.Fatalf("reported %d peers for an off-link SRV target, want 0: %+v", len(got), got)
+	}
+}
+
+// A question about the host name alone gets addresses and nothing else: a
+// resolver asking "where is mac-sergio.local" has no use for our PTR.
+func TestAdvertiserAnswersAHostQuestionWithAddressesOnly(t *testing.T) {
+	adConn, peerConn := NewMemConn()
+	t.Cleanup(func() { _ = adConn.Close(); _ = peerConn.Close() })
+
+	adv, err := NewAdvertiser(adConn, testAdvertisement(), quietLogger())
+	if err != nil {
+		t.Fatalf("NewAdvertiser: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); adv.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("mac-sergio.local.", dns.TypeA)
+	packed, _ := msg.Pack()
+	if _, err := peerConn.WriteTo(packed, GroupAddr()); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+
+	reply := readReply(t, peerConn)
+	for _, rr := range reply.Answer {
+		switch rr.(type) {
+		case *dns.A, *dns.AAAA:
+		default:
+			t.Errorf("a host question was answered with %T", rr)
+		}
+	}
+	if len(reply.Answer) == 0 {
+		t.Fatal("a host question drew no address records")
+	}
+}
+
+// An unrelated record type against our own service name draws nothing, rather
+// than the whole record set.
+func TestAdvertiserIgnoresAnIrrelevantQuestionType(t *testing.T) {
+	adConn, peerConn := NewMemConn()
+	t.Cleanup(func() { _ = adConn.Close(); _ = peerConn.Close() })
+
+	adv, _ := NewAdvertiser(adConn, testAdvertisement(), quietLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); adv.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	msg := new(dns.Msg)
+	msg.SetQuestion(serviceFQDN(), dns.TypeMX)
+	packed, _ := msg.Pack()
+	if _, err := peerConn.WriteTo(packed, GroupAddr()); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+
+	_ = peerConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	buf := make([]byte, 2048)
+	if _, _, err := peerConn.ReadFrom(buf); err == nil {
+		t.Fatal("an MX question drew an answer")
+	}
+}
+
+// The service-enumeration query DNS-SD browsers use must be answered too, or a
+// generic browser sees nothing.
+func TestAdvertiserAnswersTheServiceEnumeration(t *testing.T) {
+	adConn, peerConn := NewMemConn()
+	t.Cleanup(func() { _ = adConn.Close(); _ = peerConn.Close() })
+
+	adv, _ := NewAdvertiser(adConn, testAdvertisement(), quietLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); adv.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("_services._dns-sd._udp.local.", dns.TypePTR)
+	packed, _ := msg.Pack()
+	if _, err := peerConn.WriteTo(packed, GroupAddr()); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+
+	if got := readReply(t, peerConn); len(got.Answer) == 0 {
+		t.Fatal("the service enumeration drew no answer")
+	}
+}
+
+// IPv6 advertisements produce AAAA records, not silence.
+func TestAdvertiserPublishesIPv6Addresses(t *testing.T) {
+	ad := testAdvertisement()
+	ad.Addrs = func() []netip.Addr {
+		return []netip.Addr{netip.MustParseAddr("2001:db8::1")}
+	}
+	browseConn := startAdvertiser(t, ad)
+
+	browser, _ := NewBrowser(browseConn, quietLogger())
+	peers, err := browser.Browse(context.Background(), 500*time.Millisecond)
+	if err != nil || len(peers) != 1 {
+		t.Fatalf("Browse: %v, peers %+v", err, peers)
+	}
+	if got := peers[0].Addrs; len(got) != 1 || got[0].String() != "2001:db8::1" {
+		t.Fatalf("Addrs = %v, want [2001:db8::1]", got)
+	}
+}
+
+// readReply waits for one response on conn.
+func readReply(t *testing.T, conn PacketConn) *dns.Msg {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 9000)
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no reply: %v", err)
+	}
+	var msg dns.Msg
+	if err := msg.Unpack(buf[:n]); err != nil {
+		t.Fatalf("unpacking reply: %v", err)
+	}
+	return &msg
+}
+
+// The same address arriving twice is recorded once, so a peer answering on a
+// repeated interface does not accumulate duplicates.
+func TestBrowseDeduplicatesAddresses(t *testing.T) {
+	a := srvRR()
+	dup := &dns.A{
+		Hdr: dns.RR_Header{Name: "srv-a.local.", Rrtype: dns.TypeA,
+			Class: dns.ClassINET, Ttl: 120},
+		A: net.ParseIP("192.0.2.10"),
+	}
+	peers := browseAnswers(t, []dns.RR{ptrRR(), a, txtRR(), dup, dup, dup})
+	if len(peers) != 1 {
+		t.Fatalf("got %d peers, want 1", len(peers))
+	}
+	if got := peers[0].Addrs; len(got) != 1 {
+		t.Fatalf("Addrs = %v, want one entry", got)
+	}
+}
+
+// Closing an in-memory connection makes both ends report it, the way a real
+// socket does — which is what lets the loops notice and redial.
+func TestMemConnReportsClosure(t *testing.T) {
+	a, b := NewMemConn()
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Idempotent, because the loops close on more than one path.
+	if err := a.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := a.WriteTo([]byte("x"), GroupAddr()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("WriteTo after close = %v, want net.ErrClosed", err)
+	}
+	if _, _, err := a.ReadFrom(make([]byte, 8)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("ReadFrom after close = %v, want net.ErrClosed", err)
+	}
+	_ = b.Close()
+}
+
+// A read deadline expires as a timeout, which the loops treat as "nothing
+// happened" rather than as a broken socket.
+func TestMemConnReadDeadlineIsATimeout(t *testing.T) {
+	a, b := NewMemConn()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+
+	_ = a.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	_, _, err := a.ReadFrom(make([]byte, 8))
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("ReadFrom past the deadline = %v, want a timeout", err)
+	}
+}
+
+// A full buffer drops the packet instead of blocking, the way a datagram
+// transport does — otherwise a test with an unread response would deadlock.
+func TestMemConnDropsRatherThanBlocks(t *testing.T) {
+	a, b := NewMemConn()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 500 {
+			_, _ = a.WriteTo([]byte("packet"), GroupAddr())
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteTo blocked on a full buffer")
 	}
 }
