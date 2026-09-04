@@ -728,3 +728,66 @@ func TestRunDiscovererLendsAndReclaimsTheBrowser(t *testing.T) {
 		t.Fatalf("scanned through a reclaimed browser: %+v", got)
 	}
 }
+
+// The wait progression, asserted exactly. Timing it from outside the loop
+// cannot distinguish "restart the sequence" from "reset one wait" — they are a
+// millisecond apart — which is how an earlier version of this test came to pass
+// against both behaviours.
+func TestWaitAfter(t *testing.T) {
+	p := retryPolicy{min: time.Second, max: 8 * time.Second, established: time.Minute}
+
+	const died = time.Millisecond // never really worked
+	const lasted = 5 * time.Minute
+
+	tests := []struct {
+		name   string
+		wait   time.Duration
+		lasted time.Duration
+		want   time.Duration
+	}{
+		{"a socket that never worked climbs", time.Second, died, 2 * time.Second},
+		{"and keeps climbing", 2 * time.Second, died, 4 * time.Second},
+		{"up to the ceiling", 8 * time.Second, died, 8 * time.Second},
+		{"and no further", 100 * time.Second, died, 8 * time.Second},
+		// The whole point: back to the floor, from anywhere.
+		{"a connection that lasted goes to the floor", 8 * time.Second, lasted, time.Second},
+		{"from the floor too", time.Second, lasted, time.Second},
+		{"exactly at the threshold counts as lasting", 4 * time.Second, time.Minute, time.Second},
+		{"a hair under does not", 4 * time.Second, time.Minute - time.Nanosecond, 8 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.waitAfter(tt.wait, tt.lasted); got != tt.want {
+				t.Fatalf("waitAfter(%v, %v) = %v, want %v", tt.wait, tt.lasted, got, tt.want)
+			}
+		})
+	}
+}
+
+// The sequence, not just one step: a lasting connection must leave the backoff
+// at the floor, so the attempt after it starts from the floor too rather than
+// from twice it.
+func TestWaitAfterRestartsTheWholeSequence(t *testing.T) {
+	p := retryPolicy{min: time.Second, max: 32 * time.Second, established: time.Minute}
+
+	// Climb a while.
+	wait := p.min
+	for range 4 {
+		wait = p.waitAfter(wait, time.Millisecond)
+	}
+	if wait != 16*time.Second {
+		t.Fatalf("after four failures the wait is %v, want 16s", wait)
+	}
+
+	// One connection that lasted.
+	wait = p.waitAfter(wait, 5*time.Minute)
+	if wait != time.Second {
+		t.Fatalf("after a lasting connection the wait is %v, want the floor", wait)
+	}
+
+	// And the next failure starts climbing from the floor, not from 16s.
+	if got := p.waitAfter(wait, time.Millisecond); got != 2*time.Second {
+		t.Fatalf("the next failure waits %v, want 2s: the sequence did not "+
+			"restart, it only produced one short wait", got)
+	}
+}

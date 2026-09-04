@@ -311,15 +311,12 @@ func runWithMulticast(ctx context.Context, p retryPolicy, purpose string, use fu
 		// Resetting on dial alone would retry that forever at the floor and the
 		// ceiling would never engage, which is precisely the case the redial
 		// was added for.
-		if lasted >= p.established {
-			wait = p.min
-		}
+		wait = p.waitAfter(wait, lasted)
 		slog.Info("cluster: mDNS "+purpose+" the local network stopped; reconnecting",
 			"lasted", lasted, "retry_in", wait)
 		if !sleepCtx(ctx, wait) {
 			return
 		}
-		wait = nextBackoff(wait, p.max)
 	}
 }
 
@@ -340,6 +337,26 @@ func nextBackoff(wait, max time.Duration) time.Duration {
 		return max
 	}
 	return wait
+}
+
+// waitAfter returns how long to wait before redialling, given the wait that
+// preceded the connection just lost and how long that connection lasted.
+//
+// A connection that lasted restarts the sequence at the floor rather than
+// merely producing one short wait: a laptop that discovered fine for hours and
+// then slept should reconnect in seconds, and should still be at the floor if
+// the first attempt after waking also fails. Anything shorter than
+// p.established never really worked, so the wait keeps climbing towards the
+// ceiling — which is what stops a permanently broken network spinning.
+//
+// Pure, and separated from the loop for that reason: the difference between
+// restarting the sequence and resetting one wait is a millisecond apart in real
+// time and cannot be asserted from the outside.
+func (p retryPolicy) waitAfter(wait, lasted time.Duration) time.Duration {
+	if lasted >= p.established {
+		return p.min
+	}
+	return nextBackoff(wait, p.max)
 }
 
 // Discoverer returns the LAN discoverer, or nil when this daemon is not a hub
