@@ -1500,6 +1500,7 @@ instance_id      = ""             # generated on first boot, kept in <data dir>/
 instance_name    = "main"         # defaults to the hostname
 default_instance = "hub-1"        # owns everything no rule claims
 probe_interval   = "30s"          # how often the hub health-checks the others
+discovery        = "off"          # off (default) | mdns; see 18.8
 
 # Instances are a TOML map keyed by id, not an array of tables: the config
 # schema validator rejects arrays of tables, and a map makes id uniqueness a
@@ -1514,7 +1515,7 @@ labels     = ["macos", "local"]
 
 [cluster.instances.srv-a]
 name      = "srv-a"
-base_url  = "http://10.0.0.11:7842"
+base_url  = "http://srv-a.local:7842"   # a hostname, not a pinned IP - see below
 token_env = "HEIMDALLM_SRV_A_TOKEN"
 enabled   = true                  # omit or true to participate
 
@@ -1543,13 +1544,21 @@ or `[cluster.routing]` written by an operator.
 Environment equivalents, for containers that should not carry a per-instance
 `config.toml`: `HEIMDALLM_CLUSTER_ROLE`, `HEIMDALLM_INSTANCE_ID`,
 `HEIMDALLM_INSTANCE_NAME`, `HEIMDALLM_CLUSTER_DEFAULT_INSTANCE`,
-`HEIMDALLM_CLUSTER_PROBE_INTERVAL`,
+`HEIMDALLM_CLUSTER_PROBE_INTERVAL`, `HEIMDALLM_CLUSTER_DISCOVERY`,
 `HEIMDALLM_CLUSTER_TAKEOVER_AFTER_FAILED_PROBES`.
 
-> **`base_url` on a DHCP host.** If an instance's address is not static, an
-> address change makes that instance permanently unreachable from the hub while
-> it keeps working perfectly — see §18.3.1. Give clustered hosts a static
-> address or a stable DNS name rather than an IP from a lease.
+**`base_url` takes a hostname, and it usually should.** Validation only requires
+an absolute `http`/`https` URL with a host and no credentials, query or
+fragment — so an mDNS `.local` name, a DNS record or a Tailscale name all work,
+and only the hostname is re-resolved on each request.
+
+Prefer one of those, a static address or a DHCP reservation over a literal IP
+from a lease. Nothing re-resolves a `base_url`: it changes only when someone
+edits it. So when a laptop or any DHCP host picks up a new address, its entry
+goes stale and that instance becomes permanently unreachable from the hub while
+it carries on working perfectly — which is the situation §18.3.1 exists to
+contain, and containing it is not the same as avoiding it. Section 18.8 covers
+discovering instances by name instead.
 
 ### 18.3 Routing modes
 
@@ -2018,6 +2027,7 @@ max_days = 90   # env: HEIMDALLM_RETENTION_DAYS; set to 0 to disable purging
 # instance_name    = "main"   # env: HEIMDALLM_INSTANCE_NAME; defaults to the hostname
 # default_instance = "hub-1"  # owns every repository no rule claims
 # probe_interval   = "30s"    # how often the hub health-checks the others
+# discovery        = "off"    # off (default) | mdns; env: HEIMDALLM_CLUSTER_DISCOVERY
 
 # One entry per instance, keyed by id. Exactly one token source each.
 # [cluster.instances.hub-1]
@@ -2027,7 +2037,7 @@ max_days = 90   # env: HEIMDALLM_RETENTION_DAYS; set to 0 to disable purging
 # labels     = ["macos"]
 
 # [cluster.instances.srv-a]
-# base_url  = "http://10.0.0.11:7842"
+# base_url  = "http://srv-a.local:7842"   # prefer a hostname over a pinned IP
 # token_env = "HEIMDALLM_SRV_A_TOKEN"
 # enabled   = true
 
