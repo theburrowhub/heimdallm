@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -24,7 +25,9 @@ import (
 // would leave discovery dead for the life of the process even though the
 // interface came up two seconds later, and nothing in the config changed to
 // prompt another attempt.
-const (
+// Variables rather than constants so tests can shorten them; nothing at
+// runtime reassigns these.
+var (
 	discoveryRetryMin = 5 * time.Second
 	discoveryRetryMax = 2 * time.Minute
 )
@@ -59,6 +62,15 @@ func (cs *clusterState) discoverySignatureNow() discoverySignature {
 	return cs.discoverySig
 }
 
+// dialMulticastGroup is how the loops obtain a socket. A variable so tests can
+// exercise the retry and backoff, which is the part of this file that carries
+// the risk and cannot be reached with a real socket.
+var dialMulticastGroup = func() (lan.PacketConn, error) { return lan.MulticastConn(nil) }
+
+// errNotRetryable marks a failure that waiting cannot fix, so the loops stop
+// instead of redialling forever.
+var errNotRetryable = errors.New("not retryable")
+
 // RunAdvertiser answers mDNS queries for this daemon until ctx is cancelled.
 // No-op when cluster.discovery is off.
 //
@@ -75,31 +87,25 @@ func (cs *clusterState) RunAdvertiser(ctx context.Context) {
 	}
 	warnIfDiscoveryIsContainerised()
 
-	conn, ok := dialMulticast(ctx, "advertise on")
-	if !ok {
-		return
-	}
-
-	advertiser, err := lan.NewAdvertiser(conn, lan.Advertisement{
-		InstanceID:   sig.id,
-		InstanceName: sig.name,
-		Role:         sig.role,
-		Version:      version,
-		Port:         sig.port,
-		Addrs:        localAddresses,
-	}, slog.Default())
-	if err != nil {
-		// Not retried: this is a malformed advertisement, not a network that
-		// is not ready. Waiting will not make the instance id valid.
-		slog.Warn("cluster: could not start advertising on the local network", "err", err)
-		_ = conn.Close()
-		return
-	}
-
-	advertiser.Run(ctx)
-	// After Run, so the TTL-0 goodbye it sends on the way out has already been
-	// written rather than racing this close.
-	_ = advertiser.Close()
+	runWithMulticast(ctx, "advertise on", func(conn lan.PacketConn) error {
+		advertiser, err := lan.NewAdvertiser(conn, lan.Advertisement{
+			InstanceID:   sig.id,
+			InstanceName: sig.name,
+			Role:         sig.role,
+			Version:      version,
+			Port:         sig.port,
+			Addrs:        localAddresses,
+		}, slog.Default())
+		if err != nil {
+			// Waiting will not make an invalid instance id valid.
+			slog.Warn("cluster: could not start advertising on the local network", "err", err)
+			return errNotRetryable
+		}
+		advertiser.Run(ctx)
+		// After Run, so the TTL-0 goodbye it sends on the way out has already
+		// been written rather than racing this close.
+		return advertiser.Close()
+	})
 }
 
 // RunDiscoverer browses for peers until ctx is cancelled. No-op on a worker, or
@@ -114,54 +120,91 @@ func (cs *clusterState) RunDiscoverer(ctx context.Context) {
 		return
 	}
 
-	conn, ok := dialMulticast(ctx, "browse")
-	if !ok {
-		return
-	}
-	browser, err := lan.NewBrowser(conn, slog.Default())
-	if err != nil {
-		slog.Warn("cluster: could not start the mDNS browser", "err", err)
-		_ = conn.Close()
-		return
-	}
-
-	discoverer.SetBrowser(browser)
-	defer func() {
-		// Cleared before the socket closes, so a scan triggered by the API
-		// cannot reach a browser whose connection is going away.
-		discoverer.SetBrowser(nil)
-		_ = browser.Close()
-	}()
-	discoverer.Run(ctx)
+	runWithMulticast(ctx, "browse", func(conn lan.PacketConn) error {
+		browser, err := lan.NewBrowser(conn, slog.Default())
+		if err != nil {
+			slog.Warn("cluster: could not start the mDNS browser", "err", err)
+			return errNotRetryable
+		}
+		discoverer.SetBrowser(browser)
+		defer func() {
+			// Cleared before the socket closes, so a scan triggered by the API
+			// cannot reach a browser whose connection is going away.
+			discoverer.SetBrowser(nil)
+			_ = browser.Close()
+		}()
+		discoverer.Run(ctx)
+		return nil
+	})
 }
 
-// dialMulticast joins the mDNS group, retrying with backoff while ctx lives.
-// Reports ok=false only when ctx ended first.
-func dialMulticast(ctx context.Context, purpose string) (lan.PacketConn, bool) {
+// runWithMulticast keeps a socket under use for as long as ctx lives: it dials,
+// hands the connection to use, and dials again when use returns.
+//
+// Redialling matters as much as the first attempt. A socket can fail before it
+// is ever obtained — a daemon that started before its network did, which is a
+// laptop resuming or a container racing its bridge — and it can equally fail
+// after: suspend and resume drops multicast group membership with the
+// interface, a VPN or interface flap tears it down, a container network
+// restarts. Dialling once would leave discovery dead for the life of the
+// process in every one of those cases, with nothing in the config changing to
+// prompt another attempt — and a laptop is exactly the machine this feature
+// exists for.
+//
+// The backoff means a permanently broken network costs one attempt every two
+// minutes rather than a spin.
+func runWithMulticast(ctx context.Context, purpose string, use func(lan.PacketConn) error) {
 	wait := discoveryRetryMin
-	for {
-		if ctx.Err() != nil {
-			return nil, false
+	for ctx.Err() == nil {
+		conn, err := dialMulticastGroup()
+		if err != nil {
+			slog.Warn("cluster: mDNS discovery is on but this daemon could not "+
+				purpose+" the local network; retrying",
+				"err", err, "retry_in", wait)
+			if !sleepCtx(ctx, wait) {
+				return
+			}
+			wait = nextBackoff(wait)
+			continue
 		}
-		conn, err := lan.MulticastConn(nil)
-		if err == nil {
-			return conn, true
-		}
-		slog.Warn("cluster: mDNS discovery is on but this daemon could not "+
-			purpose+" the local network; retrying",
-			"err", err, "retry_in", wait)
 
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, false
-		case <-timer.C:
+		// A connection that lasted is not evidence the next one will, but it
+		// does mean the last failure is stale: start over from the short wait
+		// so a resume after hours of sleep is picked up in seconds.
+		wait = discoveryRetryMin
+
+		if err := use(conn); errors.Is(err, errNotRetryable) {
+			return
 		}
-		if wait *= 2; wait > discoveryRetryMax {
-			wait = discoveryRetryMax
+		if ctx.Err() != nil {
+			return
 		}
+		slog.Info("cluster: mDNS "+purpose+" the local network stopped; reconnecting",
+			"retry_in", wait)
+		if !sleepCtx(ctx, wait) {
+			return
+		}
+		wait = nextBackoff(wait)
 	}
+}
+
+// sleepCtx waits for d. Reports false when ctx ended first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func nextBackoff(wait time.Duration) time.Duration {
+	if wait *= 2; wait > discoveryRetryMax {
+		return discoveryRetryMax
+	}
+	return wait
 }
 
 // Discoverer returns the LAN discoverer, or nil when this daemon is not a hub
@@ -182,11 +225,19 @@ func effectiveRole(cfg *config.Config) string {
 	return role
 }
 
-// localAddresses lists this machine's usable unicast addresses for the A/AAAA
-// records. Called per response, never cached — see Advertisement.Addrs.
+// localAddresses lists this machine's advertisable unicast addresses for the
+// A/AAAA records. Called per response, never cached — see Advertisement.Addrs.
 //
-// Loopback and link-local are skipped: a peer cannot reach us on either, so
-// advertising them would only add noise.
+// Loopback is skipped because no peer can reach us there. IPv4 link-local
+// (169.254/16) is skipped for the same reason: it means DHCP failed.
+//
+// IPv6 link-local (fe80::/10) is skipped for a different reason, and it is not
+// that it is unreachable — on an IPv6 link it is often the only stable address
+// a host has. It is skipped because it is not dialable from a DNS record: an
+// fe80:: address needs a zone identifier to say which interface it belongs to,
+// and there is nowhere to put one in an AAAA record. Advertising it would hand
+// peers an address they cannot use. A peer reaches us by the SRV hostname
+// anyway, which the resolver scopes correctly.
 func localAddresses() []netip.Addr {
 	ifaceAddrs, err := net.InterfaceAddrs()
 	if err != nil {
