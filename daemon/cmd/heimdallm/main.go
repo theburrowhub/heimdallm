@@ -553,6 +553,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	cfg.Cluster.InstanceID = instanceID
 	ensureSelfInstance(cfg, dataDir())
 	clusterSt := newClusterState(cfg, s, broker)
+	// Discovery advertises where the server actually answers, not what
+	// config.toml asked for. The listener is already bound by this point and
+	// nothing rebinds it, so this is the only address a peer can ever reach.
+	if httpListener != nil {
+		clusterSt.SetServedAddr(httpListener.Addr())
+	}
 	if cfg.ClusterEnabled() {
 		slog.Info("cluster: multi-instance mode active",
 			"instance_id", instanceID, "role", cfg.Cluster.Role,

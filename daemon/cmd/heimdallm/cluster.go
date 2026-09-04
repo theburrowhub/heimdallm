@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,12 @@ type clusterState struct {
 	// goroutine — while the loop using it is still reading.
 	discoverer   *instances.Discoverer
 	discoverySig discoverySignature
+
+	// served is the HTTP listener's real address, set once at startup. The
+	// advertiser publishes this rather than server.port: the listener is bound
+	// before any reload can touch it, so the configured port and the served
+	// port can legitimately disagree.
+	served *net.TCPAddr
 
 	// store and broker are retained (rather than only used inline at
 	// construction) so Update can lazily build a prober if this daemon is
@@ -348,7 +355,7 @@ func newClusterState(cfg *config.Config, st *store.Store, broker *sse.Broker) *c
 // loops live on the poller context — so they are torn down, close their own
 // sockets on the way out, and start again reading whatever this recorded.
 func (cs *clusterState) applyDiscovery(cfg *config.Config, registry *instances.Registry) {
-	sig := newDiscoverySignature(cfg, cfg.Server.Port)
+	sig := newDiscoverySignature(cfg)
 
 	cs.mu.Lock()
 	cs.discoverySig = sig

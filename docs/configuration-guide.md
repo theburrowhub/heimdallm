@@ -1713,6 +1713,20 @@ discovery = "mdns"    # off (default) | mdns
 Environment equivalent: `HEIMDALLM_CLUSTER_DISCOVERY`. The Instances tab also
 offers a one-click switch on the hub.
 
+**The daemon must be listening somewhere a peer can reach it.** `server.bind_addr`
+defaults to `127.0.0.1`, and on that setting nothing else on the network can
+connect — so a daemon would advertise an address it then refuses. It declines to
+advertise at all in that case and logs why, because the alternative is a machine
+that simply never appears in the hub's list with nothing to explain it. Set
+`server.bind_addr` to a LAN address, or to `0.0.0.0`, on any instance you want
+discovered. Browsing is unaffected: a hub bound to loopback can still find and
+register peers, it just cannot be found itself.
+
+The advertised port is the one the listener actually bound, not
+`server.port` — the listener is claimed once at startup and no reload rebinds
+it, so a live port edit takes effect on restart and discovery keeps telling the
+truth in the meantime.
+
 A daemon with discovery on advertises itself as `_heimdallm._tcp.local`,
 carrying its instance id, name, role and version. A **hub** with discovery on
 also browses, and lists what it finds under *"found on this network, not
