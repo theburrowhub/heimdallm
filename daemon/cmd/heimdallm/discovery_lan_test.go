@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -159,7 +162,7 @@ func TestServedReachableFromLAN(t *testing.T) {
 // Same rule, end to end: the advertiser declines rather than publishing an
 // address the server will refuse.
 func TestRunAdvertiserDeclinesALoopbackOnlyDaemon(t *testing.T) {
-	calls := stubDial(t, func() (lan.PacketConn, error) {
+	policy, calls := testPolicy(func() (lan.PacketConn, error) {
 		t.Error("dialled the multicast group despite a loopback-only bind")
 		return nil, errors.New("should not be reached")
 	})
@@ -169,7 +172,7 @@ func TestRunAdvertiserDeclinesALoopbackOnlyDaemon(t *testing.T) {
 	cs.SetServedAddr(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 7842})
 
 	done := make(chan struct{})
-	go func() { defer close(done); cs.RunAdvertiser(context.Background()) }()
+	go func() { defer close(done); cs.runAdvertiser(context.Background(), policy) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -182,7 +185,7 @@ func TestRunAdvertiserDeclinesALoopbackOnlyDaemon(t *testing.T) {
 
 // And it declines before the listener's address is known, rather than guessing.
 func TestRunAdvertiserWaitsForTheServedAddress(t *testing.T) {
-	calls := stubDial(t, func() (lan.PacketConn, error) {
+	policy, calls := testPolicy(func() (lan.PacketConn, error) {
 		t.Error("dialled the multicast group with no served address")
 		return nil, errors.New("should not be reached")
 	})
@@ -191,7 +194,7 @@ func TestRunAdvertiserWaitsForTheServedAddress(t *testing.T) {
 	cs := newClusterState(cfg, nil, nil)
 
 	done := make(chan struct{})
-	go func() { defer close(done); cs.RunAdvertiser(context.Background()) }()
+	go func() { defer close(done); cs.runAdvertiser(context.Background(), policy) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -263,29 +266,36 @@ func TestRunLoopsAreNoOpsWithDiscoveryOff(t *testing.T) {
 	}
 }
 
-// stubDial replaces the multicast dialler for the duration of a test and
-// shortens the backoff, so the retry path can be exercised without a socket
-// and without waiting five seconds per attempt.
-func stubDial(t *testing.T, dial func() (lan.PacketConn, error)) *int32 {
-	t.Helper()
+// testPolicy builds a retry policy with a stub dialler and short bounds.
+// Nothing package-level is mutated, so these tests are safe to run in parallel
+// and a future t.Parallel() cannot turn into a data race on shared backoff
+// variables.
+func testPolicy(dial func() (lan.PacketConn, error)) (retryPolicy, *int32) {
 	var calls int32
-	realDial, realMin, realMax := dialMulticastGroup, discoveryRetryMin, discoveryRetryMax
-	discoveryRetryMin, discoveryRetryMax = time.Millisecond, 200*time.Millisecond
-	dialMulticastGroup = func() (lan.PacketConn, error) {
-		atomic.AddInt32(&calls, 1)
-		return dial()
-	}
-	t.Cleanup(func() {
-		dialMulticastGroup, discoveryRetryMin, discoveryRetryMax = realDial, realMin, realMax
-	})
-	return &calls
+	return retryPolicy{
+		dial: func() (lan.PacketConn, error) {
+			atomic.AddInt32(&calls, 1)
+			return dial()
+		},
+		min:         time.Millisecond,
+		max:         200 * time.Millisecond,
+		established: time.Hour, // no connection counts as lasting unless asked
+	}, &calls
+}
+
+// deadConn returns a connection that is closed the moment it is handed over,
+// standing in for a socket that joined the group but cannot be used.
+func deadConn() (lan.PacketConn, error) {
+	conn, other := lan.NewMemConn()
+	_ = other.Close()
+	return conn, nil
 }
 
 // A network that is not up yet is the commonest failure, and it fixes itself
 // seconds later — so a single attempt would leave discovery dead for the life
 // of the process with nothing in the config to prompt another try.
 func TestRunWithMulticastRetriesAFailingDial(t *testing.T) {
-	calls := stubDial(t, func() (lan.PacketConn, error) {
+	policy, calls := testPolicy(func() (lan.PacketConn, error) {
 		return nil, errors.New("network is down")
 	})
 
@@ -293,19 +303,10 @@ func TestRunWithMulticastRetriesAFailingDial(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runWithMulticast(ctx, "browse", func(lan.PacketConn) error { return nil })
+		runWithMulticast(ctx, policy, "browse", func(lan.PacketConn) error { return nil })
 	}()
 
-	deadline := time.After(5 * time.Second)
-	for atomic.LoadInt32(calls) < 3 {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatalf("dialled %d times; a failing dial should be retried", atomic.LoadInt32(calls))
-		case <-time.After(time.Millisecond):
-		}
-	}
+	waitForCalls(t, calls, 3, cancel, done, "a failing dial should be retried")
 	cancel()
 
 	select {
@@ -319,33 +320,18 @@ func TestRunWithMulticastRetriesAFailingDial(t *testing.T) {
 // after it was obtained. Suspend and resume drops group membership with the
 // interface, and a laptop is exactly the machine this feature exists for.
 func TestRunWithMulticastRedialsAfterTheSocketDies(t *testing.T) {
-	calls := stubDial(t, func() (lan.PacketConn, error) {
-		conn, other := lan.NewMemConn()
-		_ = other.Close()
-		return conn, nil
-	})
+	policy, calls := testPolicy(deadConn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// use returning is how a dead socket surfaces: Run gave up on it.
-		runWithMulticast(ctx, "advertise on", func(conn lan.PacketConn) error {
+		runWithMulticast(ctx, policy, "advertise on", func(conn lan.PacketConn) error {
 			return conn.Close()
 		})
 	}()
 
-	deadline := time.After(5 * time.Second)
-	for atomic.LoadInt32(calls) < 3 {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatalf("dialled %d times; the loop should redial when the socket dies",
-				atomic.LoadInt32(calls))
-		case <-time.After(time.Millisecond):
-		}
-	}
+	waitForCalls(t, calls, 3, cancel, done, "the loop should redial when the socket dies")
 	cancel()
 	<-done
 }
@@ -353,19 +339,16 @@ func TestRunWithMulticastRedialsAfterTheSocketDies(t *testing.T) {
 // A malformed advertisement is not a network problem. Retrying it would log the
 // same complaint every few seconds forever.
 func TestRunWithMulticastStopsOnANonRetryableFailure(t *testing.T) {
-	calls := stubDial(t, func() (lan.PacketConn, error) {
-		conn, other := lan.NewMemConn()
-		_ = other.Close()
-		return conn, nil
-	})
+	policy, calls := testPolicy(deadConn)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runWithMulticast(context.Background(), "advertise on", func(conn lan.PacketConn) error {
-			_ = conn.Close()
-			return errNotRetryable
-		})
+		runWithMulticast(context.Background(), policy, "advertise on",
+			func(conn lan.PacketConn) error {
+				_ = conn.Close()
+				return errNotRetryable
+			})
 	}()
 
 	select {
@@ -375,6 +358,22 @@ func TestRunWithMulticastStopsOnANonRetryableFailure(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(calls); got != 1 {
 		t.Fatalf("dialled %d times, want exactly 1", got)
+	}
+}
+
+// waitForCalls blocks until the dialler has been called n times.
+func waitForCalls(t *testing.T, calls *int32, n int32, cancel context.CancelFunc,
+	done chan struct{}, what string) {
+	t.Helper()
+	deadline := time.After(20 * time.Second)
+	for atomic.LoadInt32(calls) < n {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("dialled %d times, wanted %d: %s", atomic.LoadInt32(calls), n, what)
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 
@@ -409,22 +408,18 @@ func (w *waitRecorder) observed() []time.Duration {
 }
 
 // runUntilReconnects drives runWithMulticast until it has redialled n times.
-func runUntilReconnects(t *testing.T, n int32, body func(*waitRecorder) time.Duration) []time.Duration {
+func runUntilReconnects(t *testing.T, policy retryPolicy, calls *int32, n int32,
+	hold time.Duration) []time.Duration {
 	t.Helper()
 	rec := &waitRecorder{}
-	calls := stubDial(t, func() (lan.PacketConn, error) {
-		conn, other := lan.NewMemConn()
-		_ = other.Close()
-		return conn, nil
-	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runWithMulticast(ctx, "browse", func(lan.PacketConn) error {
+		runWithMulticast(ctx, policy, "browse", func(lan.PacketConn) error {
 			rec.enter()
-			if hold := body(rec); hold > 0 {
+			if hold > 0 {
 				time.Sleep(hold)
 			}
 			rec.exit()
@@ -432,16 +427,7 @@ func runUntilReconnects(t *testing.T, n int32, body func(*waitRecorder) time.Dur
 		})
 	}()
 
-	deadline := time.After(20 * time.Second)
-	for atomic.LoadInt32(calls) < n {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatalf("only %d reconnects observed, wanted %d", atomic.LoadInt32(calls), n)
-		case <-time.After(time.Millisecond):
-		}
-	}
+	waitForCalls(t, calls, n, cancel, done, "not enough reconnects observed")
 	cancel()
 	<-done
 	return rec.observed()
@@ -451,14 +437,13 @@ func runUntilReconnects(t *testing.T, n int32, body func(*waitRecorder) time.Dur
 // multicast route, a bridged container, a firewalled group — must not retry at
 // the floor forever. The ceiling exists for exactly that case.
 func TestRunWithMulticastBacksOffWhenTheSocketNeverWorks(t *testing.T) {
-	waits := runUntilReconnects(t, 6, func(*waitRecorder) time.Duration { return 0 })
+	policy, calls := testPolicy(deadConn)
+	waits := runUntilReconnects(t, policy, calls, 6, 0)
 
 	if len(waits) < 4 {
 		t.Fatalf("only %d waits observed", len(waits))
 	}
-	// The waits must climb towards the ceiling. Keyed wrongly on a successful
-	// dial, every one of them would be the floor.
-	if last := waits[len(waits)-1]; last < 8*discoveryRetryMin {
+	if last := waits[len(waits)-1]; last < 8*policy.min {
 		t.Fatalf("waits stayed at the floor (%v); a socket that never works "+
 			"is retrying forever without backing off", waits)
 	}
@@ -468,24 +453,21 @@ func TestRunWithMulticastBacksOffWhenTheSocketNeverWorks(t *testing.T) {
 // the previous failure, so a laptop resuming after hours asleep reconnects at
 // the floor rather than at the ceiling.
 func TestRunWithMulticastResetsBackoffAfterAConnectionThatLasted(t *testing.T) {
-	realEstablished := discoveryConnectionEstablished
-	discoveryConnectionEstablished = 5 * time.Millisecond
-	t.Cleanup(func() { discoveryConnectionEstablished = realEstablished })
+	policy, calls := testPolicy(deadConn)
+	policy.established = 5 * time.Millisecond
 
 	// Each connection outlasts the threshold, so every reconnect counts as
 	// "it worked" and the wait must go back to the floor every time.
-	waits := runUntilReconnects(t, 6, func(*waitRecorder) time.Duration {
-		return 10 * time.Millisecond
-	})
+	waits := runUntilReconnects(t, policy, calls, 6, 10*time.Millisecond)
 
 	if len(waits) < 4 {
 		t.Fatalf("only %d waits observed", len(waits))
 	}
 	for i, w := range waits {
-		if w > 8*discoveryRetryMin {
+		if w > 8*policy.min {
 			t.Fatalf("wait %d was %v, far above the floor %v: the backoff was "+
 				"not reset after a connection that lasted (all: %v)",
-				i, w, discoveryRetryMin, waits)
+				i, w, policy.min, waits)
 		}
 	}
 }
@@ -499,5 +481,80 @@ func TestContainerWarningIsPrintedAtMostOnce(t *testing.T) {
 	// on repeat, which is what the reload path does to it.
 	if !containerWarnEvaluated.Load() {
 		t.Fatal("the once was never evaluated")
+	}
+}
+
+// A specific bind must advertise only that address. Publishing the whole
+// machine's enumeration repeats the bug that made the port issue serious: with
+// bind_addr = 192.168.1.20 on a host that also has a VPN address, a hub
+// resolving the name could pick the VPN one, be refused, and the peer would
+// silently never appear.
+func TestAdvertisableAddrsFollowsTheBind(t *testing.T) {
+	specific := advertisableAddrs(&net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 7842})()
+	if len(specific) != 1 || specific[0].String() != "192.168.1.20" {
+		t.Fatalf("a specific bind advertised %v, want just [192.168.1.20]", specific)
+	}
+
+	// A wildcard bind really does answer on every interface, so the full
+	// enumeration is correct there.
+	for _, wildcard := range []net.IP{net.ParseIP("0.0.0.0"), net.ParseIP("::"), nil} {
+		got := advertisableAddrs(&net.TCPAddr{IP: wildcard, Port: 7842})
+		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(localAddresses).Pointer() {
+			t.Errorf("wildcard bind %v did not fall back to the full enumeration", wildcard)
+		}
+	}
+}
+
+// The advertiser gives up permanently when the served address is unknown, which
+// is safe only because SetServedAddr runs first. That ordering is invisible in
+// the code, so it gets an assertion rather than a comment: a future reordering
+// should fail here, not silently stop advertising in production.
+func TestServedAddrIsSetBeforeThePollersStart(t *testing.T) {
+	body, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("reading main.go: %v", err)
+	}
+	src := string(body)
+
+	setServed := strings.Index(src, "clusterSt.SetServedAddr(")
+	if setServed < 0 {
+		t.Fatal("main.go no longer calls SetServedAddr; RunAdvertiser will never " +
+			"know where the server listens and will refuse to advertise")
+	}
+	startPollers := strings.Index(src, "startPollers(runtimeCtx,")
+	if startPollers < 0 {
+		t.Skip("startPollers call site moved; update this guard")
+	}
+	if setServed > startPollers {
+		t.Fatalf("SetServedAddr (offset %d) now runs after startPollers (offset %d): "+
+			"the advertiser will start before it knows the served address and "+
+			"will refuse to advertise for the life of the process",
+			setServed, startPollers)
+	}
+}
+
+// The container notice explains a silent no-op, and browsing is just as broken
+// on a bridged container as advertising — so a hub that only browses has to see
+// it too.
+func TestContainerWarningIsReachableFromBothLoops(t *testing.T) {
+	body, err := os.ReadFile("discovery_lan.go")
+	if err != nil {
+		t.Fatalf("reading discovery_lan.go: %v", err)
+	}
+	src := string(body)
+
+	for _, fn := range []string{"runAdvertiser", "runDiscoverer"} {
+		start := strings.Index(src, "func (cs *clusterState) "+fn+"(")
+		if start < 0 {
+			t.Fatalf("%s not found", fn)
+		}
+		end := strings.Index(src[start:], "\n}\n")
+		if end < 0 {
+			end = len(src) - start
+		}
+		if !strings.Contains(src[start:start+end], "warnIfDiscoveryIsContainerised()") {
+			t.Errorf("%s does not call warnIfDiscoveryIsContainerised; a container "+
+				"running only that loop gets no explanation for the silence", fn)
+		}
 	}
 }

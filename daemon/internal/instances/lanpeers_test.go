@@ -3,11 +3,13 @@ package instances
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,8 +30,27 @@ func (b *fakeBrowser) Browse(context.Context, time.Duration) ([]lan.Peer, error)
 	return b.peers, b.err
 }
 
+// loopbackFactory builds clients that resolve any .local name to loopback on
+// the port it was advertised with — which is what an mDNS resolver does on a
+// real network, and lets these tests use the hostnames the code now requires
+// while still reaching an httptest server.
+func loopbackFactory() ClientFactory {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	return func(inst Instance) *Client { return NewClient(inst, client) }
+}
+
 // daemonAt stands up something that answers /health like a daemon, and returns
-// the peer that advertises it.
+// the peer that advertises it — with a .local hostname, as a real one would.
 func daemonAt(t *testing.T, instanceID, name, role string) (*httptest.Server, lan.Peer) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,8 +66,9 @@ func daemonAt(t *testing.T, instanceID, name, role string) (*httptest.Server, la
 	return srv, peerFor(t, srv.URL, instanceID)
 }
 
-// peerFor builds the advertisement a daemon at url would publish. Hostname and
-// port come from the test server so BaseURL() resolves back to it.
+// peerFor builds the advertisement a daemon at url would publish. The hostname
+// is derived from the id so it is a legal single-label .local name; the port is
+// the test server's, so loopbackFactory reaches it.
 func peerFor(t *testing.T, rawURL, instanceID string) lan.Peer {
 	t.Helper()
 	u, err := url.Parse(rawURL)
@@ -63,7 +85,7 @@ func peerFor(t *testing.T, rawURL, instanceID string) lan.Peer {
 	}
 	return lan.Peer{
 		InstanceID: instanceID,
-		Hostname:   u.Hostname(),
+		Hostname:   strings.ToLower(instanceID) + ".local",
 		Port:       port,
 		Scheme:     "http",
 		Addrs:      []netip.Addr{netip.MustParseAddr("127.0.0.1")},
@@ -109,10 +131,10 @@ func TestDiscovererClassifiesAgainstTheRegistry(t *testing.T) {
 		},
 		{
 			name:       "known at the same address is not actionable",
-			registry:   map[string]string{"srv-a": srv.URL},
+			registry:   map[string]string{"srv-a": srvLocalURL(srv, "srv-a")},
 			wantStatus: StatusRegistered,
 			wantRegID:  "srv-a",
-			wantRegURL: srv.URL,
+			wantRegURL: srvLocalURL(srv, "srv-a"),
 		},
 		{
 			name:       "known at a different address needs repair",
@@ -123,14 +145,14 @@ func TestDiscovererClassifiesAgainstTheRegistry(t *testing.T) {
 		},
 		{
 			name:       "a different instance at that address is still new",
-			registry:   map[string]string{"srv-b": srv.URL},
+			registry:   map[string]string{"srv-b": srvLocalURL(srv, "srv-b")},
 			wantStatus: StatusNew,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := NewDiscoverer(registryWith(t, tt.registry), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+			d := NewDiscoverer(registryWith(t, tt.registry), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
 			got := d.Scan(context.Background())
 			if len(got) != 1 {
 				t.Fatalf("got %d candidates, want 1: %+v", len(got), got)
@@ -157,7 +179,7 @@ func TestDiscovererTrustsHealthOverTheAdvertisement(t *testing.T) {
 	peer.Role = "hub"
 	peer.Version = "9.9.9"
 
-	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
 	got := d.Scan(context.Background())
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
@@ -199,7 +221,7 @@ func TestDiscovererDropsWhatItCannotVerify(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{tt.peer}}, time.Minute, nil)
+			d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{tt.peer}}, time.Minute, loopbackFactory())
 			if got := d.Scan(context.Background()); len(got) != 0 {
 				t.Fatalf("got %d candidates, want 0: %+v", len(got), got)
 			}
@@ -213,12 +235,14 @@ func TestDiscovererDeduplicatesByIdentity(t *testing.T) {
 	// them rather than one of them simply failing to answer.
 	_, first := daemonAt(t, "srv-a", "Server A", "worker")
 	_, second := daemonAt(t, "srv-a", "Server A", "worker")
+	// One machine advertising on two interfaces: same identity, two names.
+	second.Hostname = "srv-a-alt.local"
 	if first.BaseURL() == second.BaseURL() {
 		t.Fatal("the two fake daemons need different addresses to be a real test")
 	}
 
 	d := NewDiscoverer(registryWith(t, nil),
-		&fakeBrowser{peers: []lan.Peer{first, second}}, time.Minute, nil)
+		&fakeBrowser{peers: []lan.Peer{first, second}}, time.Minute, loopbackFactory())
 
 	got := d.Scan(context.Background())
 	if len(got) != 1 {
@@ -241,7 +265,7 @@ func TestDiscovererScanIsBoundedByASilentPeer(t *testing.T) {
 	_, good := daemonAt(t, "srv-a", "Server A", "worker")
 	peers := []lan.Peer{peerFor(t, silent.URL, "black-hole"), good}
 
-	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: peers}, time.Minute, nil)
+	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: peers}, time.Minute, loopbackFactory())
 
 	start := time.Now()
 	got := d.Scan(context.Background())
@@ -261,8 +285,8 @@ func TestDiscovererIgnoresATrailingSlashAndCase(t *testing.T) {
 	// must not be told the address changed.
 	srv, peer := daemonAt(t, "srv-a", "Server A", "worker")
 
-	d := NewDiscoverer(registryWith(t, map[string]string{"srv-a": srv.URL + "/"}),
-		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+	d := NewDiscoverer(registryWith(t, map[string]string{"srv-a": srvLocalURL(srv, "srv-a") + "/"}),
+		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
 	got := d.Scan(context.Background())
 	if len(got) != 1 || got[0].Status != StatusRegistered {
 		t.Fatalf("status = %+v, want registered", got)
@@ -273,16 +297,16 @@ func TestDiscovererBaseURLUsesTheHostname(t *testing.T) {
 	// The whole point: address the peer by a name that re-resolves, not by the
 	// IP it happened to answer from.
 	srv, peer := daemonAt(t, "srv-a", "Server A", "worker")
-	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
 
 	got := d.Scan(context.Background())
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
-	if got[0].BaseURL != srv.URL {
-		t.Errorf("BaseURL = %q, want %q", got[0].BaseURL, srv.URL)
+	if want := srvLocalURL(srv, "srv-a"); got[0].BaseURL != want {
+		t.Errorf("BaseURL = %q, want %q", got[0].BaseURL, want)
 	}
-	if got[0].Hostname != "127.0.0.1" {
+	if got[0].Hostname != "srv-a.local" {
 		t.Errorf("Hostname = %q, want the SRV target", got[0].Hostname)
 	}
 }
@@ -292,12 +316,12 @@ func TestDiscovererBaseURLUsesTheHostname(t *testing.T) {
 func TestDiscovererUpdateReclassifiesTheCache(t *testing.T) {
 	srv, peer := daemonAt(t, "srv-a", "Server A", "worker")
 
-	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
 	if got := d.Scan(context.Background()); got[0].Status != StatusNew {
 		t.Fatalf("status = %q, want new", got[0].Status)
 	}
 
-	d.Update(registryWith(t, map[string]string{"srv-a": srv.URL}), 0)
+	d.Update(registryWith(t, map[string]string{"srv-a": srvLocalURL(srv, "srv-a")}), 0)
 
 	got := d.Candidates()
 	if len(got) != 1 || got[0].Status != StatusRegistered {
@@ -306,9 +330,11 @@ func TestDiscovererUpdateReclassifiesTheCache(t *testing.T) {
 }
 
 func TestDiscovererIsInertWithoutABrowser(t *testing.T) {
-	d := NewDiscoverer(registryWith(t, nil), nil, time.Minute, nil)
-	if got := d.Scan(context.Background()); got != nil {
-		t.Fatalf("Scan returned %+v with no browser, want nil", got)
+	d := NewDiscoverer(registryWith(t, nil), nil, time.Minute, loopbackFactory())
+	// Empty, not nil: a caller that has to distinguish the two is a caller
+	// that will eventually get it wrong.
+	if got := d.Scan(context.Background()); len(got) != 0 {
+		t.Fatalf("Scan returned %+v with no browser, want empty", got)
 	}
 	if got := d.Candidates(); len(got) != 0 {
 		t.Fatalf("Candidates returned %+v, want empty", got)
@@ -319,7 +345,7 @@ func TestDiscovererIsInertWithoutABrowser(t *testing.T) {
 
 	// Run must return rather than spin on a ticker forever.
 	done := make(chan struct{})
-	go func() { defer close(done); d.Run(context.Background()) }()
+	go func() { defer close(done); _ = d.Run(context.Background()) }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -330,7 +356,7 @@ func TestDiscovererIsInertWithoutABrowser(t *testing.T) {
 func TestDiscovererKeepsTheCacheWhenABrowseFails(t *testing.T) {
 	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
 	browser := &fakeBrowser{peers: []lan.Peer{peer}}
-	d := NewDiscoverer(registryWith(t, nil), browser, time.Minute, nil)
+	d := NewDiscoverer(registryWith(t, nil), browser, time.Minute, loopbackFactory())
 
 	if got := d.Scan(context.Background()); len(got) != 1 {
 		t.Fatalf("first scan found %d, want 1", len(got))
@@ -345,7 +371,7 @@ func TestDiscovererKeepsTheCacheWhenABrowseFails(t *testing.T) {
 
 func TestDiscovererRecordsWhenItLastLooked(t *testing.T) {
 	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
-	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
 
 	if !d.LastScan().IsZero() {
 		t.Fatal("LastScan should be zero before the first scan")
@@ -361,11 +387,11 @@ func TestDiscovererRunScansImmediately(t *testing.T) {
 	// after the daemon starts.
 	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
 	browser := &fakeBrowser{peers: []lan.Peer{peer}}
-	d := NewDiscoverer(registryWith(t, nil), browser, time.Hour, nil)
+	d := NewDiscoverer(registryWith(t, nil), browser, time.Hour, loopbackFactory())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); d.Run(ctx) }()
+	go func() { defer close(done); _ = d.Run(ctx) }()
 
 	deadline := time.After(3 * time.Second)
 	for len(d.Candidates()) == 0 {
@@ -402,7 +428,7 @@ func TestDiscovererNeverOffersTheHubItself(t *testing.T) {
 
 	d := NewDiscoverer(
 		registryWithSelf(t, map[string]string{"hub-1": "http://127.0.0.1:7842"}, "hub-1"),
-		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
 
 	if got := d.Scan(context.Background()); len(got) != 0 {
 		t.Fatalf("the hub offered itself: %+v", got)
@@ -417,7 +443,7 @@ func TestDiscovererStillOffersOtherDaemonsToAHub(t *testing.T) {
 
 	d := NewDiscoverer(
 		registryWithSelf(t, map[string]string{"hub-1": "http://127.0.0.1:7842"}, "hub-1"),
-		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
 
 	got := d.Scan(context.Background())
 	if len(got) != 1 || got[0].InstanceID != "srv-a" {
@@ -426,4 +452,13 @@ func TestDiscovererStillOffersOtherDaemonsToAHub(t *testing.T) {
 	if got[0].Status != StatusNew {
 		t.Fatalf("status = %q, want new", got[0].Status)
 	}
+}
+
+// srvLocalURL is the base URL a peer advertising id would produce for srv.
+func srvLocalURL(srv *httptest.Server, id string) string {
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		panic(err)
+	}
+	return "http://" + strings.ToLower(id) + ".local:" + u.Port()
 }

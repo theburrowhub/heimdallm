@@ -2,6 +2,7 @@ package lan
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -429,5 +430,111 @@ func TestAdvertiserWithoutAddressesStillAnnounces(t *testing.T) {
 	}
 	if len(peers[0].Addrs) != 0 {
 		t.Fatalf("Addrs = %v, want none", peers[0].Addrs)
+	}
+}
+
+// A browse is a read from a multicast group anyone on the link can write to.
+// Without a cap, one sender emitting distinct names for the whole window grows
+// the accumulator without limit and then hands the caller thousands of peers to
+// go and probe.
+func TestBrowseCapsWhatOneWindowCanReport(t *testing.T) {
+	a, b := NewMemConn()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+
+	// Sent as many packets rather than one, both because a real flood is many
+	// packets and because a single oversized datagram would simply be dropped:
+	// an mDNS response is meant to fit inside one MTU, and a packet larger than
+	// the read buffer fails to unpack rather than being parsed in part.
+	const perPacket = 16
+	var batch []dns.RR
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		sendResponse(t, a, batch)
+		batch = nil
+	}
+	for i := range maxPeers * 3 {
+		id := fmt.Sprintf("flood%04d", i)
+		name := id + "._heimdallm._tcp.local."
+		batch = append(batch,
+			&dns.PTR{Hdr: dns.RR_Header{Name: serviceFQDN(), Rrtype: dns.TypePTR,
+				Class: dns.ClassINET, Ttl: 120}, Ptr: name},
+			&dns.SRV{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeSRV,
+				Class: dns.ClassINET, Ttl: 120}, Port: 7842, Target: id + ".local."},
+			&dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT,
+				Class: dns.ClassINET, Ttl: 120}, Txt: []string{"id=" + id}},
+		)
+		if (i+1)%perPacket == 0 {
+			flush()
+		}
+	}
+	flush()
+
+	browser, _ := NewBrowser(b, quietLogger())
+	peers, err := browser.Browse(context.Background(), 700*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Browse: %v", err)
+	}
+
+	if len(peers) > maxPeers {
+		t.Fatalf("reported %d peers, want at most %d", len(peers), maxPeers)
+	}
+	if len(peers) == 0 {
+		t.Fatal("the cap dropped everything; peers heard first should survive")
+	}
+	// Capped after sorting, so the same subset comes back every time rather
+	// than whichever names Go's map iteration happened to yield.
+	for i := 1; i < len(peers); i++ {
+		if peers[i-1].InstanceID >= peers[i].InstanceID {
+			t.Fatalf("peers are not sorted: %q then %q",
+				peers[i-1].InstanceID, peers[i].InstanceID)
+		}
+	}
+}
+
+// The accumulator itself must stay bounded while a flood is arriving, not only
+// the slice it eventually returns.
+func TestAccumulatorStopsGrowingUnderAFlood(t *testing.T) {
+	acc := newAccumulator()
+	for i := range maxRecordNames * 3 {
+		name := fmt.Sprintf("flood%05d._heimdallm._tcp.local.", i)
+		msg := new(dns.Msg)
+		msg.Response = true
+		msg.Answer = []dns.RR{
+			&dns.PTR{Hdr: dns.RR_Header{Name: serviceFQDN(), Rrtype: dns.TypePTR,
+				Class: dns.ClassINET, Ttl: 120}, Ptr: name},
+			&dns.SRV{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeSRV,
+				Class: dns.ClassINET, Ttl: 120}, Port: 7842, Target: "x.local."},
+			&dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT,
+				Class: dns.ClassINET, Ttl: 120}, Txt: []string{"id=x"}},
+		}
+		packed, err := msg.Pack()
+		if err != nil {
+			t.Fatalf("Pack: %v", err)
+		}
+		acc.absorb(packed)
+	}
+
+	for what, got := range map[string]int{
+		"instances": len(acc.instances),
+		"srv":       len(acc.srv),
+		"txt":       len(acc.txt),
+		"addrs":     len(acc.addrs),
+	} {
+		if got > maxRecordNames {
+			t.Errorf("%s grew to %d, above the %d cap", what, got, maxRecordNames)
+		}
+	}
+}
+
+// A peer whose SRV target names something off-link is dropped during assembly,
+// so it never reaches the caller to be probed.
+func TestBrowseDropsAPeerNamingSomethingOffLink(t *testing.T) {
+	srv := srvRR()
+	srv.Target = "metadata.google.internal."
+
+	if got := browseAnswers(t, []dns.RR{ptrRR(), srv, txtRR()}); len(got) != 0 {
+		t.Fatalf("reported %d peers for an off-link SRV target, want 0: %+v", len(got), got)
 	}
 }

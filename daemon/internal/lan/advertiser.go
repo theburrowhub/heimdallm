@@ -104,8 +104,23 @@ func NewAdvertiser(conn PacketConn, ad Advertisement, log *slog.Logger) (*Advert
 // the goodbye it sends on the way out still reaches the network.
 func (a *Advertiser) Close() error { return a.conn.Close() }
 
-// Run answers queries until ctx is cancelled, then sends a goodbye.
-func (a *Advertiser) Run(ctx context.Context) {
+// maxConsecutiveReadErrors is how many non-timeout read failures in a row mean
+// the socket is not coming back.
+//
+// Swallowing them indefinitely was a bug: after a suspend and resume the
+// socket can keep returning a permanent interface error, and a loop that only
+// logs and continues spins on it forever — never returning, so never
+// reconnecting and never backing off. A handful of failures is a blip; a
+// steady stream is a socket that has to be replaced, which only the caller can
+// do.
+const maxConsecutiveReadErrors = 10
+
+// Run answers queries until ctx is cancelled or the socket stops working, then
+// sends a goodbye.
+//
+// Returns nil on cancellation and an error when the connection failed, so the
+// caller can tell "we are shutting down" from "this socket needs replacing".
+func (a *Advertiser) Run(ctx context.Context) error {
 	a.log.Info("lan: advertising on the local network",
 		"service", Service, "instance", a.instanceName,
 		"hostname", strings.TrimSuffix(a.ad.Hostname, "."), "port", a.ad.Port)
@@ -115,9 +130,10 @@ func (a *Advertiser) Run(ctx context.Context) {
 	defer a.goodbye()
 
 	buf := make([]byte, 9000) // jumbo frame; mDNS responses are far smaller
+	failures := 0
 	for {
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		// A short deadline rather than a blocking read, so cancellation is
 		// noticed promptly without a second goroutine to close the socket.
@@ -126,14 +142,24 @@ func (a *Advertiser) Run(ctx context.Context) {
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
+				failures = 0
 				continue
 			}
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return
+			if ctx.Err() != nil {
+				return nil
 			}
-			a.log.Debug("lan: read failed", "err", err)
+			if errors.Is(err, net.ErrClosed) {
+				return fmt.Errorf("lan: the advertiser's connection was closed: %w", err)
+			}
+			failures++
+			if failures >= maxConsecutiveReadErrors {
+				return fmt.Errorf("lan: giving up on this connection after %d "+
+					"consecutive read failures: %w", failures, err)
+			}
+			a.log.Debug("lan: read failed", "err", err, "consecutive", failures)
 			continue
 		}
+		failures = 0
 		a.respond(buf[:n], from)
 	}
 }

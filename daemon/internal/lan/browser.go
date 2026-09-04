@@ -3,6 +3,7 @@ package lan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -10,6 +11,20 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+)
+
+// maxPeers bounds what one browse will report, and maxRecordNames bounds what
+// the accumulator will hold while assembling it.
+//
+// Both exist because the input is a multicast group that anyone on the link can
+// write to. Without a cap, a single sender emitting distinct PTR/SRV/TXT names
+// for the whole browse window grows the accumulator without limit and then
+// hands the caller thousands of peers to go and probe. A real network has a
+// handful of daemons; a number this far above that is not a bigger cluster, it
+// is someone filling the window.
+const (
+	maxPeers       = 64
+	maxRecordNames = 512
 )
 
 // Browser asks the network which Heimdallm daemons are on it.
@@ -54,6 +69,7 @@ func (b *Browser) Browse(ctx context.Context, window time.Duration) ([]Peer, err
 	// accumulated per record name and only assembled into Peers at the end.
 	acc := newAccumulator()
 	buf := make([]byte, 9000)
+	failures := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -72,14 +88,24 @@ func (b *Browser) Browse(ctx context.Context, window time.Duration) ([]Peer, err
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
+				failures = 0
 				continue
 			}
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			if ctx.Err() != nil {
 				break
 			}
-			b.log.Debug("lan: read failed while browsing", "err", err)
+			if errors.Is(err, net.ErrClosed) {
+				return nil, fmt.Errorf("lan: the browser's connection was closed: %w", err)
+			}
+			failures++
+			if failures >= maxConsecutiveReadErrors {
+				return nil, fmt.Errorf("lan: giving up on this connection after %d "+
+					"consecutive read failures: %w", failures, err)
+			}
+			b.log.Debug("lan: read failed while browsing", "err", err, "consecutive", failures)
 			continue
 		}
+		failures = 0
 		acc.absorb(buf[:n])
 	}
 
@@ -142,13 +168,17 @@ func (a *accumulator) absorb(packet []byte) {
 		}
 		switch rec := rr.(type) {
 		case *dns.PTR:
-			if strings.EqualFold(rec.Hdr.Name, serviceFQDN()) {
+			if strings.EqualFold(rec.Hdr.Name, serviceFQDN()) && !a.full() {
 				a.instances[strings.ToLower(rec.Ptr)] = true
 			}
 		case *dns.SRV:
-			a.srv[strings.ToLower(rec.Hdr.Name)] = rec
+			if !a.full() {
+				a.srv[strings.ToLower(rec.Hdr.Name)] = rec
+			}
 		case *dns.TXT:
-			a.txt[strings.ToLower(rec.Hdr.Name)] = rec.Txt
+			if !a.full() {
+				a.txt[strings.ToLower(rec.Hdr.Name)] = rec.Txt
+			}
 		case *dns.A:
 			a.addAddr(rec.Hdr.Name, rec.A)
 		case *dns.AAAA:
@@ -168,7 +198,19 @@ func (a *accumulator) forget(rr dns.RR) {
 	delete(a.txt, name)
 }
 
+// full reports whether the accumulator has taken all it will hold. Records past
+// this are dropped rather than growing the maps, so a flooded window costs a
+// bounded amount of memory and the peers heard first still get reported.
+func (a *accumulator) full() bool {
+	return len(a.instances) >= maxRecordNames ||
+		len(a.srv) >= maxRecordNames ||
+		len(a.txt) >= maxRecordNames
+}
+
 func (a *accumulator) addAddr(host string, ip net.IP) {
+	if len(a.addrs) >= maxRecordNames {
+		return
+	}
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
 		return
@@ -205,10 +247,17 @@ func (a *accumulator) peers() []Peer {
 			peer.Scheme = "http"
 		}
 		if peer.BaseURL() == "" {
-			continue // no addressable host or port
+			// Includes an SRV target that is not a single .local label, which
+			// is refused rather than probed — see ValidateMDNSHostname.
+			continue
 		}
 		out = append(out, peer)
 	}
 	sortPeers(out)
+	// Sorted first, so a capped result is the same subset every time rather
+	// than whichever names Go's map iteration happened to yield.
+	if len(out) > maxPeers {
+		out = out[:maxPeers]
+	}
 	return out
 }
