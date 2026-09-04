@@ -11,6 +11,7 @@ import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
 import '../server/server_actions.dart' as server_actions;
 import 'config_propagation_dialog.dart';
+import 'discovered_peers_section.dart';
 import 'enable_hub_action.dart';
 import 'instance_dialog.dart';
 
@@ -59,6 +60,7 @@ class InstancesScreen extends ConsumerWidget {
               // through the restart flow, this is the only thing that
               // notices.
               ref.invalidate(localClusterRoleProvider);
+              ref.invalidate(discoveredPeersProvider);
             },
           ),
         ],
@@ -138,6 +140,7 @@ class InstancesTabView extends ConsumerWidget {
                 onPressed: () {
                   ref.invalidate(daemonInstancesProvider);
                   ref.invalidate(localClusterRoleProvider);
+                  ref.invalidate(discoveredPeersProvider);
                 },
               ),
             ],
@@ -233,15 +236,22 @@ class _InstanceList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (registry.instances.isEmpty) {
-      return const _EmptyState();
-    }
-    return ListView.separated(
+    // The discovered section sits above the registry, and above the empty
+    // state too: a fresh hub with nothing registered and a daemon waiting on
+    // the LAN is exactly the case this feature exists for, and the old empty
+    // state would otherwise hide it behind "register your first instance".
+    return ListView(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-      itemCount: registry.instances.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 6),
-      itemBuilder: (context, i) =>
-          _InstanceCard(instance: registry.instances[i]),
+      children: [
+        const DiscoveredPeersSection(),
+        if (registry.instances.isEmpty)
+          const _EmptyState()
+        else
+          for (final instance in registry.instances) ...[
+            _InstanceCard(instance: instance),
+            const SizedBox(height: 6),
+          ],
+      ],
     );
   }
 }
@@ -263,7 +273,8 @@ class _EmptyState extends ConsumerWidget {
               'repositories to it, apply the same configuration everywhere, '
               'and spread reviews and merges across the fleet.';
 
-    return Center(
+    return Align(
+      alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 460),
         child: Padding(
@@ -409,6 +420,9 @@ class _InstanceCard extends ConsumerWidget {
                     : state.lastError,
                 color: scheme.error,
               ),
+            // Only renders when the network says this instance moved, so it
+            // costs nothing on a healthy fleet.
+            AddressChangedBanner(instanceId: instance.id),
           ],
         ),
       ),
