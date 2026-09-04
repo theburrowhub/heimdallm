@@ -21,6 +21,7 @@
 package lan
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -81,10 +82,11 @@ type Peer struct {
 }
 
 // BaseURL renders the peer as a daemon base URL built from its hostname.
-// Returns "" when the peer is too incomplete to address.
+// Returns "" when the peer is not addressable, which includes any hostname that
+// fails ValidateMDNSHostname.
 func (p Peer) BaseURL() string {
-	host := strings.TrimSuffix(strings.TrimSpace(p.Hostname), ".")
-	if host == "" || p.Port <= 0 {
+	host, err := ValidateMDNSHostname(p.Hostname)
+	if err != nil || p.Port <= 0 || p.Port > 65535 {
 		return ""
 	}
 	scheme := p.Scheme
@@ -92,6 +94,60 @@ func (p Peer) BaseURL() string {
 		scheme = "http"
 	}
 	return scheme + "://" + host + ":" + strconv.Itoa(p.Port)
+}
+
+// ValidateMDNSHostname accepts only a single-label name in .local, and returns
+// it without the trailing dot.
+//
+// This is a security boundary, not tidiness. An SRV target is supplied by
+// whoever answered a multicast query — anyone on the link, with no
+// authentication — and the consumer turns it into a URL and fetches it. Left
+// unchecked, an attacker advertises `metadata.google.internal.` or any internal
+// hostname and the hub makes the request for them: a server-side request
+// forgery primitive handed out to the whole subnet.
+//
+// Restricting it to <label>.local is what makes the name harmless. That is the
+// only shape mDNS actually assigns (RFC 6762 §3 gives a host one single-label
+// name in the .local domain), it cannot name anything off-link, and it is
+// resolved by the mDNS resolver rather than by unicast DNS — so it cannot be
+// pointed at a public record or an internal one. A multi-label name is rejected
+// too: "metadata.google.internal.local" is not a host mDNS can assign, and
+// allowing it would let an attacker smuggle a delegated suffix past the check.
+func ValidateMDNSHostname(raw string) (string, error) {
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	if host == "" {
+		return "", errors.New("lan: peer advertised no hostname")
+	}
+	label, ok := strings.CutSuffix(host, "."+Domain)
+	if !ok {
+		return "", fmt.Errorf("lan: peer hostname %q is not in .%s; refusing to "+
+			"probe a name mDNS cannot have assigned", raw, Domain)
+	}
+	if !isDNSLabel(label) {
+		return "", fmt.Errorf("lan: peer hostname %q is not a single .%s label", raw, Domain)
+	}
+	return host, nil
+}
+
+// isDNSLabel reports whether s is one legal DNS label: 1-63 characters of
+// letters, digits and hyphens, not starting or ending with a hyphen. A dot
+// anywhere fails, which is the point.
+func isDNSLabel(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // encodeTXT renders a peer's identity as DNS-SD TXT strings, in a stable order

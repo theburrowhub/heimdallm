@@ -1713,6 +1713,11 @@ discovery = "mdns"    # off (default) | mdns
 Environment equivalent: `HEIMDALLM_CLUSTER_DISCOVERY`. The Instances tab also
 offers a one-click switch on the hub.
 
+Only the address the listener actually bound is advertised. With
+`server.bind_addr` set to one specific interface, that is the only address
+published — a machine with a VPN or a second NIC does not offer peers an address
+where nothing is listening.
+
 **The daemon must be listening somewhere a peer can reach it.** `server.bind_addr`
 defaults to `127.0.0.1`, and on that setting nothing else on the network can
 connect — so a daemon would advertise an address it then refuses. It declines to
@@ -1755,6 +1760,8 @@ and claim to be any instance. The design assumes that.
 | Identity comes from the daemon, not the advertisement | The hub fetches the peer's `/health` and uses the id **it** reports; the TXT record is discarded. A peer that does not answer, or will not name itself, is never offered |
 | Registration pins the discovered id | If the machine at that address is no longer the one that was found, the registration is refused rather than silently pointed at whatever is there now |
 | An address is never rewritten for you | A moved instance is a proposal on a card, so a rogue advertiser cannot redirect the hub by claiming a known id |
+| Only `<name>.local` is ever probed | An advertised hostname is turned into a URL and fetched, so anything else would be a request-forgery primitive handed to the subnet. A name like `metadata.google.internal` is refused, not resolved, and redirects are refused too |
+| A browse is bounded | One sender cannot make the hub hold unlimited records or open unlimited connections: records and peers are capped per scan and verification runs through a fixed pool |
 
 Turning discovery **on** is still a decision worth making deliberately:
 announcing a service on a shared corporate network is a choice, which is why

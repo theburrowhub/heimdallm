@@ -2,7 +2,9 @@ package instances
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +49,36 @@ const discoveryBrowseWindow = 2 * time.Second
 // not be something a stranger can stall. A daemon one hop away that cannot
 // answer in this long is not one to propose adopting.
 const discoveryVerifyTimeout = 3 * time.Second
+
+// discoveryVerifyWorkers bounds how many peers are probed at once.
+//
+// Fanning out one goroutine per peer looks harmless at cluster scale and is not
+// safe at LAN scale: the peer list comes from a multicast group anyone on the
+// link can write to, so "one request per advertised name" is a knob a stranger
+// turns. A fixed pool means a flooded browse costs a bounded number of sockets
+// and takes longer, instead of costing every file descriptor the daemon has.
+const discoveryVerifyWorkers = 8
+
+// discoveryHTTPTimeout bounds the whole verification client. Slightly above
+// discoveryVerifyTimeout so the per-peer context is what normally expires.
+const discoveryHTTPTimeout = 5 * time.Second
+
+// newDiscoveryHTTPClient builds the client used to verify a discovered peer.
+//
+// Redirects are refused, which matters more here than anywhere else in the
+// daemon: the address being fetched was supplied by an unauthenticated
+// advertisement, and following a redirect would let whoever sent it choose a
+// second URL that never had to pass the hostname check. One hop to a
+// .local name is the entire permitted reach.
+func newDiscoveryHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: discoveryHTTPTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return fmt.Errorf("instances: refusing to follow a redirect from a "+
+				"discovered peer (to %s)", req.URL.Redacted())
+		},
+	}
+}
 
 // Candidate is one daemon seen on the network, after verification, joined with
 // what the registry already knows about it.
@@ -93,9 +125,15 @@ type Discoverer struct {
 
 // NewDiscoverer builds a Discoverer. A nil browser makes every method a no-op,
 // which is what a daemon with discovery switched off gets.
+//
+// factory is only used when it was supplied explicitly (tests do). Otherwise
+// verification goes through a client of this package's own making, because the
+// registry's default client follows redirects and a discovered address must not
+// be allowed to choose a second one.
 func NewDiscoverer(reg *Registry, browser PeerBrowser, interval time.Duration, factory ClientFactory) *Discoverer {
 	if factory == nil {
-		factory = func(inst Instance) *Client { return NewClient(inst, nil) }
+		httpClient := newDiscoveryHTTPClient()
+		factory = func(inst Instance) *Client { return NewClient(inst, httpClient) }
 	}
 	if interval <= 0 {
 		interval = DefaultDiscoveryInterval
@@ -155,8 +193,17 @@ func (d *Discoverer) LastScan() time.Time {
 	return d.lastScan
 }
 
-// Scan runs one browse-verify-classify cycle and replaces the cache.
+// Scan runs one browse-verify-classify cycle and replaces the cache. A failed
+// browse keeps the previous view rather than blanking the list the operator is
+// looking at.
 func (d *Discoverer) Scan(ctx context.Context) []Candidate {
+	_ = d.scan(ctx)
+	return d.Candidates()
+}
+
+// scan is Scan with the browse error kept, so Run can tell a socket that needs
+// replacing from a network with nothing on it.
+func (d *Discoverer) scan(ctx context.Context) error {
 	d.mu.RLock()
 	browser, registry := d.browser, d.registry
 	d.mu.RUnlock()
@@ -167,23 +214,34 @@ func (d *Discoverer) Scan(ctx context.Context) []Candidate {
 	peers, err := browser.Browse(ctx, discoveryBrowseWindow)
 	if err != nil {
 		slog.Debug("instances: browsing the local network failed", "err", err)
-		return d.Candidates()
+		return err
 	}
 
-	// Verified in parallel, like Prober.ProbeAll. Sequentially, one advertised
-	// address that accepts a connection and then says nothing would hold up
-	// every peer behind it, and a scan is something a stranger on the LAN can
-	// trigger the cost of.
+	// Verified in parallel like Prober.ProbeAll, but through a fixed pool
+	// rather than a goroutine per peer. Sequentially, one advertised address
+	// that accepts a connection and then says nothing would hold up every peer
+	// behind it; unbounded, the number of concurrent outbound requests is a
+	// number anyone on the link chooses by advertising more names.
 	verified := make([]Candidate, len(peers))
 	ok := make([]bool, len(peers))
+	work := make(chan int)
 	var wg sync.WaitGroup
-	for i, peer := range peers {
+	for range min(discoveryVerifyWorkers, len(peers)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			verified[i], ok[i] = d.verify(ctx, peer)
+			for i := range work {
+				verified[i], ok[i] = d.verify(ctx, peers[i])
+			}
 		}()
 	}
+	for i := range peers {
+		select {
+		case work <- i:
+		case <-ctx.Done():
+		}
+	}
+	close(work)
 	wg.Wait()
 
 	seen := make(map[string]bool, len(peers))
@@ -218,7 +276,7 @@ func (d *Discoverer) Scan(ctx context.Context) []Candidate {
 	d.candidates = found
 	d.lastScan = d.now()
 	d.mu.Unlock()
-	return found
+	return nil
 }
 
 // verify asks the peer to identify itself over HTTP.
@@ -242,7 +300,7 @@ func (d *Discoverer) verify(ctx context.Context, peer lan.Peer) (Candidate, bool
 	probe := Instance{ID: "candidate", BaseURL: baseURL, Enabled: true}
 	ctx, cancel := context.WithTimeout(ctx, discoveryVerifyTimeout)
 	defer cancel()
-	health, err := d.newClient(probe).Health(ctx)
+	health, err := d.verifyClient(probe).Health(ctx)
 	if err != nil {
 		slog.Debug("instances: a peer on the network did not answer /health",
 			"base_url", baseURL, "err", err)
@@ -275,6 +333,14 @@ func (d *Discoverer) verify(ctx context.Context, peer lan.Peer) (Candidate, bool
 		Addresses:    addrs,
 		SeenAt:       d.now(),
 	}, true
+}
+
+// verifyClient builds the client used to probe one candidate.
+func (d *Discoverer) verifyClient(probe Instance) *Client {
+	d.mu.RLock()
+	factory := d.newClient
+	d.mu.RUnlock()
+	return factory(probe)
 }
 
 // classify decides what the operator is being offered. Pure: registry in,
@@ -313,31 +379,40 @@ func sameBaseURL(a, b string) bool {
 	return norm(a) == norm(b)
 }
 
-// Run scans on a ticker until ctx is cancelled.
-func (d *Discoverer) Run(ctx context.Context) {
+// Run scans on a ticker until ctx is cancelled, or until the browser's socket
+// stops working.
+//
+// Returns an error in the latter case so the caller replaces the connection.
+// A browse that fails because nothing answered is not an error — that is an
+// empty network, which is a normal state.
+func (d *Discoverer) Run(ctx context.Context) error {
 	if d == nil {
-		return
+		return nil
 	}
 	d.mu.RLock()
 	browser := d.browser
 	interval := d.interval
 	d.mu.RUnlock()
 	if browser == nil {
-		return // discovery is off; nothing to do
+		return nil // discovery is off; nothing to do
 	}
 
 	// Scan immediately so the Instances tab has something to show before the
 	// first tick, rather than an empty section for a minute after startup.
-	d.Scan(ctx)
+	if err := d.scan(ctx); err != nil {
+		return err
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
-			d.Scan(ctx)
+			if err := d.scan(ctx); err != nil {
+				return err
+			}
 			d.mu.RLock()
 			current := d.interval
 			d.mu.RUnlock()

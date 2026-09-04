@@ -26,9 +26,7 @@ import (
 // would leave discovery dead for the life of the process even though the
 // interface came up two seconds later, and nothing in the config changed to
 // prompt another attempt.
-// Variables rather than constants so tests can shorten them; nothing at
-// runtime reassigns these.
-var (
+const (
 	discoveryRetryMin = 5 * time.Second
 	discoveryRetryMax = 2 * time.Minute
 
@@ -40,6 +38,29 @@ var (
 	// climbing.
 	discoveryConnectionEstablished = 30 * time.Second
 )
+
+// retryPolicy is the dial-and-back-off behaviour of one loop.
+//
+// Passed rather than read from package variables so a test can shorten it
+// without mutating shared state. The previous version reassigned globals for
+// the duration of a test, which was safe only because nothing called
+// t.Parallel() — an invisible constraint that would have become a data race
+// the moment someone did.
+type retryPolicy struct {
+	dial        func() (lan.PacketConn, error)
+	min         time.Duration
+	max         time.Duration
+	established time.Duration
+}
+
+func defaultRetryPolicy() retryPolicy {
+	return retryPolicy{
+		dial:        func() (lan.PacketConn, error) { return lan.MulticastConn(nil) },
+		min:         discoveryRetryMin,
+		max:         discoveryRetryMax,
+		established: discoveryConnectionEstablished,
+	}
+}
 
 // discoverySignature is the identity this daemon would advertise, and whether
 // it browses. The loops read it to decide what to build; a reload that changes
@@ -95,11 +116,6 @@ func (cs *clusterState) discoverySignatureNow() discoverySignature {
 	return cs.discoverySig
 }
 
-// dialMulticastGroup is how the loops obtain a socket. A variable so tests can
-// exercise the retry and backoff, which is the part of this file that carries
-// the risk and cannot be reached with a real socket.
-var dialMulticastGroup = func() (lan.PacketConn, error) { return lan.MulticastConn(nil) }
-
 // errNotRetryable marks a failure that waiting cannot fix, so the loops stop
 // instead of redialling forever.
 var errNotRetryable = errors.New("not retryable")
@@ -114,10 +130,20 @@ var errNotRetryable = errors.New("not retryable")
 // goodbye. Owning it here means the only thing that ever closes it is the loop
 // that was using it, after Run has returned and its goodbye is on the wire.
 func (cs *clusterState) RunAdvertiser(ctx context.Context) {
+	cs.runAdvertiser(ctx, defaultRetryPolicy())
+}
+
+func (cs *clusterState) runAdvertiser(ctx context.Context, policy retryPolicy) {
 	sig := cs.discoverySignatureNow()
 	if !sig.enabled {
 		return
 	}
+	// Before the reachability checks, and from the browse loop too: the whole
+	// point of the line is to explain a silent no-op, and browsing is just as
+	// broken on a bridged container as advertising. A container that declines
+	// to advertise for some other reason still needs to be told why nothing is
+	// happening.
+	warnIfDiscoveryIsContainerised()
 
 	// Nothing is advertised until we know where the server actually answers.
 	// Publishing a guess would be worse than publishing nothing: a hub only
@@ -126,8 +152,15 @@ func (cs *clusterState) RunAdvertiser(ctx context.Context) {
 	// never appears, with nothing to explain why.
 	served := cs.servedAddr()
 	if served == nil {
-		slog.Warn("cluster: not advertising on the local network: " +
-			"the HTTP listener's address is not known yet")
+		// Unreachable today: SetServedAddr runs at startup (main.go, right
+		// after newClusterState) and the loops only start with the pollers,
+		// much later. Stated as a restart rather than a retry because that is
+		// what it would take, and asserted by
+		// TestServedAddrIsSetBeforeThePollersStart so a future reordering
+		// fails a test rather than silently disabling advertising.
+		slog.Warn("cluster: not advertising on the local network: the HTTP " +
+			"listener's address was not known when discovery started; " +
+			"restart the daemon")
 		return
 	}
 	if !servedReachableFromLAN(served) {
@@ -137,16 +170,14 @@ func (cs *clusterState) RunAdvertiser(ctx context.Context) {
 			"bind_addr", served.IP.String(), "port", served.Port)
 		return
 	}
-	warnIfDiscoveryIsContainerised()
-
-	runWithMulticast(ctx, "advertise on", func(conn lan.PacketConn) error {
+	runWithMulticast(ctx, policy, "advertise on", func(conn lan.PacketConn) error {
 		advertiser, err := lan.NewAdvertiser(conn, lan.Advertisement{
 			InstanceID:   sig.id,
 			InstanceName: sig.name,
 			Role:         sig.role,
 			Version:      version,
 			Port:         served.Port,
-			Addrs:        localAddresses,
+			Addrs:        advertisableAddrs(served),
 		}, slog.Default())
 		if err != nil {
 			// Waiting will not make an invalid instance id valid.
@@ -155,9 +186,9 @@ func (cs *clusterState) RunAdvertiser(ctx context.Context) {
 		}
 		// Run sends its TTL-0 goodbye before returning, and runWithMulticast
 		// closes the connection only after that — so the goodbye is on the
-		// wire rather than racing the close.
-		advertiser.Run(ctx)
-		return nil
+		// wire rather than racing the close. A non-nil error means the socket
+		// stopped working, which is what triggers the redial.
+		return advertiser.Run(ctx)
 	})
 }
 
@@ -185,12 +216,17 @@ func servedReachableFromLAN(addr *net.TCPAddr) bool {
 // cached view should survive a poller restart — so only the socket is scoped
 // here, handed over with SetBrowser and taken back on the way out.
 func (cs *clusterState) RunDiscoverer(ctx context.Context) {
+	cs.runDiscoverer(ctx, defaultRetryPolicy())
+}
+
+func (cs *clusterState) runDiscoverer(ctx context.Context, policy retryPolicy) {
 	discoverer := cs.Discoverer()
 	if discoverer == nil {
 		return
 	}
+	warnIfDiscoveryIsContainerised()
 
-	runWithMulticast(ctx, "browse", func(conn lan.PacketConn) error {
+	runWithMulticast(ctx, policy, "browse", func(conn lan.PacketConn) error {
 		browser, err := lan.NewBrowser(conn, slog.Default())
 		if err != nil {
 			slog.Warn("cluster: could not start the mDNS browser", "err", err)
@@ -201,8 +237,7 @@ func (cs *clusterState) RunDiscoverer(ctx context.Context) {
 		// triggered by the API cannot reach a browser whose connection is
 		// going away.
 		defer discoverer.SetBrowser(nil)
-		discoverer.Run(ctx)
-		return nil
+		return discoverer.Run(ctx)
 	})
 }
 
@@ -222,10 +257,10 @@ func (cs *clusterState) RunDiscoverer(ctx context.Context) {
 // runWithMulticast owns the connection throughout, including on the
 // non-retryable path. use is never responsible for closing it, so no branch can
 // return early and strand a joined multicast socket for the life of the daemon.
-func runWithMulticast(ctx context.Context, purpose string, use func(lan.PacketConn) error) {
-	wait := discoveryRetryMin
+func runWithMulticast(ctx context.Context, p retryPolicy, purpose string, use func(lan.PacketConn) error) {
+	wait := p.min
 	for ctx.Err() == nil {
-		conn, err := dialMulticastGroup()
+		conn, err := p.dial()
 		if err != nil {
 			slog.Warn("cluster: mDNS discovery is on but this daemon could not "+
 				purpose+" the local network; retrying",
@@ -233,7 +268,7 @@ func runWithMulticast(ctx context.Context, purpose string, use func(lan.PacketCo
 			if !sleepCtx(ctx, wait) {
 				return
 			}
-			wait = nextBackoff(wait)
+			wait = nextBackoff(wait, p.max)
 			continue
 		}
 
@@ -253,15 +288,15 @@ func runWithMulticast(ctx context.Context, purpose string, use func(lan.PacketCo
 		// Resetting on dial alone would retry that forever at the floor and the
 		// ceiling would never engage, which is precisely the case the redial
 		// was added for.
-		if lasted >= discoveryConnectionEstablished {
-			wait = discoveryRetryMin
+		if lasted >= p.established {
+			wait = p.min
 		}
 		slog.Info("cluster: mDNS "+purpose+" the local network stopped; reconnecting",
 			"lasted", lasted, "retry_in", wait)
 		if !sleepCtx(ctx, wait) {
 			return
 		}
-		wait = nextBackoff(wait)
+		wait = nextBackoff(wait, p.max)
 	}
 }
 
@@ -277,9 +312,9 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func nextBackoff(wait time.Duration) time.Duration {
-	if wait *= 2; wait > discoveryRetryMax {
-		return discoveryRetryMax
+func nextBackoff(wait, max time.Duration) time.Duration {
+	if wait *= 2; wait > max {
+		return max
 	}
 	return wait
 }
@@ -300,6 +335,24 @@ func effectiveRole(cfg *config.Config) string {
 		return config.RoleStandalone
 	}
 	return role
+}
+
+// advertisableAddrs decides which addresses go in the A/AAAA records for a
+// listener bound to served.
+//
+// A specific bind gets exactly that address and nothing else. Publishing the
+// whole machine's enumeration would repeat the bug that made the port issue
+// serious: with server.bind_addr = 192.168.1.20 on a host that also has a VPN
+// address, a hub resolving the name could pick the VPN one, be refused, and the
+// peer would silently never appear. Only a wildcard bind (0.0.0.0, ::, or no
+// address at all) means every interface really does answer.
+func advertisableAddrs(served *net.TCPAddr) func() []netip.Addr {
+	if ip, ok := netip.AddrFromSlice(served.IP); ok {
+		if ip = ip.Unmap(); !ip.IsUnspecified() {
+			return func() []netip.Addr { return []netip.Addr{ip} }
+		}
+	}
+	return localAddresses
 }
 
 // localAddresses lists this machine's advertisable unicast addresses for the
