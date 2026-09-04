@@ -10,6 +10,15 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.8.18](https://github.com/theburrowhub/heimdallm/compare/v0.8.17...v0.8.18) (2026-09-04)
+
+
+### Bug Fixes
+
+* **cluster:** stop a worker with no partition from reviewing everything ([#770](https://github.com/theburrowhub/heimdallm/issues/770)) ([da8a8b4](https://github.com/theburrowhub/heimdallm/commit/da8a8b42ef10d303c17772ef9d290e31b07ee9b8))
+* **cluster:** stop an unreachable routed instance producing duplicate reviews ([#767](https://github.com/theburrowhub/heimdallm/issues/767)) ([56fcb57](https://github.com/theburrowhub/heimdallm/commit/56fcb57d9c1df159add577cd32e4fa07ddaf43ea)), closes [#765](https://github.com/theburrowhub/heimdallm/issues/765)
+* **stats:** GitHub API limits card shows real usage instead of always-max ([#763](https://github.com/theburrowhub/heimdallm/issues/763)) ([b841a28](https://github.com/theburrowhub/heimdallm/commit/b841a281b39a889d6dd6b4433985939e3b7af5b3))
+
 ## [0.8.17](https://github.com/theburrowhub/heimdallm/compare/v0.8.16...v0.8.17) (2026-09-03)
 
 
