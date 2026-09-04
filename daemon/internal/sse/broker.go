@@ -59,6 +59,13 @@ const (
 	// {"instance_id", "instance_name", "reachable", "version", "error"}.
 	EventInstanceUp   = "instance_up"
 	EventInstanceDown = "instance_down"
+	// EventInstanceTakeover fires when this daemon starts doing the work of a
+	// routed instance it has given up on. It is deliberately its own event
+	// rather than a variant of instance_down: "that instance is not working"
+	// and "that instance's repos are now being reviewed here, possibly twice"
+	// are different operator problems, and #765 was invisible precisely
+	// because only the first one was ever reported.
+	EventInstanceTakeover = "instance_takeover"
 
 	// EventRoutingChanged fires when the org/repo -> instance rules change, so
 	// every connected GUI refreshes its ownership view rather than showing a

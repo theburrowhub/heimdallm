@@ -1202,6 +1202,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	if superseded, err := p.retireIfPRMoved(rev, pr); superseded {
 		return nil, err
 	}
+	// Sits alongside the freshness re-check, and ahead of the multi-mode
+	// comment loop for the same reason: that loop already writes to the PR, so
+	// guarding only the final submit would leave N inline comments from a
+	// review whose summary was correctly withheld.
+	if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, pr.Head.SHA); skip {
+		return nil, err
+	}
 	var reviewBody string
 	if reviewMode == "multi" && len(result.Issues) > 0 {
 		// Post one comment per issue (best-effort — failures are logged but don't abort)
@@ -1384,6 +1391,15 @@ func (p *Pipeline) PublishPending() {
 			Issues:   issues,
 			Severity: rev.Severity,
 		}
+		// Cross-instance duplicate guard (#765): another instance may have
+		// published for this commit while the row sat here unpublished.
+		if skip, skipErr := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, rev.HeadSHA); skip {
+			if skipErr != nil {
+				slog.Warn("pipeline: could not retire a review a peer instance already published, will retry next tick",
+					"review_id", rev.ID, "err", skipErr)
+			}
+			continue
+		}
 		// PublishPending always uses single-mode body (individual comments were
 		// already posted when the review first ran; we only retry the formal review).
 		// The stored event already incorporates signal escalation and the
@@ -1462,7 +1478,10 @@ func severityLabel(s string) string {
 // An empty severity omits the severity line (used for the LGTM body). No
 // leading blank line: callers own the spacing that precedes it.
 func reviewFooter(severity string) string {
-	footer := fmt.Sprintf("---\n🤖 *Reviewed by [Heimdallm](%s)*", heimdallmURL)
+	// Built from ReviewFooterMarker rather than spelled out, so the
+	// cross-instance duplicate guard in peer_review.go can never drift out of
+	// sync with the text it matches on. See theburrowhub/heimdallm#765.
+	footer := fmt.Sprintf("---\n🤖 *%s(%s)*", ReviewFooterMarker, heimdallmURL)
 	if strings.TrimSpace(severity) == "" {
 		return footer
 	}

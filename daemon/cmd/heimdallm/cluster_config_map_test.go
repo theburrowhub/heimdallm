@@ -24,12 +24,13 @@ func TestClusterConfigMap_CarriesRoleAndIdentityBack(t *testing.T) {
 	})
 
 	want := map[string]any{
-		"role":             "hub",
-		"instance_id":      "hub-1",
-		"instance_name":    "Local hub",
-		"default_instance": "hub-1",
-		"probe_interval":   "30s",
-		"routing_mode":     "dispatch",
+		"role":                         "hub",
+		"instance_id":                  "hub-1",
+		"instance_name":                "Local hub",
+		"default_instance":             "hub-1",
+		"probe_interval":               "30s",
+		"routing_mode":                 "dispatch",
+		"takeover_after_failed_probes": config.DefaultTakeoverAfterFailedProbes,
 	}
 	for key, expected := range want {
 		if got[key] != expected {

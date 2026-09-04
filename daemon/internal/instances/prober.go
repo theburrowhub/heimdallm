@@ -168,6 +168,38 @@ func (p *Prober) HealthyIDs() []string {
 	return out
 }
 
+// ConfirmedDown reports whether id has failed at least minFailures consecutive
+// health probes.
+//
+// Deliberately narrower than !Reachable, and the distinction is the whole
+// point. One failed probe means "I could not reach it", which a network
+// partition makes a bad proxy for "it is not working": the instance may still
+// be reaching GitHub and reviewing the repos it owns, in which case doing its
+// work for it publishes a second review on the same PR
+// (theburrowhub/heimdallm#765). Requiring a run of failures does not make the
+// inference sound — nothing observable from one side of a partition can — but
+// it keeps a single dropped packet from triggering a takeover.
+//
+// An instance that has never been probed is not confirmed down, matching
+// HealthyIDs: refusing to trust an unprobed instance would stall every
+// ownership decision for the first probe interval after a hub restart.
+//
+// minFailures below 1 is clamped to 1 rather than treated as "always down":
+// the caller's config is validated, but a zero from a test double or a future
+// caller must not silently mean "take over on the first missed probe".
+func (p *Prober) ConfirmedDown(id string, minFailures int) bool {
+	if minFailures < 1 {
+		minFailures = 1
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	s, probed := p.states[id]
+	if !probed || s.Reachable {
+		return false
+	}
+	return s.ConsecutiveFailures >= minFailures
+}
+
 // ProbeAll probes every registered instance once, concurrently.
 func (p *Prober) ProbeAll(ctx context.Context) []State {
 	p.mu.RLock()

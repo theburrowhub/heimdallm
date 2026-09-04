@@ -300,6 +300,7 @@ String _skipReasonLabel(String reason) => switch (reason) {
   'self_authored' => 'PR was authored by the bot',
   'sha_unchanged' => 'HEAD SHA is unchanged',
   'legacy_backfill' => 'legacy review was backfilled',
+  'peer_published' => 'another instance already reviewed this commit',
   _ => reason.replaceAll('_', ' '),
 };
 

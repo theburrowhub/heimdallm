@@ -521,6 +521,50 @@ func TestClusterDefaultsPreserveExplicitValues(t *testing.T) {
 	}
 }
 
+func TestClusterTakeoverThresholdDefaultsAndValidation(t *testing.T) {
+	// Unset must land on the documented default, never on zero: a zero read by
+	// a bare >= comparison means "take over on the first missed probe", which
+	// is theburrowhub/heimdallm#765.
+	c := &Config{}
+	c.AI.Primary = "claude"
+	c.Cluster.Role = RoleHub
+	c.applyDefaults()
+	if got := c.Cluster.TakeoverAfterFailedProbes; got == nil || *got != DefaultTakeoverAfterFailedProbes {
+		t.Errorf("takeover_after_failed_probes = %v, want the default %d",
+			got, DefaultTakeoverAfterFailedProbes)
+	}
+
+	nine := 9
+	c.Cluster.TakeoverAfterFailedProbes = &nine
+	c.applyDefaults()
+	if got := c.Cluster.TakeoverAfterFailedProbes; got == nil || *got != 9 {
+		t.Errorf("takeover_after_failed_probes = %v, want the explicit 9 preserved", got)
+	}
+
+	zero := 0
+	c.Cluster.TakeoverAfterFailedProbes = &zero
+	err := c.validateCluster()
+	if err == nil {
+		t.Fatal("validateCluster() = nil for a negative takeover_after_failed_probes, want an error")
+	}
+	if !strings.Contains(err.Error(), "takeover_after_failed_probes") {
+		t.Errorf("error %q does not name the offending key", err)
+	}
+}
+
+// Clustering stays inert without [cluster]: applyClusterDefaults must not grow
+// a value in a config.toml the daemon rewrites for a feature nobody enabled.
+func TestClusterTakeoverThresholdStaysUnsetWithoutCluster(t *testing.T) {
+	c := &Config{}
+	c.AI.Primary = "claude"
+	c.applyDefaults()
+	if c.Cluster.TakeoverAfterFailedProbes != nil {
+		t.Errorf("takeover_after_failed_probes = %v on a non-clustered config, want nil — "+
+			"a non-nil value makes ClusterConfig non-empty and writes an inert [cluster] table",
+			*c.Cluster.TakeoverAfterFailedProbes)
+	}
+}
+
 // A [cluster] section must survive a TOML round trip, or the daemon would
 // silently drop the registry the first time it rewrote its own config.
 func TestClusterTOMLRoundTrip(t *testing.T) {

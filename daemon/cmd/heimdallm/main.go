@@ -1790,6 +1790,16 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		if deferForMonitoringChange("before_submit") {
 			return nil
 		}
+		// Cross-instance duplicate guard (#765). Runs here, under the atomic
+		// publish claim and after the HEAD refresh above, so it sees the same
+		// commit the submit below will be anchored to. Returning an error naks
+		// the message for retry; the review stays unpublished either way.
+		if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, rev.HeadSHA); skip {
+			if err != nil {
+				return fmt.Errorf("retire review %d already published by a peer instance: %w", rev.ID, err)
+			}
+			return nil // ack — the review that matters is already on the PR
+		}
 		reviewBody := pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent, len(result.Issues))
 		var ghID int64
 		var ghState string
@@ -6282,6 +6292,10 @@ func clusterConfigMap(c config.ClusterConfig) map[string]any {
 		"default_instance": c.DefaultInstance,
 		"probe_interval":   c.ProbeInterval,
 		"routing_mode":     routingMode,
+		// Resolved rather than passed through, for the same reason role and
+		// routing_mode are: the TOML zero value means "the default", and a 0
+		// reaching the GUI would read as "take over immediately".
+		"takeover_after_failed_probes": clusterTakeoverThreshold(&config.Config{Cluster: c}),
 	}
 }
 
