@@ -559,6 +559,57 @@ func (p *Pipeline) shouldReReviewNewCommitsAsRequestedReviewer(pr *github.PullRe
 	return info.ReviewRequestedFor(p.botLogin)
 }
 
+// reviewWasReanchoredToHead returns true when prevReview already covers the
+// PR's current HEAD, even though its stored HeadSHA disagrees, because GitHub
+// retargeted the review's commit_id onto a merge commit after it was
+// published. Clicking "Update branch" in the GitHub UI creates exactly such a
+// commit and moves every still-standing review already on the PR onto it —
+// the review body is untouched, only its anchor moves.
+//
+// Without this check the gate reports SkipReasonNoReReviewRequest ("nobody
+// asked us to re-review") for a commit our own review already covers, and the
+// row is left pointing at a HeadSHA that no longer matches what GitHub
+// reports for it — which also makes the peer-review guard (SkipIfPeerPublished)
+// blind to this review on every subsequent publish elsewhere in the cluster.
+// See theburrowhub/heimdallm#772.
+//
+// Only meaningful for a published review (GitHubReviewID > 0) — an unpublished
+// row has no commit_id on GitHub to have moved. Fails closed (false) on a
+// missing capability or an API error: the existing SkipReasonNoReReviewRequest
+// behaviour is the safe fallback, not a regression, so a lookup failure here
+// must not create a new way to skip a review that starts silently passing.
+func (p *Pipeline) reviewWasReanchoredToHead(pr *github.PullRequest, prevReview *store.Review) bool {
+	if prevReview == nil || prevReview.GitHubReviewID <= 0 || pr.Head.SHA == "" {
+		return false
+	}
+	fetcher, ok := p.gh.(PublishedReviewFetcher)
+	if !ok {
+		return false
+	}
+	reviews, err := fetcher.GetPRReviews(pr.Repo, pr.Number)
+	if err != nil {
+		slog.Warn("pipeline: could not list published reviews to check for a HEAD reanchor, keeping SHA skip (fail-closed)",
+			"repo", pr.Repo, "pr", pr.Number, "err", err)
+		return false
+	}
+	found := false
+	for _, rev := range reviews {
+		if rev.ID == prevReview.GitHubReviewID && rev.CommitID == pr.Head.SHA {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+	if err := p.store.UpdateReviewHeadSHA(prevReview.ID, pr.Head.SHA); err != nil {
+		slog.Warn("pipeline: could not reconcile reanchored review's stored HEAD, keeping SHA skip (fail-closed)",
+			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID, "err", err)
+		return false
+	}
+	return true
+}
+
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
 func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string, flags *string) {
 	agents, err := p.store.ListAgents()
@@ -897,6 +948,18 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 			slog.Info("pipeline: new commits + bot is a requested reviewer — proceeding with review",
 				"repo", pr.Repo, "pr", pr.Number,
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+		case prevReview.HeadSHA != pr.Head.SHA && p.reviewWasReanchoredToHead(pr, prevReview):
+			// GitHub retargeted prevReview onto the current HEAD (typically an
+			// "Update branch" merge commit) since it was stored. The review
+			// already covers this commit; reviewWasReanchoredToHead has just
+			// reconciled the stored row to say so. Reporting
+			// SkipReasonNoReReviewRequest here would claim nobody asked us to
+			// review code our own review already covers. See #772.
+			slog.Info("pipeline: review was reanchored to the current HEAD by GitHub — treating as covered",
+				"repo", pr.Repo, "pr", pr.Number,
+				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+			p.publishSkipped(pr, SkipReasonHeadReanchored)
+			return nil, nil
 		default:
 			reason := SkipReasonSHAUnchanged
 			if prevReview.HeadSHA != pr.Head.SHA {
@@ -907,6 +970,30 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA,
 				"reason", string(reason))
 			p.publishSkipped(pr, reason)
+			return nil, nil
+		}
+	}
+
+	// Race mitigation (#772): two instances that both pass every gate above
+	// at nearly the same moment (no partition, both just polled) would
+	// otherwise both spend a full review generation before either one
+	// discovers the duplicate at SkipIfPeerPublished, right before the
+	// submit. Checking again here, before FetchDiff/the executor run, cannot
+	// close the race — a peer publishing between this check and the submit
+	// still slips through to the existing publish-boundary guard — but it
+	// narrows the window from "review generation time" to "the few
+	// milliseconds until FetchDiff", which is where the cost of the race
+	// actually lives. Skipped under Force for the same reason the
+	// publish-boundary guard is (see above): a peer's earlier review must not
+	// eat an operator-initiated re-review. No local row exists yet at this
+	// point, so this uses PublishedPeerReview directly rather than
+	// SkipIfPeerPublished, which requires one to retire.
+	if !opts.Force {
+		reviewFetcher, _ := p.gh.(PublishedReviewFetcher)
+		if _, _, found := PublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), pr.Head.SHA); found {
+			slog.Info("pipeline: peer instance already published a review for this HEAD, skipping before generation",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
+			p.publishSkipped(pr, SkipReasonPeerPublished)
 			return nil, nil
 		}
 	}
@@ -1206,8 +1293,20 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// comment loop for the same reason: that loop already writes to the PR, so
 	// guarding only the final submit would leave N inline comments from a
 	// review whose summary was correctly withheld.
-	if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, pr.Head.SHA); skip {
-		return nil, err
+	//
+	// Skipped entirely under Force (theburrowhub/heimdallm#772): the ours
+	// exclusion inside the guard only recognises a review THIS instance
+	// published, so a peer's review on the same commit would silently eat the
+	// operator-initiated "Re-review" button — the opposite of what Force
+	// means. Both anchors are passed because GitHub can retarget an existing
+	// review's commit_id onto a merge commit ("Update branch") after it was
+	// stored; rev.HeadSHA is what the row was created against, pr.Head.SHA is
+	// the commit actually being submitted here, and after a retarget they can
+	// differ from what a peer's review now reports.
+	if !opts.Force {
+		if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, pr.Head.SHA, rev.HeadSHA); skip {
+			return nil, err
+		}
 	}
 	var reviewBody string
 	if reviewMode == "multi" && len(result.Issues) > 0 {
@@ -1393,7 +1492,23 @@ func (p *Pipeline) PublishPending() {
 		}
 		// Cross-instance duplicate guard (#765): another instance may have
 		// published for this commit while the row sat here unpublished.
-		if skip, skipErr := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, rev.HeadSHA); skip {
+		//
+		// rev.HeadSHA alone is not enough (#772): GitHub can retarget an
+		// existing review's commit_id onto a merge commit ("Update branch")
+		// produced after this row was stored, and the peer's review would
+		// then report a commit_id the stale rev.HeadSHA never matches. Add
+		// the PR's live HEAD as a second anchor; a failed lookup here is not
+		// fatal — it just falls back to the single-anchor check this guard
+		// already ran before #772, so publishing still proceeds on API
+		// hiccups rather than stalling every pending review.
+		anchors := []string{rev.HeadSHA}
+		if live, liveErr := p.resolveLivePR(&github.PullRequest{Repo: pr.Repo, Number: pr.Number}); liveErr != nil {
+			slog.Warn("pipeline: could not resolve live HEAD for the peer-review guard, checking stored HEAD only",
+				"review_id", rev.ID, "pr", pr.Number, "repo", pr.Repo, "err", liveErr)
+		} else if live.headSHA != "" {
+			anchors = append(anchors, live.headSHA)
+		}
+		if skip, skipErr := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, anchors...); skip {
 			if skipErr != nil {
 				slog.Warn("pipeline: could not retire a review a peer instance already published, will retry next tick",
 					"review_id", rev.ID, "err", skipErr)
@@ -1407,11 +1522,20 @@ func (p *Pipeline) PublishPending() {
 		// rows without a stored event fall back to SeverityToEvent via
 		// publishEventFor.
 		retryEvent := PublishEventFor(rev)
-		ghID, ghState, err := p.gh.SubmitReview(
-			pr.Repo, pr.Number,
-			AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent, len(result.Issues)),
-			retryEvent,
-		)
+		annotatedBody := AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent, len(result.Issues))
+		var ghID int64
+		var ghState string
+		// Anchor to the commit this row was actually reviewed against, same as
+		// Run and the NATS publish worker (theburrowhub/heimdallm#772): the
+		// plain SubmitReview below lets GitHub attach to whatever is at HEAD
+		// when the request lands, so this retry path — unlike the other two —
+		// was publishing every retry unanchored and letting its own review's
+		// commit_id silently drift off rev.HeadSHA.
+		if anchored, ok := p.gh.(CommitAnchoredReviewer); ok && rev.HeadSHA != "" {
+			ghID, ghState, err = anchored.SubmitReviewForCommit(pr.Repo, pr.Number, annotatedBody, retryEvent, rev.HeadSHA)
+		} else {
+			ghID, ghState, err = p.gh.SubmitReview(pr.Repo, pr.Number, annotatedBody, retryEvent)
+		}
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock
 			// prevents review") are routed through the shared helper so

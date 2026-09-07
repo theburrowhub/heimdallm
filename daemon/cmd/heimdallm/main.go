@@ -1794,7 +1794,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// publish claim and after the HEAD refresh above, so it sees the same
 		// commit the submit below will be anchored to. Returning an error naks
 		// the message for retry; the review stays unpublished either way.
-		if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, rev.HeadSHA); skip {
+		//
+		// pendingReviewInvalidReason above already retires this row if
+		// snapshot.HeadSHA disagrees with rev.HeadSHA, so the two are the same
+		// value by this point — passed explicitly, rather than relying on that
+		// invariant silently, so this call site cannot drift from the other two
+		// if that upstream check ever changes (#772).
+		if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, rev.HeadSHA, snapshot.HeadSHA); skip {
 			if err != nil {
 				return fmt.Errorf("retire review %d already published by a peer instance: %w", rev.ID, err)
 			}

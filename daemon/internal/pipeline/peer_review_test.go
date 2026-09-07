@@ -47,7 +47,7 @@ func TestPeerPublishedReviewIDFindsAPeerReviewOnTheSameCommit(t *testing.T) {
 		{ID: 11, CommitID: "aaa", State: "COMMENTED", Body: heimdallmBody(t, "older commit")},
 		{ID: 22, CommitID: "bbb", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "this commit")},
 	}
-	id, state, found := pipeline.PeerPublishedReviewID(reviews, "bbb", nil)
+	id, state, found := pipeline.PeerPublishedReviewID(reviews, nil, "bbb")
 	if !found {
 		t.Fatal("PeerPublishedReviewID() found = false, want true")
 	}
@@ -59,6 +59,21 @@ func TestPeerPublishedReviewIDFindsAPeerReviewOnTheSameCommit(t *testing.T) {
 	}
 }
 
+func TestPeerPublishedReviewIDMatchesAnySuppliedAnchor(t *testing.T) {
+	// A review's commit_id can be moved by GitHub (an "Update branch" merge
+	// commit reanchors every still-standing review on the PR) after the
+	// caller's own bookkeeping — the stored row's HeadSHA, or the PR's live
+	// HEAD — was captured. Passing both anchors must still find the peer
+	// review regardless of which one it now matches. See #772.
+	reviews := []github.PRReview{
+		{ID: 22, CommitID: "merged-in", State: "APPROVED", Body: heimdallmBody(t, "reanchored")},
+	}
+	id, state, found := pipeline.PeerPublishedReviewID(reviews, nil, "stale-head", "merged-in")
+	if !found || id != 22 || state != "APPROVED" {
+		t.Errorf("PeerPublishedReviewID() = (%d, %q, %v), want (22, APPROVED, true)", id, state, found)
+	}
+}
+
 func TestPeerPublishedReviewIDIgnoresOurOwnPublishedReviews(t *testing.T) {
 	// A forced re-review of an unchanged commit must still publish. Without
 	// this exclusion the guard would mistake the daemon's own earlier review
@@ -66,7 +81,7 @@ func TestPeerPublishedReviewIDIgnoresOurOwnPublishedReviews(t *testing.T) {
 	reviews := []github.PRReview{
 		{ID: 22, CommitID: "bbb", State: "COMMENTED", Body: heimdallmBody(t, "ours")},
 	}
-	if _, _, found := pipeline.PeerPublishedReviewID(reviews, "bbb", map[int64]bool{22: true}); found {
+	if _, _, found := pipeline.PeerPublishedReviewID(reviews, map[int64]bool{22: true}, "bbb"); found {
 		t.Error("PeerPublishedReviewID() found = true, want false for a review this daemon published")
 	}
 }
@@ -75,7 +90,7 @@ func TestPeerPublishedReviewIDIgnoresNonHeimdallmReviews(t *testing.T) {
 	reviews := []github.PRReview{
 		{ID: 22, CommitID: "bbb", State: "CHANGES_REQUESTED", Body: "Please rename this variable."},
 	}
-	if _, _, found := pipeline.PeerPublishedReviewID(reviews, "bbb", nil); found {
+	if _, _, found := pipeline.PeerPublishedReviewID(reviews, nil, "bbb"); found {
 		t.Error("PeerPublishedReviewID() found = true, want false for a human review")
 	}
 }
@@ -84,7 +99,7 @@ func TestPeerPublishedReviewIDIgnoresOtherCommits(t *testing.T) {
 	reviews := []github.PRReview{
 		{ID: 22, CommitID: "aaa", State: "COMMENTED", Body: heimdallmBody(t, "previous head")},
 	}
-	if _, _, found := pipeline.PeerPublishedReviewID(reviews, "bbb", nil); found {
+	if _, _, found := pipeline.PeerPublishedReviewID(reviews, nil, "bbb"); found {
 		t.Error("PeerPublishedReviewID() found = true, want false for a review anchored elsewhere")
 	}
 }
@@ -96,7 +111,7 @@ func TestPeerPublishedReviewIDIgnoresPendingAndDismissed(t *testing.T) {
 		reviews := []github.PRReview{
 			{ID: 22, CommitID: "bbb", State: state, Body: heimdallmBody(t, "not standing")},
 		}
-		if _, _, found := pipeline.PeerPublishedReviewID(reviews, "bbb", nil); found {
+		if _, _, found := pipeline.PeerPublishedReviewID(reviews, nil, "bbb"); found {
 			t.Errorf("PeerPublishedReviewID() found = true for state %q, want false", state)
 		}
 	}
@@ -108,8 +123,12 @@ func TestPeerPublishedReviewIDRequiresACommitToAnchorOn(t *testing.T) {
 	reviews := []github.PRReview{
 		{ID: 22, CommitID: "", State: "COMMENTED", Body: heimdallmBody(t, "legacy")},
 	}
-	if _, _, found := pipeline.PeerPublishedReviewID(reviews, "", nil); found {
+	if _, _, found := pipeline.PeerPublishedReviewID(reviews, nil, ""); found {
 		t.Error("PeerPublishedReviewID() found = true for an empty commit id, want false")
+	}
+	// No anchors at all is the same failure mode as a single empty one.
+	if _, _, found := pipeline.PeerPublishedReviewID(reviews, nil); found {
+		t.Error("PeerPublishedReviewID() found = true with zero anchors, want false")
 	}
 }
 
@@ -118,7 +137,7 @@ func TestPeerPublishedReviewIDPrefersTheMostRecentMatch(t *testing.T) {
 		{ID: 22, CommitID: "bbb", State: "COMMENTED", Body: heimdallmBody(t, "first")},
 		{ID: 33, CommitID: "bbb", State: "APPROVED", Body: heimdallmBody(t, "second")},
 	}
-	id, state, found := pipeline.PeerPublishedReviewID(reviews, "bbb", nil)
+	id, state, found := pipeline.PeerPublishedReviewID(reviews, nil, "bbb")
 	if !found || id != 33 || state != "APPROVED" {
 		t.Errorf("PeerPublishedReviewID() = (%d, %q, %v), want (33, APPROVED, true)", id, state, found)
 	}
@@ -139,7 +158,7 @@ func (f *fakeReviewLister) GetPRReviews(string, int) ([]github.PRReview, error) 
 func TestPublishedPeerReviewFailsOpenWithoutTheCapability(t *testing.T) {
 	// A nil fetcher is every test double and any adapter predating the
 	// capability: publishing must not stop because the lookup is unavailable.
-	if _, _, found := pipeline.PublishedPeerReview(nil, "o/r", 1, "bbb", nil); found {
+	if _, _, found := pipeline.PublishedPeerReview(nil, "o/r", 1, nil, "bbb"); found {
 		t.Error("PublishedPeerReview(nil) found = true, want false")
 	}
 }
@@ -148,7 +167,7 @@ func TestPublishedPeerReviewFailsOpenOnAPIError(t *testing.T) {
 	// Rate limits and outages must not block a review the operator is waiting
 	// for. A duplicate is recoverable; a permanently withheld review is not.
 	f := &fakeReviewLister{err: errors.New("403 rate limited")}
-	if _, _, found := pipeline.PublishedPeerReview(f, "o/r", 1, "bbb", nil); found {
+	if _, _, found := pipeline.PublishedPeerReview(f, "o/r", 1, nil, "bbb"); found {
 		t.Error("PublishedPeerReview() found = true on API error, want false")
 	}
 	if f.calls != 1 {
@@ -158,7 +177,7 @@ func TestPublishedPeerReviewFailsOpenOnAPIError(t *testing.T) {
 
 func TestPublishedPeerReviewSkipsTheAPICallWithoutACommit(t *testing.T) {
 	f := &fakeReviewLister{}
-	if _, _, found := pipeline.PublishedPeerReview(f, "o/r", 1, "", nil); found {
+	if _, _, found := pipeline.PublishedPeerReview(f, "o/r", 1, nil, ""); found {
 		t.Error("PublishedPeerReview() found = true for an empty commit, want false")
 	}
 	if f.calls != 0 {
@@ -170,7 +189,7 @@ func TestPublishedPeerReviewReportsAPeersReview(t *testing.T) {
 	f := &fakeReviewLister{reviews: []github.PRReview{
 		{ID: 44, CommitID: "bbb", State: "COMMENTED", Body: heimdallmBody(t, "peer")},
 	}}
-	id, state, found := pipeline.PublishedPeerReview(f, "o/r", 1, "bbb", nil)
+	id, state, found := pipeline.PublishedPeerReview(f, "o/r", 1, nil, "bbb")
 	if !found || id != 44 || state != "COMMENTED" {
 		t.Errorf("PublishedPeerReview() = (%d, %q, %v), want (44, COMMENTED, true)", id, state, found)
 	}

@@ -390,6 +390,31 @@ func TestRecorder_ReviewSkipped(t *testing.T) {
 	}
 }
 
+// TestRecorder_HeadReanchoredSkipIsRecorded locks in that head_reanchored
+// (theburrowhub/heimdallm#772) is NOT in dedupSkipReasons: unlike
+// sha_unchanged, it fires at most once per commit (the stored row's HeadSHA
+// is reconciled to the new HEAD right after this event, so the next poll
+// converges on sha_unchanged, which IS deduped) and is worth surfacing —
+// it is the operator's only signal that GitHub silently retargeted a review.
+func TestRecorder_HeadReanchoredSkipIsRecorded(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	events <- sse.Event{
+		Type: sse.EventReviewSkipped,
+		Data: `{"repo":"org/name","pr_number":2186,"pr_title":"feat: x","reason":"head_reanchored"}`,
+	}
+
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.action != "review_skipped" {
+		t.Errorf("action = %q, want review_skipped", got.action)
+	}
+	if got.outcome != "head_reanchored" {
+		t.Errorf("outcome = %q, want head_reanchored", got.outcome)
+	}
+}
+
 // TestRecorder_ReviewSkippedDedupReasonsAreNotRecorded locks in the
 // fix from theburrowhub/heimdallm#322 review feedback: dedup-flavoured
 // skips (sha_unchanged, legacy_backfill, retry cooldowns) MUST NOT generate

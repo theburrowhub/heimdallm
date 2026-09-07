@@ -180,4 +180,30 @@ void main() {
       findsOneWidget,
     );
   });
+
+  // head_reanchored (theburrowhub/heimdallm#772): GitHub retargeted our own
+  // earlier review's commit_id onto the current HEAD — typically an "Update
+  // branch" merge commit — so the pipeline treats the commit as already
+  // covered instead of reporting no_rereview_request. The raw reason would
+  // otherwise read as "head reanchored" through the fallback.
+  testWidgets('review_skipped explains a GitHub HEAD reanchor', (
+    tester,
+  ) async {
+    final entry = _mk(
+      action: ActivityAction.reviewSkipped,
+      outcome: 'head_reanchored',
+      details: {'reason': 'head_reanchored'},
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ActivityEntryTile(entry: entry)),
+      ),
+    );
+    expect(
+      find.textContaining(
+        'Skipped because GitHub retargeted our review onto the current HEAD',
+      ),
+      findsOneWidget,
+    );
+  });
 }

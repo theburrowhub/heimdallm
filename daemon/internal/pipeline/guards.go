@@ -49,6 +49,17 @@ const (
 	// commit and nobody asked us to re-review yet".
 	SkipReasonNoReReviewRequest SkipReason = "no_rereview_request"
 
+	// SkipReasonHeadReanchored is emitted when pipeline.Run finds the HEAD SHA
+	// changed but the previous review's commit_id, re-read from GitHub, now
+	// equals the new HEAD: GitHub retargeted an existing review onto the merge
+	// commit an "Update branch" click produces (the review body is unchanged,
+	// only its anchor moved). The stored row is reconciled to the new HEAD via
+	// UpdateReviewHeadSHA and the review is treated as already covering it,
+	// rather than reported as SkipReasonNoReReviewRequest — which would claim
+	// nobody asked us to review code we already reviewed. See
+	// theburrowhub/heimdallm#772.
+	SkipReasonHeadReanchored SkipReason = "head_reanchored"
+
 	// SkipReasonPeerPublished means another Heimdallm instance had already
 	// published a review for this exact commit by the time this one reached
 	// the publish boundary. Only reachable in a cluster, and only when the
