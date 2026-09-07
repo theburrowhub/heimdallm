@@ -301,6 +301,7 @@ String _skipReasonLabel(String reason) => switch (reason) {
   'sha_unchanged' => 'HEAD SHA is unchanged',
   'legacy_backfill' => 'legacy review was backfilled',
   'peer_published' => 'another instance already reviewed this commit',
+  'head_reanchored' => 'GitHub retargeted our review onto the current HEAD',
   _ => reason.replaceAll('_', ' '),
 };
 
