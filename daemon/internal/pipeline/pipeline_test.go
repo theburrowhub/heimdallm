@@ -1898,6 +1898,16 @@ func TestPipeline_Run_PeerPublishedSkipConvergesOnNextPoll(t *testing.T) {
 	if placeholder.HeadSHA != "deadbeef" {
 		t.Errorf("placeholder HeadSHA = %q, want %q", placeholder.HeadSHA, "deadbeef")
 	}
+	// PR #774 review feedback: an empty Severity/CLIUsed would render as a
+	// blank green SeverityBadge in the Flutter dashboard and create an
+	// unexplained blank bucket in the GROUP BY severity / GROUP BY cli_used
+	// stats queries. Both must be marked, not left blank.
+	if placeholder.Severity != "peer" {
+		t.Errorf("placeholder Severity = %q, want %q (not blank)", placeholder.Severity, "peer")
+	}
+	if placeholder.CLIUsed != "peer" {
+		t.Errorf("placeholder CLIUsed = %q, want %q (not blank)", placeholder.CLIUsed, "peer")
+	}
 
 	// Second run, same HEAD, no re-request: must converge on the deduped
 	// sha_unchanged path rather than rediscovering the same peer.

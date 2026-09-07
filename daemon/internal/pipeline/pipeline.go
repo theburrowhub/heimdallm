@@ -658,6 +658,19 @@ func (p *Pipeline) persistPeerCoveredReview(prID int64, headSHA string, peerID i
 	if _, err := p.store.InsertReview(&store.Review{
 		PRID: prID, Issues: "[]", Suggestions: "[]", CreatedAt: now, HeadSHA: headSHA,
 		GitHubReviewID: peerID, GitHubReviewState: peerState, PublishedAt: now,
+		// Marked, not left blank (PR #774 review feedback): an empty Severity
+		// renders as a blank green SeverityBadge in the Flutter dashboard
+		// (severity_badge.dart defaults anything but "high"/"medium" to
+		// green, then prints severity.toUpperCase() as the label — "" prints
+		// nothing), and an empty CLIUsed/Severity both create a genuine
+		// blank bucket in the GROUP BY severity / GROUP BY cli_used stats
+		// queries (store.go) while still counting toward TotalReviews. This
+		// row never ran an executor, so there is no real severity or CLI to
+		// report — "peer" reads as a real, self-explanatory badge/bucket in
+		// both surfaces instead of an unexplained gap.
+		CLIUsed:  "peer",
+		Severity: "peer",
+		Summary:  "Covered by a peer Heimdallm instance's review; see " + peerState + " on GitHub.",
 	}); err != nil {
 		slog.Warn("pipeline: could not persist a placeholder for a peer's review, will re-check next poll",
 			"pr_id", prID, "head_sha", headSHA, "err", err)
