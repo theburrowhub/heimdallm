@@ -346,6 +346,21 @@ func TestSkipIfPeerPublishedNoOpForANonHeimdallmReview(t *testing.T) {
 	}
 }
 
+// TestSkipIfPeerPublishedNoOpForANilReview covers the guard's other
+// short-circuit: a nil rev has nothing to retire, so the guard must fail
+// open rather than look anything up.
+func TestSkipIfPeerPublishedNoOpForANilReview(t *testing.T) {
+	s, _ := storeWithPendingReview(t, "deadbeef")
+	gh := &peerGH{reviews: []github.PRReview{
+		{ID: 4242, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
+	}}
+	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
+
+	if skip, err := p.SkipIfPeerPublished(nil, "acme/widgets", 12, "deadbeef"); skip || err != nil {
+		t.Errorf("SkipIfPeerPublished(nil) = (%v, %v), want (false, nil)", skip, err)
+	}
+}
+
 type peerExec struct{}
 
 func (peerExec) Detect(string, string) (string, error) { return "claude", nil }

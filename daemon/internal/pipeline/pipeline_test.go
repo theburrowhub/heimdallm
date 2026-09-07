@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -1946,7 +1947,9 @@ func TestPipeline_PublishPending_RetiresStaleCommitInsteadOfRetryingForever(t *t
 	}
 
 	gh := &snapshotGH{diff: "+line", state: "open", sha: "new-sha-after-force-push"}
+	pub := &fakePublisher{}
 	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+	p.SetPublisher(pub)
 
 	p.PublishPending()
 
@@ -1960,6 +1963,16 @@ func TestPipeline_PublishPending_RetiresStaleCommitInsteadOfRetryingForever(t *t
 	if stored.GitHubReviewID != pipeline.SupersededReviewID {
 		t.Errorf("github_review_id = %d, want SupersededReviewID (%d) — retired, not stuck retrying",
 			stored.GitHubReviewID, pipeline.SupersededReviewID)
+	}
+	// PR #774 review feedback: retireIfPRMoved (Run) and the NATS publish
+	// worker both surface head_changed via review_skipped; this retire path
+	// must too, or the UI/activity feed silently misses it.
+	ev, found := pub.firstOf("review_skipped")
+	if !found {
+		t.Fatal("expected a review_skipped event, got none")
+	}
+	if !strings.Contains(ev.Data, `"reason":"head_changed"`) {
+		t.Errorf("expected reason head_changed, got %q", ev.Data)
 	}
 }
 
@@ -2002,6 +2015,159 @@ func TestPipeline_PublishPending_CachesLiveHEADPerPR(t *testing.T) {
 	if gh.snapshotCalls != 1 {
 		t.Errorf("GetPRSnapshot calls = %d, want exactly 1 — cached across the 3 rows for the same PR",
 			gh.snapshotCalls)
+	}
+}
+
+// callCountedPeerGH returns no peer review on its first GetPRReviews call —
+// satisfying the pre-generation check added for #772 — and a peer's review
+// from the second call onward, simulating a peer instance publishing during
+// the window between that check and the actual submit. That race is exactly
+// why the pre-generation check is a mitigation, not a fix: only the
+// publish-boundary SkipIfPeerPublished call can still catch it.
+type callCountedPeerGH struct {
+	*fakeGHCounter
+	calls int
+}
+
+func (f *callCountedPeerGH) GetPRReviews(string, int) ([]github.PRReview, error) {
+	f.calls++
+	if f.calls == 1 {
+		return nil, nil
+	}
+	return []github.PRReview{
+		{ID: 999, CommitID: "deadbeef", State: "CHANGES_REQUESTED",
+			Body: "peer verdict\n\n---\n🤖 *" + pipeline.ReviewFooterMarker + "(https://theburrowhub.github.io/heimdallm/)*"},
+	}, nil
+}
+
+// TestPipeline_Run_PublishBoundaryCatchesPeerPublishedDuringGeneration covers
+// the race the pre-generation check (#772) only narrows: a peer instance
+// publishing its review AFTER that check passed but BEFORE this instance's
+// own submit. The publish-boundary SkipIfPeerPublished call — unchanged
+// since #765 — must still catch it.
+func TestPipeline_Run_PublishBoundaryCatchesPeerPublishedDuringGeneration(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &callCountedPeerGH{fakeGHCounter: &fakeGHCounter{diff: "+line"}}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+
+	pr := &github.PullRequest{
+		ID: 3004, Number: 3004, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/3004",
+		Head: github.Branch{SHA: "deadbeef"},
+	}
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Errorf("expected nil review — a peer published during generation, got %+v", rev)
+	}
+	if exec.calls != 1 {
+		t.Errorf("the pre-generation check found no peer yet and must have let this one through, got exec.calls=%d", exec.calls)
+	}
+	if gh.submits != 0 {
+		t.Errorf("must not submit once the publish-boundary guard catches the peer, got submits=%d", gh.submits)
+	}
+	if gh.calls < 2 {
+		t.Fatalf("test setup: need at least 2 GetPRReviews calls to exercise both guards, got %d", gh.calls)
+	}
+}
+
+// TestPipeline_PublishPending_FallsBackToStoredHeadOnLiveLookupError covers
+// the fallback path added alongside the live-HEAD anchor (#772): a failed
+// resolveLivePR call must not stall publishing a pending review — it falls
+// back to the single-anchor check (rev.HeadSHA only) that ran before #772,
+// and the anchored submit still proceeds against the stored HeadSHA.
+func TestPipeline_PublishPending_FallsBackToStoredHeadOnLiveLookupError(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 4003, Repo: "org/repo", Number: 4003, Title: "t",
+		Author: "alice", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpsertPR: %v", err)
+	}
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now().Add(-time.Hour),
+		HeadSHA: "deadbeef", Event: "COMMENT",
+	}); err != nil {
+		t.Fatalf("InsertReview: %v", err)
+	}
+
+	gh := &snapshotGH{diff: "+line", state: "open", sha: "deadbeef", err: errors.New("503 unavailable")}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	p.PublishPending()
+
+	if gh.submits != 1 {
+		t.Errorf("must still publish using the stored HeadSHA when the live lookup fails, got submits=%d", gh.submits)
+	}
+	if gh.anchoredCommit != "deadbeef" {
+		t.Errorf("anchored commit = %q, want the stored HeadSHA %q", gh.anchoredCommit, "deadbeef")
+	}
+}
+
+// TestPipeline_PublishPending_LogsWhenRetiringStaleCommitFails covers the
+// fail-open posture of the staleness-retire branch added for #772: if the
+// MarkReviewPublished write itself fails, PublishPending must not panic or
+// submit against the gone commit anyway — the row stays unpublished
+// (github_review_id == 0) for the next tick to retry, matching every other
+// store-write-failure branch in this function.
+func TestPipeline_PublishPending_LogsWhenRetiringStaleCommitFails(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 4004, Repo: "org/repo", Number: 4004, Title: "t",
+		Author: "alice", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpsertPR: %v", err)
+	}
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now().Add(-time.Hour),
+		HeadSHA: "stale-sha-dropped-by-force-push", Event: "COMMENT",
+	}); err != nil {
+		t.Fatalf("InsertReview: %v", err)
+	}
+
+	// Make the on-disk database reject writes from here on, while reads keep
+	// working — the same technique SQLite itself uses to report "readonly
+	// database", forcing the retire write inside PublishPending to fail on
+	// its own already-open connection without any store-internal access.
+	if err := os.Chmod(dir+"/test.db", 0o444); err != nil {
+		t.Fatalf("chmod db: %v", err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	gh := &snapshotGH{diff: "+line", state: "open", sha: "new-sha-after-force-push"}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	p.PublishPending()
+
+	if gh.submits != 0 {
+		t.Errorf("must not submit against a commit no longer on the PR even when the retire write fails, got submits=%d", gh.submits)
 	}
 }
 

@@ -636,23 +636,31 @@ func (p *Pipeline) reviewWasReanchoredToHead(pr *github.PullRequest, prevReview 
 // activity_log row, the #322 Bug 4 spam regression this codebase guards
 // against elsewhere. See theburrowhub/heimdallm#772 review feedback.
 //
+// Written as a single InsertReview with GitHubReviewID/GitHubReviewState/
+// PublishedAt already set — not an insert-then-MarkReviewPublished two-step —
+// because InsertReview persists those three fields straight from the struct
+// (store/reviews.go), so the two-step bought nothing but a window: if the
+// second write failed, the row would sit as a genuinely UNPUBLISHED review
+// (github_review_id == 0) with empty Summary/Issues/Severity/Event, exactly
+// what ListUnpublishedReviews selects on. A later PublishPending tick would
+// then submit that content-less row for real — PublishEventFor falls through
+// to SeverityToEvent("") == "APPROVE" — posting an empty APPROVE review on
+// the PR if SkipIfPeerPublished happened to miss by then (a GetPRReviews
+// error, or the peer's review having been dismissed in the meantime). A
+// single insert makes that window impossible: the row is born published.
+//
 // A failure here is logged and swallowed rather than propagated: the skip
 // itself is still correct (a peer really did cover this commit), only the
 // convergence bookkeeping is unreliable, and the next poll's GetPRReviews
 // call will simply repeat the check rather than anything being lost.
 func (p *Pipeline) persistPeerCoveredReview(prID int64, headSHA string, peerID int64, peerState string) {
 	now := time.Now().UTC()
-	revID, err := p.store.InsertReview(&store.Review{
+	if _, err := p.store.InsertReview(&store.Review{
 		PRID: prID, Issues: "[]", Suggestions: "[]", CreatedAt: now, HeadSHA: headSHA,
-	})
-	if err != nil {
+		GitHubReviewID: peerID, GitHubReviewState: peerState, PublishedAt: now,
+	}); err != nil {
 		slog.Warn("pipeline: could not persist a placeholder for a peer's review, will re-check next poll",
 			"pr_id", prID, "head_sha", headSHA, "err", err)
-		return
-	}
-	if err := p.store.MarkReviewPublished(revID, peerID, peerState, now); err != nil {
-		slog.Warn("pipeline: could not mark the peer-covered placeholder published, will re-check next poll",
-			"review_id", revID, "err", err)
 	}
 }
 
@@ -986,18 +994,22 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 			slog.Info("pipeline: explicit re-request detected — proceeding with review",
 				"repo", pr.Repo, "pr", pr.Number,
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
-		case p.shouldReReviewNewCommitsAsRequestedReviewer(pr, prevReview):
-			// New unreviewed commits AND the bot is a current requested
-			// reviewer, but GitHub emitted no review_requested timeline event
-			// (see shouldReReviewNewCommitsAsRequestedReviewer / #1532). Treat
-			// the pending review request on new code as an implicit re-request.
-			slog.Info("pipeline: new commits + bot is a requested reviewer — proceeding with review",
-				"repo", pr.Repo, "pr", pr.Number,
-				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
 		case prevReview.HeadSHA != pr.Head.SHA && p.reviewWasReanchoredToHead(pr, prevReview):
-			// GitHub retargeted prevReview onto the current HEAD (typically an
-			// "Update branch" merge commit) since it was stored. The review
-			// already covers this commit; reviewWasReanchoredToHead has just
+			// Checked before shouldReReviewNewCommitsAsRequestedReviewer
+			// (PR #774 review feedback): the two are mutually exclusive in
+			// what they claim about pr.Head.SHA — reanchor says "this exact
+			// commit is already reviewed, per GitHub's own review record",
+			// a certainty, while the requested-reviewer case is a heuristic
+			// inference that the HEAD advance means unreviewed code. Trying
+			// the heuristic first would run a whole extra CLI generation on
+			// a commit that is, in fact, already covered, whenever the bot
+			// happens to also be a requested reviewer on an "Update branch"
+			// merge commit — the ordering costs nothing when reanchor
+			// doesn't apply, since it still falls through to the case below.
+			//
+			// GitHub retargeted prevReview onto the current HEAD (typically
+			// that merge commit) since it was stored. The review already
+			// covers this commit; reviewWasReanchoredToHead has just
 			// reconciled the stored row to say so. Reporting
 			// SkipReasonNoReReviewRequest here would claim nobody asked us to
 			// review code our own review already covers. See #772.
@@ -1006,6 +1018,14 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
 			p.publishSkipped(pr, SkipReasonHeadReanchored)
 			return nil, nil
+		case p.shouldReReviewNewCommitsAsRequestedReviewer(pr, prevReview):
+			// New unreviewed commits AND the bot is a current requested
+			// reviewer, but GitHub emitted no review_requested timeline event
+			// (see shouldReReviewNewCommitsAsRequestedReviewer / #1532). Treat
+			// the pending review request on new code as an implicit re-request.
+			slog.Info("pipeline: new commits + bot is a requested reviewer — proceeding with review",
+				"repo", pr.Repo, "pr", pr.Number,
+				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
 		default:
 			reason := SkipReasonSHAUnchanged
 			if prevReview.HeadSHA != pr.Head.SHA {
@@ -1606,6 +1626,18 @@ func (p *Pipeline) PublishPending() {
 				slog.Info("pipeline: pending review's commit is no longer on the PR — retiring instead of submitting",
 					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number,
 					"review_head_sha", rev.HeadSHA, "current_head_sha", live.headSHA)
+				// retireIfPRMoved (Run) and the NATS publish worker both emit
+				// review_skipped(head_changed) for this exact reason code; doing
+				// it here too (PR #774 review feedback) keeps the UI/activity
+				// feed seeing every head_changed retirement, not just the two
+				// other call sites that happen to already have a
+				// *github.PullRequest handy for publishSkipped's signature.
+				p.publish(sse.EventReviewSkipped, map[string]any{
+					"repo":      pr.Repo,
+					"pr_number": pr.Number,
+					"pr_title":  pr.Title,
+					"reason":    string(SkipReasonHeadChanged),
+				})
 			}
 			continue
 		}
