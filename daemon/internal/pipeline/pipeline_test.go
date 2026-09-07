@@ -1520,6 +1520,90 @@ func (f *fakeGHWithPeerReviews) GetPRReviews(string, int) ([]github.PRReview, er
 	return f.reviews, f.reviewsErr
 }
 
+// SubmitReviewForCommit gives fakeGHWithPeerReviews the CommitAnchoredReviewer
+// capability that reviewWasReanchoredToHead requires (#772 review feedback):
+// trusting a peer/own review's commit_id as proof of coverage is only sound
+// for an adapter that actually anchors its own submits. Counted through the
+// same f.submits field as the embedded fakeGHCounter's plain SubmitReview so
+// existing assertions on submit counts don't care which method Run picked.
+func (f *fakeGHWithPeerReviews) SubmitReviewForCommit(_ string, _ int, _, _, _ string) (int64, string, error) {
+	f.submits++
+	return 1, "COMMENTED", nil
+}
+
+// fakeGHUnanchoredWithPeerReviews carries GetPRReviews but NOT
+// SubmitReviewForCommit — the adapter shape reviewWasReanchoredToHead's
+// CommitAnchoredReviewer gate exists to guard against (#772 review
+// feedback): an adapter that never anchors its submits can end up with a
+// commit_id that reflects whatever was live HEAD at submit time, not what
+// was actually reviewed.
+type fakeGHUnanchoredWithPeerReviews struct {
+	*fakeGHCounter
+	reviews []github.PRReview
+}
+
+func (f *fakeGHUnanchoredWithPeerReviews) GetPRReviews(string, int) ([]github.PRReview, error) {
+	return f.reviews, nil
+}
+
+// TestPipeline_Run_HeadReanchorRequiresAnchoredAdapter is the PR #774 review
+// regression guard for gating reviewWasReanchoredToHead on
+// CommitAnchoredReviewer: without that capability, a commit_id that happens
+// to match the new HEAD is not trustworthy proof of coverage, so the pipeline
+// must keep reporting no_rereview_request (safe) rather than skip as
+// head_reanchored (which could silently let a genuinely unreviewed commit
+// through on an adapter that races an unanchored submit onto it).
+func TestPipeline_Run_HeadReanchorRequiresAnchoredAdapter(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHUnanchoredWithPeerReviews{fakeGHCounter: &fakeGHCounter{diff: "+line"}}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetPublisher(pub)
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 2188, Number: 2188, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/2188",
+		Head:      github.Branch{SHA: "first-sha"},
+	}
+	runFirstReview(t, p, pr)
+
+	p.SetTimelineFetcher(&fakeTimeline{})
+	// Reports our own review's id (fakeGHCounter.SubmitReview always returns
+	// id=1) as if its commit_id coincidentally now equals the new HEAD —
+	// exactly the risk the CommitAnchoredReviewer gate exists to distrust
+	// when the adapter never anchors its own submits.
+	gh.reviews = []github.PRReview{
+		{ID: 1, CommitID: "second-sha", State: "APPROVED", Body: heimdallmBody(t, "unanchored coincidence")},
+	}
+
+	pub.events = nil
+	pr.Head.SHA = "second-sha"
+	pr.UpdatedAt = time.Now()
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.calls != 1 {
+		t.Errorf("sanity: second run should skip either way (no fresh CLI run), got exec.calls=%d", exec.calls)
+	}
+	// The load-bearing assertion: without CommitAnchoredReviewer this must
+	// stay no_rereview_request, NOT be reclassified as head_reanchored — the
+	// latter would mean the pipeline trusted an unanchored adapter's
+	// coincidental commit_id as proof of coverage.
+	ev, _ := pub.firstOf("review_skipped")
+	if !strings.Contains(ev.Data, `"reason":"no_rereview_request"`) {
+		t.Errorf("expected no_rereview_request without CommitAnchoredReviewer, got %q", ev.Data)
+	}
+}
+
 // TestPipeline_Run_HeadReanchoredReviewCoversNewHead reproduces the trace
 // from theburrowhub/heimdallm#772: a push moves HEAD, nobody explicitly
 // re-requested a review, but GitHub has since retargeted the previous
@@ -1754,6 +1838,170 @@ func TestPipeline_Run_ForceBypassesPeerPublishedGuard(t *testing.T) {
 	}
 	if gh.submits != 1 {
 		t.Errorf("Force must still submit despite a peer's review, got gh.submits=%d", gh.submits)
+	}
+}
+
+// TestPipeline_Run_PeerPublishedSkipConvergesOnNextPoll is the PR #774 review
+// regression guard: the pre-generation peer skip added for #772 has no local
+// row to retire (unlike SkipIfPeerPublished at the publish boundary, which
+// always runs against an already-inserted row), so without persisting a
+// placeholder it would rediscover the same peer and re-fire peer_published on
+// every single poll — and since peer_published is not in
+// activity.dedupSkipReasons, every one of those polls would write a fresh
+// activity_log row, the #322 Bug 4 spam regression this codebase otherwise
+// guards against everywhere else it skips routinely.
+func TestPipeline_Run_PeerPublishedSkipConvergesOnNextPoll(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHWithPeerReviews{
+		fakeGHCounter: &fakeGHCounter{diff: "+line"},
+		reviews: []github.PRReview{
+			{ID: 999, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
+		},
+	}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetPublisher(pub)
+
+	pr := &github.PullRequest{
+		ID: 3003, Number: 3003, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/3003",
+		Head: github.Branch{SHA: "deadbeef"},
+	}
+	// First run: no local row exists at all yet, so this is exactly the path
+	// that had nothing to retire before the fix.
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if exec.calls != 0 || gh.submits != 0 {
+		t.Fatalf("seed: exec=%d submits=%d, want 0/0 (peer already covers this commit)", exec.calls, gh.submits)
+	}
+
+	storedPR, err := s.GetPRByGithubID(pr.ID)
+	if err != nil || storedPR == nil {
+		t.Fatalf("GetPRByGithubID: %v", err)
+	}
+	placeholder, err := s.LatestReviewForPR(storedPR.ID)
+	if err != nil {
+		t.Fatalf("LatestReviewForPR: %v", err)
+	}
+	if placeholder.GitHubReviewID != 999 {
+		t.Errorf("placeholder github_review_id = %d, want the peer's id 999", placeholder.GitHubReviewID)
+	}
+	if placeholder.HeadSHA != "deadbeef" {
+		t.Errorf("placeholder HeadSHA = %q, want %q", placeholder.HeadSHA, "deadbeef")
+	}
+
+	// Second run, same HEAD, no re-request: must converge on the deduped
+	// sha_unchanged path rather than rediscovering the same peer.
+	pub.events = nil
+	pr.UpdatedAt = time.Now().Add(time.Minute)
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if exec.calls != 0 {
+		t.Errorf("second run must not execute either, got exec.calls=%d", exec.calls)
+	}
+	ev, _ := pub.firstOf("review_skipped")
+	if !strings.Contains(ev.Data, `"reason":"sha_unchanged"`) {
+		t.Errorf("expected the second poll to converge on the deduped sha_unchanged, got %q", ev.Data)
+	}
+}
+
+// TestPipeline_PublishPending_RetiresStaleCommitInsteadOfRetryingForever is
+// the PR #774 review regression guard for anchoring PublishPending's retry to
+// rev.HeadSHA (#772): a force-push or rebase that drops that commit from the
+// PR entirely must retire the row instead of submitting against a commit
+// GitHub will keep rejecting with a plain 422 that
+// classifyPermanentSubmit422 does not recognise as permanent — which,
+// unguarded, would retry and fail on the exact same commit every tick
+// forever.
+func TestPipeline_PublishPending_RetiresStaleCommitInsteadOfRetryingForever(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 4001, Repo: "org/repo", Number: 4001, Title: "t",
+		Author: "alice", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpsertPR: %v", err)
+	}
+	revID, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now().Add(-time.Hour),
+		HeadSHA: "stale-sha-dropped-by-force-push", Event: "COMMENT",
+	})
+	if err != nil {
+		t.Fatalf("InsertReview: %v", err)
+	}
+
+	gh := &snapshotGH{diff: "+line", state: "open", sha: "new-sha-after-force-push"}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	p.PublishPending()
+
+	if gh.submits != 0 {
+		t.Errorf("must not submit against a commit no longer on the PR, got submits=%d", gh.submits)
+	}
+	stored, err := s.GetReview(revID)
+	if err != nil {
+		t.Fatalf("GetReview: %v", err)
+	}
+	if stored.GitHubReviewID != pipeline.SupersededReviewID {
+		t.Errorf("github_review_id = %d, want SupersededReviewID (%d) — retired, not stuck retrying",
+			stored.GitHubReviewID, pipeline.SupersededReviewID)
+	}
+}
+
+// TestPipeline_PublishPending_CachesLiveHEADPerPR is the PR #774 review
+// regression guard for the resolveLivePR call added to PublishPending's
+// peer-review anchor (#772): a backlog with several pending rows for the SAME
+// PR must resolve its live HEAD once per invocation, not once per row.
+func TestPipeline_PublishPending_CachesLiveHEADPerPR(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 4002, Repo: "org/repo", Number: 4002, Title: "t",
+		Author: "alice", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpsertPR: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]",
+			Severity: "low", CreatedAt: time.Now().Add(-time.Hour),
+			HeadSHA: "shared-head-sha", Event: "COMMENT",
+		}); err != nil {
+			t.Fatalf("InsertReview %d: %v", i, err)
+		}
+	}
+
+	gh := &snapshotGH{diff: "+line", state: "open", sha: "shared-head-sha"}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	p.PublishPending()
+
+	if gh.submits != 3 {
+		t.Fatalf("submits = %d, want 3 (one per pending row)", gh.submits)
+	}
+	if gh.snapshotCalls != 1 {
+		t.Errorf("GetPRSnapshot calls = %d, want exactly 1 — cached across the 3 rows for the same PR",
+			gh.snapshotCalls)
 	}
 }
 

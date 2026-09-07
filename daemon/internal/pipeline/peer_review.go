@@ -107,6 +107,12 @@ func PublishedPeerReview(f PublishedReviewFetcher, repo string, number int, ours
 	if f == nil {
 		return 0, "", false
 	}
+	// Duplicates PeerPublishedReviewID's own no-anchor check below — the
+	// duplication is deliberate, not drift: PeerPublishedReviewID's check
+	// alone still lets f.GetPRReviews run first and its return value get
+	// discarded, spending an API call this guard exists to avoid spending
+	// when there is nothing to anchor on. Keep both in sync if the anchor
+	// validation rule ever changes.
 	hasAnchor := false
 	for _, c := range commitIDs {
 		if strings.TrimSpace(c) != "" {

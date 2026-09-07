@@ -586,6 +586,19 @@ func (p *Pipeline) reviewWasReanchoredToHead(pr *github.PullRequest, prevReview 
 	if !ok {
 		return false
 	}
+	// Trusting commit_id as proof this review covers pr.Head.SHA is only
+	// sound when reviews are actually submitted pinned to a commit — an
+	// adapter that only ever uses the unanchored SubmitReview can end up with
+	// a commit_id that reflects whatever was live HEAD at submit time rather
+	// than what was actually reviewed (see the anchoring rationale on
+	// CommitAnchoredReviewer / Run's own use of SubmitReviewForCommit). That
+	// stray commit_id could then coincidentally match a later, genuinely
+	// unreviewed pr.Head.SHA. p.gh does not change mid-process, so checking
+	// the capability now also answers for whichever submit produced
+	// prevReview. See theburrowhub/heimdallm#772 review feedback.
+	if _, ok := p.gh.(CommitAnchoredReviewer); !ok {
+		return false
+	}
 	reviews, err := fetcher.GetPRReviews(pr.Repo, pr.Number)
 	if err != nil {
 		slog.Warn("pipeline: could not list published reviews to check for a HEAD reanchor, keeping SHA skip (fail-closed)",
@@ -608,6 +621,39 @@ func (p *Pipeline) reviewWasReanchoredToHead(pr *github.PullRequest, prevReview 
 		return false
 	}
 	return true
+}
+
+// persistPeerCoveredReview records a placeholder row for prID/headSHA pointing
+// at a peer instance's already-published review, so the pre-generation peer
+// check in Run has something to converge on.
+//
+// Without this, the pre-generation check (unlike SkipIfPeerPublished at the
+// publish boundary, which retires an already-inserted row) has no local row
+// to retire: it returns before InsertReview ever runs. The next poll would
+// then find prevReview unchanged, fall through the same path, and re-fire
+// peer_published — and since that reason is not in
+// activity.dedupSkipReasons, every poll cycle would write a fresh
+// activity_log row, the #322 Bug 4 spam regression this codebase guards
+// against elsewhere. See theburrowhub/heimdallm#772 review feedback.
+//
+// A failure here is logged and swallowed rather than propagated: the skip
+// itself is still correct (a peer really did cover this commit), only the
+// convergence bookkeeping is unreliable, and the next poll's GetPRReviews
+// call will simply repeat the check rather than anything being lost.
+func (p *Pipeline) persistPeerCoveredReview(prID int64, headSHA string, peerID int64, peerState string) {
+	now := time.Now().UTC()
+	revID, err := p.store.InsertReview(&store.Review{
+		PRID: prID, Issues: "[]", Suggestions: "[]", CreatedAt: now, HeadSHA: headSHA,
+	})
+	if err != nil {
+		slog.Warn("pipeline: could not persist a placeholder for a peer's review, will re-check next poll",
+			"pr_id", prID, "head_sha", headSHA, "err", err)
+		return
+	}
+	if err := p.store.MarkReviewPublished(revID, peerID, peerState, now); err != nil {
+		slog.Warn("pipeline: could not mark the peer-covered placeholder published, will re-check next poll",
+			"review_id", revID, "err", err)
+	}
 }
 
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
@@ -990,9 +1036,10 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// SkipIfPeerPublished, which requires one to retire.
 	if !opts.Force {
 		reviewFetcher, _ := p.gh.(PublishedReviewFetcher)
-		if _, _, found := PublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), pr.Head.SHA); found {
+		if peerID, peerState, found := PublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), pr.Head.SHA); found {
 			slog.Info("pipeline: peer instance already published a review for this HEAD, skipping before generation",
 				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
+			p.persistPeerCoveredReview(prID, pr.Head.SHA, peerID, peerState)
 			p.publishSkipped(pr, SkipReasonPeerPublished)
 			return nil, nil
 		}
@@ -1458,6 +1505,17 @@ func (p *Pipeline) PublishPending() {
 	if err != nil || len(reviews) == 0 {
 		return
 	}
+	// Cached per (repo, number) across this invocation's loop: a backlog with
+	// several pending reviews for the same PR (different commits, or a repeat
+	// visit after a transient failure) would otherwise re-issue the same
+	// GetPRSnapshot/GetPRHeadSHA call — with its own retry-with-sleep on
+	// failure — once per row instead of once per PR. See theburrowhub/heimdallm#772
+	// review feedback.
+	type liveLookup struct {
+		live livePR
+		err  error
+	}
+	liveCache := map[string]liveLookup{}
 	for _, rev := range reviews {
 		pr, err := p.store.GetPR(rev.PRID)
 		if err != nil {
@@ -1501,8 +1559,20 @@ func (p *Pipeline) PublishPending() {
 		// fatal — it just falls back to the single-anchor check this guard
 		// already ran before #772, so publishing still proceeds on API
 		// hiccups rather than stalling every pending review.
+		//
+		// Also used below (live.headSHA) to detect a force-push/rebase that
+		// dropped rev.HeadSHA from the PR entirely — see the comment at the
+		// anchored submit for why that check is required once this loop
+		// anchors to a specific commit.
+		liveKey := fmt.Sprintf("%s#%d", pr.Repo, pr.Number)
+		lookup, cached := liveCache[liveKey]
+		if !cached {
+			lookup.live, lookup.err = p.resolveLivePR(&github.PullRequest{Repo: pr.Repo, Number: pr.Number})
+			liveCache[liveKey] = lookup
+		}
+		live, liveErr := lookup.live, lookup.err
 		anchors := []string{rev.HeadSHA}
-		if live, liveErr := p.resolveLivePR(&github.PullRequest{Repo: pr.Repo, Number: pr.Number}); liveErr != nil {
+		if liveErr != nil {
 			slog.Warn("pipeline: could not resolve live HEAD for the peer-review guard, checking stored HEAD only",
 				"review_id", rev.ID, "pr", pr.Number, "repo", pr.Repo, "err", liveErr)
 		} else if live.headSHA != "" {
@@ -1512,6 +1582,30 @@ func (p *Pipeline) PublishPending() {
 			if skipErr != nil {
 				slog.Warn("pipeline: could not retire a review a peer instance already published, will retry next tick",
 					"review_id", rev.ID, "err", skipErr)
+			}
+			continue
+		}
+		// Anchoring the submit below to rev.HeadSHA (#772) requires that
+		// commit to still be reachable from the PR. A force-push or rebase
+		// that dropped it makes GitHub reject the request with a plain 422
+		// that classifyPermanentSubmit422 does not recognise (only "lock
+		// prevents review" does), so without this check the row would retry
+		// against the same gone commit and fail every tick forever — worse
+		// than before #772, when the unanchored SubmitReview just attached to
+		// whatever was at live HEAD instead. Retire it the same way Run's
+		// retireIfPRMoved does rather than submit against a commit that no
+		// longer exists on the PR. Skipped when the live-HEAD lookup above
+		// failed: that already fell back to the single-anchor peer check, and
+		// guessing staleness without a live value would risk the same false
+		// positive retireIfPRMoved avoids by requiring a real snapshot.
+		if liveErr == nil && live.headSHA != "" && rev.HeadSHA != "" && live.headSHA != rev.HeadSHA {
+			if err := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); err != nil {
+				slog.Warn("pipeline: could not retire a pending review whose commit is no longer on the PR, will retry next tick",
+					"review_id", rev.ID, "err", err)
+			} else {
+				slog.Info("pipeline: pending review's commit is no longer on the PR — retiring instead of submitting",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number,
+					"review_head_sha", rev.HeadSHA, "current_head_sha", live.headSHA)
 			}
 			continue
 		}
