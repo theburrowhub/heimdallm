@@ -19,10 +19,15 @@ import (
 // store both of them can still reach, so the PR itself is where the claim has
 // to live — and the footer is already on it. See theburrowhub/heimdallm#765.
 //
-// Deliberately login-independent: docs §18.4 states github.token never
-// propagates ("each instance authenticates as itself"), so two instances may
-// publish as two different bot accounts. Keying the claim on the author would
-// miss exactly the case it exists to catch.
+// The marker says "a Heimdallm wrote this"; it does not say which one. The
+// claim is therefore scoped by the review's author login in
+// PeerPublishedReviewID: only a footered review published under this daemon's
+// own GitHub login counts as a peer's. #767 originally made the claim
+// login-independent on the grounds that cluster instances "authenticate as
+// themselves" (docs §18.4), but every duplicate that motivated #765 and #770
+// was two daemons publishing under one login — and several operators each
+// running a standalone daemon as themselves are several reviewers GitHub asked
+// for separately, not copies of one (theburrowhub/heimdallm#778).
 const ReviewFooterMarker = "Reviewed by [Heimdallm]"
 
 // BodyIsHeimdallm reports whether a review body was written by a Heimdallm
@@ -45,6 +50,14 @@ type PublishedReviewFetcher interface {
 // already published for any of commitIDs, returning its GitHub id and state
 // so the caller can point its own local row at the review that actually
 // exists.
+//
+// "Another instance" means another daemon publishing under ownLogin — the
+// GitHub login this daemon authenticates as. A footered review by a different
+// login is a colleague's daemon answering its own review request, not a
+// duplicate of ours, and is never a claim against us (#778). The comparison
+// is case-insensitive because GitHub logins are. An empty ownLogin means the
+// daemon could not resolve who it is, which leaves no way to tell a peer from
+// a colleague: fail open and publish, like every other ambiguous case below.
 //
 // Accepting several anchors — rather than one — matters because GitHub
 // retargets an existing review's commit_id onto the merge commit an "Update
@@ -69,7 +82,7 @@ type PublishedReviewFetcher interface {
 //
 // The last match wins: GitHub returns reviews chronologically, so the newest
 // review for the commit is the one still standing.
-func PeerPublishedReviewID(reviews []github.PRReview, ours map[int64]bool, commitIDs ...string) (id int64, state string, found bool) {
+func PeerPublishedReviewID(reviews []github.PRReview, ours map[int64]bool, ownLogin string, commitIDs ...string) (id int64, state string, found bool) {
 	anchors := map[string]bool{}
 	for _, c := range commitIDs {
 		if c = strings.TrimSpace(c); c != "" {
@@ -79,8 +92,15 @@ func PeerPublishedReviewID(reviews []github.PRReview, ours map[int64]bool, commi
 	if len(anchors) == 0 {
 		return 0, "", false
 	}
+	ownLogin = strings.TrimSpace(ownLogin)
+	if ownLogin == "" {
+		return 0, "", false
+	}
 	for _, rev := range reviews {
 		if !anchors[rev.CommitID] || ours[rev.ID] {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(rev.User.Login), ownLogin) {
 			continue
 		}
 		switch strings.ToUpper(strings.TrimSpace(rev.State)) {
@@ -100,10 +120,10 @@ func PeerPublishedReviewID(reviews []github.PRReview, ours map[int64]bool, commi
 // PublishPending and the NATS publish worker in cmd/heimdallm) so a future
 // change to the claim cannot drift between them.
 //
-// Fails open on a nil fetcher, no anchor at all and any API error: the guard
-// exists to stop a second review, never to withhold the first one because the
-// lookup was rate-limited.
-func PublishedPeerReview(f PublishedReviewFetcher, repo string, number int, ours map[int64]bool, commitIDs ...string) (id int64, state string, found bool) {
+// Fails open on a nil fetcher, no anchor at all, no own login and any API
+// error: the guard exists to stop a second review, never to withhold the
+// first one because the lookup was rate-limited.
+func PublishedPeerReview(f PublishedReviewFetcher, repo string, number int, ours map[int64]bool, ownLogin string, commitIDs ...string) (id int64, state string, found bool) {
 	if f == nil {
 		return 0, "", false
 	}
@@ -120,7 +140,7 @@ func PublishedPeerReview(f PublishedReviewFetcher, repo string, number int, ours
 			break
 		}
 	}
-	if !hasAnchor {
+	if !hasAnchor || strings.TrimSpace(ownLogin) == "" {
 		return 0, "", false
 	}
 	reviews, err := f.GetPRReviews(repo, number)
@@ -129,12 +149,13 @@ func PublishedPeerReview(f PublishedReviewFetcher, repo string, number int, ours
 			"repo", repo, "pr", number, "commits", commitIDs, "err", err)
 		return 0, "", false
 	}
-	return PeerPublishedReviewID(reviews, ours, commitIDs...)
+	return PeerPublishedReviewID(reviews, ours, ownLogin, commitIDs...)
 }
 
 // ownPublishedReviewIDs is the set of GitHub review ids this daemon published
-// for prID. Anything on the PR outside this set and carrying the Heimdallm
-// footer came from another instance.
+// for prID. Anything on the PR outside this set, carrying the Heimdallm
+// footer and signed by this daemon's own login came from another instance
+// running as the same account.
 //
 // A store error yields an empty set, which is the cautious direction for this
 // particular lookup: with no way to recognise our own reviews the guard treats
@@ -197,7 +218,7 @@ func (p *Pipeline) SkipIfPeerPublished(rev *store.Review, repo string, number in
 	if !ok {
 		return false, nil
 	}
-	peerID, peerState, found := PublishedPeerReview(fetcher, repo, number, p.ownPublishedReviewIDs(rev.PRID), commitIDs...)
+	peerID, peerState, found := PublishedPeerReview(fetcher, repo, number, p.ownPublishedReviewIDs(rev.PRID), p.botLogin, commitIDs...)
 	if !found {
 		return false, nil
 	}

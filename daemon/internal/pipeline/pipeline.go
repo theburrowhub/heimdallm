@@ -1069,7 +1069,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// SkipIfPeerPublished, which requires one to retire.
 	if !opts.Force {
 		reviewFetcher, _ := p.gh.(PublishedReviewFetcher)
-		if peerID, peerState, found := PublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), pr.Head.SHA); found {
+		if peerID, peerState, found := PublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), p.botLogin, pr.Head.SHA); found {
 			slog.Info("pipeline: peer instance already published a review for this HEAD, skipping before generation",
 				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
 			p.persistPeerCoveredReview(prID, pr.Head.SHA, peerID, peerState)
