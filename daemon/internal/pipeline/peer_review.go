@@ -10,8 +10,10 @@ import (
 	"github.com/heimdallm/daemon/internal/store"
 )
 
-// ReviewFooterMarker is the substring every review body Heimdallm publishes
-// carries, and therefore the only cross-instance claim this project has.
+// ReviewFooterMarker is the substring every review body Heimdallm has
+// published since #756 (v0.8.15) carries, and therefore the cross-instance
+// claim this project keys on. Bodies from older builds are recognised by
+// legacyReviewMarkers below (#782).
 //
 // Two daemons in a cluster share nothing: their SQLite stores, their
 // reviews_in_flight claims and their circuit breakers are all local, and a
@@ -30,10 +32,32 @@ import (
 // for separately, not copies of one (theburrowhub/heimdallm#778).
 const ReviewFooterMarker = "Reviewed by [Heimdallm]"
 
+// legacyReviewMarkers are the fixed strings a pre-#756 build (≤ v0.8.14) put
+// in every review body: the "## 🤖 Heimdallm AI Review" heading (also used,
+// with a "— Summary" suffix, on the multi-comment summary) and the
+// "· Reviewed by Heimdallm" footer. The heading is the reliable one — the
+// legacy footer's name was configurable ("· Reviewed by <name>"), so a
+// renamed instance only carries the heading. A cluster is routinely
+// mixed-version for the minutes to days between one instance updating and
+// the next, and a same-account peer still on the old build must count as a
+// claim or the newer instance publishes a duplicate on top of it (#782).
+var legacyReviewMarkers = []string{
+	"🤖 Heimdallm AI Review",
+	"· Reviewed by Heimdallm",
+}
+
 // BodyIsHeimdallm reports whether a review body was written by a Heimdallm
-// instance.
+// instance, on the current build or a pre-#756 one.
 func BodyIsHeimdallm(body string) bool {
-	return strings.Contains(body, ReviewFooterMarker)
+	if strings.Contains(body, ReviewFooterMarker) {
+		return true
+	}
+	for _, m := range legacyReviewMarkers {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // PublishedReviewFetcher lists the reviews already on a PR.

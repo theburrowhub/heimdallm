@@ -500,3 +500,43 @@ func TestSkipIfPeerPublishedReadsTheLoginThroughTheAccessor(t *testing.T) {
 		t.Error("SkipIfPeerPublished() = false after the accessor started returning our login, want true — the guard must not cache the startup value")
 	}
 }
+
+// Instances on builds older than #756 (≤ v0.8.14) publish a different body:
+// a "## 🤖 Heimdallm AI Review" heading and a "· Reviewed by <name>" footer
+// with no link, where <name> is a configurable reviewer label. Those reviews
+// must still count as Heimdallm's, or a same-account instance on a newer
+// build publishes a duplicate on top of them (theburrowhub/heimdallm#782).
+func TestBodyIsHeimdallmRecognisesThePre756ReviewFormat(t *testing.T) {
+	for name, body := range map[string]string{
+		"legacy footer":                 "Summary.\n\n---\n*Severity: **LOW** · Reviewed by Heimdallm*",
+		"legacy heading, custom name":   "## 🤖 Heimdallm AI Review\n\nSummary.\n\n---\n*Severity: **LOW** · Reviewed by Acme Bot*",
+		"legacy summary comment header": "## 🤖 Heimdallm AI Review — Summary\n\nSummary.",
+	} {
+		if !pipeline.BodyIsHeimdallm(body) {
+			t.Errorf("BodyIsHeimdallm(%s) = false, want true:\n%s", name, body)
+		}
+	}
+}
+
+func TestBodyIsHeimdallmStillRejectsHumanProse(t *testing.T) {
+	for name, body := range map[string]string{
+		"human review":         "Please rename this variable.",
+		"human mentioning us":  "I think heimdallm already reviewed this, LGTM.",
+		"other bot's template": "## 🤖 Copilot review\n\nLooks fine.",
+	} {
+		if pipeline.BodyIsHeimdallm(body) {
+			t.Errorf("BodyIsHeimdallm(%s) = true, want false:\n%s", name, body)
+		}
+	}
+}
+
+func TestPeerPublishedReviewIDFindsALegacyFormatPeer(t *testing.T) {
+	reviews := []github.PRReview{
+		{ID: 22, User: github.User{Login: "bot"}, CommitID: "bbb", State: "APPROVED",
+			Body: "## 🤖 Heimdallm AI Review\n\nFine.\n\n---\n*Severity: **LOW** · Reviewed by Heimdallm*"},
+	}
+	id, _, found := pipeline.PeerPublishedReviewID(reviews, nil, "bot", "bbb")
+	if !found || id != 22 {
+		t.Errorf("PeerPublishedReviewID() = (%d, found=%v), want (22, true) for a same-login review in the pre-#756 format", id, found)
+	}
+}
