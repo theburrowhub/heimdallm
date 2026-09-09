@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/github"
-	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
 
@@ -21,7 +20,7 @@ import (
 //
 // The marker says "a Heimdallm wrote this"; it does not say which one. The
 // claim is therefore scoped by the review's author login in
-// PeerPublishedReviewID: only a footered review published under this daemon's
+// PeerPublishedReview: only a footered review published under this daemon's
 // own GitHub login counts as a peer's. #767 originally made the claim
 // login-independent on the grounds that cluster instances "authenticate as
 // themselves" (docs §18.4), but every duplicate that motivated #765 and #770
@@ -82,6 +81,10 @@ type PublishedReviewFetcher interface {
 //
 // The last match wins: GitHub returns reviews chronologically, so the newest
 // review for the commit is the one still standing.
+//
+// Production paths call PeerPublishedReview / LookupPublishedPeerReview for
+// the whole review (#781); this and PublishedPeerReview are kept as the
+// compact (id, state, found) form the guard's tests are written against.
 func PeerPublishedReviewID(reviews []github.PRReview, ours map[int64]bool, ownLogin string, commitIDs ...string) (id int64, state string, found bool) {
 	peer, found := PeerPublishedReview(reviews, ours, ownLogin, commitIDs...)
 	return peer.ID, peer.State, found
@@ -143,8 +146,8 @@ func LookupPublishedPeerReview(f PublishedReviewFetcher, repo string, number int
 	if f == nil {
 		return github.PRReview{}, false
 	}
-	// Duplicates PeerPublishedReviewID's own no-anchor check below — the
-	// duplication is deliberate, not drift: PeerPublishedReviewID's check
+	// Duplicates PeerPublishedReview's own no-anchor check below — the
+	// duplication is deliberate, not drift: PeerPublishedReview's check
 	// alone still lets f.GetPRReviews run first and its return value get
 	// discarded, spending an API call this guard exists to avoid spending
 	// when there is nothing to anchor on. Keep both in sync if the anchor
@@ -214,7 +217,7 @@ func (p *Pipeline) ownPublishedReviewIDs(prID int64) map[int64]bool {
 // Heimdallm instance has already published one for the same commit.
 //
 // "Another instance" is one publishing under this daemon's own login, read
-// through Pipeline.ownLogin on every call (see PeerPublishedReviewID for the
+// through Pipeline.ownLogin on every call (see PeerPublishedReview for the
 // scope and SetBotLoginFunc for why it is not a startup copy). A colleague's
 // daemon reviewing as a different account never triggers this skip.
 //
@@ -237,9 +240,15 @@ func (p *Pipeline) ownPublishedReviewIDs(prID int64) map[int64]bool {
 // the NATS publish worker in cmd/heimdallm, which submits outside Run and must
 // apply the identical check — the same reason markOrphanIfPermanent is shared.
 //
+// prTitle is only carried onto the review_skipped event so the activity row
+// has a title on this path too (#781); it plays no part in the decision. It
+// sits before the variadic anchors on purpose — a caller that forgets it
+// would still compile, with its first anchor read as the title, so keep the
+// argument order in mind when adding a call site.
+//
 // commitIDs takes every anchor the caller has for the review being retired
 // (typically the stored row's HeadSHA plus the PR's live HEAD): see
-// PeerPublishedReviewID for why a single anchor is not enough after GitHub
+// PeerPublishedReview for why a single anchor is not enough after GitHub
 // retargets a review's commit_id (#772).
 func (p *Pipeline) SkipIfPeerPublished(rev *store.Review, repo string, number int, prTitle string, commitIDs ...string) (bool, error) {
 	// No anchor at all has nothing to key a claim on, and a nil store cannot
@@ -266,15 +275,10 @@ func (p *Pipeline) SkipIfPeerPublished(rev *store.Review, repo string, number in
 		// the publish worker re-checks it on the next tick.
 		return true, err
 	}
-	data := map[string]any{
-		"repo":      repo,
-		"pr_number": number,
-		"pr_title":  prTitle,
-		"reason":    string(SkipReasonPeerPublished),
-	}
-	for k, v := range peerSkipDetails(peer) {
-		data[k] = v
-	}
-	p.publish(sse.EventReviewSkipped, data)
+	// One payload builder for both peer_published sites (here and the
+	// pre-generation check in Run): #781 happened because this path built
+	// its own map and drifted from publishSkipped's, losing pr_title.
+	p.publishSkippedWith(&github.PullRequest{Repo: repo, Number: number, Title: prTitle},
+		SkipReasonPeerPublished, peerSkipDetails(peer))
 	return true, nil
 }

@@ -204,7 +204,7 @@ void main() {
     );
     expect(
       find.textContaining(
-        "Skipped because @sergiotejon's Heimdallm instance already reviewed this commit (APPROVED)",
+        'Skipped because another instance running as @sergiotejon already reviewed this commit (APPROVED, review 5151568032)',
       ),
       findsOneWidget,
     );

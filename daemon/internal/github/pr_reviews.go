@@ -21,7 +21,7 @@ type PRReview struct {
 	// CommitID is the commit the review is anchored to. Every review the
 	// daemon publishes goes through SubmitReviewForCommit, so this equals the
 	// HEAD SHA that was analysed — which is what makes it a usable dedup key
-	// for pipeline.PeerPublishedReviewID. Empty on reviews submitted without
+	// for pipeline.PeerPublishedReview. Empty on reviews submitted without
 	// an anchor (legacy rows, some third-party bots).
 	CommitID    string    `json:"commit_id"`
 	SubmittedAt time.Time `json:"submitted_at"`

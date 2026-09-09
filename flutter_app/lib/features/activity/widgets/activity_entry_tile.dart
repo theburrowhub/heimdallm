@@ -276,16 +276,24 @@ String _skippedOutcome(ActivityEntry entry) {
   return label.isEmpty ? 'Skipped review' : 'Skipped because $label';
 }
 
-/// theburrowhub/heimdallm#781: name the peer when the daemon recorded it, so
-/// a correct skip reads as "sergiotejon's instance got there first" rather
-/// than as a review that silently vanished. Older rows carry no login and
-/// fall back to the generic wording.
+/// theburrowhub/heimdallm#781: name the peer review when the daemon recorded
+/// it, so a correct skip reads as "another instance on our account got there
+/// first, here is its review" rather than as a review that silently
+/// vanished. Since #779 the peer is by construction another instance running
+/// as the same GitHub login, so the login identifies the account, and the
+/// review id is what lets the operator go and look at it. Older rows carry
+/// neither and fall back to the generic wording.
 String _peerPublishedLabel(ActivityEntry entry) {
   final login = _detailString(entry, 'peer_login');
   if (login == null) return _skipReasonLabel('peer_published');
   final state = _detailString(entry, 'peer_state');
-  final verdict = state == null ? '' : ' ($state)';
-  return "@$login's Heimdallm instance already reviewed this commit$verdict";
+  final id = entry.details['peer_review_id'];
+  final parts = <String>[
+    ?state,
+    if (id is num && id > 0) 'review ${id.toInt()}',
+  ];
+  final tail = parts.isEmpty ? '' : ' (${parts.join(', ')})';
+  return 'another instance running as @$login already reviewed this commit$tail';
 }
 
 String _triageOutcome(ActivityEntry entry) {
