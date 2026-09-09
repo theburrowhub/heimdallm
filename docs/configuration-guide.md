@@ -1655,6 +1655,12 @@ the fix is the same: update that worker. Once it runs a version that
 understands `PUT /cluster/partition`, the next push resolves both the
 identity and the rules together.
 
+The publish-boundary check (§18.3.1) also tolerates a mixed-version cluster:
+it recognises review bodies in the format daemons older than v0.8.15 publish
+(the `🤖 Heimdallm AI Review` heading and the unlinked `· Reviewed by
+Heimdallm` footer) as well as the current footer, so a same-account instance
+still on an old build counts as having claimed the commit.
+
 ### 18.5 The hub proxies; the UI talks to one origin
 
 The app never opens a connection to a remote daemon. Every read for another
