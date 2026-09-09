@@ -60,11 +60,13 @@ const (
 	// theburrowhub/heimdallm#772.
 	SkipReasonHeadReanchored SkipReason = "head_reanchored"
 
-	// SkipReasonPeerPublished means another Heimdallm instance had already
-	// published a review for this exact commit by the time this one reached
-	// the publish boundary. Only reachable in a cluster, and only when the
-	// hub took over a repo whose routed owner was unreachable rather than
-	// dead. See theburrowhub/heimdallm#765.
+	// SkipReasonPeerPublished means another Heimdallm instance running as the
+	// same GitHub account had already published a review for this exact
+	// commit by the time this one reached the publish boundary — typically a
+	// hub that took over a repo whose routed owner was unreachable rather
+	// than dead (theburrowhub/heimdallm#765). Two daemons authenticated as
+	// different people are two reviewers, not a duplicate, and never produce
+	// this skip (theburrowhub/heimdallm#778).
 	SkipReasonPeerPublished SkipReason = "peer_published"
 )
 

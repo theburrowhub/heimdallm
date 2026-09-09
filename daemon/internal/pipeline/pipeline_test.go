@@ -1583,7 +1583,7 @@ func TestPipeline_Run_HeadReanchorRequiresAnchoredAdapter(t *testing.T) {
 	// exactly the risk the CommitAnchoredReviewer gate exists to distrust
 	// when the adapter never anchors its own submits.
 	gh.reviews = []github.PRReview{
-		{ID: 1, CommitID: "second-sha", State: "APPROVED", Body: heimdallmBody(t, "unanchored coincidence")},
+		{ID: 1, User: github.User{Login: "heimdallm-bot"}, CommitID: "second-sha", State: "APPROVED", Body: heimdallmBody(t, "unanchored coincidence")},
 	}
 
 	pub.events = nil
@@ -1647,7 +1647,7 @@ func TestPipeline_Run_HeadReanchoredReviewCoversNewHead(t *testing.T) {
 	// returned id=1) now anchored to the merge commit "Update branch"
 	// produced, not to the commit it was actually reviewed against.
 	gh.reviews = []github.PRReview{
-		{ID: 1, CommitID: "492be7a", State: "APPROVED", Body: heimdallmBody(t, "reanchored by GitHub")},
+		{ID: 1, User: github.User{Login: "heimdallm-bot"}, CommitID: "492be7a", State: "APPROVED", Body: heimdallmBody(t, "reanchored by GitHub")},
 	}
 	pub.events = nil
 	pr.Head.SHA = "492be7a"
@@ -1767,11 +1767,12 @@ func TestPipeline_Run_PeerPublishedSkipsBeforeGeneration(t *testing.T) {
 	gh := &fakeGHWithPeerReviews{
 		fakeGHCounter: &fakeGHCounter{diff: "+line"},
 		reviews: []github.PRReview{
-			{ID: 999, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
+			{ID: 999, User: github.User{Login: "heimdallm-bot"}, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
 		},
 	}
 	pub := &fakePublisher{}
 	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
 	p.SetPublisher(pub)
 
 	pr := &github.PullRequest{
@@ -1816,10 +1817,11 @@ func TestPipeline_Run_ForceBypassesPeerPublishedGuard(t *testing.T) {
 	gh := &fakeGHWithPeerReviews{
 		fakeGHCounter: &fakeGHCounter{diff: "+line"},
 		reviews: []github.PRReview{
-			{ID: 999, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
+			{ID: 999, User: github.User{Login: "heimdallm-bot"}, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
 		},
 	}
 	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
 
 	pr := &github.PullRequest{
 		ID: 3002, Number: 3002, Title: "t", Repo: "org/repo",
@@ -1862,11 +1864,12 @@ func TestPipeline_Run_PeerPublishedSkipConvergesOnNextPoll(t *testing.T) {
 	gh := &fakeGHWithPeerReviews{
 		fakeGHCounter: &fakeGHCounter{diff: "+line"},
 		reviews: []github.PRReview{
-			{ID: 999, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
+			{ID: 999, User: github.User{Login: "heimdallm-bot"}, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
 		},
 	}
 	pub := &fakePublisher{}
 	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
 	p.SetPublisher(pub)
 
 	pr := &github.PullRequest{
@@ -2045,7 +2048,7 @@ func (f *callCountedPeerGH) GetPRReviews(string, int) ([]github.PRReview, error)
 		return nil, nil
 	}
 	return []github.PRReview{
-		{ID: 999, CommitID: "deadbeef", State: "CHANGES_REQUESTED",
+		{ID: 999, User: github.User{Login: "heimdallm-bot"}, CommitID: "deadbeef", State: "CHANGES_REQUESTED",
 			Body: "peer verdict\n\n---\n🤖 *" + pipeline.ReviewFooterMarker + "(https://theburrowhub.github.io/heimdallm/)*"},
 	}, nil
 }
@@ -2065,6 +2068,7 @@ func TestPipeline_Run_PublishBoundaryCatchesPeerPublishedDuringGeneration(t *tes
 	exec := &fakeExecCounter{}
 	gh := &callCountedPeerGH{fakeGHCounter: &fakeGHCounter{diff: "+line"}}
 	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
 
 	pr := &github.PullRequest{
 		ID: 3004, Number: 3004, Title: "t", Repo: "org/repo",
@@ -2647,5 +2651,48 @@ func TestAnnotateBodyForEvent(t *testing.T) {
 		if got := pipeline.AnnotateBodyForEvent(body, ev, 2); got != body {
 			t.Errorf("event %s: body should be unchanged, got %q", ev, got)
 		}
+	}
+}
+
+// TestPipeline_Run_PeerPublishedIgnoresAnotherLoginBeforeGeneration: the
+// pre-generation peer check must apply the same login scope as the
+// publish-boundary guard. A colleague's standalone daemon reviewing the same
+// commit under its own login is a separate reviewer GitHub asked for, so this
+// instance still generates and publishes its own review.
+func TestPipeline_Run_PeerPublishedIgnoresAnotherLoginBeforeGeneration(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHWithPeerReviews{
+		fakeGHCounter: &fakeGHCounter{diff: "+line"},
+		reviews: []github.PRReview{
+			{ID: 999, User: github.User{Login: "sergiotejon"}, CommitID: "deadbeef", State: "APPROVED", Body: heimdallmBody(t, "a colleague's verdict")},
+		},
+	}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("ivanmunozruiz")
+
+	pr := &github.PullRequest{
+		ID: 3005, Number: 3005, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/3005",
+		Head: github.Branch{SHA: "deadbeef"},
+	}
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev == nil {
+		t.Fatal("expected this instance's own review despite a colleague's review on the same commit")
+	}
+	if exec.calls != 1 {
+		t.Errorf("a colleague's review must not stop generation, got exec.calls=%d", exec.calls)
+	}
+	if gh.submits != 1 {
+		t.Errorf("a colleague's review must not stop the submit, got gh.submits=%d", gh.submits)
 	}
 }
