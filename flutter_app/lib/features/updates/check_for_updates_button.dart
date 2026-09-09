@@ -23,12 +23,16 @@ class CheckForUpdatesButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final platform = ref.watch(platformServicesProvider);
     if (platform.appUpdateSupport != AppUpdateSupport.native) {
+      final reason =
+          platform.appUpdateUnavailableReason ?? 'Updates are unavailable.';
       return IconButton(
         key: const Key('check-for-updates'),
-        tooltip:
-            platform.appUpdateUnavailableReason ?? 'Updates are unavailable',
-        onPressed: null,
-        icon: const Icon(Icons.system_update_alt),
+        tooltip: 'Updates unavailable',
+        onPressed: () => _showUnavailableReason(context, reason),
+        icon: Icon(
+          Icons.system_update_alt,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
       );
     }
     final status =
@@ -58,6 +62,23 @@ class CheckForUpdatesButton extends ConsumerWidget {
               available ? Icons.system_update : Icons.system_update_alt,
               color: available ? Theme.of(context).colorScheme.primary : null,
             ),
+    );
+  }
+
+  void _showUnavailableReason(BuildContext context, String reason) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('update-unavailable-details'),
+        title: const Text('Updates unavailable'),
+        content: Text(reason),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
     );
   }
 

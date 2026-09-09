@@ -640,6 +640,17 @@ class DesktopPlatformServices
       return 'Automatic updates are unavailable for this installation.';
     }
     if (_isLinux) {
+      if (!_nativeAppUpdatesRequested) {
+        return 'Automatic updates are disabled for this build.';
+      }
+      final reason = _linuxAppUpdater?.unavailableReason;
+      if (reason != null) return reason;
+      // Defensive fallback only: in the real app, main.dart always awaits
+      // setupAppUpdater() before the UI can read this getter, so by the time
+      // we get here _linuxAppUpdater is non-null and initialize() has
+      // already populated unavailableReason on every false-returning path.
+      // This only fires if something (a test, a future caller) queries this
+      // getter without having called setupAppUpdater() first.
       return 'This Linux installation cannot update itself. Install the '
           'official AppImage or packaged release to enable automatic updates.';
     }
