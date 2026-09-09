@@ -11,7 +11,8 @@ import '../../core/platform/fake_platform_services.dart';
 
 void main() {
   testWidgets(
-    'explains unavailable updates instead of hiding the app-bar entry',
+    'explains unavailable updates in a dialog instead of hiding the '
+    'app-bar entry',
     (tester) async {
       final platform = FakePlatformServices(
         appUpdateUnavailableReason: 'Updates are unavailable here.',
@@ -20,8 +21,25 @@ void main() {
       final button = tester.widget<IconButton>(
         find.byKey(const Key('check-for-updates')),
       );
-      expect(button.onPressed, isNull);
-      expect(button.tooltip, 'Updates are unavailable here.');
+      expect(button.onPressed, isNotNull);
+      expect(button.tooltip, 'Updates unavailable');
+      expect(find.text('Updates are unavailable here.'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('check-for-updates')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('update-unavailable-details')),
+        findsOneWidget,
+      );
+      expect(find.text('Updates are unavailable here.'), findsOneWidget);
+
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('update-unavailable-details')),
+        findsNothing,
+      );
     },
   );
 

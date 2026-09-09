@@ -15,7 +15,10 @@ class _FakeLinuxAppUpdater extends LinuxAppUpdater {
     this.installError,
     this.pendingVersion = '2.0.0',
     this.restartPath = '/opt/heimdallm/heimdallm',
-  }) : super(
+    this.initializeSucceeds = true,
+    String? unavailableReason,
+  }) : _unavailableReason = unavailableReason,
+       super(
          apiBaseURL: Uri.parse('http://127.0.0.1:7842'),
          apiTokenPath: '/tmp/heimdallm-test-token',
          dataDirectory: '/tmp/heimdallm-test-data',
@@ -30,15 +33,20 @@ class _FakeLinuxAppUpdater extends LinuxAppUpdater {
   final Object? installError;
   final String? pendingVersion;
   final String restartPath;
+  final bool initializeSucceeds;
+  final String? _unavailableReason;
   int checkCalls = 0;
   int installCalls = 0;
   int completeCalls = 0;
   int finalizeCalls = 0;
 
   @override
+  String? get unavailableReason => _unavailableReason;
+
+  @override
   Future<bool> initialize() async {
     if (initializeError != null) throw initializeError!;
-    return true;
+    return initializeSucceeds;
   }
 
   @override
@@ -936,7 +944,33 @@ else:
         );
         expect(
           services.appUpdateUnavailableReason,
-          contains('official AppImage or packaged release'),
+          'Automatic updates are disabled for this build.',
+        );
+      },
+    );
+
+    test(
+      'Linux updater surfaces its own unavailable reason once requested',
+      () async {
+        final updater = _FakeLinuxAppUpdater(
+          initializeSucceeds: false,
+          unavailableReason:
+              'Heimdallm is running from /home/dev/heimdallm-src, which is '
+              'not a packaged install, so it cannot update itself.',
+        );
+        final services = DesktopPlatformServices(
+          isMacOS: false,
+          isLinux: true,
+          enableNativeAppUpdates: true,
+          linuxAppUpdater: updater,
+        );
+
+        await services.setupAppUpdater();
+
+        expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
+        expect(
+          services.appUpdateUnavailableReason,
+          contains('/home/dev/heimdallm-src'),
         );
       },
     );

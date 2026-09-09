@@ -228,10 +228,16 @@ class LinuxAppUpdater {
   Timer? _scheduledCheck;
   bool _checking = false;
   bool _installing = false;
+  String? _unavailableReason;
 
   LinuxInstallKind get installKind => _installKind;
   LinuxUpdateRelease? get availableRelease => _availableRelease;
   String? get currentVersion => _currentVersion;
+
+  /// Explains why [initialize] returned `false`, in terms specific to this
+  /// machine (the actual executable path, the actual detected version).
+  /// `null` once `initialize` has succeeded.
+  String? get unavailableReason => _unavailableReason;
 
   @visibleForTesting
   void dispose() => _scheduledCheck?.cancel();
@@ -241,12 +247,23 @@ class LinuxAppUpdater {
   String get _journalPath => '$dataDirectory/app-update-recovery.json';
 
   Future<bool> initialize() async {
-    if (!_isLoopbackAPI(apiBaseURL)) return false;
+    _unavailableReason = null;
+    if (!_isLoopbackAPI(apiBaseURL)) {
+      _unavailableReason =
+          'The daemon API is not local, so updates are disabled.';
+      return false;
+    }
     _installKind = _forcedInstallKind ?? await _detectInstallKind();
-    if (_installKind == LinuxInstallKind.unsupported) return false;
+    if (_installKind == LinuxInstallKind.unsupported) {
+      _unavailableReason = await _describeUnsupportedInstall();
+      return false;
+    }
     _currentVersion =
         _forcedCurrentVersion ?? await _readBundledDaemonVersion();
     if (_currentVersion == null || !_isReleaseVersion(_currentVersion!)) {
+      _unavailableReason =
+          'This build reports a development version, so it cannot update '
+          'itself. Only tagged releases can.';
       return false;
     }
 
@@ -519,6 +536,30 @@ class LinuxAppUpdater {
     onStatus(const AppUpdateStatus.idle(message: 'Heimdallm was updated.'));
   }
 
+  /// Canonical, symlink-resolved path of the running executable, or `null`
+  /// if it cannot be resolved (e.g. it no longer exists on disk).
+  Future<String?> _canonicalExecutable() async {
+    try {
+      return await File(executablePath).resolveSymbolicLinks();
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  /// Human-readable explanation for why this install was classified as
+  /// [LinuxInstallKind.unsupported], naming the actual location Heimdallm is
+  /// running from so the message is actionable instead of generic.
+  Future<String> _describeUnsupportedInstall() async {
+    final canonical = await _canonicalExecutable();
+    final location = canonical == null
+        ? 'an unresolvable location'
+        : File(canonical).parent.path;
+    return 'Heimdallm is running from $location, which is not a packaged '
+        'install, so it cannot update itself. Update it with '
+        "'git pull && make install-linux', or install the AppImage or the "
+        '.deb/.rpm release for automatic updates.';
+  }
+
   Future<LinuxInstallKind> _detectInstallKind() async {
     final appImage = environment['APPIMAGE'];
     if (appImage != null && appImage.isNotEmpty) {
@@ -526,8 +567,8 @@ class LinuxAppUpdater {
       if (type == FileSystemEntityType.file) return LinuxInstallKind.appImage;
       return LinuxInstallKind.unsupported;
     }
-    final canonical = await File(executablePath).resolveSymbolicLinks();
-    if (!canonical.startsWith('/opt/heimdallm/')) {
+    final canonical = await _canonicalExecutable();
+    if (canonical == null || !canonical.startsWith('/opt/heimdallm/')) {
       return LinuxInstallKind.unsupported;
     }
     if (await File('/usr/bin/dpkg-query').exists()) {

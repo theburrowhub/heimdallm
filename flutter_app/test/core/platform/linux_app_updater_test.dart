@@ -147,6 +147,10 @@ void main() {
         currentVersion: '1.0.0',
       );
       expect(await remote.initialize(), isFalse);
+      expect(
+        remote.unavailableReason,
+        'The daemon API is not local, so updates are disabled.',
+      );
 
       final unsupported = _updater(
         directory,
@@ -155,6 +159,11 @@ void main() {
       );
       expect(await unsupported.initialize(), isFalse);
       expect(unsupported.installKind, LinuxInstallKind.unsupported);
+      expect(
+        unsupported.unavailableReason,
+        contains('is not a packaged install'),
+      );
+      expect(unsupported.unavailableReason, contains('make install-linux'));
 
       final invalid = _updater(
         directory,
@@ -162,7 +171,31 @@ void main() {
         currentVersion: 'dev',
       );
       expect(await invalid.initialize(), isFalse);
+      expect(
+        invalid.unavailableReason,
+        contains('reports a development version'),
+      );
     });
+
+    test(
+      'names the actual executable directory in the unsupported reason',
+      () async {
+        final directory = await _temporaryDirectory();
+        final appDirectory = Directory('${directory.path}/app')
+          ..createSync(recursive: true);
+        final executable = File('${appDirectory.path}/heimdallm')
+          ..writeAsStringSync('binary');
+        final updater = _updater(
+          directory,
+          executablePath: executable.path,
+          installKind: LinuxInstallKind.unsupported,
+        );
+        final canonicalDirectory = await appDirectory.resolveSymbolicLinks();
+
+        expect(await updater.initialize(), isFalse);
+        expect(updater.unavailableReason, contains(canonicalDirectory));
+      },
+    );
 
     test('detects an AppImage and reads the bundled daemon version', () async {
       final directory = await _temporaryDirectory();

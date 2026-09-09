@@ -640,6 +640,11 @@ class DesktopPlatformServices
       return 'Automatic updates are unavailable for this installation.';
     }
     if (_isLinux) {
+      if (!_nativeAppUpdatesRequested) {
+        return 'Automatic updates are disabled for this build.';
+      }
+      final reason = _linuxAppUpdater?.unavailableReason;
+      if (reason != null) return reason;
       return 'This Linux installation cannot update itself. Install the '
           'official AppImage or packaged release to enable automatic updates.';
     }
