@@ -35,9 +35,11 @@ const ReviewFooterMarker = "Reviewed by [Heimdallm]"
 // legacyReviewMarkers are the fixed strings a pre-#756 build (≤ v0.8.14) put
 // in every review body: the "## 🤖 Heimdallm AI Review" heading (also used,
 // with a "— Summary" suffix, on the multi-comment summary) and the
-// "· Reviewed by Heimdallm" footer. The heading is the reliable one — the
-// legacy footer's name was configurable ("· Reviewed by <name>"), so a
-// renamed instance only carries the heading. A cluster is routinely
+// "· Reviewed by Heimdallm" footer. The heading is the anchor to trust: the
+// footer's name was a literal that changed once already (Heimdallr →
+// Heimdallm, #35), so a body from before a rename only carries the heading.
+// The emoji plus the exact phrase makes an accidental match by a human or
+// another bot very unlikely, not impossible. A cluster is routinely
 // mixed-version for the minutes to days between one instance updating and
 // the next, and a same-account peer still on the old build must count as a
 // claim or the newer instance publishes a duplicate on top of it (#782).
