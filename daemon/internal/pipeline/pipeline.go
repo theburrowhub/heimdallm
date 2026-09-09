@@ -218,6 +218,10 @@ type Pipeline struct {
 	executor CLIExecutor
 	notify   Notifier
 	botLogin string
+	// botLoginFn, when set, is consulted instead of botLogin by the code that
+	// must know the daemon's login *now* rather than what it was at startup:
+	// see ownLogin.
+	botLoginFn func() string
 	// breaker caps the number of reviews per PR and per repo. Nil disables
 	// all caps (the pre-issue-243 behaviour). Populated at daemon startup via
 	// SetCircuitBreakerLimits.
@@ -260,6 +264,27 @@ func New(s *store.Store, gh interface {
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from re-review discussion context.
 func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
+
+// SetBotLoginFunc makes the peer-review guard read the daemon's login through
+// fn on every check instead of the value SetBotLogin captured at startup.
+//
+// cmd/heimdallm resolves the login once at boot and, if that lookup fails
+// (rate limit, 5xx), repairs it lazily later through its cachedLogin. The
+// guard scopes its cross-instance claim to that login (#778), so a copy taken
+// at boot and never refreshed would leave the #765 duplicate protection
+// silently off for the process lifetime after one bad lookup. fn must be safe
+// to call from any goroutine; the caller's accessor already takes its own
+// lock.
+func (p *Pipeline) SetBotLoginFunc(fn func() string) { p.botLoginFn = fn }
+
+// ownLogin is the daemon's current GitHub login for the peer-review guard:
+// the accessor when one was installed, the startup value otherwise.
+func (p *Pipeline) ownLogin() string {
+	if p.botLoginFn != nil {
+		return p.botLoginFn()
+	}
+	return p.botLogin
+}
 
 // SetCircuitBreakerLimits enables the per-PR and per-repo caps. Nil
 // disables all caps. Captured by pointer at wiring time — config reloads
@@ -1069,7 +1094,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// SkipIfPeerPublished, which requires one to retire.
 	if !opts.Force {
 		reviewFetcher, _ := p.gh.(PublishedReviewFetcher)
-		if peerID, peerState, found := PublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), p.botLogin, pr.Head.SHA); found {
+		if peerID, peerState, found := PublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), p.ownLogin(), pr.Head.SHA); found {
 			slog.Info("pipeline: peer instance already published a review for this HEAD, skipping before generation",
 				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
 			p.persistPeerCoveredReview(prID, pr.Head.SHA, peerID, peerState)

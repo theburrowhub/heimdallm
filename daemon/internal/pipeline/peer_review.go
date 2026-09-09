@@ -184,6 +184,11 @@ func (p *Pipeline) ownPublishedReviewIDs(prID int64) map[int64]bool {
 // that runs immediately before a review is submitted and stops it when another
 // Heimdallm instance has already published one for the same commit.
 //
+// "Another instance" is one publishing under this daemon's own login, read
+// through Pipeline.ownLogin on every call (see PeerPublishedReviewID for the
+// scope and SetBotLoginFunc for why it is not a startup copy). A colleague's
+// daemon reviewing as a different account never triggers this skip.
+//
 // It is the only defence in this project that works across a network
 // partition. Everything upstream — reviews_in_flight, PRAlreadyReviewed, the
 // SHA guard in Run, the circuit breaker — reads a SQLite database local to one
@@ -218,7 +223,7 @@ func (p *Pipeline) SkipIfPeerPublished(rev *store.Review, repo string, number in
 	if !ok {
 		return false, nil
 	}
-	peerID, peerState, found := PublishedPeerReview(fetcher, repo, number, p.ownPublishedReviewIDs(rev.PRID), p.botLogin, commitIDs...)
+	peerID, peerState, found := PublishedPeerReview(fetcher, repo, number, p.ownPublishedReviewIDs(rev.PRID), p.ownLogin(), commitIDs...)
 	if !found {
 		return false, nil
 	}

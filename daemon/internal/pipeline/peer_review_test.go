@@ -455,3 +455,48 @@ func TestPublishedPeerReviewSkipsTheAPICallWithoutAnOwnLogin(t *testing.T) {
 		t.Errorf("GetPRReviews calls = %d, want 0 — no own login means nothing can match", f.calls)
 	}
 }
+
+// TestSkipIfPeerPublishedFailsOpenWithoutABotLogin pins the wiring, not the
+// function: a Pipeline whose login was never resolved must publish, even
+// when a same-account review is standing on the commit, because it cannot
+// tell that review from a colleague's.
+func TestSkipIfPeerPublishedFailsOpenWithoutABotLogin(t *testing.T) {
+	s, rev := storeWithPendingReview(t, "deadbeef")
+	gh := &peerGH{reviews: []github.PRReview{
+		{ID: 4242, User: github.User{Login: "bot"}, CommitID: "deadbeef", State: "APPROVED", Body: heimdallmBody(t, "same account, other instance")},
+	}}
+	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
+	// No SetBotLogin on purpose.
+
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef")
+	if err != nil || skip {
+		t.Errorf("SkipIfPeerPublished() = (%v, %v) with no bot login, want (false, nil) — publish rather than guess", skip, err)
+	}
+}
+
+// TestSkipIfPeerPublishedReadsTheLoginThroughTheAccessor: the daemon resolves
+// its login once at startup and repairs it lazily afterwards (cachedLogin in
+// cmd/heimdallm). A guard that copied the startup value would stay disabled
+// for the process lifetime after one failed lookup at boot, so it must read
+// the login through the accessor every time it runs.
+func TestSkipIfPeerPublishedReadsTheLoginThroughTheAccessor(t *testing.T) {
+	s, rev := storeWithPendingReview(t, "deadbeef")
+	gh := &peerGH{reviews: []github.PRReview{
+		{ID: 4242, User: github.User{Login: "bot"}, CommitID: "deadbeef", State: "APPROVED", Body: heimdallmBody(t, "same account, other instance")},
+	}}
+	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
+	login := "" // unresolved at boot…
+	p.SetBotLoginFunc(func() string { return login })
+
+	if skip, _ := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef"); skip {
+		t.Fatal("SkipIfPeerPublished() = true while the accessor still returns \"\", want false")
+	}
+	login = "bot" // …repaired later by the cache
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef")
+	if err != nil {
+		t.Fatalf("SkipIfPeerPublished: %v", err)
+	}
+	if !skip {
+		t.Error("SkipIfPeerPublished() = false after the accessor started returning our login, want true — the guard must not cache the startup value")
+	}
+}

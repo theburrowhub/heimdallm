@@ -689,7 +689,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		issuePipe.SetBotLogin(login)
 		slog.Info("bot login resolved", "login", login)
 	} else {
-		slog.Warn("could not resolve bot login for re-review context", "err", err)
+		slog.Warn("could not resolve bot login; re-review context filtering and the cross-instance duplicate-review guard stay off until the login is resolved lazily", "err", err)
 	}
 	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
 	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
@@ -1069,6 +1069,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		defer loginMu.Unlock()
 		return cachedLogin
 	}
+	// The peer-review guard scopes its cross-instance claim to this login
+	// (#778). Reading it through the accessor, not the SetBotLogin copy taken
+	// above, means a failed AuthenticatedUser at boot disables the guard only
+	// until cachedLogin is repaired, not until the daemon restarts.
+	p.SetBotLoginFunc(botLoginAccessor)
 	responder := issuepipeline.NewResponder(
 		s, ghClient,
 		&prReviewExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
