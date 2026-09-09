@@ -181,6 +181,35 @@ void main() {
     );
   });
 
+  // theburrowhub/heimdallm#781: when the daemon recorded who covered the
+  // commit, say so. "another instance" alone made a correct skip look like a
+  // lost review to the operator who then hit Re-review.
+  testWidgets('review_skipped names the peer login and verdict when recorded', (
+    tester,
+  ) async {
+    final entry = _mk(
+      action: ActivityAction.reviewSkipped,
+      outcome: 'peer_published',
+      details: {
+        'reason': 'peer_published',
+        'peer_login': 'sergiotejon',
+        'peer_review_id': 5151568032,
+        'peer_state': 'APPROVED',
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ActivityEntryTile(entry: entry)),
+      ),
+    );
+    expect(
+      find.textContaining(
+        'Skipped because another instance running as @sergiotejon already reviewed this commit (APPROVED, review 5151568032)',
+      ),
+      findsOneWidget,
+    );
+  });
+
   // head_reanchored (theburrowhub/heimdallm#772): GitHub retargeted our own
   // earlier review's commit_id onto the current HEAD — typically an "Update
   // branch" merge commit — so the pipeline treats the commit as already

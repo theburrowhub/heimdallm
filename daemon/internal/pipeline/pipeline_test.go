@@ -2696,3 +2696,69 @@ func TestPipeline_Run_PeerPublishedIgnoresAnotherLoginBeforeGeneration(t *testin
 		t.Errorf("a colleague's review must not stop the submit, got gh.submits=%d", gh.submits)
 	}
 }
+
+// TestPipeline_Run_PeerPublishedSkipBeforeGenerationNamesThePeer (#781): the
+// pre-generation skip must carry the same attribution as the publish-boundary
+// one, and the placeholder row it persists must say whose review covered the
+// commit rather than only its state.
+func TestPipeline_Run_PeerPublishedSkipBeforeGenerationNamesThePeer(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHWithPeerReviews{
+		fakeGHCounter: &fakeGHCounter{diff: "+line"},
+		reviews: []github.PRReview{
+			{ID: 999, User: github.User{Login: "heimdallm-bot"}, CommitID: "deadbeef", State: "APPROVED", Body: heimdallmBody(t, "peer verdict")},
+		},
+	}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetPublisher(pub)
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 3006, Number: 3006, Title: "Fix Y", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/3006",
+		Head: github.Branch{SHA: "deadbeef"},
+	}
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.calls != 0 {
+		t.Fatalf("sanity: executor must not run, got %d", exec.calls)
+	}
+
+	ev, ok := pub.firstOf("review_skipped")
+	if !ok {
+		t.Fatal("no review_skipped event published")
+	}
+	for _, want := range []string{
+		`"pr_title":"Fix Y"`,
+		`"peer_login":"heimdallm-bot"`,
+		`"peer_review_id":999`,
+		`"peer_state":"APPROVED"`,
+	} {
+		if !strings.Contains(ev.Data, want) {
+			t.Errorf("review_skipped event lacks %s:\n%s", want, ev.Data)
+		}
+	}
+
+	stored, err := s.GetPRByGithubID(3006)
+	if err != nil || stored == nil {
+		t.Fatalf("GetPRByGithubID: %v", err)
+	}
+	rows, err := s.ListReviewsForPR(stored.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListReviewsForPR = %d rows, %v; want 1 placeholder", len(rows), err)
+	}
+	for _, want := range []string{"heimdallm-bot", "999", "APPROVED"} {
+		if !strings.Contains(rows[0].Summary, want) {
+			t.Errorf("placeholder summary lacks %q: %q", want, rows[0].Summary)
+		}
+	}
+}

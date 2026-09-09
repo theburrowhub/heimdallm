@@ -677,3 +677,40 @@ func TestRecorder_MergeTrackHandlesAnOwnerlessRepo(t *testing.T) {
 		t.Errorf("org = %q, want the slug itself when there is no owner", got)
 	}
 }
+
+// TestRecorder_PeerPublishedSkipRecordsThePeer (#781): the activity row is
+// what the dashboard renders, so the peer attribution the pipeline now puts
+// on the event must survive into details — and only when present, so rows
+// from older daemons keep their shape.
+func TestRecorder_PeerPublishedSkipRecordsThePeer(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	events <- sse.Event{
+		Type: sse.EventReviewSkipped,
+		Data: `{"repo":"org/name","pr_number":2212,"pr_title":"fix: x","reason":"peer_published","peer_login":"sergiotejon","peer_review_id":5151568032,"peer_state":"APPROVED"}`,
+	}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.outcome != "peer_published" {
+		t.Fatalf("outcome = %q, want peer_published", got.outcome)
+	}
+	if got.details["peer_login"] != "sergiotejon" {
+		t.Errorf("details peer_login = %v, want sergiotejon", got.details["peer_login"])
+	}
+	if got.details["peer_review_id"] != int64(5151568032) {
+		t.Errorf("details peer_review_id = %v (%T), want 5151568032", got.details["peer_review_id"], got.details["peer_review_id"])
+	}
+	if got.details["peer_state"] != "APPROVED" {
+		t.Errorf("details peer_state = %v, want APPROVED", got.details["peer_state"])
+	}
+
+	events <- sse.Event{
+		Type: sse.EventReviewSkipped,
+		Data: `{"repo":"org/name","pr_number":2213,"pr_title":"fix: y","reason":"peer_published"}`,
+	}
+	waitFor(t, func() bool { return fs.count() == 2 })
+	if _, present := fs.at(1).details["peer_login"]; present {
+		t.Errorf("details must not carry an empty peer_login when the event had none: %+v", fs.at(1).details)
+	}
+}

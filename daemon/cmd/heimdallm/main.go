@@ -1805,7 +1805,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// value by this point — passed explicitly, rather than relying on that
 		// invariant silently, so this call site cannot drift from the other two
 		// if that upstream check ever changes (#772).
-		if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, rev.HeadSHA, snapshot.HeadSHA); skip {
+		if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, pr.Title, rev.HeadSHA, snapshot.HeadSHA); skip {
 			if err != nil {
 				return fmt.Errorf("retire review %d already published by a peer instance: %w", rev.ID, err)
 			}

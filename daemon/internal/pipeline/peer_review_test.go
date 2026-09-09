@@ -2,6 +2,7 @@ package pipeline_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,7 +256,7 @@ func TestSkipIfPeerPublishedRetiresTheLocalRowAgainstThePeersReview(t *testing.T
 	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
 	p.SetBotLogin("bot")
 
-	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef")
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "t", "deadbeef")
 	if err != nil {
 		t.Fatalf("SkipIfPeerPublished: %v", err)
 	}
@@ -316,7 +317,7 @@ func TestSkipIfPeerPublishedAllowsAForcedReReviewOfOurOwnCommit(t *testing.T) {
 	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
 	p.SetBotLogin("bot")
 
-	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef")
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "t", "deadbeef")
 	if err != nil {
 		t.Fatalf("SkipIfPeerPublished: %v", err)
 	}
@@ -331,7 +332,7 @@ func TestSkipIfPeerPublishedFailsOpenOnAPIError(t *testing.T) {
 	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
 	p.SetBotLogin("bot")
 
-	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef")
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "t", "deadbeef")
 	if err != nil || skip {
 		t.Errorf("SkipIfPeerPublished() = (%v, %v), want (false, nil) — a rate limit must not withhold a review", skip, err)
 	}
@@ -345,7 +346,7 @@ func TestSkipIfPeerPublishedNoOpForANonHeimdallmReview(t *testing.T) {
 	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
 	p.SetBotLogin("bot")
 
-	if skip, _ := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef"); skip {
+	if skip, _ := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "t", "deadbeef"); skip {
 		t.Error("SkipIfPeerPublished() = true for a human review, want false")
 	}
 }
@@ -361,7 +362,7 @@ func TestSkipIfPeerPublishedNoOpForANilReview(t *testing.T) {
 	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
 	p.SetBotLogin("bot")
 
-	if skip, err := p.SkipIfPeerPublished(nil, "acme/widgets", 12, "deadbeef"); skip || err != nil {
+	if skip, err := p.SkipIfPeerPublished(nil, "acme/widgets", 12, "t", "deadbeef"); skip || err != nil {
 		t.Errorf("SkipIfPeerPublished(nil) = (%v, %v), want (false, nil)", skip, err)
 	}
 }
@@ -424,7 +425,7 @@ func TestSkipIfPeerPublishedIgnoresAColleaguesInstance(t *testing.T) {
 	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
 	p.SetBotLogin("ivanmunozruiz")
 
-	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef")
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "t", "deadbeef")
 	if err != nil {
 		t.Fatalf("SkipIfPeerPublished: %v", err)
 	}
@@ -468,7 +469,7 @@ func TestSkipIfPeerPublishedFailsOpenWithoutABotLogin(t *testing.T) {
 	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
 	// No SetBotLogin on purpose.
 
-	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef")
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "t", "deadbeef")
 	if err != nil || skip {
 		t.Errorf("SkipIfPeerPublished() = (%v, %v) with no bot login, want (false, nil) — publish rather than guess", skip, err)
 	}
@@ -488,11 +489,11 @@ func TestSkipIfPeerPublishedReadsTheLoginThroughTheAccessor(t *testing.T) {
 	login := "" // unresolved at boot…
 	p.SetBotLoginFunc(func() string { return login })
 
-	if skip, _ := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef"); skip {
+	if skip, _ := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "t", "deadbeef"); skip {
 		t.Fatal("SkipIfPeerPublished() = true while the accessor still returns \"\", want false")
 	}
 	login = "bot" // …repaired later by the cache
-	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "deadbeef")
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "t", "deadbeef")
 	if err != nil {
 		t.Fatalf("SkipIfPeerPublished: %v", err)
 	}
@@ -501,6 +502,41 @@ func TestSkipIfPeerPublishedReadsTheLoginThroughTheAccessor(t *testing.T) {
 	}
 }
 
+// TestSkipIfPeerPublishedEventNamesThePeerAndThePR (#781): the skip event is
+// the operator's only view of why their review never appeared. Without the
+// peer's login, review id and state — all in hand at this point — a correct
+// skip is indistinguishable from a #772-style false positive, and the PR
+// title was missing on this path while the pre-generation path had it.
+func TestSkipIfPeerPublishedEventNamesThePeerAndThePR(t *testing.T) {
+	s, rev := storeWithPendingReview(t, "deadbeef")
+	gh := &peerGH{reviews: []github.PRReview{
+		{ID: 4242, User: github.User{Login: "bot"}, CommitID: "deadbeef", State: "CHANGES_REQUESTED", Body: heimdallmBody(t, "peer verdict")},
+	}}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, gh, &peerExec{}, &peerNotify{})
+	p.SetBotLogin("bot")
+	p.SetPublisher(pub)
+
+	skip, err := p.SkipIfPeerPublished(rev, "acme/widgets", 12, "Fix X", "deadbeef")
+	if err != nil || !skip {
+		t.Fatalf("SkipIfPeerPublished() = (%v, %v), want (true, nil)", skip, err)
+	}
+	ev, ok := pub.firstOf("review_skipped")
+	if !ok {
+		t.Fatal("no review_skipped event published")
+	}
+	for _, want := range []string{
+		`"reason":"peer_published"`,
+		`"pr_title":"Fix X"`,
+		`"peer_login":"bot"`,
+		`"peer_review_id":4242`,
+		`"peer_state":"CHANGES_REQUESTED"`,
+	} {
+		if !strings.Contains(ev.Data, want) {
+			t.Errorf("review_skipped event lacks %s:\n%s", want, ev.Data)
+		}
+	}
+}
 // Instances on builds older than #756 (≤ v0.8.14) publish a different body:
 // a "## 🤖 Heimdallm AI Review" heading and a "· Reviewed by <name>" footer
 // with no link, where <name> is a configurable reviewer label. Those reviews
