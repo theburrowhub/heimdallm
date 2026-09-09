@@ -67,7 +67,7 @@ func TestPersistPeerCoveredReview_InsertFailureIsLoggedAndSwallowed(t *testing.T
 	// line, which this test cannot capture without a slog handler — the
 	// non-panic itself, plus the read-only file actually rejecting the
 	// write (proven directly below), is what this test guards.
-	p.persistPeerCoveredReview(prID, "deadbeef", 999, "APPROVED")
+	p.persistPeerCoveredReview(prID, "deadbeef", github.PRReview{ID: 999, State: "APPROVED", User: github.User{Login: "bot"}})
 
 	if _, err := s.InsertReview(&store.Review{PRID: prID, Issues: "[]", Suggestions: "[]", CreatedAt: time.Now()}); err == nil {
 		t.Fatal("test setup broken: InsertReview succeeded on a chmod'd read-only database file")

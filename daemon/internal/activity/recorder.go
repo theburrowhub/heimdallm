@@ -308,6 +308,12 @@ func (r *Recorder) recordReviewSkipped(ev sse.Event) error {
 		PRNumber int    `json:"pr_number"`
 		PRTitle  string `json:"pr_title"`
 		Reason   string `json:"reason"`
+		// Set on peer_published only (theburrowhub/heimdallm#781): which
+		// peer review covered the commit. Kept out of details when absent
+		// so rows from daemons that predate the fields keep their shape.
+		PeerLogin    string `json:"peer_login"`
+		PeerReviewID int64  `json:"peer_review_id"`
+		PeerState    string `json:"peer_state"`
 	}
 	if err := decode(ev.Data, &p); err != nil {
 		return err
@@ -317,10 +323,18 @@ func (r *Recorder) recordReviewSkipped(ev sse.Event) error {
 		// clear, but the activity log stays free of poll-cycle noise.
 		return nil
 	}
+	details := map[string]any{"reason": p.Reason}
+	if p.PeerLogin != "" {
+		details["peer_login"] = p.PeerLogin
+	}
+	if p.PeerReviewID != 0 {
+		details["peer_review_id"] = p.PeerReviewID
+	}
+	if p.PeerState != "" {
+		details["peer_state"] = p.PeerState
+	}
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
-		p.PRNumber, p.PRTitle, "review_skipped", p.Reason, map[string]any{
-			"reason": p.Reason,
-		})
+		p.PRNumber, p.PRTitle, "review_skipped", p.Reason, details)
 	return err
 }
 

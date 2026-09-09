@@ -270,8 +270,22 @@ String _reviewOutcome(ActivityEntry entry) {
 
 String _skippedOutcome(ActivityEntry entry) {
   final reason = _detailString(entry, 'reason') ?? entry.outcome;
-  final label = _skipReasonLabel(reason);
+  final label = reason == 'peer_published'
+      ? _peerPublishedLabel(entry)
+      : _skipReasonLabel(reason);
   return label.isEmpty ? 'Skipped review' : 'Skipped because $label';
+}
+
+/// theburrowhub/heimdallm#781: name the peer when the daemon recorded it, so
+/// a correct skip reads as "sergiotejon's instance got there first" rather
+/// than as a review that silently vanished. Older rows carry no login and
+/// fall back to the generic wording.
+String _peerPublishedLabel(ActivityEntry entry) {
+  final login = _detailString(entry, 'peer_login');
+  if (login == null) return _skipReasonLabel('peer_published');
+  final state = _detailString(entry, 'peer_state');
+  final verdict = state == null ? '' : ' ($state)';
+  return "@$login's Heimdallm instance already reviewed this commit$verdict";
 }
 
 String _triageOutcome(ActivityEntry entry) {

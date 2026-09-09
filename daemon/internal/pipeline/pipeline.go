@@ -502,12 +502,22 @@ func (p *Pipeline) publish(eventType string, data map[string]any) {
 // pr_title, reason. Centralised so changes to the payload schema only
 // touch one site.
 func (p *Pipeline) publishSkipped(pr *github.PullRequest, reason SkipReason) {
-	p.publish(sse.EventReviewSkipped, map[string]any{
-		"repo":      pr.Repo,
-		"pr_number": pr.Number,
-		"pr_title":  pr.Title,
-		"reason":    string(reason),
-	})
+	p.publishSkippedWith(pr, reason, nil)
+}
+
+// publishSkippedWith is publishSkipped with reason-specific attribution
+// merged into the event (the peer's identity on peer_published, #781). The
+// fixed keys win over extra on a collision so the event shape stays stable.
+func (p *Pipeline) publishSkippedWith(pr *github.PullRequest, reason SkipReason, extra map[string]any) {
+	data := make(map[string]any, len(extra)+4)
+	for k, v := range extra {
+		data[k] = v
+	}
+	data["repo"] = pr.Repo
+	data["pr_number"] = pr.Number
+	data["pr_title"] = pr.Title
+	data["reason"] = string(reason)
+	p.publish(sse.EventReviewSkipped, data)
 }
 
 // shouldBypassSHASkipForReReview returns true iff the operator
@@ -678,11 +688,11 @@ func (p *Pipeline) reviewWasReanchoredToHead(pr *github.PullRequest, prevReview 
 // itself is still correct (a peer really did cover this commit), only the
 // convergence bookkeeping is unreliable, and the next poll's GetPRReviews
 // call will simply repeat the check rather than anything being lost.
-func (p *Pipeline) persistPeerCoveredReview(prID int64, headSHA string, peerID int64, peerState string) {
+func (p *Pipeline) persistPeerCoveredReview(prID int64, headSHA string, peer github.PRReview) {
 	now := time.Now().UTC()
 	if _, err := p.store.InsertReview(&store.Review{
 		PRID: prID, Issues: "[]", Suggestions: "[]", CreatedAt: now, HeadSHA: headSHA,
-		GitHubReviewID: peerID, GitHubReviewState: peerState, PublishedAt: now,
+		GitHubReviewID: peer.ID, GitHubReviewState: peer.State, PublishedAt: now,
 		// Marked, not left blank (PR #774 review feedback): an empty Severity
 		// renders as a blank green SeverityBadge in the Flutter dashboard
 		// (severity_badge.dart defaults anything but "high"/"medium" to
@@ -695,7 +705,8 @@ func (p *Pipeline) persistPeerCoveredReview(prID int64, headSHA string, peerID i
 		// both surfaces instead of an unexplained gap.
 		CLIUsed:  "peer",
 		Severity: "peer",
-		Summary:  "Covered by a peer Heimdallm instance's review; see " + peerState + " on GitHub.",
+		Summary: fmt.Sprintf("Covered by @%s's Heimdallm instance: review %d (%s) on GitHub.",
+			peer.User.Login, peer.ID, peer.State),
 	}); err != nil {
 		slog.Warn("pipeline: could not persist a placeholder for a peer's review, will re-check next poll",
 			"pr_id", prID, "head_sha", headSHA, "err", err)
@@ -1094,11 +1105,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// SkipIfPeerPublished, which requires one to retire.
 	if !opts.Force {
 		reviewFetcher, _ := p.gh.(PublishedReviewFetcher)
-		if peerID, peerState, found := PublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), p.ownLogin(), pr.Head.SHA); found {
+		if peer, found := LookupPublishedPeerReview(reviewFetcher, pr.Repo, pr.Number, p.ownPublishedReviewIDs(prID), p.ownLogin(), pr.Head.SHA); found {
 			slog.Info("pipeline: peer instance already published a review for this HEAD, skipping before generation",
-				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
-			p.persistPeerCoveredReview(prID, pr.Head.SHA, peerID, peerState)
-			p.publishSkipped(pr, SkipReasonPeerPublished)
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
+				"peer_github_review_id", peer.ID, "peer_state", peer.State, "peer_login", peer.User.Login)
+			p.persistPeerCoveredReview(prID, pr.Head.SHA, peer)
+			p.publishSkippedWith(pr, SkipReasonPeerPublished, peerSkipDetails(peer))
 			return nil, nil
 		}
 	}
@@ -1409,7 +1421,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// the commit actually being submitted here, and after a retarget they can
 	// differ from what a peer's review now reports.
 	if !opts.Force {
-		if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, pr.Head.SHA, rev.HeadSHA); skip {
+		if skip, err := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, pr.Title, pr.Head.SHA, rev.HeadSHA); skip {
 			return nil, err
 		}
 	}
@@ -1636,7 +1648,7 @@ func (p *Pipeline) PublishPending() {
 		} else if live.headSHA != "" {
 			anchors = append(anchors, live.headSHA)
 		}
-		if skip, skipErr := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, anchors...); skip {
+		if skip, skipErr := p.SkipIfPeerPublished(rev, pr.Repo, pr.Number, pr.Title, anchors...); skip {
 			if skipErr != nil {
 				slog.Warn("pipeline: could not retire a review a peer instance already published, will retry next tick",
 					"review_id", rev.ID, "err", skipErr)
