@@ -33,6 +33,16 @@ const (
 	// left open. A real host has a handful of interfaces.
 	maxAddrsPerHost = 16
 
+	// maxRecordNamesPerSender bounds how many distinct record names one sender
+	// can put into the accumulator.
+	//
+	// The global cap alone was first-come, and a flooder chooses when it
+	// starts: filling all 512 names early meant a real daemon replying later
+	// was never recorded at all, so the per-peer fairness cap below had
+	// nothing of the victim's left to preserve. Admission has to be fair, not
+	// just the result.
+	maxRecordNamesPerSender = 32
+
 	// maxPeersPerSender bounds how much of the result one sender can occupy.
 	// The global cap alone let a flooder crowd real daemons out of it: peers
 	// are ordered by an instance id the sender chooses, so a few hundred
@@ -41,6 +51,12 @@ const (
 )
 
 // Browser asks the network which Heimdallm daemons are on it.
+//
+// Browse returns who replied before we stopped listening, which is not the
+// same as who is out there: mDNS is lossy and the window is short. A caller
+// that treats one empty result as "they are gone" will flicker. The consumer
+// in instances.Discoverer keeps a TTL grace period for exactly that reason,
+// and this contract is why.
 //
 // One responder can legitimately appear more than once. A multi-homed host
 // answering from two addresses produces two Peers with the same advertised
@@ -209,6 +225,11 @@ type accumulator struct {
 	txt       map[recordKey][]string
 	addrs     map[recordKey][]netip.Addr
 	seenAddr  map[addrKey]bool
+
+	// seenName and namesFrom enforce the per-sender admission bound: which
+	// names a sender has had admitted, and how many.
+	seenName  map[recordKey]bool
+	namesFrom map[netip.Addr]int
 }
 
 // recordKey scopes a record name to the sender that advertised it.
@@ -230,6 +251,8 @@ func newAccumulator() *accumulator {
 		txt:       map[recordKey][]string{},
 		addrs:     map[recordKey][]netip.Addr{},
 		seenAddr:  map[addrKey]bool{},
+		seenName:  map[recordKey]bool{},
+		namesFrom: map[netip.Addr]int{},
 	}
 }
 
@@ -242,32 +265,38 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 		return // another browser's question, not an answer
 	}
 	// Extra carries the SRV/TXT/A that a well-behaved responder bundles with
-	// its PTR, so both sections have to be read.
-	for _, rr := range append(append([]dns.RR{}, msg.Answer...), msg.Extra...) {
-		// TTL 0 is a goodbye: the peer is leaving, so anything already
-		// collected for it is dropped rather than reported as present. Only
-		// this sender's own records — the key sees to that.
-		if rr.Header().Ttl == 0 {
-			a.forget(rr, source)
-			continue
-		}
-		switch rec := rr.(type) {
-		case *dns.PTR:
-			if strings.EqualFold(rec.Hdr.Name, serviceFQDN()) && !a.full() {
-				a.instances[recordKey{source, strings.ToLower(rec.Ptr)}] = true
+	// its PTR, so both sections have to be read. Ranged as two sections rather
+	// than concatenated: on a flooded group that concatenation allocated once
+	// per inbound packet to no purpose.
+	for _, section := range [2][]dns.RR{msg.Answer, msg.Extra} {
+		for _, rr := range section {
+			// TTL 0 is a goodbye: the peer is leaving, so anything already
+			// collected for it is dropped rather than reported as present. Only
+			// this sender's own records — the key sees to that.
+			if rr.Header().Ttl == 0 {
+				a.forget(rr, source)
+				continue
 			}
-		case *dns.SRV:
-			if !a.full() {
-				a.srv[recordKey{source, strings.ToLower(rec.Hdr.Name)}] = rec
+			switch rec := rr.(type) {
+			case *dns.PTR:
+				if strings.EqualFold(rec.Hdr.Name, serviceFQDN()) {
+					if key := (recordKey{source, strings.ToLower(rec.Ptr)}); a.admit(key) {
+						a.instances[key] = true
+					}
+				}
+			case *dns.SRV:
+				if key := (recordKey{source, strings.ToLower(rec.Hdr.Name)}); a.admit(key) {
+					a.srv[key] = rec
+				}
+			case *dns.TXT:
+				if key := (recordKey{source, strings.ToLower(rec.Hdr.Name)}); a.admit(key) {
+					a.txt[key] = rec.Txt
+				}
+			case *dns.A:
+				a.addAddr(rec.Hdr.Name, rec.A, source)
+			case *dns.AAAA:
+				a.addAddr(rec.Hdr.Name, rec.AAAA, source)
 			}
-		case *dns.TXT:
-			if !a.full() {
-				a.txt[recordKey{source, strings.ToLower(rec.Hdr.Name)}] = rec.Txt
-			}
-		case *dns.A:
-			a.addAddr(rec.Hdr.Name, rec.A, source)
-		case *dns.AAAA:
-			a.addAddr(rec.Hdr.Name, rec.AAAA, source)
 		}
 	}
 }
@@ -301,6 +330,22 @@ func (a *accumulator) dropAddrs(key recordKey) {
 		delete(a.seenAddr, addrKey{key, addr})
 	}
 	delete(a.addrs, key)
+}
+
+// admit reports whether this sender may add key, and records it if so.
+//
+// Both bounds apply: the global one caps total memory, the per-sender one
+// stops any single host consuming that budget before the others have spoken.
+func (a *accumulator) admit(key recordKey) bool {
+	if a.seenName[key] {
+		return true // already counted against this sender
+	}
+	if a.full() || a.namesFrom[key.source] >= maxRecordNamesPerSender {
+		return false
+	}
+	a.seenName[key] = true
+	a.namesFrom[key.source]++
+	return true
 }
 
 // full reports whether the accumulator has taken all it will hold. Records past

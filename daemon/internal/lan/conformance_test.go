@@ -630,3 +630,66 @@ func mustBrowser(t *testing.T) *Browser {
 	}
 	return browser
 }
+
+// The fairness cap at peers() was applied too late. A flooder chooses when it
+// starts, so filling the global admission budget *before* a real daemon
+// replies meant the victim was never recorded at all — and a cap on the
+// result cannot preserve something that was never admitted.
+func TestAFloodCannotExhaustAdmissionBeforeARealDaemonReplies(t *testing.T) {
+	flooder := netip.MustParseAddr("192.168.1.99")
+	victim := netip.MustParseAddr("192.168.1.20")
+
+	acc := newAccumulator()
+
+	// The flooder goes first and tries to take the whole budget.
+	for i := range maxRecordNames * 2 {
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("flood%05d", i))...), flooder)
+	}
+
+	// Only now does the real daemon answer.
+	acc.absorb(pack(t, advertisementFor("srv-a")...), victim)
+
+	found := map[string]bool{}
+	for _, p := range acc.peers(mustBrowser(t)) {
+		found[p.InstanceID] = true
+	}
+	if !found["srv-a"] {
+		t.Fatal("a daemon replying after a flood was never admitted; the " +
+			"per-sender bound is not being applied at admission")
+	}
+}
+
+// And the flooder's own share is bounded at admission, not merely trimmed
+// afterwards.
+func TestAdmissionIsBoundedPerSender(t *testing.T) {
+	flooder := netip.MustParseAddr("192.168.1.99")
+
+	acc := newAccumulator()
+	for i := range maxRecordNamesPerSender * 10 {
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("flood%05d", i))...), flooder)
+	}
+
+	if got := acc.namesFrom[flooder]; got > maxRecordNamesPerSender {
+		t.Fatalf("one sender got %d names admitted, above the %d bound",
+			got, maxRecordNamesPerSender)
+	}
+	// And the global budget is left largely intact for everyone else.
+	if len(acc.instances) > maxRecordNamesPerSender {
+		t.Fatalf("one sender occupies %d instance slots", len(acc.instances))
+	}
+}
+
+// Many honest daemons must still all fit: the per-sender bound restricts one
+// host, not the network.
+func TestManySendersEachGetTheirShare(t *testing.T) {
+	acc := newAccumulator()
+	for i := range 20 {
+		src := netip.MustParseAddr(fmt.Sprintf("192.168.1.%d", 20+i))
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("node%02d", i))...), src)
+	}
+
+	peers := acc.peers(mustBrowser(t))
+	if len(peers) != 20 {
+		t.Fatalf("got %d peers from 20 distinct senders, want all of them", len(peers))
+	}
+}
