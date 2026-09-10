@@ -115,6 +115,33 @@ func (a *Advertiser) Close() error { return a.conn.Close() }
 // do.
 const maxConsecutiveReadErrors = 10
 
+// recordTTL is the lifetime published with every record.
+const recordTTL = 120
+
+// serviceEnumerationName is the DNS-SD meta-query asking which service types
+// exist on this link (RFC 6763 §9).
+const serviceEnumerationName = "_services._dns-sd._udp." + Domain + "."
+
+// unicastResponseBit is the top bit of an mDNS question's class field, used to
+// request a unicast reply (RFC 6762 §18.12). It is a flag, not part of the
+// class, and has to be masked off before comparing.
+const unicastResponseBit = 1 << 15
+
+// cacheFlush is the same top bit in a *response*, where it means "this is the
+// authoritative set for this name — replace what you have rather than adding
+// to it" (RFC 6762 §10.2).
+//
+// It matters more here than anywhere else in the protocol. Without it a
+// resolver merges our new address in beside the old one and keeps answering
+// with both until the old record expires, which is exactly the stale-address
+// behaviour this whole feature exists to end: a daemon that moves would be
+// resolvable at the address it just left for another two minutes.
+//
+// Set on the records that are uniquely ours — SRV, TXT and the addresses — and
+// deliberately not on PTR, which is a shared record type where several hosts
+// legitimately contribute entries under one name.
+const cacheFlush = 1 << 15
+
 // Run answers queries until ctx is cancelled or the socket stops working, then
 // sends a goodbye.
 //
@@ -125,8 +152,10 @@ func (a *Advertiser) Run(ctx context.Context) error {
 		"service", Service, "instance", a.instanceName,
 		"hostname", strings.TrimSuffix(a.ad.Hostname, "."), "port", a.ad.Port)
 
-	// The goodbye rides on a deferred call with its own deadline: by the time
-	// we get here ctx is already cancelled, so reusing it would send nothing.
+	// Deferred so it runs on every exit path, including the socket failures
+	// below. It takes no context: ctx is already cancelled by the time this
+	// runs, and the write is a single unacknowledged datagram with nothing to
+	// wait for.
 	defer a.goodbye()
 
 	buf := make([]byte, 9000) // jumbo frame; mDNS responses are far smaller
@@ -174,9 +203,20 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 		return
 	}
 
+	// De-duplicated across questions: a query carrying both a PTR and an SRV
+	// question for this instance would otherwise repeat the whole record set,
+	// which is wasteful and can push the response past the MTU.
 	var answers []dns.RR
+	seen := map[string]bool{}
 	for _, q := range msg.Question {
-		answers = append(answers, a.recordsFor(q)...)
+		for _, rr := range a.recordsFor(q) {
+			key := rr.String()
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			answers = append(answers, rr)
+		}
 	}
 	if len(answers) == 0 {
 		return
@@ -190,7 +230,7 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 	reply.Answer = answers
 	reply.Authoritative = true
 
-	a.send(reply, from)
+	a.send(reply)
 }
 
 // recordsFor returns everything we hold that answers q.
@@ -200,45 +240,67 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 // enough: a browser asking only for PTR still gets the SRV, TXT and A it will
 // need next.
 func (a *Advertiser) recordsFor(q dns.Question) []dns.RR {
+	// The top bit of the class field is mDNS's unicast-response flag
+	// (RFC 6762 §18.12), not part of the class. Masking it is what stops a
+	// question with QU set being read as an unknown class and ignored; a class
+	// that is genuinely not INET is not ours to answer.
+	if q.Qclass&^unicastResponseBit != dns.ClassINET {
+		return nil
+	}
+
 	name := strings.ToLower(dns.Fqdn(q.Name))
 	service := strings.ToLower(serviceFQDN())
 	instance := strings.ToLower(a.instanceName)
 
 	switch name {
-	case service, "_services._dns-sd._udp." + Domain + ".":
-	case instance:
+	case serviceEnumerationName:
+		// The meta-query asks which service *types* exist here, so the answer
+		// is a PTR named after the meta-query itself pointing at the type
+		// (RFC 6763 §9). Replying with our own service's records instead
+		// answers a question nobody asked and leaves generic browsers unable
+		// to enumerate us at all.
+		if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeANY {
+			return nil
+		}
+		return []dns.RR{&dns.PTR{
+			Hdr: dns.RR_Header{Name: serviceEnumerationName, Rrtype: dns.TypePTR,
+				Class: dns.ClassINET, Ttl: recordTTL},
+			Ptr: serviceFQDN(),
+		}}
+	case service, instance:
+		if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeSRV &&
+			q.Qtype != dns.TypeTXT && q.Qtype != dns.TypeANY {
+			return nil
+		}
+		return a.allRecords()
 	case strings.ToLower(a.ad.Hostname):
-		// A host-only question: answer with addresses alone.
+		// A host question: addresses and nothing else. Gated on the type, or
+		// a PTR query for the hostname would be answered with A records.
+		if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA && q.Qtype != dns.TypeANY {
+			return nil
+		}
 		return a.addressRecords()
-	default:
-		return nil
 	}
-	if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeSRV &&
-		q.Qtype != dns.TypeTXT && q.Qtype != dns.TypeANY {
-		return nil
-	}
-	return a.allRecords()
+	return nil
 }
 
 func (a *Advertiser) allRecords() []dns.RR {
-	const ttl = 120
-
 	records := []dns.RR{
 		&dns.PTR{
 			Hdr: dns.RR_Header{Name: serviceFQDN(), Rrtype: dns.TypePTR,
-				Class: dns.ClassINET, Ttl: ttl},
+				Class: dns.ClassINET, Ttl: recordTTL},
 			Ptr: a.instanceName,
 		},
 		&dns.SRV{
 			Hdr: dns.RR_Header{Name: a.instanceName, Rrtype: dns.TypeSRV,
-				Class: dns.ClassINET, Ttl: ttl},
+				Class: dns.ClassINET | cacheFlush, Ttl: recordTTL},
 			Priority: 0, Weight: 0,
 			Port:   uint16(a.ad.Port),
 			Target: a.ad.Hostname,
 		},
 		&dns.TXT{
 			Hdr: dns.RR_Header{Name: a.instanceName, Rrtype: dns.TypeTXT,
-				Class: dns.ClassINET, Ttl: ttl},
+				Class: dns.ClassINET | cacheFlush, Ttl: recordTTL},
 			Txt: a.txt,
 		},
 	}
@@ -246,7 +308,6 @@ func (a *Advertiser) allRecords() []dns.RR {
 }
 
 func (a *Advertiser) addressRecords() []dns.RR {
-	const ttl = 120
 	if a.ad.Addrs == nil {
 		return nil
 	}
@@ -255,14 +316,14 @@ func (a *Advertiser) addressRecords() []dns.RR {
 		if addr.Is4() {
 			out = append(out, &dns.A{
 				Hdr: dns.RR_Header{Name: a.ad.Hostname, Rrtype: dns.TypeA,
-					Class: dns.ClassINET, Ttl: ttl},
+					Class: dns.ClassINET | cacheFlush, Ttl: recordTTL},
 				A: net.IP(addr.AsSlice()),
 			})
 			continue
 		}
 		out = append(out, &dns.AAAA{
 			Hdr: dns.RR_Header{Name: a.ad.Hostname, Rrtype: dns.TypeAAAA,
-				Class: dns.ClassINET, Ttl: ttl},
+				Class: dns.ClassINET | cacheFlush, Ttl: recordTTL},
 			AAAA: net.IP(addr.AsSlice()),
 		})
 	}
@@ -279,10 +340,10 @@ func (a *Advertiser) goodbye() {
 	for _, rr := range msg.Answer {
 		rr.Header().Ttl = 0
 	}
-	a.send(msg, GroupAddr())
+	a.send(msg)
 }
 
-func (a *Advertiser) send(msg *dns.Msg, to net.Addr) {
+func (a *Advertiser) send(msg *dns.Msg) {
 	packed, err := msg.Pack()
 	if err != nil {
 		a.log.Debug("lan: packing a response failed", "err", err)
@@ -290,33 +351,59 @@ func (a *Advertiser) send(msg *dns.Msg, to net.Addr) {
 	}
 	// Always to the group. A unicast reply would reach only the asker, and mDNS
 	// peers legitimately learn from responses to questions they did not ask.
-	if _, err := a.conn.WriteTo(packed, responseTarget(to)); err != nil {
+	if _, err := a.conn.WriteTo(packed, GroupAddr()); err != nil {
 		a.log.Debug("lan: sending a response failed", "err", err)
 	}
-}
-
-// responseTarget keeps in-memory transports working: they route by pair, not by
-// address, so handing them the real multicast group would be meaningless.
-func responseTarget(from net.Addr) net.Addr {
-	if _, ok := from.(memAddr); ok {
-		return from
-	}
-	return GroupAddr()
 }
 
 // defaultHostname is this machine's mDNS name. Falls back to a generic label
 // rather than failing: an advertisement with a wrong-but-present hostname is
 // still useful for the addresses it carries.
 func defaultHostname() string {
+	const fallback = "heimdallm." + Domain + "."
+
 	host, err := osHostname()
-	if err != nil || strings.TrimSpace(host) == "" {
-		return "heimdallm." + Domain + "."
+	if err != nil {
+		return fallback
 	}
 	// A machine configured with an FQDN ("mac.corp.example.com") still answers
 	// mDNS as its short name under .local.
+	host = strings.ToLower(strings.TrimSpace(host))
 	host = strings.TrimSuffix(host, "."+Domain)
 	if i := strings.Index(host, "."); i > 0 {
 		host = host[:i]
 	}
-	return fmt.Sprintf("%s.%s.", host, Domain)
+	// Sanitised into a legal label, and the fallback used when nothing legal
+	// survives. An over-long or exotic hostname otherwise produces a name that
+	// msg.Pack refuses, and packing failures are only logged at Debug — so the
+	// advertiser would answer nothing at all, for the life of the process,
+	// with no visible reason.
+	host = sanitizeLabel(host)
+	if host == "" {
+		return fallback
+	}
+	return host + "." + Domain + "."
+}
+
+// sanitizeLabel reduces s to a legal DNS label, or "" when nothing usable is
+// left. Legal here is the hostname rule: letters, digits and inner hyphens, at
+// most 63 characters.
+func sanitizeLabel(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= 63 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteByte('-')
+		}
+	}
+	label := strings.Trim(b.String(), "-")
+	if !isDNSLabel(label) {
+		return ""
+	}
+	return label
 }
