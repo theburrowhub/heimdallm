@@ -64,3 +64,88 @@ func TestRegisterInstanceRejectsAnUnverifiablePin(t *testing.T) {
 			rec.Code, strings.TrimSpace(rec.Body.String()))
 	}
 }
+
+// The attack the address_changed banner opened, and the reason PATCH now
+// verifies the way POST does.
+//
+// The banner is raised from an unauthenticated /health, which anything on the
+// link can forge. A rogue daemon that advertises over mDNS and answers with a
+// registered instance's id is classified as that instance having moved, and
+// the GUI renders a one-click repair of an urgent-looking failure. If the
+// click were accepted unverified, the hub would then send that instance's API
+// token, its dispatched work, and every config push to the attacker.
+func TestRepointingAnInstanceRequiresItToProveItsIdentity(t *testing.T) {
+	// An impostor: claims the right id on /health, but does not hold the
+	// instance's token, so every authenticated call fails.
+	impostor := newFakeInstance(t, "srv-a", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_, _ = w.Write([]byte(`{"status":"ok","instance_id":"srv-a",` +
+				`"instance_name":"srv-a","role":"worker"}`))
+			return
+		}
+		// It has no idea what the real token is.
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	})
+
+	real := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": real}, config.RoutingConfig{})
+
+	rec := f.do(t, http.MethodPatch, "/instances/srv-a",
+		fmt.Sprintf(`{"base_url":%q}`, impostor.URL))
+
+	if rec.Code == http.StatusOK {
+		t.Fatal("the hub re-pointed a registered instance at a host that only " +
+			"claimed its id; the token would now go to the attacker")
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("PATCH = %d (%s), want 502",
+			rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "token") {
+		t.Errorf("the refusal should say the token was not accepted, got %s", body)
+	}
+}
+
+// A host that does not even claim the right id is refused earlier, and the
+// message says which id it found — an operator has to be able to tell a stale
+// proposal from an impostor.
+func TestRepointingRefusesADifferentDaemon(t *testing.T) {
+	other := newFakeInstance(t, "srv-b", nil)
+	real := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": real}, config.RoutingConfig{})
+
+	rec := f.do(t, http.MethodPatch, "/instances/srv-a",
+		fmt.Sprintf(`{"base_url":%q}`, other.URL))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("PATCH = %d (%s), want 502", rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "srv-b") {
+		t.Errorf("the refusal should name the id it actually found, got %s", body)
+	}
+}
+
+// Changing anything other than the address does not probe: renaming an
+// instance that happens to be down must keep working.
+func TestPatchingSomethingElseDoesNotProbe(t *testing.T) {
+	real := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": real}, config.RoutingConfig{})
+
+	if rec := f.do(t, http.MethodPatch, "/instances/srv-a", `{"name":"Renamed"}`); rec.Code != http.StatusOK {
+		t.Fatalf("rename = %d (%s), want 200", rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+}
+
+// And an operator moving a machine that is currently off can still say so.
+func TestRepointingCanBeForced(t *testing.T) {
+	real := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": real}, config.RoutingConfig{})
+
+	rec := f.do(t, http.MethodPatch, "/instances/srv-a",
+		`{"base_url":"http://srv-a-moved.local:7842","skip_probe":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forced re-point = %d (%s), want 200",
+			rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+}

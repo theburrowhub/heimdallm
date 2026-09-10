@@ -386,6 +386,11 @@ type patchInstanceRequest struct {
 	TokenFile *string   `json:"token_file"`
 	Enabled   *bool     `json:"enabled"`
 	Labels    *[]string `json:"labels"`
+
+	// SkipProbe re-points an instance without verifying the new address
+	// first. Needed when moving a machine that is currently off; the default
+	// verifies, and the GUI never sends it.
+	SkipProbe bool `json:"skip_probe"`
 }
 
 func (srv *Server) handlePatchInstance(w http.ResponseWriter, r *http.Request) {
@@ -395,7 +400,8 @@ func (srv *Server) handlePatchInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	if _, exists := snap.Registry.Get(id); !exists {
+	current, exists := snap.Registry.Get(id)
+	if !exists {
 		httpJSONErr(w, http.StatusNotFound, fmt.Sprintf("unknown instance %q", id))
 		return
 	}
@@ -413,6 +419,28 @@ func (srv *Server) handlePatchInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.BaseURL = &trimmed
+	}
+
+	// Re-pointing a registered instance is verified the way registering one
+	// is, and for the same reason with more at stake.
+	//
+	// The address_changed banner that drives this from the GUI is raised from
+	// an unauthenticated /health, which anything on the link can forge: a
+	// rogue daemon advertising a registered instance's id is classified as
+	// that instance having moved, and rendered as a one-click repair of an
+	// urgent-looking failure. Accepting the click unverified would hand the
+	// attacker that instance's API token, its dispatched work, and every
+	// config push the hub makes.
+	//
+	// So the new address has to prove it is that instance using the token we
+	// already hold, which is the part an impostor cannot fake. /health alone
+	// would not do: it is unauthenticated, so it only proves somebody is
+	// willing to claim the id.
+	if req.BaseURL != nil && !req.SkipProbe && *req.BaseURL != current.BaseURL {
+		if err := srv.verifyInstanceMoved(r.Context(), current, *req.BaseURL); err != nil {
+			httpJSONErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
 	}
 
 	result, err := srv.patchClusterTOML(func(cluster map[string]any) error {
@@ -454,6 +482,38 @@ func (srv *Server) handlePatchInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// verifyInstanceMoved checks that whatever now answers at newURL really is the
+// instance we already know, by making it authenticate with that instance's
+// token.
+func (srv *Server) verifyInstanceMoved(ctx context.Context, current instances.Instance, newURL string) error {
+	if current.Token == "" {
+		return fmt.Errorf("cannot verify %s at %s: no usable token for this "+
+			"instance; re-point it with skip_probe if you are sure", current.ID, newURL)
+	}
+	probe := instances.Instance{
+		ID: current.ID, Name: current.Name, BaseURL: newURL,
+		Token: current.Token, Enabled: true,
+	}
+	client := srv.clusterDeps().clientFor(probe)
+
+	health, err := client.Health(ctx)
+	if err != nil {
+		return fmt.Errorf("could not reach %s at %s: %v", current.ID, newURL, err)
+	}
+	if health.InstanceID != current.ID {
+		return fmt.Errorf("%s identifies itself as %q, not %q; refusing to "+
+			"re-point a registered instance at a different daemon",
+			newURL, health.InstanceID, current.ID)
+	}
+	// The part an impostor cannot pass: /config requires the token, so a host
+	// that merely claims the id on the unauthenticated /health is refused.
+	if _, err := client.GetConfig(ctx); err != nil {
+		return fmt.Errorf("%s claims to be %s but did not accept that "+
+			"instance's token: %v", newURL, current.ID, err)
+	}
+	return nil
 }
 
 func (srv *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
