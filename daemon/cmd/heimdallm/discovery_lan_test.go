@@ -836,32 +836,59 @@ func TestTheAppBundleIsExemptFromTheMacOSWarning(t *testing.T) {
 	}
 }
 
-// Emitted at most once, and only on darwin.
+// The decision, asserted exhaustively and on any platform. Gating on
+// runtime.GOOS inside the once-block put these branches out of reach of the
+// Linux runner, where they could only be skipped.
+func TestShouldWarnAboutMacOSPermission(t *testing.T) {
+	tests := []struct {
+		name    string
+		goos    string
+		bundled bool
+		want    bool
+	}{
+		// The measured case: a bare binary on macOS receives nothing and says
+		// nothing.
+		{"bare binary on darwin", "darwin", false, true},
+		// The installer's shape: registered, prompts, holds the permission.
+		// Warning here would be noise on every normal install.
+		{"inside the signed bundle", "darwin", true, false},
+		{"linux, bare", "linux", false, false},
+		{"linux, bundled somehow", "linux", true, false},
+		{"windows", "windows", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldWarnAboutMacOSPermission(tt.goos, tt.bundled); got != tt.want {
+				t.Fatalf("shouldWarnAboutMacOSPermission(%q, %v) = %v, want %v",
+					tt.goos, tt.bundled, got, tt.want)
+			}
+		})
+	}
+}
+
+// And the line itself is emitted at most once, whatever the platform decides.
 func TestMacOSWarningIsEmittedAtMostOnce(t *testing.T) {
 	var buf bytes.Buffer
 	realLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(realLogger) })
-
-	realOnce := macOSWarnOnce
+	realBundle, realOnce := fromAppBundle, macOSWarnOnce
+	fromAppBundle = func() bool { return false }
 	macOSWarnOnce = new(sync.Once)
-	t.Cleanup(func() { macOSWarnOnce = realOnce })
+	t.Cleanup(func() {
+		slog.SetDefault(realLogger)
+		fromAppBundle, macOSWarnOnce = realBundle, realOnce
+	})
 
 	warnIfDiscoveryNeedsMacOSPermission()
 	warnIfDiscoveryNeedsMacOSPermission()
 	warnIfDiscoveryNeedsMacOSPermission()
 
-	n := strings.Count(buf.String(), "Local Network")
-	if runtime.GOOS == "darwin" && !runningFromAppBundle() {
-		if n != 1 {
-			t.Fatalf("warned %d times on darwin, want exactly 1", n)
-		}
-		return
+	want := 0
+	if runtime.GOOS == "darwin" {
+		want = 1
 	}
-	// Everywhere else — including CI, which is Linux for this package — the
-	// line must not appear at all.
-	if n != 0 {
-		t.Fatalf("warned %d times off darwin, want none", n)
+	if got := strings.Count(buf.String(), "Local Network"); got != want {
+		t.Fatalf("warned %d times on %s, want %d", got, runtime.GOOS, want)
 	}
 }
 

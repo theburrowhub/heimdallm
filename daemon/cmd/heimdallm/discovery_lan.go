@@ -497,7 +497,7 @@ var macOSWarnOnce = new(sync.Once)
 // reception works. A static hedge beats a detector that lies.
 func warnIfDiscoveryNeedsMacOSPermission() {
 	macOSWarnOnce.Do(func() {
-		if runtime.GOOS != "darwin" || runningFromAppBundle() {
+		if !shouldWarnAboutMacOSPermission(runtime.GOOS, fromAppBundle()) {
 			return
 		}
 		slog.Warn(macOSDiscoveryWarning)
@@ -510,6 +510,22 @@ const macOSDiscoveryWarning = "cluster: mDNS discovery is on and this daemon " +
 	"nothing at all while reporting no error. If no peers are found, check " +
 	"System Settings › Privacy & Security › Local Network, or run the " +
 	"packaged app. See section 18.8."
+
+// shouldWarnAboutMacOSPermission is the decision, separated from the logging
+// so it can be asserted on any platform.
+//
+// The alternative was gating on runtime.GOOS inside the once-block, which made
+// the interesting branches unreachable from the Linux runner these tests
+// actually run on — the exemption could only ever be skipped, never checked.
+func shouldWarnAboutMacOSPermission(goos string, bundled bool) bool {
+	return goos == "darwin" && !bundled
+}
+
+// fromAppBundle is a variable for the same reason inContainer is: the
+// exemption branch is otherwise only reachable on darwin, through whatever
+// os.Executable happens to return, so it could not be asserted on the Linux
+// runner where these tests actually run. Nothing reassigns it at runtime.
+var fromAppBundle = runningFromAppBundle
 
 // runningFromAppBundle reports whether this executable lives inside a .app,
 // which is how the installer deploys it and the shape that holds the
