@@ -1739,6 +1739,13 @@ The advertised port is the one the listener actually bound, not
 it, so a live port edit takes effect on restart and discovery keeps telling the
 truth in the meantime.
 
+A peer stays in the list for a few minutes after it was last heard from. mDNS
+is lossy and one browse is a two-second window, so a peer missing from a single
+scan is far more likely to be a dropped packet than a daemon that left — and
+dropping it immediately made instances flicker in and out of the list. The
+trade is that a daemon which shuts down cleanly lingers until its entry
+expires.
+
 A daemon with discovery on advertises itself as `_heimdallm._tcp.local`,
 carrying its instance id, name, role and version. A **hub** with discovery on
 also browses, and lists what it finds under *"found on this network, not
@@ -1791,6 +1798,20 @@ which is true of DNS as well, and is the accepted trade for addressing an
 instance by name rather than by a pinned IP. What the checks above bound is the
 *unauthenticated* part: what discovery will propose, and what it will connect to
 before an operator has decided anything.
+
+**macOS needs Local Network permission, and denies it silently.** On recent
+macOS the system gates multicast and local-subnet traffic per application. The
+signed `Heimdallm.app` the installer deploys is registered for it and prompts
+the first time, so a normal install is fine — but a daemon started as a bare
+binary, which is what `make dev-daemon` does, is not registered at all. It
+cannot be granted the permission from System Settings because it never appears
+in the list, and the failure has no symptom: the socket binds, every read times
+out, and nothing is logged. Discovery simply never finds anything.
+
+If you are running the daemon directly and see an empty list where you expect
+peers, check `dns-sd -B _heimdallm._tcp` in a terminal that does have the
+permission. If that shows the peers and the daemon does not, this is why. Run
+the packaged app, or run the daemon with `sudo` for a one-off test.
 
 **Anything past the subnet.** mDNS is link-local by definition. It will not find
 a machine in another VLAN, another office or a cloud VPC. Discovery is a

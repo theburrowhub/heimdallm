@@ -776,3 +776,108 @@ func TestDiscovererRunReturnsWhenTheBrowserFails(t *testing.T) {
 		t.Fatal("Run did not surface the browse failure")
 	}
 }
+
+// A browse is one short window on a lossy protocol, so a peer missing from it
+// usually means a dropped packet rather than a daemon that left. Replacing the
+// cache made those indistinguishable and the list blanked — seen for real on
+// two machines, invisible to a fake browser that always answers the same.
+func TestAPeerSurvivesABrowseThatMissedIt(t *testing.T) {
+	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
+	browser := &fakeBrowser{peers: []lan.Peer{peer}}
+	d := NewDiscoverer(registryWith(t, nil), browser, time.Minute, loopbackFactory())
+
+	if got := d.Scan(context.Background()); len(got) != 1 {
+		t.Fatalf("first scan found %d, want 1", len(got))
+	}
+
+	// The next window hears nothing at all.
+	browser.mu.Lock()
+	browser.peers = nil
+	browser.mu.Unlock()
+
+	if got := d.Scan(context.Background()); len(got) != 1 {
+		t.Fatalf("a lossy browse emptied the list: got %d, want the peer kept", len(got))
+	}
+}
+
+// The grace period is bounded: a daemon that really went away stops being
+// offered rather than lingering for good.
+func TestAPeerIsEvictedOnceItsGracePeriodExpires(t *testing.T) {
+	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
+	browser := &fakeBrowser{peers: []lan.Peer{peer}}
+	d := NewDiscoverer(registryWith(t, nil), browser, time.Minute, loopbackFactory())
+
+	// A clock we control: the eviction is about elapsed time, not wall time.
+	now := time.Now()
+	d.mu.Lock()
+	d.now = func() time.Time { return now }
+	d.mu.Unlock()
+
+	if got := d.Scan(context.Background()); len(got) != 1 {
+		t.Fatalf("first scan found %d, want 1", len(got))
+	}
+
+	browser.mu.Lock()
+	browser.peers = nil
+	browser.mu.Unlock()
+
+	// Still inside the grace period.
+	now = now.Add(discoveryPeerTTL - time.Second)
+	if got := d.Scan(context.Background()); len(got) != 1 {
+		t.Fatalf("evicted early: got %d inside the grace period", len(got))
+	}
+
+	// Past it.
+	now = now.Add(2 * time.Second)
+	if got := d.Scan(context.Background()); len(got) != 0 {
+		t.Fatalf("a peer gone for longer than the grace period is still offered: %+v", got)
+	}
+}
+
+// A peer heard again replaces its previous entry: its address or status may
+// have changed, and the fresh reading is the accurate one.
+func TestAFreshReadingReplacesTheCachedOne(t *testing.T) {
+	srv, peer := daemonAt(t, "srv-a", "Server A", "worker")
+	browser := &fakeBrowser{peers: []lan.Peer{peer}}
+
+	d := NewDiscoverer(registryWith(t, nil), browser, time.Minute, loopbackFactory())
+	if got := d.Scan(context.Background()); len(got) != 1 || got[0].Status != StatusNew {
+		t.Fatalf("first scan = %+v, want one new peer", got)
+	}
+
+	// It gets registered between browses.
+	d.Update(registryWith(t, map[string]string{"srv-a": srvLocalURL(srv, "srv-a")}),
+		time.Minute)
+
+	got := d.Scan(context.Background())
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(got))
+	}
+	if got[0].Status != StatusRegistered {
+		t.Fatalf("status = %q, want %q: the cached entry went stale",
+			got[0].Status, StatusRegistered)
+	}
+}
+
+// The view is ordered, so the API and the UI do not reshuffle between polls.
+func TestCandidatesComeBackInAStableOrder(t *testing.T) {
+	var peers []lan.Peer
+	for _, id := range []string{"zulu", "alpha", "mike"} {
+		_, p := daemonAt(t, id, id, "worker")
+		peers = append(peers, p)
+	}
+	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: peers},
+		time.Minute, loopbackFactory())
+
+	for range 3 {
+		got := d.Scan(context.Background())
+		if len(got) != 3 {
+			t.Fatalf("got %d candidates, want 3", len(got))
+		}
+		for i, want := range []string{"alpha", "mike", "zulu"} {
+			if got[i].InstanceID != want {
+				t.Fatalf("candidates[%d] = %q, want %q", i, got[i].InstanceID, want)
+			}
+		}
+	}
+}

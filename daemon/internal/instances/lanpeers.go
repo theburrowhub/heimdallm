@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,23 @@ const DefaultDiscoveryInterval = 60 * time.Second
 // concept of a complete response — only of who replied before we stopped
 // listening — so this trades latency for the chance of hearing a slow peer.
 const discoveryBrowseWindow = 2 * time.Second
+
+// discoveryPeerTTL is how long a peer stays in the view after it was last
+// heard from.
+//
+// A browse is one 2-second listening window on a lossy protocol, so a peer
+// missing from it usually means a dropped packet, not a daemon that left.
+// Replacing the cache with each browse's result made that indistinguishable:
+// on a real network the list would blank and refill, and an instance would
+// flicker in and out of the UI. This was found by running the feature on two
+// machines; no in-memory test could show it, because a fake browser answers
+// with the same peers every time.
+//
+// The cost of the grace period is the opposite case: a daemon that shuts down
+// cleanly lingers until its entry expires. That is the better trade — packet
+// loss is constant and shutdown is occasional — and the window is bounded so a
+// departed peer does not linger indefinitely.
+const discoveryPeerTTL = 3 * DefaultDiscoveryInterval
 
 // discoveryVerifyTimeout bounds one peer's /health check.
 //
@@ -340,11 +358,42 @@ func (d *Discoverer) scan(ctx context.Context) error {
 		found = append(found, candidate)
 	}
 
-	d.mu.Lock()
-	d.candidates = found
-	d.lastScan = d.now()
-	d.mu.Unlock()
+	d.merge(found)
 	return nil
+}
+
+// merge folds this browse's result into the cached view rather than replacing
+// it, and evicts whatever has not been heard from within discoveryPeerTTL.
+//
+// Replacing was the bug: one lossy browse emptied the list.
+func (d *Discoverer) merge(found []Candidate) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	now := d.now()
+	byID := make(map[string]Candidate, len(d.candidates)+len(found))
+	for _, c := range d.candidates {
+		byID[c.InstanceID] = c
+	}
+	// A peer heard now replaces its previous entry wholesale: its address or
+	// status may have changed, and the fresh reading is the accurate one.
+	for _, c := range found {
+		byID[c.InstanceID] = c
+	}
+
+	kept := make([]Candidate, 0, len(byID))
+	for _, c := range byID {
+		if now.Sub(c.SeenAt) > discoveryPeerTTL {
+			continue
+		}
+		kept = append(kept, c)
+	}
+	// Sorted so the API and the UI see a stable order rather than whatever Go
+	// map iteration produced this time.
+	sort.Slice(kept, func(i, j int) bool { return kept[i].InstanceID < kept[j].InstanceID })
+
+	d.candidates = kept
+	d.lastScan = now
 }
 
 // verify asks the peer to identify itself over HTTP.
