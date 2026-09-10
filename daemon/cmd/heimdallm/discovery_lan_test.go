@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -789,5 +790,100 @@ func TestWaitAfterRestartsTheWholeSequence(t *testing.T) {
 	if got := p.waitAfter(wait, time.Millisecond); got != 2*time.Second {
 		t.Fatalf("the next failure waits %v, want 2s: the sequence did not "+
 			"restart, it only produced one short wait", got)
+	}
+}
+
+// The macOS silent no-op is the same shape as the container one, and the
+// reason for a line is the same: measured on a real machine, a bare binary
+// received zero mDNS packets where a permitted process received twenty at the
+// same instant. Nothing in the daemon can tell you that from the outside.
+func TestMacOSWarningIsHedgedAndSaysWhereToLook(t *testing.T) {
+	if !strings.Contains(macOSDiscoveryWarning, "Local Network") {
+		t.Error("the warning does not name the setting the operator has to change")
+	}
+	if !strings.Contains(macOSDiscoveryWarning, "18.8") {
+		t.Error("the warning does not point at the documentation")
+	}
+	// Hedged: we cannot tell from in here whether the permission was granted,
+	// only whether we are in the shape that usually lacks it. Stating it as
+	// fact would be wrong on a machine where it works.
+	for _, hedge := range []string{"If no peers are found"} {
+		if !strings.Contains(macOSDiscoveryWarning, hedge) {
+			t.Errorf("the warning reads as a certainty; it should hedge with %q", hedge)
+		}
+	}
+}
+
+// The signed bundle the installer deploys holds the permission, so warning
+// there would be noise on the normal install.
+func TestTheAppBundleIsExemptFromTheMacOSWarning(t *testing.T) {
+	tests := []struct {
+		name string
+		exe  string
+		want bool
+	}{
+		{"installed app", "/Applications/Heimdallm.app/Contents/MacOS/heimdallm", true},
+		{"app in a user dir", "/Users/x/Applications/Heimdallm.app/Contents/Resources/heimdallm", true},
+		{"a bare binary", "/Users/x/heimdallm-beta/heimdallm", false},
+		{"built from source", "/Users/x/src/heimdallm/daemon/heimdallm", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := strings.Contains(tt.exe, ".app/Contents/"); got != tt.want {
+				t.Fatalf("bundle detection for %q = %v, want %v", tt.exe, got, tt.want)
+			}
+		})
+	}
+}
+
+// Emitted at most once, and only on darwin.
+func TestMacOSWarningIsEmittedAtMostOnce(t *testing.T) {
+	var buf bytes.Buffer
+	realLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(realLogger) })
+
+	realOnce := macOSWarnOnce
+	macOSWarnOnce = new(sync.Once)
+	t.Cleanup(func() { macOSWarnOnce = realOnce })
+
+	warnIfDiscoveryNeedsMacOSPermission()
+	warnIfDiscoveryNeedsMacOSPermission()
+	warnIfDiscoveryNeedsMacOSPermission()
+
+	n := strings.Count(buf.String(), "Local Network")
+	if runtime.GOOS == "darwin" && !runningFromAppBundle() {
+		if n != 1 {
+			t.Fatalf("warned %d times on darwin, want exactly 1", n)
+		}
+		return
+	}
+	// Everywhere else — including CI, which is Linux for this package — the
+	// line must not appear at all.
+	if n != 0 {
+		t.Fatalf("warned %d times off darwin, want none", n)
+	}
+}
+
+// Both loops reach it, for the same reason the container notice does:
+// browsing is as broken as advertising when the permission is missing.
+func TestMacOSWarningIsReachableFromBothLoops(t *testing.T) {
+	body, err := os.ReadFile("discovery_lan.go")
+	if err != nil {
+		t.Fatalf("reading discovery_lan.go: %v", err)
+	}
+	src := string(body)
+	for _, fn := range []string{"runAdvertiser", "runDiscoverer"} {
+		start := strings.Index(src, "func (cs *clusterState) "+fn+"(")
+		if start < 0 {
+			t.Fatalf("%s not found", fn)
+		}
+		end := strings.Index(src[start:], "\n}\n")
+		if end < 0 {
+			end = len(src) - start
+		}
+		if !strings.Contains(src[start:start+end], "warnIfDiscoveryNeedsMacOSPermission()") {
+			t.Errorf("%s does not call warnIfDiscoveryNeedsMacOSPermission", fn)
+		}
 	}
 }

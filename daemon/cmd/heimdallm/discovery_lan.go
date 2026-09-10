@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -143,6 +144,7 @@ func (cs *clusterState) runAdvertiser(ctx context.Context, policy retryPolicy) {
 	// to advertise for some other reason still needs to be told why nothing is
 	// happening.
 	warnIfDiscoveryIsContainerised()
+	warnIfDiscoveryNeedsMacOSPermission()
 
 	// Nothing is advertised until we know where the server actually answers.
 	// Publishing a guess would be worse than publishing nothing: a hub only
@@ -242,6 +244,7 @@ func (cs *clusterState) runDiscoverer(ctx context.Context, policy retryPolicy) {
 		return
 	}
 	warnIfDiscoveryIsContainerised()
+	warnIfDiscoveryNeedsMacOSPermission()
 
 	runWithMulticast(ctx, policy, "browse", func(conn lan.PacketConn) error {
 		browser, err := lan.NewBrowser(conn, slog.Default())
@@ -469,6 +472,55 @@ const containerDiscoveryWarning = "cluster: mDNS discovery is on inside a " +
 	"container uses host networking this daemon will neither see peers nor be " +
 	"seen. Set HEIMDALLM_CLUSTER_DISCOVERY=off to silence this, or address " +
 	"instances by hostname or a DHCP reservation instead."
+
+// macOSWarnOnce keeps the macOS notice to one line per process, like the
+// container one.
+var macOSWarnOnce = new(sync.Once)
+
+// warnIfDiscoveryNeedsMacOSPermission says so once when discovery is on and
+// this daemon is not running from the signed app bundle.
+//
+// Same failure as the container case, and the same reason for a line: recent
+// macOS gates multicast per application, and a daemon that has not been
+// granted it binds fine, reads nothing, and reports no error. Measured on a
+// real machine — a bare binary received zero mDNS packets where a permitted
+// process received twenty at the same instant, and worked as root.
+//
+// Hedged rather than asserted, because we cannot tell from in here whether the
+// permission was granted; only whether we are in the shape that usually lacks
+// it. The signed bundle the installer deploys is registered and prompts, so it
+// is exempt — warning there would be noise on the normal install.
+//
+// A runtime check was considered and rejected: sending to the group and
+// waiting for our own packet looks like a clean probe, but macOS never loops
+// multicast back to the sending socket, so it reports "blocked" even when
+// reception works. A static hedge beats a detector that lies.
+func warnIfDiscoveryNeedsMacOSPermission() {
+	macOSWarnOnce.Do(func() {
+		if runtime.GOOS != "darwin" || runningFromAppBundle() {
+			return
+		}
+		slog.Warn(macOSDiscoveryWarning)
+	})
+}
+
+const macOSDiscoveryWarning = "cluster: mDNS discovery is on and this daemon " +
+	"is not running from the Heimdallm app bundle; recent macOS grants " +
+	"multicast access per application, and a daemon without it receives " +
+	"nothing at all while reporting no error. If no peers are found, check " +
+	"System Settings › Privacy & Security › Local Network, or run the " +
+	"packaged app. See section 18.8."
+
+// runningFromAppBundle reports whether this executable lives inside a .app,
+// which is how the installer deploys it and the shape that holds the
+// permission.
+func runningFromAppBundle() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false // cannot tell; warning is the safer side
+	}
+	return strings.Contains(exe, ".app/Contents/")
+}
 
 // runningInContainer is a best-effort guess, used only to decide whether to
 // print a warning. A false positive costs one log line.
