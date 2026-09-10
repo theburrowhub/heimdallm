@@ -16,6 +16,17 @@ import (
 )
 
 // quietLogger keeps the transport's debug chatter out of test output.
+// unpacedAdvertiser removes the response pacing for tests that are not about
+// it: the rate limit would otherwise swallow the second query of any test that
+// browses twice, and the jitter would slow every one of them.
+func unpaced(t *testing.T) {
+	t.Helper()
+	realInterval, realDelay := minResponseInterval, responseDelay
+	minResponseInterval = 0
+	responseDelay = func() time.Duration { return 0 }
+	t.Cleanup(func() { minResponseInterval, responseDelay = realInterval, realDelay })
+}
+
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -24,6 +35,7 @@ func quietLogger() *slog.Logger {
 // returns the browser's end.
 func startAdvertiser(t *testing.T, ad Advertisement) PacketConn {
 	t.Helper()
+	unpaced(t)
 	adConn, browseConn := NewMemConn()
 
 	adv, err := NewAdvertiser(adConn, ad, quietLogger())

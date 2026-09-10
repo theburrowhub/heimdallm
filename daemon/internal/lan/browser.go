@@ -352,9 +352,17 @@ func (a *accumulator) admit(key recordKey) bool {
 // this are dropped rather than growing the maps, so a flooded window costs a
 // bounded amount of memory and the peers heard first still get reported.
 func (a *accumulator) full() bool {
+	// The enforcement state counts against the same budget as the data it
+	// guards. It is never refunded on retraction — deliberately, so a sender
+	// cannot cycle advertise/goodbye to buy unlimited admissions — which means
+	// it can only grow, and with UDP source addresses trivially spoofed on a
+	// link, each fabricated source would otherwise buy another quota entry
+	// that nothing ever bounds.
 	return len(a.instances) >= maxRecordNames ||
 		len(a.srv) >= maxRecordNames ||
-		len(a.txt) >= maxRecordNames
+		len(a.txt) >= maxRecordNames ||
+		len(a.seenName) >= maxRecordNames ||
+		len(a.namesFrom) >= maxRecordNames
 }
 
 func (a *accumulator) addAddr(host string, ip net.IP, source netip.Addr) {
