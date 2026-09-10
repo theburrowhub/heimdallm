@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/github"
@@ -1746,6 +1748,41 @@ func (p *Pipeline) PublishPending() {
 // heimdallmURL is the project page linked from every review footer.
 const heimdallmURL = "https://theburrowhub.github.io/heimdallm/"
 
+// daemonVersion is the build stamp the review footer reports, wired from
+// main.version via SetDaemonVersion at startup. It lives at package scope,
+// not on Pipeline, because BuildGitHubBody is also called from outside the
+// pipeline — the NATS publish worker in cmd/heimdallm/main.go — and package
+// scope keeps that call site in sync without threading the version through
+// every signature. atomic.Value rather than a bare string so the tests that
+// override it cannot race with a concurrent review under `go test -race`.
+var daemonVersion atomic.Value // string
+
+// SetDaemonVersion records the running build's version for the review
+// footer. Call once at startup with main.version's value (see
+// pipeline.SetBotLogin for the same wiring pattern). An empty or unset value
+// leaves the footer without a version suffix rather than guessing.
+func SetDaemonVersion(v string) { daemonVersion.Store(v) }
+
+// versionSuffix renders the footer's trailing "(v0.8.22)" or "(dev)" segment,
+// or "" when no version was ever wired (SetDaemonVersion not called, e.g. in
+// tests that don't care about it). The value is reported exactly as the
+// build produced it — including a dirty `git describe` suffix — because a
+// footer that quietly cleaned it up would hide the one signal that tells an
+// operator this review came from an uncommitted local build. A leading digit
+// is assumed to be a bare semver (goreleaser's {{.Version}} and
+// GIT_VERSION both strip the "v") and gets it back; anything else (the
+// Makefile's "dev" default, a "main-<sha>" style string) is shown as-is.
+func versionSuffix() string {
+	v, _ := daemonVersion.Load().(string)
+	if v == "" {
+		return ""
+	}
+	if r := []rune(v); len(r) > 0 && unicode.IsDigit(r[0]) {
+		return " (v" + v + ")"
+	}
+	return " (" + v + ")"
+}
+
 // severityIcon maps a severity to its badge emoji. Unknown values fall back
 // to the medium badge, matching severityLabel.
 func severityIcon(s string) string {
@@ -1780,8 +1817,10 @@ func severityLabel(s string) string {
 func reviewFooter(severity string) string {
 	// Built from ReviewFooterMarker rather than spelled out, so the
 	// cross-instance duplicate guard in peer_review.go can never drift out of
-	// sync with the text it matches on. See theburrowhub/heimdallm#765.
-	footer := fmt.Sprintf("---\n🤖 *%s(%s)*", ReviewFooterMarker, heimdallmURL)
+	// sync with the text it matches on. See theburrowhub/heimdallm#765. The
+	// version suffix comes after the closing "(url)" — inside the marker
+	// would make BodyIsHeimdallm's substring match miss every versioned body.
+	footer := fmt.Sprintf("---\n🤖 *%s(%s)%s*", ReviewFooterMarker, heimdallmURL, versionSuffix())
 	if strings.TrimSpace(severity) == "" {
 		return footer
 	}
