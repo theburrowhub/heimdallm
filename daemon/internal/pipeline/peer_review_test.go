@@ -576,3 +576,32 @@ func TestPeerPublishedReviewIDFindsALegacyFormatPeer(t *testing.T) {
 		t.Errorf("PeerPublishedReviewID() = (%d, found=%v), want (22, true) for a same-login review in the pre-#756 format", id, found)
 	}
 }
+
+// TestBodyIsHeimdallmRecognisesAVersionedFooter guards the exact reason the
+// version suffix must land after the closing "(url)" rather than inside the
+// "Reviewed by [Heimdallm]" marker: BodyIsHeimdallm is a substring match, and
+// a real peer review carries whatever version its own instance is running.
+//
+// NOTE: mutates the package-global daemonVersion via the exported
+// SetDaemonVersion — same caveat as
+// TestReviewFooterVersionSuffix in feedback_format_coverage_test.go: safe
+// only because this package's tests never call t.Parallel().
+func TestBodyIsHeimdallmRecognisesAVersionedFooter(t *testing.T) {
+	defer pipeline.SetDaemonVersion("")
+	pipeline.SetDaemonVersion("0.8.22")
+
+	body := pipeline.BuildGitHubBody(&executor.ReviewResult{Summary: "Fine.", Severity: "low"})
+	if !strings.Contains(body, "(v0.8.22)") {
+		t.Fatalf("test setup: body should carry the version suffix: %q", body)
+	}
+	if !pipeline.BodyIsHeimdallm(body) {
+		t.Errorf("BodyIsHeimdallm() = false for a versioned body, want true:\n%s", body)
+	}
+
+	reviews := []github.PRReview{
+		{ID: 33, User: github.User{Login: "bot"}, CommitID: "ccc", State: "APPROVED", Body: body},
+	}
+	if id, _, found := pipeline.PeerPublishedReviewID(reviews, nil, "bot", "ccc"); !found || id != 33 {
+		t.Errorf("PeerPublishedReviewID() = (%d, found=%v), want (33, true) for a same-login versioned review", id, found)
+	}
+}
