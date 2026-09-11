@@ -10,6 +10,19 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.8.24](https://github.com/theburrowhub/heimdallm/compare/v0.8.23...v0.8.24) (2026-09-11)
+
+
+### Features
+
+* **cluster:** discover instances on the local network via mDNS ([#769](https://github.com/theburrowhub/heimdallm/issues/769)) ([6531727](https://github.com/theburrowhub/heimdallm/commit/6531727319d063ac6862af7eff9c5cc2a14ba5a8))
+* **lan:** mDNS advertise and browse over an injectable transport ([#771](https://github.com/theburrowhub/heimdallm/issues/771)) ([a0b2fef](https://github.com/theburrowhub/heimdallm/commit/a0b2fef8877fdcea854b0231c19196629d504c67)), closes [#766](https://github.com/theburrowhub/heimdallm/issues/766)
+
+
+### Documentation
+
+* correct when a base_url hostname is re-resolved ([#797](https://github.com/theburrowhub/heimdallm/issues/797)) ([e2e720a](https://github.com/theburrowhub/heimdallm/commit/e2e720ae3531c4bcde90ba6f3c052b95eea6b811)), closes [#766](https://github.com/theburrowhub/heimdallm/issues/766)
+
 ## [0.8.23](https://github.com/theburrowhub/heimdallm/compare/v0.8.22...v0.8.23) (2026-09-10)
 
 
