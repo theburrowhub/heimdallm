@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -40,6 +42,23 @@ type Advertisement struct {
 
 // Advertiser answers mDNS queries for this daemon's service record.
 //
+// # Name conflicts are not handled
+//
+// RFC 6762 §8 asks a responder to probe a name before claiming it and to
+// defend or rename on conflict. This does neither: it claims its instance
+// label and <hostname>.local. outright, with the cache-flush bit set. Two
+// daemons on one link with the same hostname — cloned images, default
+// hostnames, or two distinct FQDNs that defaultHostname collapses to the same
+// short label — will both answer authoritatively and resolvers will flip
+// between them, which undermines exactly the stable-addressing this package
+// exists for.
+//
+// Accepted rather than overlooked. Probing is a state machine with its own
+// timing rules, and getting it half right is worse than not having it; the
+// collision needs two hosts sharing a name on one subnet, which an operator
+// can see and fix by setting cluster.instance_name. Deriving the advertised
+// name from the instance id on conflict would be the fix if this ever bites.
+//
 // It is a responder, not a broadcaster: it does not announce itself on a timer,
 // it replies when asked. That keeps a daemon that nobody is looking for
 // completely silent on the network, which matters on a corporate LAN where
@@ -53,6 +72,10 @@ type Advertiser struct {
 
 	instanceName string // the escaped FQDN this daemon answers to
 	txt          []string
+
+	// mu guards lastResponse, which paces the responder.
+	mu           sync.Mutex
+	lastResponse time.Time
 }
 
 // NewAdvertiser validates the advertisement and prepares the records.
@@ -75,7 +98,20 @@ func NewAdvertiser(conn PacketConn, ad Advertisement, log *slog.Logger) (*Advert
 	if strings.TrimSpace(ad.Hostname) == "" {
 		ad.Hostname = defaultHostname()
 	}
-	ad.Hostname = dns.Fqdn(strings.TrimSpace(ad.Hostname))
+	// The hostname we publish is held to the same rule we hold a peer's to.
+	//
+	// Not defence — an advertiser is not a threat to itself — but consistency.
+	// A caller passing "hub.corp.example.com" gets an SRV target every
+	// Heimdallm hub rejects in ValidateMDNSHostname, so the daemon advertises
+	// perfectly well and is discovered by nobody, with the refusal logged on
+	// the other machine. Failing here names the problem where it can be fixed.
+	// defaultHostname always produces a legal name, so this can only fire on
+	// a hostname the caller chose.
+	host, err := ValidateMDNSHostname(ad.Hostname)
+	if err != nil {
+		return nil, err
+	}
+	ad.Hostname = dns.Fqdn(host)
 
 	// The DNS-SD instance label is the display name when there is one, and the
 	// id otherwise. The id is the tiebreaker rather than the first choice
@@ -141,6 +177,33 @@ const unicastResponseBit = 1 << 15
 // deliberately not on PTR, which is a shared record type where several hosts
 // legitimately contribute entries under one name.
 const cacheFlush = 1 << 15
+
+// Response pacing (RFC 6762 §6).
+//
+// Without it the responder is the asymmetric half of this package: the browser
+// takes care about a hostile group, while an attacker sending queries at high
+// rate makes this daemon multicast a full PTR+SRV+TXT+A set onto the LAN at
+// the same rate — turning it into an amplifier for traffic it did not
+// originate. The rate limit is the part that matters; the jitter is what the
+// RFC asks for on shared records so that several responders do not answer the
+// same query in the same instant.
+const (
+	responseJitterMin = 20 * time.Millisecond
+	responseJitterMax = 120 * time.Millisecond
+)
+
+// minResponseInterval is a variable so tests can shorten it; nothing
+// reassigns it at runtime.
+var minResponseInterval = time.Second
+
+// responseDelay is a variable so tests do not pay the jitter. Nothing
+// reassigns it at runtime.
+var responseDelay = randomResponseDelay
+
+func randomResponseDelay() time.Duration {
+	span := responseJitterMax - responseJitterMin
+	return responseJitterMin + time.Duration(rand.Int64N(int64(span)+1))
+}
 
 // Run answers queries until ctx is cancelled or the socket stops working, then
 // sends a goodbye.
@@ -222,6 +285,19 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 		return
 	}
 
+	// Paced before anything is built: a query we are not going to answer
+	// should cost as little as possible, since the whole point is that
+	// somebody else chooses how often they arrive.
+	if !a.allowResponse() {
+		return
+	}
+	// Shared records are answered after a short random delay so that several
+	// responders do not all reply in the same instant. Cheap here because the
+	// rate limit above means we reach this at most once a second.
+	if d := responseDelay(); d > 0 {
+		time.Sleep(d)
+	}
+
 	reply := new(dns.Msg)
 	reply.SetReply(&msg)
 	// An mDNS response is not a unicast DNS answer: it must stand on its own,
@@ -231,6 +307,19 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 	reply.Authoritative = true
 
 	a.send(reply)
+}
+
+// allowResponse reports whether enough time has passed since the last answer,
+// and records this one if so.
+func (a *Advertiser) allowResponse() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	if !a.lastResponse.IsZero() && now.Sub(a.lastResponse) < minResponseInterval {
+		return false
+	}
+	a.lastResponse = now
+	return true
 }
 
 // recordsFor returns everything we hold that answers q.
@@ -307,6 +396,11 @@ func (a *Advertiser) allRecords() []dns.RR {
 	return append(records, a.addressRecords()...)
 }
 
+// addressRecords renders the host's addresses as A/AAAA.
+//
+// AAAA is published even though Peer.DialAddrs refuses v6 — see the comment
+// there. Advertising is for whoever is browsing; dialing is limited by the
+// socket we hold.
 func (a *Advertiser) addressRecords() []dns.RR {
 	if a.ad.Addrs == nil {
 		return nil

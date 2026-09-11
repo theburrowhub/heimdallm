@@ -630,3 +630,152 @@ func mustBrowser(t *testing.T) *Browser {
 	}
 	return browser
 }
+
+// The fairness cap at peers() was applied too late. A flooder chooses when it
+// starts, so filling the global admission budget *before* a real daemon
+// replies meant the victim was never recorded at all — and a cap on the
+// result cannot preserve something that was never admitted.
+func TestAFloodCannotExhaustAdmissionBeforeARealDaemonReplies(t *testing.T) {
+	flooder := netip.MustParseAddr("192.168.1.99")
+	victim := netip.MustParseAddr("192.168.1.20")
+
+	acc := newAccumulator()
+
+	// The flooder goes first and tries to take the whole budget.
+	for i := range maxRecordNames * 2 {
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("flood%05d", i))...), flooder)
+	}
+
+	// Only now does the real daemon answer.
+	acc.absorb(pack(t, advertisementFor("srv-a")...), victim)
+
+	found := map[string]bool{}
+	for _, p := range acc.peers(mustBrowser(t)) {
+		found[p.InstanceID] = true
+	}
+	if !found["srv-a"] {
+		t.Fatal("a daemon replying after a flood was never admitted; the " +
+			"per-sender bound is not being applied at admission")
+	}
+}
+
+// And the flooder's own share is bounded at admission, not merely trimmed
+// afterwards.
+func TestAdmissionIsBoundedPerSender(t *testing.T) {
+	flooder := netip.MustParseAddr("192.168.1.99")
+
+	acc := newAccumulator()
+	for i := range maxRecordNamesPerSender * 10 {
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("flood%05d", i))...), flooder)
+	}
+
+	if got := acc.namesFrom[flooder]; got > maxRecordNamesPerSender {
+		t.Fatalf("one sender got %d names admitted, above the %d bound",
+			got, maxRecordNamesPerSender)
+	}
+	// And the global budget is left largely intact for everyone else.
+	if len(acc.instances) > maxRecordNamesPerSender {
+		t.Fatalf("one sender occupies %d instance slots", len(acc.instances))
+	}
+}
+
+// Many honest daemons must still all fit: the per-sender bound restricts one
+// host, not the network.
+func TestManySendersEachGetTheirShare(t *testing.T) {
+	acc := newAccumulator()
+	for i := range 20 {
+		src := netip.MustParseAddr(fmt.Sprintf("192.168.1.%d", 20+i))
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("node%02d", i))...), src)
+	}
+
+	peers := acc.peers(mustBrowser(t))
+	if len(peers) != 20 {
+		t.Fatalf("got %d peers from 20 distinct senders, want all of them", len(peers))
+	}
+}
+
+// Without pacing the responder is the asymmetric half of this package: an
+// attacker sending queries at high rate makes this daemon multicast a full
+// record set onto the LAN at the same rate, so it amplifies traffic it did not
+// originate. RFC 6762 §6 caps a shared record at roughly one multicast per
+// second.
+func TestTheResponderIsRateLimited(t *testing.T) {
+	realDelay := responseDelay
+	responseDelay = func() time.Duration { return 0 }
+	t.Cleanup(func() { responseDelay = realDelay })
+
+	adConn, peerConn := NewMemConn()
+	t.Cleanup(func() { _ = adConn.Close(); _ = peerConn.Close() })
+
+	adv, err := NewAdvertiser(adConn, testAdvertisement(), quietLogger())
+	if err != nil {
+		t.Fatalf("NewAdvertiser: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = adv.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	query := new(dns.Msg)
+	query.SetQuestion(serviceFQDN(), dns.TypePTR)
+	packed, _ := query.Pack()
+
+	// A burst, as a flooder would send it.
+	for range 50 {
+		if _, err := peerConn.WriteTo(packed, GroupAddr()); err != nil {
+			t.Fatalf("WriteTo: %v", err)
+		}
+	}
+
+	// Count what came back over a window shorter than the interval.
+	replies := 0
+	deadline := time.Now().Add(400 * time.Millisecond)
+	buf := make([]byte, 9000)
+	for time.Now().Before(deadline) {
+		_ = peerConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		if _, _, err := peerConn.ReadFrom(buf); err == nil {
+			replies++
+		}
+	}
+	if replies > 1 {
+		t.Fatalf("50 queries drew %d responses inside one interval; the "+
+			"responder amplifies whatever rate it is asked at", replies)
+	}
+}
+
+// The jitter is what RFC 6762 §6 asks for on shared records, so that several
+// responders do not answer the same query in the same instant.
+func TestResponseDelayStaysInTheSpecifiedRange(t *testing.T) {
+	for range 200 {
+		d := randomResponseDelay()
+		if d < responseJitterMin || d > responseJitterMax {
+			t.Fatalf("delay %v outside [%v, %v]", d, responseJitterMin, responseJitterMax)
+		}
+	}
+}
+
+// The maps that enforce the caps are covered by the same budget as the data
+// they guard. They are deliberately never refunded on retraction — otherwise a
+// sender could cycle advertise/goodbye to buy unlimited admissions — so
+// without this they would be the one thing an attacker could grow freely,
+// spoofing a fresh source address per packet.
+func TestTheQuotaStateIsItselfBounded(t *testing.T) {
+	acc := newAccumulator()
+
+	// A different spoofed source every time, each retracting immediately.
+	for i := range maxRecordNames * 3 {
+		src := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+		name := fmt.Sprintf("spoof%05d", i)
+		acc.absorb(pack(t, advertisementFor(name)...), src)
+		goodbye := advertisementFor(name)[0]
+		goodbye.Header().Ttl = 0
+		acc.absorb(pack(t, goodbye), src)
+	}
+
+	if got := len(acc.seenName); got > maxRecordNames {
+		t.Errorf("seenName grew to %d, above the %d budget", got, maxRecordNames)
+	}
+	if got := len(acc.namesFrom); got > maxRecordNames {
+		t.Errorf("namesFrom grew to %d, above the %d budget", got, maxRecordNames)
+	}
+}

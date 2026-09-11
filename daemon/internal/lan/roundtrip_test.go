@@ -16,6 +16,17 @@ import (
 )
 
 // quietLogger keeps the transport's debug chatter out of test output.
+// unpacedAdvertiser removes the response pacing for tests that are not about
+// it: the rate limit would otherwise swallow the second query of any test that
+// browses twice, and the jitter would slow every one of them.
+func unpaced(t *testing.T) {
+	t.Helper()
+	realInterval, realDelay := minResponseInterval, responseDelay
+	minResponseInterval = 0
+	responseDelay = func() time.Duration { return 0 }
+	t.Cleanup(func() { minResponseInterval, responseDelay = realInterval, realDelay })
+}
+
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -24,6 +35,7 @@ func quietLogger() *slog.Logger {
 // returns the browser's end.
 func startAdvertiser(t *testing.T, ad Advertisement) PacketConn {
 	t.Helper()
+	unpaced(t)
 	adConn, browseConn := NewMemConn()
 
 	adv, err := NewAdvertiser(adConn, ad, quietLogger())
@@ -627,6 +639,12 @@ func TestAdvertiserAnswersTheServiceEnumeration(t *testing.T) {
 }
 
 // IPv6 advertisements produce AAAA records, not silence.
+//
+// Deliberately asymmetric with DialAddrs, which refuses v6: what we publish is
+// for anyone browsing the service (dns-sd, avahi-browse, a future v6
+// transport), whereas what we dial is limited by the socket we actually have.
+// Publishing only what our own browser can consume would make the record set a
+// function of our client's limitations rather than of the host's addresses.
 func TestAdvertiserPublishesIPv6Addresses(t *testing.T) {
 	ad := testAdvertisement()
 	ad.Addrs = func() []netip.Addr {
