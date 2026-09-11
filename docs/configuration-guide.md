@@ -1550,15 +1550,41 @@ Environment equivalents, for containers that should not carry a per-instance
 **`base_url` takes a hostname, and it usually should.** Validation only requires
 an absolute `http`/`https` URL with a host and no credentials, query or
 fragment — so an mDNS `.local` name, a DNS record or a Tailscale name all work,
-and only the hostname is re-resolved on each request.
+and what the hub stores is the name rather than an address.
 
 Prefer one of those, a static address or a DHCP reservation over a literal IP
-from a lease. Nothing re-resolves a `base_url`: it changes only when someone
-edits it. So when a laptop or any DHCP host picks up a new address, its entry
-goes stale and that instance becomes permanently unreachable from the hub while
-it carries on working perfectly — which is the situation §18.3.1 exists to
-contain, and containing it is not the same as avoiding it. Section 18.8 covers
-discovering instances by name instead.
+from a lease. Nothing ever rewrites a stored `base_url`: it changes only when
+someone edits it. So when a laptop or any DHCP host picks up a new address, an
+entry holding a literal IP goes stale and that instance becomes permanently
+unreachable from the hub while it carries on working perfectly — which is the
+situation §18.3.1 exists to contain, and containing it is not the same as
+avoiding it. Section 18.8 covers discovering instances by name instead.
+
+**A name is re-resolved when the connection to it breaks, not on every probe.**
+The hub's HTTP client keeps idle connections keyed by host and port as written,
+so while the address behind a name keeps answering, that connection is reused
+and the name is never looked up again. With the default 30s `probe_interval`
+the connection never sits idle long enough to be recycled either.
+
+That is the right behaviour for the case this is here for — a host that changes
+address stops answering on the old one, the connection fails, the name resolves
+again — but it sets two expectations worth having:
+
+- **Recovery costs one failed probe.** Expect roughly one `probe_interval`
+  between the address changing and the instance going green again, not an
+  instant switch. The hub logs `instance became unreachable` and then
+  `instance recovered`; a single pair of those around an address change is the
+  system working, not a fault.
+- **An old address that still answers goes on being used.** If a machine keeps
+  its previous address alongside the new one, the hub has no reason to look the
+  name up again and will stay on the old one indefinitely. Harmless, but it is
+  why a half-finished address change can look like nothing happened.
+
+The same point applies to testing this: pointing a name at a different address
+proves nothing unless the previous address actually stops answering. A DHCP
+lease that is renewed rather than released, or an address added without
+removing the old one, leaves the original reachable and the hub will never
+notice the change.
 
 ### 18.3 Routing modes
 
@@ -1762,11 +1788,12 @@ also browses, and lists what it finds under *"found on this network, not
 registered"*, with a button to register each one.
 
 The point is not saving a few keystrokes. A discovered instance is registered
-by its mDNS hostname rather than the address it answered from, and a hostname
-is re-resolved on every request — so when that machine picks up a new DHCP
-lease, the hub follows it with no operator action. A pinned IP does not, and a
-stale one means the other instances take over its repositories while it is
-still reviewing them.
+by its mDNS hostname rather than the address it answered from, and a name is
+resolved again once the connection behind it fails — so when that machine picks
+up a new DHCP lease, the hub follows it within about one `probe_interval` and
+with no operator action. A pinned IP never does, and a stale one means the other
+instances take over its repositories while it is still reviewing them. See
+§18.2 for what "follows it" costs and does not cover.
 
 The hub also notices when an *already registered* instance answers somewhere
 its `base_url` no longer points, and offers to correct it — one click, on the
