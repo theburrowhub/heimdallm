@@ -61,13 +61,13 @@ Controls the HTTP interface the daemon listens on.
 ```toml
 [server]
 port      = 7842
-bind_addr = "0.0.0.0"
+bind_addr = "0.0.0.0"   # every interface; the default is 127.0.0.1
 ```
 
 | TOML field | Env var | Default | Description |
 |---|---|---|---|
 | `port` | `HEIMDALLM_PORT` | `7842` | TCP port the daemon listens on |
-| `bind_addr` | `HEIMDALLM_BIND_ADDR` | `0.0.0.0` | Interface to bind (use `127.0.0.1` to restrict to localhost) |
+| `bind_addr` | `HEIMDALLM_BIND_ADDR` | `127.0.0.1` | Interface to bind. Loopback by default, so nothing on the network can reach the daemon until this is widened — set `0.0.0.0` for every interface, or one routable address. §18.8 covers what this means for a cluster |
 
 The daemon exposes a health endpoint at `GET /health` — returns `{"status":"ok"}` when running. Docker Compose uses this for its `healthcheck`.
 
@@ -1898,7 +1898,10 @@ machine is worse than refusing to pick.
 
 [server]
 port      = 7842        # env: HEIMDALLM_PORT
-bind_addr = "0.0.0.0"  # env: HEIMDALLM_BIND_ADDR
+# Default is "127.0.0.1". Shown widened because a daemon on loopback is
+# unreachable from any other machine, and declines to advertise itself for
+# discovery — see 18.8.
+bind_addr = "0.0.0.0"   # env: HEIMDALLM_BIND_ADDR
 
 # ── GitHub ───────────────────────────────────────────────────────────────────
 
