@@ -430,6 +430,17 @@ func localAddresses() []netip.Addr {
 		slog.Debug("cluster: could not enumerate local addresses", "err", err)
 		return nil
 	}
+	return advertisableFrom(ifaceAddrs)
+}
+
+// advertisableFrom applies the rules above to a list of interface addresses.
+//
+// Split out from localAddresses so it can be tested against a fixed list.
+// Exercised through net.InterfaceAddrs() instead, each skip branch ran or did
+// not depending on which interfaces the machine happened to have — so the
+// covered-statement count differed between two runs of identical code, which
+// an exact coverage ratchet reads as a regression.
+func advertisableFrom(ifaceAddrs []net.Addr) []netip.Addr {
 	var out []netip.Addr
 	for _, a := range ifaceAddrs {
 		ipNet, ok := a.(*net.IPNet)

@@ -654,7 +654,41 @@ func TestRunningInContainerAnswers(t *testing.T) {
 	_ = runningInContainer()
 }
 
-// The enumeration must never offer a peer an address it cannot use.
+// Every branch of the filter, against a fixed list rather than whatever
+// interfaces the machine has. Driven through net.InterfaceAddrs() the skip
+// branches ran or did not depending on the host, so two runs of identical
+// code reported different covered-statement counts.
+func TestAdvertisableFromSkipsWhatAPeerCannotReach(t *testing.T) {
+	_, v4Net, _ := net.ParseCIDR("192.168.1.20/24")
+
+	got := advertisableFrom([]net.Addr{
+		&net.IPNet{IP: net.ParseIP("192.168.1.20"), Mask: v4Net.Mask},
+		&net.IPNet{IP: net.ParseIP("2001:db8::1"), Mask: net.CIDRMask(64, 128)},
+		// No peer can reach us there.
+		&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)},
+		// DHCP failed; and fe80:: needs a zone an AAAA record cannot carry.
+		&net.IPNet{IP: net.ParseIP("169.254.10.1"), Mask: v4Net.Mask},
+		&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.ParseIP("0.0.0.0"), Mask: net.CIDRMask(0, 32)},
+		// A point-to-point link reports one of these, with no mask.
+		&net.IPAddr{IP: net.ParseIP("10.0.0.1")},
+		// An IP of a length netip cannot interpret.
+		&net.IPNet{IP: net.IP{1, 2, 3}, Mask: v4Net.Mask},
+	})
+
+	want := []string{"192.168.1.20", "2001:db8::1"}
+	if len(got) != len(want) {
+		t.Fatalf("advertisableFrom = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i].String() != w {
+			t.Fatalf("advertisableFrom[%d] = %s, want %s", i, got[i], w)
+		}
+	}
+}
+
+// The real reader, against the real machine: all this adds is that
+// net.InterfaceAddrs() is wired to the filter correctly.
 func TestLocalAddressesSkipsWhatAPeerCannotReach(t *testing.T) {
 	for _, addr := range localAddresses() {
 		if addr.IsLoopback() {
