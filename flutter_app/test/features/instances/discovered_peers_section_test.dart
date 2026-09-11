@@ -91,10 +91,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Server A'), findsOneWidget);
-      expect(
-        find.textContaining('http://srv-a.local:7842'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('http://srv-a.local:7842'), findsOneWidget);
       expect(find.widgetWithText(FilledButton, 'Register'), findsOneWidget);
     });
 
@@ -120,10 +117,7 @@ void main() {
       await _pump(tester, found: _found(peers: [_peer()]));
 
       expect(find.text('No instances registered'), findsOneWidget);
-      expect(
-        find.textContaining('found on this network'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('found on this network'), findsOneWidget);
     });
 
     testWidgets('a peer already registered is not offered again', (
@@ -136,6 +130,37 @@ void main() {
 
       expect(find.textContaining('found on this network'), findsNothing);
       expect(find.widgetWithText(FilledButton, 'Register'), findsNothing);
+    });
+
+    testWidgets('Scan is reachable when nothing has been found yet', (
+      tester,
+    ) async {
+      // The button was previously built inside the found-peers list, so it
+      // only existed once there was something to scan for. Someone who has
+      // just plugged a machine in and is waiting for it to appear is exactly
+      // who needs it, and they saw no section at all.
+      await _pump(tester, found: _found(peers: const []));
+
+      expect(find.byTooltip('Scan the network now'), findsOneWidget);
+      expect(
+        find.text('No unregistered daemons on this network'),
+        findsOneWidget,
+      );
+      // Nothing to register, so no row and no offer.
+      expect(find.widgetWithText(FilledButton, 'Register'), findsNothing);
+    });
+
+    testWidgets('Scan is reachable when every peer is already registered', (
+      tester,
+    ) async {
+      // Same blind spot by a different route: a fully adopted fleet filters
+      // down to an empty unregistered list.
+      await _pump(
+        tester,
+        found: _found(peers: [_peer(status: 'registered')]),
+      );
+
+      expect(find.byTooltip('Scan the network now'), findsOneWidget);
     });
 
     testWidgets('offers to turn discovery on when it is off', (tester) async {
@@ -211,10 +236,7 @@ void main() {
       );
       expect(find.widgetWithText(TextButton, 'Update address'), findsOneWidget);
       // The consequence, not just the fact — this is the #765 failure forming.
-      expect(
-        find.textContaining('take over its repositories'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('take over its repositories'), findsOneWidget);
     });
 
     testWidgets('is absent when the address still matches', (tester) async {
@@ -264,9 +286,7 @@ void main() {
       await _pump(
         tester,
         found: _found(peers: [_peer()]),
-        child: const Scaffold(
-          body: AddressChangedBanner(instanceId: 'nobody'),
-        ),
+        child: const Scaffold(body: AddressChangedBanner(instanceId: 'nobody')),
       );
 
       expect(find.textContaining('Answering at'), findsNothing);

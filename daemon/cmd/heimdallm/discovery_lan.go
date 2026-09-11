@@ -224,6 +224,19 @@ func unadvertisableBind(addr *net.TCPAddr) string {
 			"reached from a DNS record without an interface scope."
 	case ip.IsMulticast():
 		return "the daemon's listen address is a multicast address, which is not a host."
+	case !ip.Is4():
+		// A wildcard bind never lands here — "::" is unspecified and was
+		// already accepted above, and localAddresses then publishes this
+		// machine's IPv4 addresses alongside its IPv6 ones. Only a listener
+		// pinned to one global IPv6 address does, and that daemon publishes
+		// AAAA and nothing else. lan.MulticastConn is udp4-only, so every
+		// Heimdallm hub browsing for it sees an IPv4 packet source and
+		// refuses the v6 address in DialAddrs: the daemon advertises
+		// flawlessly and is verified by nobody, with the refusal logged on
+		// the other machine. Saying so here is the only place the operator
+		// can act on it.
+		return "the daemon listens only on an IPv6 address, and discovery " +
+			"speaks IPv4 — bind it to :: or an IPv4 address to be discovered."
 	}
 	return ""
 }

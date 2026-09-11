@@ -174,6 +174,25 @@ type PeerBrowser interface {
 // on reload, same Run loop. Two things in this package that do the same kind of
 // job should not need to be learned twice.
 type Discoverer struct {
+	// browseMu serialises browses, because they share one socket.
+	//
+	// Run's ticker and the POST /cluster/discovered/scan handler both land in
+	// scan, and Browse reads and writes one PacketConn under its own read
+	// deadlines. Two at once would consume each other's packets and reset
+	// each other's deadlines, so the symptom is not a crash but an
+	// intermittently short peer list — which is the failure this feature
+	// exists to remove, reintroduced by the refresh button.
+	//
+	// Deliberately narrower than the whole scan: only the browse touches the
+	// socket. Verification is outbound HTTP with its own timeouts, and
+	// holding the lock across it would make an operator's Scan queue behind
+	// another scan's slow peer for no gain.
+	//
+	// Separate from mu, which guards the cached view and is taken inside
+	// verification. One mutex for both would mean a 2s browse blocked every
+	// Candidates() read the GUI makes.
+	browseMu sync.Mutex
+
 	mu         sync.RWMutex
 	registry   *Registry
 	browser    PeerBrowser
@@ -297,7 +316,9 @@ func (d *Discoverer) scan(ctx context.Context) error {
 		return nil
 	}
 
+	d.browseMu.Lock()
 	peers, err := browser.Browse(ctx, discoveryBrowseWindow)
+	d.browseMu.Unlock()
 	if err != nil {
 		slog.Debug("instances: browsing the local network failed", "err", err)
 		return err

@@ -44,9 +44,12 @@ class DiscoveredPeersSection extends ConsumerWidget {
         if (!found.enabled) {
           return isHub ? const _DiscoveryOffCard() : const SizedBox.shrink();
         }
-        final peers = found.unregistered;
-        if (peers.isEmpty) return const SizedBox.shrink();
-        return _FoundList(peers: peers);
+        // Rendered even when nothing was found. An empty section is not the
+        // same as no section: "I just plugged the machine in, why is it not
+        // here?" is exactly the moment someone reaches for Scan, and hiding
+        // the card at zero peers put the button behind the result it exists
+        // to produce — reachable only once the wait was already over.
+        return _FoundList(peers: found.unregistered);
       },
     );
   }
@@ -60,6 +63,7 @@ class _FoundList extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final empty = peers.isEmpty;
     return Card(
       color: scheme.surfaceContainerHighest,
       child: Padding(
@@ -69,29 +73,41 @@ class _FoundList extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.wifi_find_outlined, size: 18, color: scheme.primary),
+                Icon(
+                  Icons.wifi_find_outlined,
+                  size: 18,
+                  color: empty ? scheme.onSurfaceVariant : scheme.primary,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    peers.length == 1
-                        ? '1 daemon found on this network, not registered'
-                        : '${peers.length} daemons found on this network, '
-                              'not registered',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
+                  child: Text(switch (peers.length) {
+                    0 => 'No unregistered daemons on this network',
+                    1 => '1 daemon found on this network, not registered',
+                    _ =>
+                      '${peers.length} daemons found on this network, '
+                          'not registered',
+                  }, style: Theme.of(context).textTheme.titleSmall),
                 ),
                 const _ScanButton(),
               ],
             ),
             const SizedBox(height: 4),
             Text(
-              'Registering one still needs its API token, which does not travel '
-              'over the network. Anything on this LAN can advertise itself, so '
-              'only adopt machines you recognise.',
+              empty
+                  ? 'Every daemon answering here is already registered. One '
+                        'that has just started can take a few seconds to '
+                        'announce itself, and discovery does not leave this '
+                        'subnet.'
+                  : 'Registering one still needs its API token, which does '
+                        'not travel over the network. Anything on this LAN '
+                        'can advertise itself, so only adopt machines you '
+                        'recognise.',
               style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
             ),
-            const SizedBox(height: 8),
-            for (final peer in peers) _PeerRow(peer: peer),
+            if (!empty) ...[
+              const SizedBox(height: 8),
+              for (final peer in peers) _PeerRow(peer: peer),
+            ],
           ],
         ),
       ),
@@ -164,11 +180,9 @@ class _DiscoveryOffCardState extends ConsumerState<_DiscoveryOffCard> {
       _error = null;
     });
     try {
-      await ref
-          .read(hubApiClientProvider)
-          .patchConfig({
-            'cluster': {'discovery': 'mdns'},
-          });
+      await ref.read(hubApiClientProvider).patchConfig({
+        'cluster': {'discovery': 'mdns'},
+      });
       ref.invalidate(discoveredPeersProvider);
     } on ApiException catch (e) {
       if (mounted) setState(() => _error = e.message);

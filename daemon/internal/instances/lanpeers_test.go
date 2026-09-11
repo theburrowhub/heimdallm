@@ -881,3 +881,77 @@ func TestCandidatesComeBackInAStableOrder(t *testing.T) {
 		}
 	}
 }
+
+// concurrentBrowser records the highest number of browses running at once.
+type concurrentBrowser struct {
+	mu      sync.Mutex
+	now     int
+	max     int
+	release chan struct{}
+}
+
+func (b *concurrentBrowser) Browse(context.Context, time.Duration) ([]lan.Peer, error) {
+	b.mu.Lock()
+	b.now++
+	if b.now > b.max {
+		b.max = b.now
+	}
+	b.mu.Unlock()
+
+	<-b.release
+
+	b.mu.Lock()
+	b.now--
+	b.mu.Unlock()
+	return nil, nil
+}
+
+func (b *concurrentBrowser) highWater() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.max
+}
+
+// The ticker and the refresh button share one socket, so only one of them may
+// be browsing it at a time. Overlapping browses do not fail loudly — they eat
+// each other's packets and each return a short peer list — so the guard has to
+// be asserted directly rather than inferred from a passing scan.
+func TestConcurrentScansDoNotShareTheSocket(t *testing.T) {
+	browser := &concurrentBrowser{release: make(chan struct{})}
+	d := NewDiscoverer(NewRegistry(nil), browser, time.Minute, loopbackFactory())
+
+	const scans = 8
+	started := make(chan struct{}, scans)
+	done := make(chan struct{})
+	for range scans {
+		go func() {
+			started <- struct{}{}
+			_ = d.scan(context.Background())
+			done <- struct{}{}
+		}()
+	}
+	for range scans {
+		<-started
+	}
+
+	// Every goroutine is past the point where it would race for the socket.
+	// Releasing one browse at a time lets them all finish; if the lock were
+	// missing they would all be inside Browse already and highWater would
+	// have recorded it.
+	go func() {
+		for range scans {
+			browser.release <- struct{}{}
+		}
+	}()
+	for range scans {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a scan never finished; the browse lock is not being released")
+		}
+	}
+
+	if got := browser.highWater(); got != 1 {
+		t.Fatalf("%d browses ran at once, want 1", got)
+	}
+}

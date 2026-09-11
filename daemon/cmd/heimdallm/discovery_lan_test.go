@@ -185,9 +185,22 @@ func TestUnadvertisableBind(t *testing.T) {
 // bind it accepts must be one a hub would accept — otherwise a daemon
 // advertises into silence.
 func TestBindRuleAgreesWithTheVerifier(t *testing.T) {
+	// Peer.Source is deliberately left unset: this pins the two ADDRESS-CLASS
+	// rules against each other, and DialAddrs' same-link branch is a rule
+	// about topology, not class. It needs control of the host's prefixes to
+	// exercise (lan.localPrefixes, unexported and unreachable from here) and
+	// is covered in that package's own tests. Setting a synthetic source here
+	// would just make every case fail closed, since no made-up address shares
+	// a prefix with a CI container's real interfaces.
+	//
+	// The IPv6 entries are the reason this matters: a daemon pinned to a
+	// global v6 address advertises AAAA that no udp4-only browse can dial,
+	// and both sides have to agree to refuse it. They are decided on class,
+	// so they are caught here with no source at all.
 	for _, ip := range []string{
 		"192.168.1.20", "10.0.0.11", "172.16.5.5",
 		"127.0.0.1", "::1", "169.254.10.1", "fe80::1", "224.0.0.251",
+		"2001:db8::5", "fd00::5",
 	} {
 		addr := netip.MustParseAddr(ip)
 		advertisable := unadvertisableBind(&net.TCPAddr{IP: net.IP(addr.AsSlice()), Port: 7842}) == ""
