@@ -1,0 +1,454 @@
+// Package lan discovers Heimdallm daemons on the local network over
+// mDNS / DNS-SD (Bonjour, Avahi, zeroconf).
+//
+// It is deliberately ignorant of the cluster: it knows how to announce "a
+// daemon lives here" and how to ask "which daemons live here", and nothing
+// about the registry, routing or whether any of the answers can be trusted.
+// Everything a Peer carries is a claim made by whoever answered the query —
+// anything on the LAN can advertise this service type, so a Peer is a lead to
+// follow up, never a fact. instances.Discoverer is what verifies it.
+//
+// The package is named lan rather than discovery because internal/discovery is
+// already GitHub repository discovery, and because "peers on this local
+// network" is what this is.
+//
+// # Scope
+//
+// mDNS is link-local. This finds daemons on the same subnet and nothing
+// further: no routed networks, no other sites, and not across Docker's default
+// bridge. Clusters that span more than one link still need DNS, a VPN or
+// Tailscale.
+package lan
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+// Service is the DNS-SD service type. The instance's own record is published at
+// "<instance>.<Service>.<Domain>." — for example
+// "mac-sergio._heimdallm._tcp.local.".
+const (
+	Service = "_heimdallm._tcp"
+	Domain  = "local"
+)
+
+// TXT keys. Short on purpose: a DNS-SD TXT record is a handful of key=value
+// strings sharing one UDP packet with the SRV and A records, and RFC 6763 §6.4
+// asks implementations to keep the whole response inside a single MTU.
+const (
+	txtKeyID      = "id"
+	txtKeyName    = "name"
+	txtKeyRole    = "role"
+	txtKeyVersion = "ver"
+	txtKeyScheme  = "scheme"
+)
+
+// txtValueMax bounds one TXT value. A single DNS character-string cannot exceed
+// 255 bytes including the "key=" prefix; capping the value well below that
+// keeps any one field from crowding out the others.
+const txtValueMax = 128
+
+// Peer is one daemon seen on the network.
+//
+// Every field is unverified. A rogue advertiser can put any id, name or role it
+// likes in a TXT record — that is the nature of an unauthenticated protocol —
+// so a Peer is only ever a proposal. The consumer is expected to reach the
+// daemon over HTTP and let it identify itself before believing any of this.
+type Peer struct {
+	InstanceID   string
+	InstanceName string
+	Role         string
+	Version      string
+
+	// Scheme is http unless the advertiser says otherwise.
+	Scheme string
+
+	// Hostname is the SRV target with the trailing dot stripped, e.g.
+	// "mac-sergio.local". This — not Addrs — is what a base URL should be
+	// built from: a name is re-resolved on every dial, which is the entire
+	// point of discovering an instance rather than pinning its address.
+	Hostname string
+	Port     int
+
+	// Addrs are the A/AAAA records that came with the response.
+	Addrs []netip.Addr
+
+	// Source is the address the response actually arrived from, when the
+	// transport carries one.
+	//
+	// An advertiser cannot choose it the way it chooses the record contents,
+	// but it is still only a UDP source address: anyone on the same L2 can
+	// forge one. It narrows the same-link check; it does not establish
+	// provenance on its own.
+	Source netip.Addr
+
+	// SourceIface is the index of the interface the response arrived on, or 0
+	// when the transport cannot say (only the in-memory pair).
+	//
+	// This is the field nothing on the wire can influence, which is what
+	// makes it — not Source — the basis of the same-link check in DialAddrs.
+	SourceIface int
+}
+
+// BaseURL renders the peer as a daemon base URL built from its hostname.
+// Returns "" when the peer is not addressable, which includes any hostname that
+// fails ValidateMDNSHostname.
+func (p Peer) BaseURL() string {
+	host, err := ValidateMDNSHostname(p.Hostname)
+	if err != nil || p.Port <= 0 || p.Port > 65535 {
+		return ""
+	}
+	scheme := p.Scheme
+	if scheme != "https" {
+		scheme = "http"
+	}
+	return scheme + "://" + host + ":" + strconv.Itoa(p.Port)
+}
+
+// ValidateMDNSHostname accepts only a single-label name in .local, and returns
+// it without the trailing dot.
+//
+// This is a security boundary, not tidiness. An SRV target is supplied by
+// whoever answered a multicast query — anyone on the link, with no
+// authentication — and the consumer turns it into a URL and fetches it. Left
+// unchecked, an attacker advertises `metadata.google.internal.` or any internal
+// hostname and the hub makes the request for them: a server-side request
+// forgery primitive handed out to the whole subnet.
+//
+// Restricting it to <label>.local is what makes the name harmless. That is the
+// only shape mDNS actually assigns (RFC 6762 §3 gives a host one single-label
+// name in the .local domain), it cannot name anything off-link, and it is
+// resolved by the mDNS resolver rather than by unicast DNS — so it cannot be
+// pointed at a public record or an internal one. A multi-label name is rejected
+// too: "metadata.google.internal.local" is not a host mDNS can assign, and
+// allowing it would let an attacker smuggle a delegated suffix past the check.
+func ValidateMDNSHostname(raw string) (string, error) {
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	if host == "" {
+		return "", errors.New("lan: peer advertised no hostname")
+	}
+	label, ok := strings.CutSuffix(host, "."+Domain)
+	if !ok {
+		return "", fmt.Errorf("lan: peer hostname %q is not in .%s; refusing to "+
+			"probe a name mDNS cannot have assigned", raw, Domain)
+	}
+	if !isDNSLabel(label) {
+		return "", fmt.Errorf("lan: peer hostname %q is not a single .%s label", raw, Domain)
+	}
+	return host, nil
+}
+
+// isDNSLabel reports whether s is one legal DNS label: 1-63 characters of
+// letters, digits and hyphens, not starting or ending with a hyphen. A dot
+// anywhere fails, which is the point.
+func isDNSLabel(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// DialAddrs returns the advertised addresses that are safe to connect to.
+//
+// A peer must be reached by address rather than by resolving its name, and that
+// is a security requirement rather than an optimisation. Restricting a hostname
+// to `<label>.local` constrains what it is *called*, not what it *resolves to*:
+// mDNS resolution is itself unauthenticated, so anyone on the link can answer
+// the resolver's query for `peer.local` with any address they like — including
+// one only the hub can reach. `169.254.169.254` is the obvious prize, since a
+// cloud metadata endpoint is reachable from the hub and from nowhere else, so
+// having the hub fetch it is a real escalation rather than something the
+// attacker could have done directly.
+//
+// Filtering the advertised addresses instead removes the attacker's choice: the
+// hub only ever connects to a routable unicast address that was published in
+// the packet, which is an address the sender could have reached itself.
+//
+// Rejected, and why:
+//   - loopback: names the hub's own services, not the peer's
+//   - link-local (169.254/16, fe80::/10): the metadata range lives here, and a
+//     link-local address is not dialable from a record anyway
+//   - multicast, unspecified: not a host
+func (p Peer) DialAddrs() []netip.Addr {
+	out := make([]netip.Addr, 0, len(p.Addrs))
+	for _, addr := range p.Addrs {
+		if !addr.IsValid() {
+			continue
+		}
+		addr = addr.Unmap()
+		// IPv6 is refused while the transport is IPv4-only (see
+		// MulticastConn). The packet source is therefore always v4, so a v6
+		// candidate could never share a local prefix with it and sameLink
+		// would drop it anyway — but silently, looking like a same-link
+		// decision rather than a transport limit. Saying it here means an
+		// IPv6 advertisement is refused for the actual reason, and whoever
+		// adds a v6 transport has one place to change.
+		if !addr.Is4() {
+			continue
+		}
+		switch {
+		case addr.IsLoopback(),
+			addr.IsLinkLocalUnicast(),
+			addr.IsLinkLocalMulticast(),
+			addr.IsMulticast(),
+			addr.IsUnspecified(),
+			addr.IsInterfaceLocalMulticast():
+			continue
+		}
+		// Same link as whoever sent the advertisement.
+		//
+		// The guard is not a way around this: a real socket always reports
+		// both a source and a receiving interface, so their absence means a
+		// transport that carries neither — today only the in-memory pair used
+		// in tests. TestRealSocketAlwaysCarriesASource pins that, so the
+		// guard cannot quietly become reachable from the wire.
+		//
+		// The class filter above is not enough on a multi-homed host. A hub on
+		// both a LAN and a VPN can reach the VPN; an attacker on the LAN
+		// cannot — so an advertisement naming a VPN address would still be
+		// asking the hub to make a request the sender could not make itself,
+		// which is the definition of the problem.
+		//
+		// Both halves are required. Matching on the source alone let the
+		// attacker pick both ends — forge a source inside the VPN range,
+		// advertise a VPN address, and the rule agrees they are on one link.
+		// The interface index is the half that comes from the kernel, so
+		// scoping the prefixes to it is what makes the check mean anything.
+		if p.Source.IsValid() && !sameLink(p.SourceIface, p.Source, addr) {
+			continue
+		}
+		out = append(out, addr)
+	}
+	return out
+}
+
+// localPrefixes is a variable so tests can describe a multi-homed host without
+// needing one. It answers for one interface, named by index.
+var localPrefixes = interfacePrefixes
+
+// interfacePrefixes returns the networks attached to one interface.
+//
+// Scoped to a single interface, not to the machine, and that is the whole
+// point: the socket joins the group on every interface, so a hub on a LAN and
+// a VPN receives from both. Asking "is this address on some network I am
+// attached to" would answer yes for the VPN no matter which link the packet
+// actually came in on — which is exactly the question an attacker gets to
+// choose the answer to. See sameLink.
+func interfacePrefixes(ifIndex int) []netip.Prefix {
+	if ifIndex <= 0 {
+		return nil
+	}
+	iface, err := netInterfaceByIndex(ifIndex)
+	if err != nil {
+		return nil
+	}
+	ifaceAddrs, err := iface.Addrs()
+	if err != nil {
+		return nil
+	}
+	return prefixesFrom(ifaceAddrs)
+}
+
+// netInterfaceByIndex is a variable so a test can describe an interface the
+// machine does not have. Nothing at runtime reassigns it.
+var netInterfaceByIndex = net.InterfaceByIndex
+
+// prefixesFrom converts interface addresses to masked prefixes, skipping
+// anything that is not one.
+//
+// Split out from systemPrefixes so it can be tested against a fixed list.
+// Testing it through net.InterfaceAddrs() meant every skip branch was taken
+// or not depending on which interfaces the machine happened to have, which
+// made the covered-statement count differ between two runs of identical code
+// — a real problem under an exact coverage ratchet, and a test that asserted
+// almost nothing besides.
+func prefixesFrom(ifaceAddrs []net.Addr) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(ifaceAddrs))
+	for _, a := range ifaceAddrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		addr, ok := netip.AddrFromSlice(ipNet.IP)
+		if !ok {
+			continue
+		}
+		ones, _ := ipNet.Mask.Size()
+		prefix, err := addr.Unmap().Prefix(ones)
+		if err != nil {
+			continue
+		}
+		out = append(out, prefix)
+	}
+	return out
+}
+
+// sameLink reports whether source and candidate fall inside the same locally
+// attached network.
+//
+// Fails closed: a source that matches no local prefix allows nothing.
+//
+// An earlier version let that case through, reasoning that a sender on no
+// attached network is a routed mDNS relay rather than an attack. That was
+// wrong, and wrong in the way that matters — a UDP source address is trivially
+// spoofed by anyone on the same L2, so "off-link source" was not a rare
+// topology, it was a flag an attacker sets to switch the check off. Having
+// added a same-link rule, leaving an unauthenticated way around it is worse
+// than not having added it.
+//
+// What this costs is a routed mDNS relay, which is outside the design anyway:
+// mDNS is link-local by definition and section 18.8 already says discovery
+// does not leave the subnet. What it buys is that the rule cannot be turned off
+// from the wire.
+//
+// Scoped to the interface the packet arrived on, and an earlier version was
+// not. That version compared against every prefix the machine was attached
+// to, which a spoofer could satisfy by choosing both halves: on a hub with a
+// LAN and a VPN, an attacker on the LAN forges a source inside the VPN range
+// and advertises a VPN address, both land in the VPN prefix, and the rule
+// says yes — handing the attacker exactly the reach into a network they
+// cannot touch that this function exists to deny. A source address is not
+// evidence of anything; the interface a packet physically arrived on is.
+func sameLink(ifIndex int, source, candidate netip.Addr) bool {
+	for _, prefix := range localPrefixes(ifIndex) {
+		if prefix.Contains(source) && prefix.Contains(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// encodeTXT renders a peer's identity as DNS-SD TXT strings, in a stable order
+// so the same peer always produces byte-identical records.
+func encodeTXT(p Peer) []string {
+	pairs := [][2]string{
+		{txtKeyID, p.InstanceID},
+		{txtKeyName, p.InstanceName},
+		{txtKeyRole, p.Role},
+		{txtKeyVersion, p.Version},
+		{txtKeyScheme, p.Scheme},
+	}
+	out := make([]string, 0, len(pairs))
+	for _, kv := range pairs {
+		v := sanitizeTXTValue(kv[1])
+		if v == "" {
+			continue
+		}
+		out = append(out, kv[0]+"="+v)
+	}
+	return out
+}
+
+// decodeTXT reads the strings back. Unknown keys are ignored rather than
+// rejected: a future version adding a field must not make its peers invisible
+// to an older one.
+func decodeTXT(txt []string) Peer {
+	var p Peer
+	for _, entry := range txt {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		value = sanitizeTXTValue(value)
+		switch strings.ToLower(key) {
+		case txtKeyID:
+			p.InstanceID = value
+		case txtKeyName:
+			p.InstanceName = value
+		case txtKeyRole:
+			p.Role = value
+		case txtKeyVersion:
+			p.Version = value
+		case txtKeyScheme:
+			p.Scheme = strings.ToLower(value)
+		}
+	}
+	return p
+}
+
+// sanitizeTXTValue drops anything that has no business in a TXT record and
+// that a UI would otherwise have to defend against: control characters,
+// invalid UTF-8, and runaway lengths. A value that survives is safe to render.
+func sanitizeTXTValue(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !utf8.ValidString(raw) {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > txtValueMax {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// serviceFQDN is the browse target, "_heimdallm._tcp.local.".
+func serviceFQDN() string {
+	return Service + "." + Domain + "."
+}
+
+// instanceFQDN is one daemon's record name within the service.
+func instanceFQDN(instance string) string {
+	return escapeLabel(instance) + "." + serviceFQDN()
+}
+
+// escapeLabel makes an arbitrary instance name safe as a single DNS label.
+// DNS-SD instance names are allowed to be free-form UTF-8, but a literal dot
+// would split the label and silently reparent the record under a different
+// service, so dots and backslashes are escaped the way the DNS presentation
+// format expects.
+func escapeLabel(name string) string {
+	name = sanitizeTXTValue(name)
+	if name == "" {
+		return "heimdallm"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch r {
+		case '.', '\\':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// validatePort rejects a port that cannot be advertised, so a misconfiguration
+// fails at startup rather than producing an SRV record nobody can dial.
+func validatePort(port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("lan: port %d is out of range", port)
+	}
+	return nil
+}
+
+// sortPeers orders peers by instance id, so consecutive browses of an unchanged
+// network produce an identical slice and a caller can diff them meaningfully.
+func sortPeers(peers []Peer) {
+	sort.Slice(peers, func(i, j int) bool {
+		return peers[i].InstanceID < peers[j].InstanceID
+	})
+}
