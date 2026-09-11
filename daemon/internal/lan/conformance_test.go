@@ -779,3 +779,61 @@ func TestTheQuotaStateIsItselfBounded(t *testing.T) {
 		t.Errorf("namesFrom grew to %d, above the %d budget", got, maxRecordNames)
 	}
 }
+
+// RFC 6762 §18.1: the query id MUST be zero in a multicast response.
+//
+// dns.Msg.SetReply echoes the query's id, which is correct for unicast DNS and
+// wrong here — send always answers to the group, so the packet reaches
+// listeners that asked nothing, and a non-zero id invites one of them to match
+// it against an outstanding query of its own by transaction id. mDNS does not
+// use that model precisely because the answer is not addressed to the asker.
+func TestMulticastResponsesCarryAZeroMessageID(t *testing.T) {
+	browseConn := startAdvertiser(t, testAdvertisement())
+
+	query := new(dns.Msg)
+	query.SetQuestion(serviceFQDN(), dns.TypePTR)
+	// After SetQuestion, which assigns a random id of its own. A distinctive
+	// value makes an echo unmistakable rather than merely non-zero.
+	query.Id = 0x4d2
+	packed, err := query.Pack()
+	if err != nil {
+		t.Fatalf("packing the query: %v", err)
+	}
+	if _, err := browseConn.WriteTo(packed, GroupAddr()); err != nil {
+		t.Fatalf("sending the query: %v", err)
+	}
+
+	reply := readReply(t, browseConn)
+	if reply.Id != 0 {
+		t.Fatalf("response id = %#x, want 0 (RFC 6762 §18.1)", reply.Id)
+	}
+}
+
+// The goodbye is unsolicited — there is no query to echo an id from — so it
+// is held to the same rule by construction rather than by a fix. Pinned so
+// that stays true if it ever grows a SetReply.
+func TestTheGoodbyeCarriesAZeroMessageID(t *testing.T) {
+	unpaced(t)
+	adConn, browseConn := NewMemConn()
+	t.Cleanup(func() { _ = adConn.Close(); _ = browseConn.Close() })
+
+	adv, err := NewAdvertiser(adConn, testAdvertisement(), quietLogger())
+	if err != nil {
+		t.Fatalf("NewAdvertiser: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); adv.Run(ctx) }()
+	cancel()
+	<-done
+
+	goodbye := readReply(t, browseConn)
+	if goodbye.Id != 0 {
+		t.Fatalf("goodbye id = %#x, want 0 (RFC 6762 §18.1)", goodbye.Id)
+	}
+	for _, rr := range goodbye.Answer {
+		if rr.Header().Ttl != 0 {
+			t.Fatalf("goodbye record %s has TTL %d, want 0", rr.Header().Name, rr.Header().Ttl)
+		}
+	}
+}
