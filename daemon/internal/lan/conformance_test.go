@@ -19,9 +19,9 @@ import (
 func TestAccumulatorCapsAddressesPerHost(t *testing.T) {
 	acc := newAccumulator()
 	for i := range maxAddrsPerHost * 10 {
-		acc.addAddr("srv-a.local.", net.ParseIP(fmt.Sprintf("10.0.%d.%d", i/256, i%256)), netip.Addr{})
+		acc.addAddr("srv-a.local.", net.ParseIP(fmt.Sprintf("10.0.%d.%d", i/256, i%256)), netip.Addr{}, testIface)
 	}
-	if got := len(acc.addrs[recordKey{netip.Addr{}, "srv-a.local."}]); got > maxAddrsPerHost {
+	if got := len(acc.addrs[recordKey{netip.Addr{}, testIface, "srv-a.local."}]); got > maxAddrsPerHost {
 		t.Fatalf("one hostname accumulated %d addresses, above the %d cap",
 			got, maxAddrsPerHost)
 	}
@@ -32,9 +32,9 @@ func TestAccumulatorCapsAddressesPerHost(t *testing.T) {
 func TestAccumulatorStillDeduplicatesAddresses(t *testing.T) {
 	acc := newAccumulator()
 	for range 5 {
-		acc.addAddr("srv-a.local.", net.ParseIP("10.0.0.11"), netip.Addr{})
+		acc.addAddr("srv-a.local.", net.ParseIP("10.0.0.11"), netip.Addr{}, testIface)
 	}
-	if got := len(acc.addrs[recordKey{netip.Addr{}, "srv-a.local."}]); got != 1 {
+	if got := len(acc.addrs[recordKey{netip.Addr{}, testIface, "srv-a.local."}]); got != 1 {
 		t.Fatalf("recorded the same address %d times, want 1", got)
 	}
 }
@@ -47,14 +47,14 @@ func TestGoodbyeFromAStrangerIsIgnored(t *testing.T) {
 	attacker := netip.MustParseAddr("192.168.1.99")
 
 	acc := newAccumulator()
-	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR()), owner)
+	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR()), owner, testIface)
 	if len(acc.instances) != 1 {
 		t.Fatalf("the advertisement was not recorded: %+v", acc.instances)
 	}
 
 	goodbye := ptrRR()
 	goodbye.Hdr.Ttl = 0
-	acc.absorb(pack(t, goodbye), attacker)
+	acc.absorb(pack(t, goodbye), attacker, testIface)
 
 	if len(acc.instances) != 1 {
 		t.Fatal("a stranger's goodbye evicted somebody else's daemon")
@@ -67,11 +67,11 @@ func TestGoodbyeFromTheAdvertiserIsHonoured(t *testing.T) {
 	owner := netip.MustParseAddr("192.168.1.20")
 
 	acc := newAccumulator()
-	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR()), owner)
+	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR()), owner, testIface)
 
 	goodbye := ptrRR()
 	goodbye.Hdr.Ttl = 0
-	acc.absorb(pack(t, goodbye), owner)
+	acc.absorb(pack(t, goodbye), owner, testIface)
 
 	if len(acc.instances) != 0 {
 		t.Fatalf("the advertiser's own goodbye was ignored: %+v", acc.instances)
@@ -90,16 +90,16 @@ func TestGoodbyeAlsoDropsTheAddresses(t *testing.T) {
 			Class: dns.ClassINET, Ttl: recordTTL},
 		A: net.ParseIP("192.168.1.20"),
 	}
-	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
-	if len(acc.addrs[recordKey{owner, "srv-a.local."}]) != 1 {
+	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner, testIface)
+	if len(acc.addrs[recordKey{owner, testIface, "srv-a.local."}]) != 1 {
 		t.Fatal("the address was not recorded")
 	}
 
 	goodbye := srvRR()
 	goodbye.Hdr.Ttl = 0
-	acc.absorb(pack(t, goodbye), owner)
+	acc.absorb(pack(t, goodbye), owner, testIface)
 
-	if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 0 {
+	if got := acc.addrs[recordKey{owner, testIface, "srv-a.local."}]; len(got) != 0 {
 		t.Fatalf("addresses survived the retraction: %v", got)
 	}
 }
@@ -328,14 +328,14 @@ func TestAForgedGoodbyeCannotStripAPeersAddresses(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			acc := newAccumulator()
-			acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
-			if len(acc.addrs[recordKey{owner, "srv-a.local."}]) != 1 {
+			acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner, testIface)
+			if len(acc.addrs[recordKey{owner, testIface, "srv-a.local."}]) != 1 {
 				t.Fatal("the address was not recorded")
 			}
 
-			acc.absorb(pack(t, tt.goodbye()), attacker)
+			acc.absorb(pack(t, tt.goodbye()), attacker, testIface)
 
-			if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 1 {
+			if got := acc.addrs[recordKey{owner, testIface, "srv-a.local."}]; len(got) != 1 {
 				t.Fatalf("a stranger's goodbye stripped the addresses: %v", got)
 			}
 			if len(acc.instances) != 1 {
@@ -356,13 +356,13 @@ func TestAnAdvertiserCanWithdrawItsOwnAddresses(t *testing.T) {
 	}
 
 	acc := newAccumulator()
-	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
+	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner, testIface)
 
 	goodbye := &dns.A{Hdr: addr.Hdr, A: addr.A}
 	goodbye.Hdr.Ttl = 0
-	acc.absorb(pack(t, goodbye), owner)
+	acc.absorb(pack(t, goodbye), owner, testIface)
 
-	if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 0 {
+	if got := acc.addrs[recordKey{owner, testIface, "srv-a.local."}]; len(got) != 0 {
 		t.Fatalf("the advertiser could not withdraw its own addresses: %v", got)
 	}
 }
@@ -383,7 +383,7 @@ func TestOneSenderCannotTouchAnothersAddresses(t *testing.T) {
 
 	t.Run("by naming their hostname as its own SRV target", func(t *testing.T) {
 		acc := newAccumulator()
-		acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), ownerAddr), owner)
+		acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), ownerAddr), owner, testIface)
 
 		// The attacker registers its own instance pointing at the victim's
 		// hostname, then retires it — which used to take the victim's
@@ -400,13 +400,13 @@ func TestOneSenderCannotTouchAnothersAddresses(t *testing.T) {
 			evilSRV,
 			&dns.TXT{Hdr: dns.RR_Header{Name: evilName, Rrtype: dns.TypeTXT,
 				Class: dns.ClassINET, Ttl: recordTTL}, Txt: []string{"id=evil"}},
-		), attacker)
+		), attacker, testIface)
 
 		goodbye := &dns.SRV{Hdr: evilSRV.Hdr, Port: evilSRV.Port, Target: evilSRV.Target}
 		goodbye.Hdr.Ttl = 0
-		acc.absorb(pack(t, goodbye), attacker)
+		acc.absorb(pack(t, goodbye), attacker, testIface)
 
-		if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 1 {
+		if got := acc.addrs[recordKey{owner, testIface, "srv-a.local."}]; len(got) != 1 {
 			t.Fatalf("the victim's addresses were stripped through an "+
 				"attacker-chosen SRV target: %v", got)
 		}
@@ -417,14 +417,14 @@ func TestOneSenderCannotTouchAnothersAddresses(t *testing.T) {
 
 		// The attacker publishes an address for the victim's hostname before
 		// the victim does, which used to make it the owner.
-		acc.absorb(pack(t, &dns.A{Hdr: ownerAddr.Hdr, A: net.ParseIP("10.0.0.66")}), attacker)
-		acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), ownerAddr), owner)
+		acc.absorb(pack(t, &dns.A{Hdr: ownerAddr.Hdr, A: net.ParseIP("10.0.0.66")}), attacker, testIface)
+		acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), ownerAddr), owner, testIface)
 
 		goodbye := &dns.A{Hdr: ownerAddr.Hdr, A: net.ParseIP("10.0.0.66")}
 		goodbye.Hdr.Ttl = 0
-		acc.absorb(pack(t, goodbye), attacker)
+		acc.absorb(pack(t, goodbye), attacker, testIface)
 
-		if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 1 {
+		if got := acc.addrs[recordKey{owner, testIface, "srv-a.local."}]; len(got) != 1 {
 			t.Fatalf("the victim's addresses were stripped by a first-claimer: %v", got)
 		}
 	})
@@ -442,12 +442,12 @@ func TestAPeerCarriesOnlyItsOwnSendersAddresses(t *testing.T) {
 		Hdr: dns.RR_Header{Name: "srv-a.local.", Rrtype: dns.TypeA,
 			Class: dns.ClassINET, Ttl: recordTTL},
 		A: net.ParseIP("10.0.0.66"),
-	}), attacker)
+	}), attacker, testIface)
 	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), &dns.A{
 		Hdr: dns.RR_Header{Name: "srv-a.local.", Rrtype: dns.TypeA,
 			Class: dns.ClassINET, Ttl: recordTTL},
 		A: net.ParseIP("192.168.1.20"),
-	}), owner)
+	}), owner, testIface)
 
 	peers := acc.peers(mustBrowser(t))
 	if len(peers) != 1 {
@@ -476,15 +476,15 @@ func TestAGoodbyeCannotRaceAnAdvertisementThatIsStillArriving(t *testing.T) {
 	acc := newAccumulator()
 
 	// The PTR arrives on its own, as a responder splitting its answer would.
-	acc.absorb(pack(t, ptrRR()), owner)
+	acc.absorb(pack(t, ptrRR()), owner, testIface)
 
 	// The attacker retires it before the SRV has been seen.
 	goodbye := ptrRR()
 	goodbye.Hdr.Ttl = 0
-	acc.absorb(pack(t, goodbye), attacker)
+	acc.absorb(pack(t, goodbye), attacker, testIface)
 
 	// The rest of the legitimate advertisement follows.
-	acc.absorb(pack(t, srvRR(), txtRR()), owner)
+	acc.absorb(pack(t, srvRR(), txtRR()), owner, testIface)
 
 	peers := acc.peers(mustBrowser(t))
 	if len(peers) != 1 {
@@ -504,9 +504,9 @@ func TestAPeerIsNotAssembledFromTwoSenders(t *testing.T) {
 	attacker := netip.MustParseAddr("192.168.1.99")
 
 	acc := newAccumulator()
-	acc.absorb(pack(t, ptrRR(), srvRR()), owner)
+	acc.absorb(pack(t, ptrRR(), srvRR()), owner, testIface)
 	// The attacker supplies the missing half.
-	acc.absorb(pack(t, txtRR()), attacker)
+	acc.absorb(pack(t, txtRR()), attacker, testIface)
 
 	if got := acc.peers(mustBrowser(t)); len(got) != 0 {
 		t.Fatalf("assembled a peer from two senders: %+v", got)
@@ -580,10 +580,10 @@ func TestOneFloodingSenderCannotCrowdOutRealDaemons(t *testing.T) {
 	// Names that sort before anything a real daemon is likely to be called.
 	for i := range maxPeers * 2 {
 		id := fmt.Sprintf("aaa%04d", i)
-		acc.absorb(pack(t, advertisementFor(id)...), flooder)
+		acc.absorb(pack(t, advertisementFor(id)...), flooder, testIface)
 	}
-	acc.absorb(pack(t, advertisementFor("zulu-one")...), real1)
-	acc.absorb(pack(t, advertisementFor("zulu-two")...), real2)
+	acc.absorb(pack(t, advertisementFor("zulu-one")...), real1, testIface)
+	acc.absorb(pack(t, advertisementFor("zulu-two")...), real2, testIface)
 
 	found := map[string]bool{}
 	for _, p := range acc.peers(mustBrowser(t)) {
@@ -643,11 +643,11 @@ func TestAFloodCannotExhaustAdmissionBeforeARealDaemonReplies(t *testing.T) {
 
 	// The flooder goes first and tries to take the whole budget.
 	for i := range maxRecordNames * 2 {
-		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("flood%05d", i))...), flooder)
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("flood%05d", i))...), flooder, testIface)
 	}
 
 	// Only now does the real daemon answer.
-	acc.absorb(pack(t, advertisementFor("srv-a")...), victim)
+	acc.absorb(pack(t, advertisementFor("srv-a")...), victim, testIface)
 
 	found := map[string]bool{}
 	for _, p := range acc.peers(mustBrowser(t)) {
@@ -666,7 +666,7 @@ func TestAdmissionIsBoundedPerSender(t *testing.T) {
 
 	acc := newAccumulator()
 	for i := range maxRecordNamesPerSender * 10 {
-		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("flood%05d", i))...), flooder)
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("flood%05d", i))...), flooder, testIface)
 	}
 
 	if got := acc.namesFrom[flooder]; got > maxRecordNamesPerSender {
@@ -685,7 +685,7 @@ func TestManySendersEachGetTheirShare(t *testing.T) {
 	acc := newAccumulator()
 	for i := range 20 {
 		src := netip.MustParseAddr(fmt.Sprintf("192.168.1.%d", 20+i))
-		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("node%02d", i))...), src)
+		acc.absorb(pack(t, advertisementFor(fmt.Sprintf("node%02d", i))...), src, testIface)
 	}
 
 	peers := acc.peers(mustBrowser(t))
@@ -733,7 +733,7 @@ func TestTheResponderIsRateLimited(t *testing.T) {
 	buf := make([]byte, 9000)
 	for time.Now().Before(deadline) {
 		_ = peerConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-		if _, _, err := peerConn.ReadFrom(buf); err == nil {
+		if _, _, _, err := peerConn.ReadFrom(buf); err == nil {
 			replies++
 		}
 	}
@@ -766,10 +766,10 @@ func TestTheQuotaStateIsItselfBounded(t *testing.T) {
 	for i := range maxRecordNames * 3 {
 		src := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
 		name := fmt.Sprintf("spoof%05d", i)
-		acc.absorb(pack(t, advertisementFor(name)...), src)
+		acc.absorb(pack(t, advertisementFor(name)...), src, testIface)
 		goodbye := advertisementFor(name)[0]
 		goodbye.Header().Ttl = 0
-		acc.absorb(pack(t, goodbye), src)
+		acc.absorb(pack(t, goodbye), src, testIface)
 	}
 
 	if got := len(acc.seenName); got > maxRecordNames {

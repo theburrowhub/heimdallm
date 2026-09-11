@@ -5,11 +5,15 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"golang.org/x/net/ipv4"
 )
 
 // mDNS group addresses and port (RFC 6762 §3).
+const mdnsPort = 5353
+
 var (
-	ipv4Group = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+	ipv4Group = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 )
 
 // PacketConn is the slice of net.PacketConn this package needs.
@@ -21,7 +25,20 @@ var (
 // only ever skip. With this seam the advertise/browse round trip runs on an
 // in-memory pair and is actually exercised in CI.
 type PacketConn interface {
-	ReadFrom(b []byte) (int, net.Addr, error)
+	// ReadFrom returns the packet, its source address, and the index of the
+	// interface it arrived on.
+	//
+	// The interface index is the part a plain net.PacketConn cannot give, and
+	// it is a security requirement rather than a nicety: the socket joins the
+	// group on every interface, so without it a packet from the LAN and a
+	// packet from a VPN are indistinguishable, and the only thing left to
+	// judge provenance by is the source address — which anyone on the link
+	// can forge. See sameLink.
+	//
+	// An index of 0 means the transport cannot say. Only the in-memory pair
+	// answers that; a real socket always reports one, which
+	// TestRealSocketAlwaysCarriesAnInterface pins.
+	ReadFrom(b []byte) (n int, src net.Addr, ifIndex int, err error)
 	WriteTo(b []byte, addr net.Addr) (int, error)
 	SetReadDeadline(t time.Time) error
 	Close() error
@@ -41,8 +58,44 @@ func MulticastConn(iface *net.Interface) (PacketConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lan: joining the mDNS multicast group: %w", err)
 	}
-	return conn, nil
+	// Ask the kernel to report the receiving interface with every packet
+	// (IP_PKTINFO on Linux, IP_RECVIF on the BSDs; x/net picks the right one).
+	// Without this the same-link rule has nothing but the source address to
+	// go on, and a source address is not evidence of anything.
+	pc := ipv4.NewPacketConn(conn)
+	if err := pc.SetControlMessage(ipv4.FlagInterface, true); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("lan: asking for the receiving interface: %w", err)
+	}
+	return &multicastConn{udp: conn, pc: pc}, nil
 }
+
+// multicastConn is the real transport: a UDP socket that also reports which
+// interface each packet arrived on.
+type multicastConn struct {
+	udp *net.UDPConn
+	pc  *ipv4.PacketConn
+}
+
+func (c *multicastConn) ReadFrom(b []byte) (int, net.Addr, int, error) {
+	n, cm, src, err := c.pc.ReadFrom(b)
+	if err != nil {
+		return n, src, 0, err
+	}
+	// cm is nil if the control message did not come back. Reporting 0 rather
+	// than guessing is what makes the caller fail closed.
+	if cm == nil {
+		return n, src, 0, nil
+	}
+	return n, src, cm.IfIndex, nil
+}
+
+func (c *multicastConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	return c.udp.WriteTo(b, addr)
+}
+
+func (c *multicastConn) SetReadDeadline(t time.Time) error { return c.udp.SetReadDeadline(t) }
+func (c *multicastConn) Close() error                      { return c.udp.Close() }
 
 // memConn is one end of an in-memory transport pair.
 type memConn struct {
@@ -92,13 +145,13 @@ func (c *memConn) isClosed() bool {
 	return c.closed
 }
 
-func (c *memConn) ReadFrom(b []byte) (int, net.Addr, error) {
+func (c *memConn) ReadFrom(b []byte) (int, net.Addr, int, error) {
 	c.mu.Lock()
 	deadline := c.deadline
 	closed := c.closed
 	c.mu.Unlock()
 	if closed {
-		return 0, nil, net.ErrClosed
+		return 0, nil, 0, net.ErrClosed
 	}
 
 	var timeout <-chan time.Time
@@ -111,11 +164,14 @@ func (c *memConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	select {
 	case pkt := <-c.in:
 		n := copy(b, pkt.data)
-		return n, pkt.from, nil
+		// No interface: there is no link here. Callers must treat this the
+		// same way they treat an absent source, which is what keeps the
+		// in-memory transport from being a way around the same-link rule.
+		return n, pkt.from, 0, nil
 	case <-c.done:
-		return 0, nil, net.ErrClosed
+		return 0, nil, 0, net.ErrClosed
 	case <-timeout:
-		return 0, nil, timeoutError{}
+		return 0, nil, 0, timeoutError{}
 	}
 }
 

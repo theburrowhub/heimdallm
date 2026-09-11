@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/ipv4"
 )
 
 // faultConn is a PacketConn that fails on demand, so the loops' error handling
@@ -35,25 +37,25 @@ func (c *faultConn) setReadErr(err error) {
 	c.readErr = err
 }
 
-func (c *faultConn) ReadFrom(b []byte) (int, net.Addr, error) {
+func (c *faultConn) ReadFrom(b []byte) (int, net.Addr, int, error) {
 	n := c.reads.Add(1)
 	c.mu.Lock()
 	err, block, alternate := c.readErr, c.blockRead, c.alternate
 	c.mu.Unlock()
 	if alternate {
 		if n%2 == 0 {
-			return 0, memAddr("peer"), nil
+			return 0, memAddr("peer"), testIface, nil
 		}
-		return 0, nil, errors.New("transient")
+		return 0, nil, 0, errors.New("transient")
 	}
 	if block {
 		time.Sleep(5 * time.Millisecond)
-		return 0, nil, timeoutError{}
+		return 0, nil, 0, timeoutError{}
 	}
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, 0, err
 	}
-	return 0, memAddr("peer"), nil
+	return 0, memAddr("peer"), testIface, nil
 }
 
 func (c *faultConn) WriteTo(b []byte, _ net.Addr) (int, error) {
@@ -328,5 +330,46 @@ func TestRealSocketAlwaysCarriesASource(t *testing.T) {
 	}
 	if got := sourceAddr(from); !got.IsValid() {
 		t.Fatal("sourceAddr could not extract an address from a real UDP read")
+	}
+}
+
+// The companion to the source check, for the half that actually decides:
+// a real socket must report the interface a packet arrived on, or sameLink has
+// nothing but a forgeable source address to judge provenance by and
+// interfacePrefixes(0) makes it refuse everything.
+func TestRealSocketAlwaysCarriesAnInterface(t *testing.T) {
+	udp, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot bind a local UDP socket here: %v", err)
+	}
+	defer udp.Close()
+
+	pc := ipv4.NewPacketConn(udp.(*net.UDPConn))
+	if err := pc.SetControlMessage(ipv4.FlagInterface, true); err != nil {
+		t.Skipf("this platform will not report the receiving interface: %v", err)
+	}
+
+	sender, err := net.Dial("udp4", udp.LocalAddr().String())
+	if err != nil {
+		t.Skipf("cannot dial the local UDP socket here: %v", err)
+	}
+	defer sender.Close()
+	if _, err := sender.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_ = udp.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 32)
+	_, cm, _, err := pc.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	if cm == nil {
+		t.Fatal("no control message: the receiving interface was not reported, " +
+			"so sameLink would refuse every peer")
+	}
+	if cm.IfIndex <= 0 {
+		t.Fatalf("IfIndex = %d, want a real interface index; sameLink treats 0 "+
+			"as 'cannot say' and refuses everything", cm.IfIndex)
 	}
 }

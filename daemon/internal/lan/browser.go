@@ -122,7 +122,7 @@ func (b *Browser) Browse(ctx context.Context, window time.Duration) ([]Peer, err
 		}
 		_ = b.conn.SetReadDeadline(time.Now().Add(remaining))
 
-		n, from, err := b.conn.ReadFrom(buf)
+		n, from, iface, err := b.conn.ReadFrom(buf)
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
@@ -144,7 +144,7 @@ func (b *Browser) Browse(ctx context.Context, window time.Duration) ([]Peer, err
 			continue
 		}
 		failures = 0
-		acc.absorb(buf[:n], sourceAddr(from))
+		acc.absorb(buf[:n], sourceAddr(from), iface)
 	}
 
 	return acc.peers(b), nil
@@ -233,8 +233,13 @@ type accumulator struct {
 }
 
 // recordKey scopes a record name to the sender that advertised it.
+//
+// Keyed by the receiving interface as well as the source address, so a sender
+// forging the address of a peer on another link cannot merge its records into
+// that peer's — the interface is the half it cannot choose.
 type recordKey struct {
 	source netip.Addr
+	iface  int
 	name   string
 }
 
@@ -256,7 +261,7 @@ func newAccumulator() *accumulator {
 	}
 }
 
-func (a *accumulator) absorb(packet []byte, source netip.Addr) {
+func (a *accumulator) absorb(packet []byte, source netip.Addr, iface int) {
 	var msg dns.Msg
 	if err := msg.Unpack(packet); err != nil {
 		return
@@ -274,28 +279,28 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 			// collected for it is dropped rather than reported as present. Only
 			// this sender's own records — the key sees to that.
 			if rr.Header().Ttl == 0 {
-				a.forget(rr, source)
+				a.forget(rr, source, iface)
 				continue
 			}
 			switch rec := rr.(type) {
 			case *dns.PTR:
 				if strings.EqualFold(rec.Hdr.Name, serviceFQDN()) {
-					if key := (recordKey{source, strings.ToLower(rec.Ptr)}); a.admit(key) {
+					if key := (recordKey{source, iface, strings.ToLower(rec.Ptr)}); a.admit(key) {
 						a.instances[key] = true
 					}
 				}
 			case *dns.SRV:
-				if key := (recordKey{source, strings.ToLower(rec.Hdr.Name)}); a.admit(key) {
+				if key := (recordKey{source, iface, strings.ToLower(rec.Hdr.Name)}); a.admit(key) {
 					a.srv[key] = rec
 				}
 			case *dns.TXT:
-				if key := (recordKey{source, strings.ToLower(rec.Hdr.Name)}); a.admit(key) {
+				if key := (recordKey{source, iface, strings.ToLower(rec.Hdr.Name)}); a.admit(key) {
 					a.txt[key] = rec.Txt
 				}
 			case *dns.A:
-				a.addAddr(rec.Hdr.Name, rec.A, source)
+				a.addAddr(rec.Hdr.Name, rec.A, source, iface)
 			case *dns.AAAA:
-				a.addAddr(rec.Hdr.Name, rec.AAAA, source)
+				a.addAddr(rec.Hdr.Name, rec.AAAA, source, iface)
 			}
 		}
 	}
@@ -304,21 +309,21 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 // forget drops what this sender previously advertised, and only that. There is
 // no ownership check because there is nothing to check: the key already
 // restricts the reach to the sender's own records.
-func (a *accumulator) forget(rr dns.RR, source netip.Addr) {
+func (a *accumulator) forget(rr dns.RR, source netip.Addr, iface int) {
 	name := strings.ToLower(rr.Header().Name)
 	switch rec := rr.(type) {
 	case *dns.PTR:
-		a.retract(recordKey{source, strings.ToLower(rec.Ptr)})
+		a.retract(recordKey{source, iface, strings.ToLower(rec.Ptr)})
 	case *dns.A, *dns.AAAA:
-		a.dropAddrs(recordKey{source, name})
+		a.dropAddrs(recordKey{source, iface, name})
 	default:
-		a.retract(recordKey{source, name})
+		a.retract(recordKey{source, iface, name})
 	}
 }
 
 func (a *accumulator) retract(key recordKey) {
 	if srv, ok := a.srv[key]; ok {
-		a.dropAddrs(recordKey{key.source, strings.ToLower(srv.Target)})
+		a.dropAddrs(recordKey{key.source, key.iface, strings.ToLower(srv.Target)})
 	}
 	delete(a.instances, key)
 	delete(a.srv, key)
@@ -365,13 +370,13 @@ func (a *accumulator) full() bool {
 		len(a.namesFrom) >= maxRecordNames
 }
 
-func (a *accumulator) addAddr(host string, ip net.IP, source netip.Addr) {
+func (a *accumulator) addAddr(host string, ip net.IP, source netip.Addr, iface int) {
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
 		return
 	}
 	addr = addr.Unmap()
-	key := recordKey{source, strings.ToLower(host)}
+	key := recordKey{source, iface, strings.ToLower(host)}
 	if _, known := a.addrs[key]; !known && len(a.addrs) >= maxRecordNames {
 		return
 	}
@@ -408,7 +413,8 @@ func (a *accumulator) peers(b *Browser) []Peer {
 		peer.Hostname = strings.TrimSuffix(srv.Target, ".")
 		peer.Port = int(srv.Port)
 		peer.Source = key.source
-		peer.Addrs = a.addrs[recordKey{key.source, strings.ToLower(srv.Target)}]
+		peer.SourceIface = key.iface
+		peer.Addrs = a.addrs[recordKey{key.source, key.iface, strings.ToLower(srv.Target)}]
 		if peer.Scheme == "" {
 			peer.Scheme = "http"
 		}
