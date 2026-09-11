@@ -129,3 +129,58 @@ func TestReviewFooter(t *testing.T) {
 		t.Errorf("footer should start with the rule and attribution line: %q", highFooter)
 	}
 }
+
+// TestReviewFooterVersionSuffix locks in the three shapes versionSuffix must
+// produce: a bare semver (what goreleaser's {{.Version}} and the Makefile's
+// GIT_VERSION both stamp) gets its "v" back, a non-numeric build tag (the
+// Makefile's "dev" default, or a git-describe-style "main-<sha>") is shown
+// verbatim, and no wiring at all (SetDaemonVersion never called) omits the
+// suffix rather than guessing.
+//
+// NOTE: this mutates the package-global daemonVersion via SetDaemonVersion.
+// Safe only because no test in this package calls t.Parallel() — see
+// comment_signals_test.go's TestReconcileSeverity_LogAttrsThreadedIntoWarnLines
+// for the same caveat with slog's default logger. defer restores the
+// zero-value state every other test in this file expects.
+func TestReviewFooterVersionSuffix(t *testing.T) {
+	defer SetDaemonVersion("")
+
+	SetDaemonVersion("")
+	if got := reviewFooter(""); !strings.HasSuffix(got, heimdallmURL+")*") {
+		t.Errorf("no version wired: footer should end right after the link, with no version suffix, got %q", got)
+	}
+
+	SetDaemonVersion("0.8.22")
+	if got := reviewFooter(""); !strings.Contains(got, "Reviewed by [Heimdallm](https://theburrowhub.github.io/heimdallm/) (v0.8.22)*") {
+		t.Errorf("semver should be reported as v0.8.22 right after the link, got %q", got)
+	}
+
+	SetDaemonVersion("0.8.22-3-gab12cd-dirty")
+	if got := reviewFooter(""); !strings.Contains(got, "(v0.8.22-3-gab12cd-dirty)") {
+		t.Errorf("a dirty git-describe version must be reported verbatim (with the v prefix), got %q", got)
+	}
+
+	SetDaemonVersion("dev")
+	if got := reviewFooter(""); !strings.Contains(got, "(dev)") {
+		t.Errorf("a non-numeric build tag should be reported verbatim, without an invented v prefix, got %q", got)
+	}
+}
+
+// TestReviewFooterVersionAppearsInAllPublishedBodyShapes guards that the
+// version suffix reaches every body Heimdallm posts — not just the review
+// footer helper itself — since buildIssueComment and buildMultiSummaryBody
+// are separate call sites a future refactor could bypass.
+func TestReviewFooterVersionAppearsInAllPublishedBodyShapes(t *testing.T) {
+	defer SetDaemonVersion("")
+	SetDaemonVersion("0.8.22")
+
+	issueBody := buildIssueComment(executor.Issue{Severity: "high", Description: "x"})
+	if !strings.Contains(issueBody, "(v0.8.22)") {
+		t.Errorf("buildIssueComment should carry the version suffix, got %q", issueBody)
+	}
+
+	summaryBody := buildMultiSummaryBody(&executor.ReviewResult{Summary: "s", Severity: "high"})
+	if !strings.Contains(summaryBody, "(v0.8.22)") {
+		t.Errorf("buildMultiSummaryBody should carry the version suffix, got %q", summaryBody)
+	}
+}
