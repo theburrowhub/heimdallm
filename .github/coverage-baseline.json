@@ -5,7 +5,7 @@
   "modules": {
     "daemon": {
       "covered": 15609,
-      "total": 18982
+      "total": 18981
     },
     "cli": {
       "covered": 1735,
