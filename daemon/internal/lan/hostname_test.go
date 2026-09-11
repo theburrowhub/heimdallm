@@ -129,13 +129,43 @@ func TestDialAddrsKeepsRoutableAddresses(t *testing.T) {
 		netip.MustParseAddr("2001:db8::1"),
 	}}
 	got := peer.DialAddrs()
-	want := []string{"10.0.0.11", "192.168.1.20", "2001:db8::1"}
+	// 2001:db8::1 is a routable unicast address and is still dropped: the
+	// transport is IPv4-only, so it could never be reached from a browse.
+	want := []string{"10.0.0.11", "192.168.1.20"}
 	if len(got) != len(want) {
 		t.Fatalf("DialAddrs = %v, want %v", got, want)
 	}
 	for i, w := range want {
 		if got[i].String() != w {
 			t.Fatalf("DialAddrs[%d] = %s, want %s", i, got[i], w)
+		}
+	}
+}
+
+// The IPv4-only rule is the whole reason a v6 advertisement is refused, so it
+// has to hold even when every other check would have passed. Without it the
+// address survives DialAddrs whenever Source is absent, and is then dropped
+// silently by sameLink whenever Source is present — two different answers for
+// the same peer depending on which transport carried it.
+func TestDialAddrsDropsIPv6EvenWithNothingElseAgainstIt(t *testing.T) {
+	// A host attached to the v6 network the candidate lives on, and a sender
+	// on that same network: sameLink would say yes.
+	realPrefixes := localPrefixes
+	localPrefixes = func() []netip.Prefix {
+		return []netip.Prefix{netip.MustParsePrefix("2001:db8::/64")}
+	}
+	t.Cleanup(func() { localPrefixes = realPrefixes })
+
+	for _, source := range []netip.Addr{
+		{}, // in-memory transport: no source at all
+		netip.MustParseAddr("2001:db8::99"),
+	} {
+		peer := Peer{
+			Source: source,
+			Addrs:  []netip.Addr{netip.MustParseAddr("2001:db8::1")},
+		}
+		if got := peer.DialAddrs(); len(got) != 0 {
+			t.Fatalf("source %v: DialAddrs = %v, want none", source, got)
 		}
 	}
 }

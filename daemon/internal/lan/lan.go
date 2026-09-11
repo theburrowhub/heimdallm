@@ -183,6 +183,16 @@ func (p Peer) DialAddrs() []netip.Addr {
 			continue
 		}
 		addr = addr.Unmap()
+		// IPv6 is refused while the transport is IPv4-only (see
+		// MulticastConn). The packet source is therefore always v4, so a v6
+		// candidate could never share a local prefix with it and sameLink
+		// would drop it anyway — but silently, looking like a same-link
+		// decision rather than a transport limit. Saying it here means an
+		// IPv6 advertisement is refused for the actual reason, and whoever
+		// adds a v6 transport has one place to change.
+		if !addr.Is4() {
+			continue
+		}
 		switch {
 		case addr.IsLoopback(),
 			addr.IsLinkLocalUnicast(),

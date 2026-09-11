@@ -98,7 +98,20 @@ func NewAdvertiser(conn PacketConn, ad Advertisement, log *slog.Logger) (*Advert
 	if strings.TrimSpace(ad.Hostname) == "" {
 		ad.Hostname = defaultHostname()
 	}
-	ad.Hostname = dns.Fqdn(strings.TrimSpace(ad.Hostname))
+	// The hostname we publish is held to the same rule we hold a peer's to.
+	//
+	// Not defence — an advertiser is not a threat to itself — but consistency.
+	// A caller passing "hub.corp.example.com" gets an SRV target every
+	// Heimdallm hub rejects in ValidateMDNSHostname, so the daemon advertises
+	// perfectly well and is discovered by nobody, with the refusal logged on
+	// the other machine. Failing here names the problem where it can be fixed.
+	// defaultHostname always produces a legal name, so this can only fire on
+	// a hostname the caller chose.
+	host, err := ValidateMDNSHostname(ad.Hostname)
+	if err != nil {
+		return nil, err
+	}
+	ad.Hostname = dns.Fqdn(host)
 
 	// The DNS-SD instance label is the display name when there is one, and the
 	// id otherwise. The id is the tiebreaker rather than the first choice
@@ -383,6 +396,11 @@ func (a *Advertiser) allRecords() []dns.RR {
 	return append(records, a.addressRecords()...)
 }
 
+// addressRecords renders the host's addresses as A/AAAA.
+//
+// AAAA is published even though Peer.DialAddrs refuses v6 — see the comment
+// there. Advertising is for whoever is browsing; dialing is limited by the
+// socket we hold.
 func (a *Advertiser) addressRecords() []dns.RR {
 	if a.ad.Addrs == nil {
 		return nil

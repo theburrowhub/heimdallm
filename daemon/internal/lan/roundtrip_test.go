@@ -639,6 +639,12 @@ func TestAdvertiserAnswersTheServiceEnumeration(t *testing.T) {
 }
 
 // IPv6 advertisements produce AAAA records, not silence.
+//
+// Deliberately asymmetric with DialAddrs, which refuses v6: what we publish is
+// for anyone browsing the service (dns-sd, avahi-browse, a future v6
+// transport), whereas what we dial is limited by the socket we actually have.
+// Publishing only what our own browser can consume would make the record set a
+// function of our client's limitations rather than of the host's addresses.
 func TestAdvertiserPublishesIPv6Addresses(t *testing.T) {
 	ad := testAdvertisement()
 	ad.Addrs = func() []netip.Addr {
