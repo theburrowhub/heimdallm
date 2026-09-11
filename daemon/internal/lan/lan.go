@@ -81,9 +81,20 @@ type Peer struct {
 	Addrs []netip.Addr
 
 	// Source is the address the response actually arrived from, when the
-	// transport carries one. It is the only field an advertiser cannot forge,
-	// which is what makes it the basis for the same-link check in DialAddrs.
+	// transport carries one.
+	//
+	// An advertiser cannot choose it the way it chooses the record contents,
+	// but it is still only a UDP source address: anyone on the same L2 can
+	// forge one. It narrows the same-link check; it does not establish
+	// provenance on its own.
 	Source netip.Addr
+
+	// SourceIface is the index of the interface the response arrived on, or 0
+	// when the transport cannot say (only the in-memory pair).
+	//
+	// This is the field nothing on the wire can influence, which is what
+	// makes it — not Source — the basis of the same-link check in DialAddrs.
+	SourceIface int
 }
 
 // BaseURL renders the peer as a daemon base URL built from its hostname.
@@ -204,21 +215,24 @@ func (p Peer) DialAddrs() []netip.Addr {
 		}
 		// Same link as whoever sent the advertisement.
 		//
-		// The IsValid guard is not a way around this: a real socket always
-		// reports a source (ReadFrom on a UDPConn yields a *net.UDPAddr), so an
-		// absent one means a transport that carries none — today only the
-		// in-memory pair used in tests. TestRealSocketAlwaysCarriesASource
-		// pins that, so the guard cannot quietly become reachable from the
-		// wire.
+		// The guard is not a way around this: a real socket always reports
+		// both a source and a receiving interface, so their absence means a
+		// transport that carries neither — today only the in-memory pair used
+		// in tests. TestRealSocketAlwaysCarriesASource pins that, so the
+		// guard cannot quietly become reachable from the wire.
 		//
 		// The class filter above is not enough on a multi-homed host. A hub on
 		// both a LAN and a VPN can reach the VPN; an attacker on the LAN
 		// cannot — so an advertisement naming a VPN address would still be
 		// asking the hub to make a request the sender could not make itself,
-		// which is the definition of the problem. Requiring the address to
-		// share a local prefix with the packet's own source keeps the reach to
-		// the link the advertisement came from.
-		if p.Source.IsValid() && !sameLink(p.Source, addr) {
+		// which is the definition of the problem.
+		//
+		// Both halves are required. Matching on the source alone let the
+		// attacker pick both ends — forge a source inside the VPN range,
+		// advertise a VPN address, and the rule agrees they are on one link.
+		// The interface index is the half that comes from the kernel, so
+		// scoping the prefixes to it is what makes the check mean anything.
+		if p.Source.IsValid() && !sameLink(p.SourceIface, p.Source, addr) {
 			continue
 		}
 		out = append(out, addr)
@@ -227,17 +241,35 @@ func (p Peer) DialAddrs() []netip.Addr {
 }
 
 // localPrefixes is a variable so tests can describe a multi-homed host without
-// needing one.
-var localPrefixes = systemPrefixes
+// needing one. It answers for one interface, named by index.
+var localPrefixes = interfacePrefixes
 
-// systemPrefixes returns the networks this machine is directly attached to.
-func systemPrefixes() []netip.Prefix {
-	ifaceAddrs, err := net.InterfaceAddrs()
+// interfacePrefixes returns the networks attached to one interface.
+//
+// Scoped to a single interface, not to the machine, and that is the whole
+// point: the socket joins the group on every interface, so a hub on a LAN and
+// a VPN receives from both. Asking "is this address on some network I am
+// attached to" would answer yes for the VPN no matter which link the packet
+// actually came in on — which is exactly the question an attacker gets to
+// choose the answer to. See sameLink.
+func interfacePrefixes(ifIndex int) []netip.Prefix {
+	if ifIndex <= 0 {
+		return nil
+	}
+	iface, err := netInterfaceByIndex(ifIndex)
+	if err != nil {
+		return nil
+	}
+	ifaceAddrs, err := iface.Addrs()
 	if err != nil {
 		return nil
 	}
 	return prefixesFrom(ifaceAddrs)
 }
+
+// netInterfaceByIndex is a variable so a test can describe an interface the
+// machine does not have. Nothing at runtime reassigns it.
+var netInterfaceByIndex = net.InterfaceByIndex
 
 // prefixesFrom converts interface addresses to masked prefixes, skipping
 // anything that is not one.
@@ -286,8 +318,17 @@ func prefixesFrom(ifaceAddrs []net.Addr) []netip.Prefix {
 // mDNS is link-local by definition and section 18.8 already says discovery
 // does not leave the subnet. What it buys is that the rule cannot be turned off
 // from the wire.
-func sameLink(source, candidate netip.Addr) bool {
-	for _, prefix := range localPrefixes() {
+//
+// Scoped to the interface the packet arrived on, and an earlier version was
+// not. That version compared against every prefix the machine was attached
+// to, which a spoofer could satisfy by choosing both halves: on a hub with a
+// LAN and a VPN, an attacker on the LAN forges a source inside the VPN range
+// and advertises a VPN address, both land in the VPN prefix, and the rule
+// says yes — handing the attacker exactly the reach into a network they
+// cannot touch that this function exists to deny. A source address is not
+// evidence of anything; the interface a packet physically arrived on is.
+func sameLink(ifIndex int, source, candidate netip.Addr) bool {
+	for _, prefix := range localPrefixes(ifIndex) {
 		if prefix.Contains(source) && prefix.Contains(candidate) {
 			return true
 		}

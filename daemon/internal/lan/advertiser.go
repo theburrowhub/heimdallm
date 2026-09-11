@@ -230,7 +230,7 @@ func (a *Advertiser) Run(ctx context.Context) error {
 		// A short deadline rather than a blocking read, so cancellation is
 		// noticed promptly without a second goroutine to close the socket.
 		_ = a.conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-		n, from, err := a.conn.ReadFrom(buf)
+		n, from, _, err := a.conn.ReadFrom(buf)
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {

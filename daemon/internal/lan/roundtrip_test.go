@@ -27,6 +27,12 @@ func unpaced(t *testing.T) {
 	t.Cleanup(func() { minResponseInterval, responseDelay = realInterval, realDelay })
 }
 
+// testIface is the interface index the in-memory transport reports: none.
+// Accumulator tests do not exercise the same-link rule — that needs a real
+// interface index and is covered in hostname_test.go — so keying everything
+// to 0 matches what memConn actually hands the browser.
+const testIface = 0
+
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -353,7 +359,7 @@ func TestAdvertiserIgnoresAQuestionAboutSomethingElse(t *testing.T) {
 	_ = browser
 	_ = browseConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	buf := make([]byte, 2048)
-	if _, _, err := browseConn.ReadFrom(buf); err == nil {
+	if _, _, _, err := browseConn.ReadFrom(buf); err == nil {
 		t.Fatal("the advertiser answered a question about another service")
 	}
 }
@@ -527,7 +533,7 @@ func TestAccumulatorStopsGrowingUnderAFlood(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Pack: %v", err)
 		}
-		acc.absorb(packed, netip.Addr{})
+		acc.absorb(packed, netip.Addr{}, testIface)
 	}
 
 	for what, got := range map[string]int{
@@ -609,7 +615,7 @@ func TestAdvertiserIgnoresAnIrrelevantQuestionType(t *testing.T) {
 
 	_ = peerConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	buf := make([]byte, 2048)
-	if _, _, err := peerConn.ReadFrom(buf); err == nil {
+	if _, _, _, err := peerConn.ReadFrom(buf); err == nil {
 		t.Fatal("an MX question drew an answer")
 	}
 }
@@ -667,7 +673,7 @@ func readReply(t *testing.T, conn PacketConn) *dns.Msg {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 9000)
-	n, _, err := conn.ReadFrom(buf)
+	n, _, _, err := conn.ReadFrom(buf)
 	if err != nil {
 		t.Fatalf("no reply: %v", err)
 	}
@@ -710,7 +716,7 @@ func TestMemConnReportsClosure(t *testing.T) {
 	if _, err := a.WriteTo([]byte("x"), GroupAddr()); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("WriteTo after close = %v, want net.ErrClosed", err)
 	}
-	if _, _, err := a.ReadFrom(make([]byte, 8)); !errors.Is(err, net.ErrClosed) {
+	if _, _, _, err := a.ReadFrom(make([]byte, 8)); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("ReadFrom after close = %v, want net.ErrClosed", err)
 	}
 	_ = b.Close()
@@ -723,7 +729,7 @@ func TestMemConnReadDeadlineIsATimeout(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 
 	_ = a.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-	_, _, err := a.ReadFrom(make([]byte, 8))
+	_, _, _, err := a.ReadFrom(make([]byte, 8))
 	var netErr net.Error
 	if !errors.As(err, &netErr) || !netErr.Timeout() {
 		t.Fatalf("ReadFrom past the deadline = %v, want a timeout", err)
