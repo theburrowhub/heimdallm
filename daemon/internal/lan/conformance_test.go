@@ -110,7 +110,7 @@ func TestGoodbyeAlsoDropsTheAddresses(t *testing.T) {
 func TestServiceEnumerationAnswersWithTheServiceType(t *testing.T) {
 	adv := newTestAdvertiser(t)
 
-	got := adv.recordsFor(dns.Question{
+	got := answersFor(adv, dns.Question{
 		Name: serviceEnumerationName, Qtype: dns.TypePTR, Qclass: dns.ClassINET,
 	})
 	if len(got) != 1 {
@@ -147,7 +147,7 @@ func TestHostQuestionIsGatedOnTheType(t *testing.T) {
 		{dns.TypeTXT, "TXT", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := adv.recordsFor(dns.Question{Name: host, Qtype: tt.qtype, Qclass: dns.ClassINET})
+			got := answersFor(adv, dns.Question{Name: host, Qtype: tt.qtype, Qclass: dns.ClassINET})
 			if (len(got) > 0) != tt.want {
 				t.Fatalf("a %s question for the hostname returned %d records, want any=%v",
 					tt.name, len(got), tt.want)
@@ -162,7 +162,7 @@ func TestQuestionClassHandling(t *testing.T) {
 	adv := newTestAdvertiser(t)
 
 	t.Run("unicast-response bit is masked, not rejected", func(t *testing.T) {
-		got := adv.recordsFor(dns.Question{
+		got := answersFor(adv, dns.Question{
 			Name: serviceFQDN(), Qtype: dns.TypePTR,
 			Qclass: dns.ClassINET | unicastResponseBit,
 		})
@@ -172,7 +172,7 @@ func TestQuestionClassHandling(t *testing.T) {
 	})
 
 	t.Run("a class that is genuinely not INET is not ours", func(t *testing.T) {
-		got := adv.recordsFor(dns.Question{
+		got := answersFor(adv, dns.Question{
 			Name: serviceFQDN(), Qtype: dns.TypePTR, Qclass: dns.ClassCHAOS,
 		})
 		if len(got) != 0 {
@@ -520,7 +520,7 @@ func TestAPeerIsNotAssembledFromTwoSenders(t *testing.T) {
 func TestUniqueRecordsSetTheCacheFlushBit(t *testing.T) {
 	adv := newTestAdvertiser(t)
 
-	got := adv.recordsFor(dns.Question{
+	got := answersFor(adv, dns.Question{
 		Name: serviceFQDN(), Qtype: dns.TypeANY, Qclass: dns.ClassINET,
 	})
 	if len(got) == 0 {
@@ -836,4 +836,11 @@ func TestTheGoodbyeCarriesAZeroMessageID(t *testing.T) {
 			t.Fatalf("goodbye record %s has TTL %d, want 0", rr.Header().Name, rr.Header().Ttl)
 		}
 	}
+}
+
+// answersFor is the question-to-records path production takes, as one call:
+// respond classifies first and builds only what survived. Tests go through the
+// same two functions rather than a wrapper that exists for their benefit.
+func answersFor(a *Advertiser, q dns.Question) []dns.RR {
+	return a.recordsForKinds(a.classify(q))
 }
