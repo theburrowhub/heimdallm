@@ -236,6 +236,19 @@ func systemPrefixes() []netip.Prefix {
 	if err != nil {
 		return nil
 	}
+	return prefixesFrom(ifaceAddrs)
+}
+
+// prefixesFrom converts interface addresses to masked prefixes, skipping
+// anything that is not one.
+//
+// Split out from systemPrefixes so it can be tested against a fixed list.
+// Testing it through net.InterfaceAddrs() meant every skip branch was taken
+// or not depending on which interfaces the machine happened to have, which
+// made the covered-statement count differ between two runs of identical code
+// — a real problem under an exact coverage ratchet, and a test that asserted
+// almost nothing besides.
+func prefixesFrom(ifaceAddrs []net.Addr) []netip.Prefix {
 	out := make([]netip.Prefix, 0, len(ifaceAddrs))
 	for _, a := range ifaceAddrs {
 		ipNet, ok := a.(*net.IPNet)

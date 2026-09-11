@@ -1,6 +1,7 @@
 package lan
 
 import (
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
@@ -290,6 +291,9 @@ func TestDialAddrsFailsClosedWithoutLocalPrefixes(t *testing.T) {
 	}
 }
 
+// The real reader, against the real machine. Deliberately shallow — the
+// conversion is pinned in TestPrefixesFromSkipsWhatIsNotANetwork, and all
+// this adds is that net.InterfaceAddrs() is wired to it correctly.
 func TestSystemPrefixesDescribesThisMachine(t *testing.T) {
 	// Shape, not values: what this returns depends on the host.
 	for _, p := range systemPrefixes() {
@@ -299,5 +303,43 @@ func TestSystemPrefixesDescribesThisMachine(t *testing.T) {
 		if p.Addr() != p.Masked().Addr() {
 			t.Errorf("prefix %v is not masked to its network", p)
 		}
+	}
+}
+
+// Every branch of the conversion, against a fixed list rather than whatever
+// interfaces the machine has. The old test called systemPrefixes() directly
+// and asserted only shape, so which skip branches ran depended on the host —
+// two runs of identical code reported different covered-statement counts.
+func TestPrefixesFromSkipsWhatIsNotANetwork(t *testing.T) {
+	_, v4Net, _ := net.ParseCIDR("192.168.1.20/24")
+	_, v6Net, _ := net.ParseCIDR("2001:db8::1/64")
+
+	got := prefixesFrom([]net.Addr{
+		&net.IPNet{IP: net.ParseIP("192.168.1.20"), Mask: v4Net.Mask},
+		&net.IPNet{IP: net.ParseIP("2001:db8::1"), Mask: v6Net.Mask},
+		// Not an *net.IPNet: a point-to-point link reports one of these, and
+		// it carries no mask to derive a prefix from.
+		&net.IPAddr{IP: net.ParseIP("10.0.0.1")},
+		// An IP of a length netip cannot interpret.
+		&net.IPNet{IP: net.IP{1, 2, 3}, Mask: v4Net.Mask},
+		// A v4 address with a mask wider than 32 bits: Prefix() refuses it.
+		&net.IPNet{IP: net.ParseIP("192.168.1.20").To4(), Mask: v6Net.Mask},
+	})
+
+	want := []string{"192.168.1.0/24", "2001:db8::/64"}
+	if len(got) != len(want) {
+		t.Fatalf("prefixesFrom = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i].String() != w {
+			t.Fatalf("prefixesFrom[%d] = %s, want %s", i, got[i], w)
+		}
+	}
+}
+
+// Nothing at all is not an error, just no prefixes.
+func TestPrefixesFromToleratesAnEmptyList(t *testing.T) {
+	if got := prefixesFrom(nil); len(got) != 0 {
+		t.Fatalf("prefixesFrom(nil) = %v, want none", got)
 	}
 }
