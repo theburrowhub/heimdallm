@@ -20,6 +20,11 @@ extension ClusterApi on ApiClient {
 
   /// Registers a new instance. The hub probes it first, so a machine that is
   /// not answering is rejected rather than silently recorded.
+  ///
+  /// [expectInstanceId] pins the identity: the probe must find exactly that
+  /// instance or the call fails. Always send it for a peer found over mDNS —
+  /// discovery is unauthenticated, so this is what stops something else on the
+  /// LAN being registered under a name it merely advertised.
   Future<String> registerInstance({
     required String baseUrl,
     String? id,
@@ -29,6 +34,7 @@ extension ClusterApi on ApiClient {
     String? tokenFile,
     List<String> labels = const [],
     bool skipProbe = false,
+    String? expectInstanceId,
   }) async {
     final body = <String, dynamic>{
       'base_url': baseUrl,
@@ -39,9 +45,31 @@ extension ClusterApi on ApiClient {
       if (tokenFile != null && tokenFile.isNotEmpty) 'token_file': tokenFile,
       if (labels.isNotEmpty) 'labels': labels,
       if (skipProbe) 'skip_probe': true,
+      if (expectInstanceId != null && expectInstanceId.isNotEmpty)
+        'expect_instance_id': expectInstanceId,
     };
     final resp = await sendJson('POST', '/instances', body: body);
     return (resp?['id'] as String?) ?? '';
+  }
+
+  /// Fetches the daemons the hub can see on the local network.
+  ///
+  /// Returns [DiscoveredPeers.empty] on a non-hub — 404 there, same as the
+  /// registry — so a single-daemon install surfaces nothing rather than an
+  /// error. A hub with `cluster.discovery` off answers with `enabled: false`,
+  /// which is a different thing and worth saying differently in the UI.
+  Future<DiscoveredPeers> fetchDiscoveredPeers() async {
+    final resp = await getJson('/cluster/discovered');
+    if (resp == null) return DiscoveredPeers.empty;
+    return DiscoveredPeers.fromJson(resp);
+  }
+
+  /// Browses the network now and returns what it found, rather than waiting
+  /// for the hub's next scan. This is the refresh button.
+  Future<DiscoveredPeers> scanForPeers() async {
+    final resp = await sendJson('POST', '/cluster/discovered/scan');
+    if (resp == null) return DiscoveredPeers.empty;
+    return DiscoveredPeers.fromJson(resp);
   }
 
   /// Renames, enables/disables, relabels or rotates the token of an instance.

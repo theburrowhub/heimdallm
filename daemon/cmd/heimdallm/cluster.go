@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,22 @@ type clusterState struct {
 	// requires before it stops deferring to a routed owner. See
 	// config.ClusterConfig.TakeoverAfterFailedProbes.
 	takeoverAfterFailedProbes int
+
+	// LAN discovery. Both are nil unless cluster.discovery is on, and the
+	// discoverer is nil unless this daemon is also the hub.
+	//
+	// Deliberately no sockets here: those belong to the loops in
+	// discovery_lan.go. A socket owned by this struct would have to be closed
+	// by whoever noticed the config changed, which on this daemon is the reload
+	// goroutine — while the loop using it is still reading.
+	discoverer   *instances.Discoverer
+	discoverySig discoverySignature
+
+	// served is the HTTP listener's real address, set once at startup. The
+	// advertiser publishes this rather than server.port: the listener is bound
+	// before any reload can touch it, so the configured port and the served
+	// port can legitimately disagree.
+	served *net.TCPAddr
 
 	// store and broker are retained (rather than only used inline at
 	// construction) so Update can lazily build a prober if this daemon is
@@ -325,7 +342,39 @@ func newClusterState(cfg *config.Config, st *store.Store, broker *sse.Broker) *c
 		)
 		cs.prober.SetSelfInfo(version, cfg.Cluster.Role)
 	}
+	cs.applyDiscovery(cfg, registry)
 	return cs
+}
+
+// applyDiscovery records what discovery should be doing for cfg. Caller must
+// not hold cs.mu.
+//
+// It only ever touches state, never a socket. Nothing needs to be told to start
+// or stop a loop either: any change to [cluster] or server.port already forces
+// a full poller restart (see configReloadRestartSnapshot), and both discovery
+// loops live on the poller context — so they are torn down, close their own
+// sockets on the way out, and start again reading whatever this recorded.
+func (cs *clusterState) applyDiscovery(cfg *config.Config, registry *instances.Registry) {
+	sig := newDiscoverySignature(cfg)
+
+	cs.mu.Lock()
+	cs.discoverySig = sig
+	switch {
+	case !sig.enabled || !sig.hub:
+		cs.discoverer = nil
+	case cs.discoverer == nil:
+		// Built without a browser. RunDiscoverer lends it one for the lifetime
+		// of the loop, so the cached view outlives a poller restart while the
+		// socket does not.
+		cs.discoverer = instances.NewDiscoverer(
+			registry, nil, instances.DefaultDiscoveryInterval, cs.factory)
+	}
+	discoverer := cs.discoverer
+	cs.mu.Unlock()
+
+	if discoverer != nil {
+		discoverer.Update(registry, instances.DefaultDiscoveryInterval)
+	}
 }
 
 // Update swaps in a reloaded config. Called from the same reload path that
@@ -373,6 +422,7 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 	if prober != nil && !proberBuilt {
 		prober.Update(registry, clusterProbeInterval(cfg))
 	}
+	cs.applyDiscovery(cfg, registry)
 	return proberBuilt
 }
 
@@ -1189,9 +1239,10 @@ func wireCluster(srv *server.Server, cs *clusterState, st *store.Store) {
 		return
 	}
 	deps := &server.ClusterDeps{
-		Snapshot:  cs.Snapshot,
-		Prober:    cs.Prober(),
-		NewClient: cs.factory,
+		Snapshot:   cs.Snapshot,
+		Prober:     cs.Prober(),
+		Discoverer: cs.Discoverer(),
+		NewClient:  cs.factory,
 	}
 	if st != nil {
 		deps.Store = st

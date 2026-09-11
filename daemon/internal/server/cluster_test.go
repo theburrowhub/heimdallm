@@ -393,7 +393,7 @@ func TestClusterRoutesAbsentWithoutHub(t *testing.T) {
 	srv := server.New(st, nil, nil, testToken)
 
 	for _, path := range []string{
-		"/instances", "/cluster/routing", "/cluster/drift",
+		"/instances", "/cluster/routing", "/cluster/drift", "/cluster/discovered",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set(instances.HeaderToken, testToken)
@@ -411,6 +411,8 @@ func TestClusterRoutesRequireAuth(t *testing.T) {
 		{http.MethodGet, "/instances"},
 		{http.MethodGet, "/cluster/routing"},
 		{http.MethodGet, "/cluster/drift"},
+		{http.MethodGet, "/cluster/discovered"},
+		{http.MethodPost, "/cluster/discovered/scan"},
 		{http.MethodPost, "/instances"},
 		{http.MethodPut, "/cluster/routing"},
 	} {

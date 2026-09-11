@@ -55,6 +55,11 @@ type ClusterDeps struct {
 	Snapshot func() ClusterSnapshot
 	// Prober supplies observed health. May be nil in tests.
 	Prober *instances.Prober
+	// Discoverer supplies daemons seen on the local network. Nil whenever
+	// cluster.discovery is off, which is the default — the routes then answer
+	// with an empty, explicitly-disabled listing rather than 404ing, so the GUI
+	// can explain why it has nothing to show.
+	Discoverer *instances.Discoverer
 	// Store persists dispatch claims and instance state.
 	Store ClusterStore
 	// NewClient builds a client for an instance. Nil uses the real HTTP client.
@@ -124,6 +129,9 @@ func (srv *Server) mountClusterRoutes(r chi.Router) {
 	r.Delete("/instances/{id}", srv.hubOnly(srv.handleDeleteInstance))
 	r.Post("/instances/{id}/probe", srv.hubOnly(srv.handleProbeInstance))
 	r.Handle("/instances/{id}/proxy/*", srv.hubOnly(srv.handleInstanceProxy))
+
+	r.Get("/cluster/discovered", srv.hubOnly(srv.handleListDiscovered))
+	r.Post("/cluster/discovered/scan", srv.hubOnly(srv.handleScanDiscovered))
 
 	r.Get("/cluster/routing", srv.hubOnly(srv.handleGetRouting))
 	r.Put("/cluster/routing", srv.hubOnly(srv.handlePutRouting))
@@ -232,6 +240,19 @@ type registerInstanceRequest struct {
 	// SkipProbe registers without contacting the instance first. Useful when
 	// adding a machine that is not up yet; the default is to verify.
 	SkipProbe bool `json:"skip_probe"`
+
+	// ExpectInstanceID pins the identity the caller believes is at BaseURL.
+	// When set, the probe must find exactly that instance or the request is
+	// refused.
+	//
+	// This is what makes it safe to register something found over mDNS.
+	// Discovery is unauthenticated, so between the browse that proposed a peer
+	// and the click that registers it, the name could have been taken over by
+	// something else on the LAN. Sending the id observed at discovery time
+	// closes that window: the worst a rogue advertiser can do is appear in a
+	// list. Meaningless with SkipProbe, since there is then nothing to check
+	// the claim against.
+	ExpectInstanceID string `json:"expect_instance_id"`
 }
 
 func (srv *Server) handleRegisterInstance(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +291,13 @@ func (srv *Server) handleRegisterInstance(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	req.ExpectInstanceID = strings.TrimSpace(req.ExpectInstanceID)
+	if req.ExpectInstanceID != "" && req.SkipProbe {
+		httpJSONErr(w, http.StatusBadRequest,
+			"expect_instance_id cannot be verified with skip_probe")
+		return
+	}
+
 	// Probe before writing. Registering an instance that answers is worth the
 	// extra round trip: the alternative is a registry entry that looks fine and
 	// silently never works, which is much harder to diagnose later.
@@ -286,6 +314,16 @@ func (srv *Server) handleRegisterInstance(w http.ResponseWriter, r *http.Request
 			return
 		}
 		health = h
+	}
+
+	// The pinned identity is checked against what the daemon says about
+	// itself, which is the only claim here that had to be served over HTTP by
+	// whoever actually holds the address.
+	if req.ExpectInstanceID != "" && health.InstanceID != req.ExpectInstanceID {
+		httpJSONErr(w, http.StatusConflict, fmt.Sprintf(
+			"%s identifies itself as %q, not %q; it may have been replaced since it was discovered",
+			req.BaseURL, health.InstanceID, req.ExpectInstanceID))
+		return
 	}
 
 	// Prefer the id the instance reports for itself: it is the identity it will
@@ -348,6 +386,11 @@ type patchInstanceRequest struct {
 	TokenFile *string   `json:"token_file"`
 	Enabled   *bool     `json:"enabled"`
 	Labels    *[]string `json:"labels"`
+
+	// SkipProbe re-points an instance without verifying the new address
+	// first. Needed when moving a machine that is currently off; the default
+	// verifies, and the GUI never sends it.
+	SkipProbe bool `json:"skip_probe"`
 }
 
 func (srv *Server) handlePatchInstance(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +400,8 @@ func (srv *Server) handlePatchInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	if _, exists := snap.Registry.Get(id); !exists {
+	current, exists := snap.Registry.Get(id)
+	if !exists {
 		httpJSONErr(w, http.StatusNotFound, fmt.Sprintf("unknown instance %q", id))
 		return
 	}
@@ -375,6 +419,28 @@ func (srv *Server) handlePatchInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.BaseURL = &trimmed
+	}
+
+	// Re-pointing a registered instance is verified the way registering one
+	// is, and for the same reason with more at stake.
+	//
+	// The address_changed banner that drives this from the GUI is raised from
+	// an unauthenticated /health, which anything on the link can forge: a
+	// rogue daemon advertising a registered instance's id is classified as
+	// that instance having moved, and rendered as a one-click repair of an
+	// urgent-looking failure. Accepting the click unverified would hand the
+	// attacker that instance's API token, its dispatched work, and every
+	// config push the hub makes.
+	//
+	// So the new address has to prove it is that instance using the token we
+	// already hold, which is the part an impostor cannot fake. /health alone
+	// would not do: it is unauthenticated, so it only proves somebody is
+	// willing to claim the id.
+	if req.BaseURL != nil && !req.SkipProbe && *req.BaseURL != current.BaseURL {
+		if err := srv.verifyInstanceMoved(r.Context(), current, *req.BaseURL); err != nil {
+			httpJSONErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
 	}
 
 	result, err := srv.patchClusterTOML(func(cluster map[string]any) error {
@@ -416,6 +482,38 @@ func (srv *Server) handlePatchInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// verifyInstanceMoved checks that whatever now answers at newURL really is the
+// instance we already know, by making it authenticate with that instance's
+// token.
+func (srv *Server) verifyInstanceMoved(ctx context.Context, current instances.Instance, newURL string) error {
+	if current.Token == "" {
+		return fmt.Errorf("cannot verify %s at %s: no usable token for this "+
+			"instance; re-point it with skip_probe if you are sure", current.ID, newURL)
+	}
+	probe := instances.Instance{
+		ID: current.ID, Name: current.Name, BaseURL: newURL,
+		Token: current.Token, Enabled: true,
+	}
+	client := srv.clusterDeps().clientFor(probe)
+
+	health, err := client.Health(ctx)
+	if err != nil {
+		return fmt.Errorf("could not reach %s at %s: %v", current.ID, newURL, err)
+	}
+	if health.InstanceID != current.ID {
+		return fmt.Errorf("%s identifies itself as %q, not %q; refusing to "+
+			"re-point a registered instance at a different daemon",
+			newURL, health.InstanceID, current.ID)
+	}
+	// The part an impostor cannot pass: /config requires the token, so a host
+	// that merely claims the id on the unauthenticated /health is refused.
+	if _, err := client.GetConfig(ctx); err != nil {
+		return fmt.Errorf("%s claims to be %s but did not accept that "+
+			"instance's token: %v", newURL, current.ID, err)
+	}
+	return nil
 }
 
 func (srv *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
