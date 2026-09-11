@@ -637,6 +637,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 
 	p := pipeline.New(s, ghClient, exec, &notifyWithSSE{notifier: notifier})
 	p.SetWorkGate(updateWorkGate)
+	// Wired once at startup, before any review body can be built, so the
+	// footer's version suffix (see pipeline.reviewFooter) is never stale.
+	pipeline.SetDaemonVersion(versionString())
 
 	// Circuit-breaker caps (see theburrowhub/heimdallm#243). The defaults are
 	// populated by config.applyDefaults so the caps are always set; nil disables

@@ -1670,6 +1670,16 @@ it recognises review bodies in the format daemons older than v0.8.15 publish
 Heimdallm` footer) as well as the current footer, so a same-account instance
 still on an old build counts as having claimed the commit.
 
+The footer itself now names the build that produced it —
+`🤖 Reviewed by [Heimdallm](https://theburrowhub.github.io/heimdallm/) (v0.8.22)`
+— which is exactly what lets an operator tell, from the PR alone, which
+instance in a mixed-version cluster published a given review. The version
+sits after the link, outside the `Reviewed by [Heimdallm]` marker the guard
+above matches on, so it plays no part in cross-instance recognition. A binary
+built without the `-X main.version=...` stamp (`cd daemon && make build` with
+no `VERSION`, or a bare `go build ./cmd/heimdallm`) reports the source
+default verbatim, `(dev)`, rather than a fabricated version number.
+
 ### 18.5 The hub proxies; the UI talks to one origin
 
 The app never opens a connection to a remote daemon. Every read for another
