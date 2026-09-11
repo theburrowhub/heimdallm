@@ -29,6 +29,12 @@ type faultConn struct {
 	// alternate makes every other read fail, deterministically. Timing the
 	// failures from another goroutine raced the loop and made the test flaky.
 	alternate bool
+
+	// onRead runs inside ReadFrom, before it returns. It exists so a test can
+	// make something happen strictly between the loop's top-of-iteration
+	// context check and its handling of the read's error — an ordering that
+	// cannot be arranged from another goroutine.
+	onRead func()
 }
 
 func (c *faultConn) setReadErr(err error) {
@@ -40,8 +46,11 @@ func (c *faultConn) setReadErr(err error) {
 func (c *faultConn) ReadFrom(b []byte) (int, net.Addr, int, error) {
 	n := c.reads.Add(1)
 	c.mu.Lock()
-	err, block, alternate := c.readErr, c.blockRead, c.alternate
+	err, block, alternate, onRead := c.readErr, c.blockRead, c.alternate, c.onRead
 	c.mu.Unlock()
+	if onRead != nil {
+		onRead()
+	}
 	if alternate {
 		if n%2 == 0 {
 			return 0, memAddr("peer"), testIface, nil
@@ -371,5 +380,46 @@ func TestRealSocketAlwaysCarriesAnInterface(t *testing.T) {
 	if cm.IfIndex <= 0 {
 		t.Fatalf("IfIndex = %d, want a real interface index; sameLink treats 0 "+
 			"as 'cannot say' and refuses everything", cm.IfIndex)
+	}
+}
+
+// A read that fails because the daemon is shutting down is not a fault.
+//
+// The loop checks the context at the top of each iteration and again after a
+// read error, and it is the second check that matters: cancelling closes the
+// socket, so the read in flight comes back with a real error rather than a
+// timeout, and reporting that as a failed advertiser would turn every clean
+// shutdown into a log line and a retry.
+//
+// Driven from inside ReadFrom because the ordering is the whole point: the
+// cancellation has to land after the top-of-loop check and before the error is
+// judged. Timed from another goroutine this was covered only when the race
+// happened to fall the right way, which also made the package's
+// covered-statement count differ between runs of identical code.
+func TestRunTreatsAReadFailureDuringShutdownAsACleanExit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn := &faultConn{}
+	conn.mu.Lock()
+	conn.readErr = errors.New("interface went away")
+	conn.onRead = cancel
+	conn.mu.Unlock()
+
+	adv, err := NewAdvertiser(conn, testAdvertisement(), quietLogger())
+	if err != nil {
+		t.Fatalf("NewAdvertiser: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- adv.Run(ctx) }()
+	select {
+	case got := <-done:
+		if got != nil {
+			t.Fatalf("Run = %v, want nil: a read that failed because we are "+
+				"shutting down is not a fault", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the context was cancelled mid-read")
 	}
 }
