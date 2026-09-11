@@ -318,6 +318,13 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 
 // alreadyPending reports whether a scheduled answer already carries every
 // shape these questions ask for.
+//
+// The lock is released before scheduleResponse takes it again, which would
+// let two queries both pass this check and both build the record set. They
+// cannot: respond is only ever called from Run's own goroutine, the single
+// reader of the socket, so queries are handled one at a time. The dedup map
+// in scheduleResponse would make the result correct anyway — the cost is the
+// only thing at stake, and this pre-check exists to bound it.
 func (a *Advertiser) alreadyPending(kinds answerKind) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -479,22 +486,13 @@ func (a *Advertiser) allowLegacyResponse() bool {
 	return true
 }
 
-// recordsFor returns everything we hold that answers q.
-//
-// The full record set goes out for any matching question, not just the type
-// asked for. That is what RFC 6763 §12 calls for and what makes one round trip
-// enough: a browser asking only for PTR still gets the SRV, TXT and A it will
-// need next.
-func (a *Advertiser) recordsFor(q dns.Question) []dns.RR {
-	return a.recordsForKinds(a.classify(q))
-}
-
 // classify says what shape of answer a question calls for, without building
 // anything. Matching and building are separate so a query that is not about
 // us costs a name comparison — see respond.
 //
-// The single place the question-to-answer mapping lives: respond's cheap
-// pre-check and recordsFor both go through it, so the two cannot drift.
+// The single place the question-to-answer mapping lives, so respond's cheap
+// pre-check and the records it later builds cannot disagree about what a
+// question asked for.
 func (a *Advertiser) classify(q dns.Question) answerKind {
 	// The top bit of the class field is mDNS's unicast-response flag
 	// (RFC 6762 §18.12), not part of the class. Masking it is what stops a
@@ -561,6 +559,12 @@ func (a *Advertiser) recordsForKinds(kinds answerKind) []dns.RR {
 	if kinds&answerAddresses != 0 && kinds&answerService == 0 {
 		// allRecords already carries the addresses, so this only adds them
 		// when the service records were not asked for.
+		//
+		// Both families go out whichever was asked for: an A-only question is
+		// answered with the AAAA records too. That is deliberate — RFC 6763
+		// §12 asks for the related set so one round trip is enough — and it
+		// is over-answering, not mis-answering, so a resolver takes what it
+		// understands.
 		out = append(out, a.addressRecords()...)
 	}
 	return out
