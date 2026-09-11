@@ -73,10 +73,28 @@ type Advertiser struct {
 	instanceName string // the escaped FQDN this daemon answers to
 	txt          []string
 
-	// mu guards lastResponse, which paces the responder.
-	mu           sync.Mutex
-	lastResponse time.Time
+	// mu guards the pacing state below.
+	mu                 sync.Mutex
+	lastResponse       time.Time
+	lastLegacyResponse time.Time
+	// pending is the answer waiting to go out, accumulated from every query
+	// that arrived while a send was already scheduled, and pendingKinds says
+	// which shapes it already covers so a repeated question costs nothing.
+	pending      []dns.RR
+	pendingSeen  map[string]bool
+	pendingKinds answerKind
+	timer        *time.Timer
 }
+
+// answerKind is the shape of answer a question calls for. A bitmask, because
+// one packet may carry several questions and the reply is their union.
+type answerKind uint8
+
+const (
+	answerEnumeration answerKind = 1 << iota // the DNS-SD service-type meta-query
+	answerService                            // our PTR + SRV + TXT + addresses
+	answerAddresses                          // addresses only, for a host question
+)
 
 // NewAdvertiser validates the advertisement and prepares the records.
 func NewAdvertiser(conn PacketConn, ad Advertisement, log *slog.Logger) (*Advertiser, error) {
@@ -220,6 +238,9 @@ func (a *Advertiser) Run(ctx context.Context) error {
 	// runs, and the write is a single unacknowledged datagram with nothing to
 	// wait for.
 	defer a.goodbye()
+	// Runs before the goodbye (defers are LIFO), so a scheduled answer cannot
+	// fire afterwards and re-announce records we just retracted.
+	defer a.cancelPending()
 
 	buf := make([]byte, 9000) // jumbo frame; mDNS responses are far smaller
 	failures := 0
@@ -257,6 +278,10 @@ func (a *Advertiser) Run(ctx context.Context) error {
 }
 
 // respond answers a query if it is asking about us.
+//
+// Nothing is sent from here. A matching query schedules the answer and the
+// read loop carries straight on, so neither the pacing interval nor the
+// jitter stops the socket being drained — see scheduleResponse.
 func (a *Advertiser) respond(packet []byte, from net.Addr) {
 	var msg dns.Msg
 	if err := msg.Unpack(packet); err != nil {
@@ -266,66 +291,191 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 		return
 	}
 
-	// De-duplicated across questions: a query carrying both a PTR and an SRV
-	// question for this instance would otherwise repeat the whole record set,
-	// which is wasteful and can push the response past the MTU.
-	var answers []dns.RR
-	seen := map[string]bool{}
-	for _, q := range msg.Question {
-		for _, rr := range a.recordsFor(q) {
-			key := rr.String()
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			answers = append(answers, rr)
-		}
+	// Matched before anything is built. Building means invoking the Addrs()
+	// callback and formatting every record to key the dedup map, and the
+	// whole point of a rate limit is that somebody else chooses how often
+	// queries arrive — so a question that is not about us must cost a name
+	// comparison and nothing more.
+	kinds := a.kindsFor(msg.Question)
+	if kinds == 0 {
+		return
 	}
+
+	// A legacy one-shot resolver is not part of the group and will never see
+	// a multicast answer, so it gets its own reply (RFC 6762 §6.7).
+	if isLegacyQuerier(from) {
+		a.respondLegacy(&msg, kinds, from)
+		return
+	}
+
+	// Already covered by an answer that has not gone out yet: a flood of the
+	// same question costs one build per scheduled send rather than one each.
+	if a.alreadyPending(kinds) {
+		return
+	}
+	a.scheduleResponse(kinds, a.recordsForKinds(kinds))
+}
+
+// alreadyPending reports whether a scheduled answer already carries every
+// shape these questions ask for.
+func (a *Advertiser) alreadyPending(kinds answerKind) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.timer != nil && a.pendingKinds&kinds == kinds
+}
+
+// scheduleResponse arranges for answers to go out later, and returns at once.
+//
+// Deferred rather than dropped when the rate limit bites. Dropping was an
+// amplification defence that made concurrent discovery lossy: Browse sends
+// exactly one query per window, so two hubs browsing the same link within the
+// interval meant the second was answered by silence and saw this daemon as
+// absent for its whole window. Holding the answer until the interval elapses
+// is what RFC 6762 §6 actually describes, and keeps the ceiling on how often
+// we transmit.
+//
+// The jitter is the §6 requirement that several responders not reply in the
+// same instant. It used to be a time.Sleep on the read loop's own goroutine,
+// which stopped the socket being drained for up to its duration and let the
+// kernel receive buffer discard other queries; a timer decouples the two.
+func (a *Advertiser) scheduleResponse(kinds answerKind, answers []dns.RR) {
 	if len(answers) == 0 {
 		return
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	// Paced before anything is built: a query we are not going to answer
-	// should cost as little as possible, since the whole point is that
-	// somebody else chooses how often they arrive.
-	if !a.allowResponse() {
+	if a.pendingSeen == nil {
+		a.pendingSeen = map[string]bool{}
+	}
+	// De-duplicated across questions and across coalesced queries: a query
+	// carrying both a PTR and an SRV question for this instance would
+	// otherwise repeat the whole record set, which is wasteful and can push
+	// the response past the MTU.
+	for _, rr := range answers {
+		key := rr.String()
+		if a.pendingSeen[key] {
+			continue
+		}
+		a.pendingSeen[key] = true
+		a.pending = append(a.pending, rr)
+	}
+	a.pendingKinds |= kinds
+
+	if a.timer != nil {
+		return // riding along with the send already scheduled
+	}
+	delay := responseDelay()
+	if !a.lastResponse.IsZero() {
+		if wait := time.Until(a.lastResponse.Add(minResponseInterval)); wait > delay {
+			delay = wait
+		}
+	}
+	a.timer = time.AfterFunc(delay, a.flush)
+}
+
+// flush sends whatever has accumulated and clears the slot.
+func (a *Advertiser) flush() {
+	a.mu.Lock()
+	answers := a.pending
+	a.pending, a.pendingSeen, a.pendingKinds, a.timer = nil, nil, 0, nil
+	a.lastResponse = time.Now()
+	a.mu.Unlock()
+
+	if len(answers) == 0 {
 		return
 	}
-	// Shared records are answered after a short random delay so that several
-	// responders do not all reply in the same instant. Cheap here because the
-	// rate limit above means we reach this at most once a second.
-	if d := responseDelay(); d > 0 {
-		time.Sleep(d)
-	}
-
+	// Built fresh rather than from the query. An mDNS response is not a
+	// unicast DNS answer: it must stand on its own, because a listener may
+	// not have seen the question (RFC 6762 §6), and it carries no query id,
+	// which §18.1 requires of a multicast response. A non-zero id would
+	// invite a receiver that did ask something to match this against its own
+	// outstanding query by transaction id — the model mDNS deliberately does
+	// not use, since the packet is addressed to everyone and most of them
+	// asked nothing.
 	reply := new(dns.Msg)
-	reply.SetReply(&msg)
-	// An mDNS response is not a unicast DNS answer: it must stand on its own,
-	// because a listener may not have seen the question (RFC 6762 §6).
-	reply.Question = nil
-	reply.Answer = answers
+	reply.Response = true
 	reply.Authoritative = true
-	// SetReply echoes the query's id, which is right for unicast DNS and wrong
-	// here: send() always answers to the group, and RFC 6762 §18.1 requires a
-	// zero id in a multicast response. A non-zero one invites a receiver that
-	// did ask something to match this against its own outstanding query by id
-	// — the transaction-id model mDNS deliberately does not use, since the
-	// packet is addressed to everyone and most of them asked nothing.
-	reply.Id = 0
-
+	reply.Answer = answers
 	a.send(reply)
 }
 
-// allowResponse reports whether enough time has passed since the last answer,
-// and records this one if so.
-func (a *Advertiser) allowResponse() bool {
+// cancelPending drops a scheduled answer. Called on the way out of Run so a
+// timer cannot fire after the goodbye and re-announce records we just
+// retracted.
+func (a *Advertiser) cancelPending() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.timer != nil {
+		a.timer.Stop()
+		a.timer = nil
+	}
+	a.pending, a.pendingSeen, a.pendingKinds = nil, nil, 0
+}
+
+// legacyResponseTTL is the ceiling RFC 6762 §6.7 puts on a legacy unicast
+// answer: the querier is not in the group, so it will never hear the
+// cache-flush or goodbye that would otherwise correct it.
+const legacyResponseTTL = 10
+
+// isLegacyQuerier reports whether a query came from a one-shot resolver
+// rather than a full mDNS participant.
+//
+// The test is the source port (RFC 6762 §6.7): a participant queries from
+// 5353 and is listening to the group, so it hears the multicast answer along
+// with everyone else. Anything else — dig, a stub resolver — is not in the
+// group and would wait out its timeout while the answer went past it.
+func isLegacyQuerier(from net.Addr) bool {
+	udp, ok := from.(*net.UDPAddr)
+	if !ok {
+		return false // no port to judge by; treat it as a participant
+	}
+	return udp.Port != mdnsPort
+}
+
+// respondLegacy answers one non-participant directly (RFC 6762 §6.7): unicast
+// to the asker, echoing its query id and question, with a short TTL.
+//
+// Paced on its own clock rather than the multicast one. Sharing a limiter
+// would let a legacy flood starve the group's answers, which is the opposite
+// of what the limit is for; separating them keeps one ceiling per path.
+func (a *Advertiser) respondLegacy(query *dns.Msg, kinds answerKind, to net.Addr) {
+	if !a.allowLegacyResponse() {
+		return
+	}
+	answers := a.recordsForKinds(kinds)
+	if len(answers) == 0 {
+		return
+	}
+	reply := new(dns.Msg)
+	reply.SetReply(query)
+	reply.Authoritative = true
+	reply.Answer = make([]dns.RR, 0, len(answers))
+	for _, rr := range answers {
+		// Copied before the TTL is clamped: these records are shared with the
+		// multicast path, and mutating them there would quietly shorten
+		// everyone's.
+		c := dns.Copy(rr)
+		// The cache-flush bit is a multicast notion and means nothing to a
+		// one-shot resolver, which would read it as an unknown class.
+		c.Header().Class &^= cacheFlush
+		if c.Header().Ttl > legacyResponseTTL {
+			c.Header().Ttl = legacyResponseTTL
+		}
+		reply.Answer = append(reply.Answer, c)
+	}
+	a.sendTo(reply, to)
+}
+
+// allowLegacyResponse is allowResponse for the unicast path, on its own clock.
+func (a *Advertiser) allowLegacyResponse() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := time.Now()
-	if !a.lastResponse.IsZero() && now.Sub(a.lastResponse) < minResponseInterval {
+	if !a.lastLegacyResponse.IsZero() && now.Sub(a.lastLegacyResponse) < minResponseInterval {
 		return false
 	}
-	a.lastResponse = now
+	a.lastLegacyResponse = now
 	return true
 }
 
@@ -336,12 +486,22 @@ func (a *Advertiser) allowResponse() bool {
 // enough: a browser asking only for PTR still gets the SRV, TXT and A it will
 // need next.
 func (a *Advertiser) recordsFor(q dns.Question) []dns.RR {
+	return a.recordsForKinds(a.classify(q))
+}
+
+// classify says what shape of answer a question calls for, without building
+// anything. Matching and building are separate so a query that is not about
+// us costs a name comparison — see respond.
+//
+// The single place the question-to-answer mapping lives: respond's cheap
+// pre-check and recordsFor both go through it, so the two cannot drift.
+func (a *Advertiser) classify(q dns.Question) answerKind {
 	// The top bit of the class field is mDNS's unicast-response flag
 	// (RFC 6762 §18.12), not part of the class. Masking it is what stops a
 	// question with QU set being read as an unknown class and ignored; a class
 	// that is genuinely not INET is not ours to answer.
 	if q.Qclass&^unicastResponseBit != dns.ClassINET {
-		return nil
+		return 0
 	}
 
 	name := strings.ToLower(dns.Fqdn(q.Name))
@@ -350,34 +510,60 @@ func (a *Advertiser) recordsFor(q dns.Question) []dns.RR {
 
 	switch name {
 	case serviceEnumerationName:
+		if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeANY {
+			return 0
+		}
+		return answerEnumeration
+	case service, instance:
+		if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeSRV &&
+			q.Qtype != dns.TypeTXT && q.Qtype != dns.TypeANY {
+			return 0
+		}
+		return answerService
+	case strings.ToLower(a.ad.Hostname):
+		// A host question: addresses and nothing else. Gated on the type, or
+		// a PTR query for the hostname would be answered with A records.
+		if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA && q.Qtype != dns.TypeANY {
+			return 0
+		}
+		return answerAddresses
+	}
+	return 0
+}
+
+// kindsFor is classify over every question in one packet.
+func (a *Advertiser) kindsFor(questions []dns.Question) answerKind {
+	var kinds answerKind
+	for _, q := range questions {
+		kinds |= a.classify(q)
+	}
+	return kinds
+}
+
+// recordsForKinds builds the records for a set of answer shapes.
+func (a *Advertiser) recordsForKinds(kinds answerKind) []dns.RR {
+	var out []dns.RR
+	if kinds&answerEnumeration != 0 {
 		// The meta-query asks which service *types* exist here, so the answer
 		// is a PTR named after the meta-query itself pointing at the type
 		// (RFC 6763 §9). Replying with our own service's records instead
 		// answers a question nobody asked and leaves generic browsers unable
 		// to enumerate us at all.
-		if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeANY {
-			return nil
-		}
-		return []dns.RR{&dns.PTR{
+		out = append(out, &dns.PTR{
 			Hdr: dns.RR_Header{Name: serviceEnumerationName, Rrtype: dns.TypePTR,
 				Class: dns.ClassINET, Ttl: recordTTL},
 			Ptr: serviceFQDN(),
-		}}
-	case service, instance:
-		if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeSRV &&
-			q.Qtype != dns.TypeTXT && q.Qtype != dns.TypeANY {
-			return nil
-		}
-		return a.allRecords()
-	case strings.ToLower(a.ad.Hostname):
-		// A host question: addresses and nothing else. Gated on the type, or
-		// a PTR query for the hostname would be answered with A records.
-		if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA && q.Qtype != dns.TypeANY {
-			return nil
-		}
-		return a.addressRecords()
+		})
 	}
-	return nil
+	if kinds&answerService != 0 {
+		out = append(out, a.allRecords()...)
+	}
+	if kinds&answerAddresses != 0 && kinds&answerService == 0 {
+		// allRecords already carries the addresses, so this only adds them
+		// when the service records were not asked for.
+		out = append(out, a.addressRecords()...)
+	}
+	return out
 }
 
 func (a *Advertiser) allRecords() []dns.RR {
@@ -444,15 +630,21 @@ func (a *Advertiser) goodbye() {
 	a.send(msg)
 }
 
-func (a *Advertiser) send(msg *dns.Msg) {
+// send puts a message on the group. This is the normal path: mDNS peers
+// legitimately learn from responses to questions they did not ask, so a
+// reply that reached only the asker would waste the round trip for everyone
+// else on the link.
+func (a *Advertiser) send(msg *dns.Msg) { a.sendTo(msg, GroupAddr()) }
+
+// sendTo puts a message on one address. Only the legacy unicast path uses
+// anything but the group.
+func (a *Advertiser) sendTo(msg *dns.Msg, to net.Addr) {
 	packed, err := msg.Pack()
 	if err != nil {
 		a.log.Debug("lan: packing a response failed", "err", err)
 		return
 	}
-	// Always to the group. A unicast reply would reach only the asker, and mDNS
-	// peers legitimately learn from responses to questions they did not ask.
-	if _, err := a.conn.WriteTo(packed, GroupAddr()); err != nil {
+	if _, err := a.conn.WriteTo(packed, to); err != nil {
 		a.log.Debug("lan: sending a response failed", "err", err)
 	}
 }

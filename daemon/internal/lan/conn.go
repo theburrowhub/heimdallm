@@ -10,8 +10,10 @@ import (
 )
 
 // mDNS group addresses and port (RFC 6762 §3).
+const mdnsPort = 5353
+
 var (
-	ipv4Group = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+	ipv4Group = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 )
 
 // PacketConn is the slice of net.PacketConn this package needs.
