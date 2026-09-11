@@ -305,6 +305,13 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 	reply.Question = nil
 	reply.Answer = answers
 	reply.Authoritative = true
+	// SetReply echoes the query's id, which is right for unicast DNS and wrong
+	// here: send() always answers to the group, and RFC 6762 §18.1 requires a
+	// zero id in a multicast response. A non-zero one invites a receiver that
+	// did ask something to match this against its own outstanding query by id
+	// — the transaction-id model mDNS deliberately does not use, since the
+	// packet is addressed to everyone and most of them asked nothing.
+	reply.Id = 0
 
 	a.send(reply)
 }
