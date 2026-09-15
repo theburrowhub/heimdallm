@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,25 @@ func TestPR_GetByRepoNumberPrefersReviewedRow(t *testing.T) {
 	}
 	if got.ID != reviewedID {
 		t.Errorf("GetPRByRepoNumber picked row %d, want reviewed row %d", got.ID, reviewedID)
+	}
+}
+
+// TestPR_NotFoundReturnsErrPRNotFound guards the cluster dispatch fix: a peer
+// instance that receives an id it does not recognise (a rowid or github_id
+// minted by a different daemon) must get a stable, checkable error rather
+// than a bare sql.ErrNoRows leaking through as "store: scan pr: sql: no rows
+// in result set".
+func TestPR_NotFoundReturnsErrPRNotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.GetPR(999999); !errors.Is(err, store.ErrPRNotFound) {
+		t.Errorf("GetPR: expected ErrPRNotFound, got %v", err)
+	}
+	if _, err := s.GetPRByGithubID(999999); !errors.Is(err, store.ErrPRNotFound) {
+		t.Errorf("GetPRByGithubID: expected ErrPRNotFound, got %v", err)
+	}
+	if _, err := s.GetPRByRepoNumber("org/repo", 999); !errors.Is(err, store.ErrPRNotFound) {
+		t.Errorf("GetPRByRepoNumber: expected ErrPRNotFound, got %v", err)
 	}
 }
 

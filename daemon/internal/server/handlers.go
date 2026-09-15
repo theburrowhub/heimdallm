@@ -1052,6 +1052,21 @@ func (srv *Server) handleTriggerReview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "review trigger not configured", http.StatusServiceUnavailable)
 		return
 	}
+	// Validate the id exists before answering 202: a caller that dispatches
+	// work across instances (see cluster.go's dispatch()) treats a 202 here as
+	// "handled elsewhere" and stops trying locally, so an id this instance
+	// cannot resolve — most commonly a rowid minted by a different daemon —
+	// must fail up front rather than surface later as an unrecoverable
+	// "PR not found" from inside the goroutine below (theburrowhub/heimdallm#799).
+	if _, err := srv.store.GetPR(id); err != nil {
+		if errors.Is(err, store.ErrPRNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "PR not found on this instance"})
+		} else {
+			slog.Error("handleTriggerReview: store error", "pr_id", id, "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+		}
+		return
+	}
 	// Acquire semaphore slot (non-blocking). Returns 429 if all slots are taken.
 	select {
 	case srv.reviewSem <- struct{}{}:
@@ -1099,6 +1114,54 @@ func (srv *Server) handleCancelReview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// adoptPRStage distinguishes which step of adoptPR failed, so callers can
+// choose a matching HTTP status (502 upstream vs 500 local) without adoptPR
+// itself knowing about HTTP.
+type adoptPRStage int
+
+const (
+	adoptPRStageFetch adoptPRStage = iota
+	adoptPRStageConfig
+)
+
+// adoptPRError wraps a failure from adoptPR with the stage it happened at.
+type adoptPRError struct {
+	stage adoptPRStage
+	err   error
+}
+
+func (e *adoptPRError) Error() string { return e.err.Error() }
+func (e *adoptPRError) Unwrap() error { return e.err }
+
+// adoptPR fetches a PR from GitHub by (repo, number), stores it, and ensures
+// its repository is monitored in config.toml. This is how a PR gets adopted
+// by an instance that has never seen it before: the manual "ADD" action
+// (handleAddPR) and the cluster dispatch endpoint
+// (handleClusterTriggerPRReview) both call this rather than assuming the PR
+// is already in the store.
+func (srv *Server) adoptPR(repo string, number int) (*store.PR, error) {
+	if srv.addPRFn == nil {
+		return nil, &adoptPRError{adoptPRStageFetch, errors.New("manual PR add not configured")}
+	}
+	// 1. Fetch the PR from GitHub and store it. Validate the PR before changing
+	// config so a typo or inaccessible repository is not monitored forever.
+	pr, err := srv.addPRFn(repo, number)
+	if err != nil {
+		return nil, &adoptPRError{adoptPRStageFetch, fmt.Errorf("fetch PR %s#%d: %w", repo, number, err)}
+	}
+	// 2. Ensure the repo is monitored: add to github.repositories (and strip
+	// from non_monitored) in config.toml, then reload so the poller tracks it.
+	if srv.configPath != "" {
+		if _, err := srv.patchTOML(func(m map[string]any) error {
+			addRepoToTOMLMap(m, repo)
+			return nil
+		}); err != nil {
+			return nil, &adoptPRError{adoptPRStageConfig, fmt.Errorf("add repo to config: %w", err)}
+		}
+	}
+	return pr, nil
+}
+
 // handleAddPR accepts a GitHub pull-request URL, adds its repository to the
 // monitored list (persisted to config.toml + reload), fetches and stores the
 // PR, and triggers an immediate review. Wired by the Activity view's "ADD"
@@ -1121,27 +1184,18 @@ func (srv *Server) handleAddPR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Fetch the PR from GitHub and store it. Validate the PR before changing
-	// config so a typo or inaccessible repository is not monitored forever.
-	pr, err := srv.addPRFn(repo, number)
+	pr, err := srv.adoptPR(repo, number)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("fetch PR %s#%d: %v", repo, number, err)})
+		status := http.StatusInternalServerError
+		var adoptErr *adoptPRError
+		if errors.As(err, &adoptErr) && adoptErr.stage == adoptPRStageFetch {
+			status = http.StatusBadGateway
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
 
-	// 2. Ensure the repo is monitored: add to github.repositories (and strip
-	// from non_monitored) in config.toml, then reload so the poller tracks it.
-	if srv.configPath != "" {
-		if _, err := srv.patchTOML(func(m map[string]any) error {
-			addRepoToTOMLMap(m, repo)
-			return nil
-		}); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("add repo to config: %v", err)})
-			return
-		}
-	}
-
-	// 3. Review it now (async, bounded by the shared review semaphore). If all
+	// Review it now (async, bounded by the shared review semaphore). If all
 	// slots are busy the PR is still stored/monitored; the operator can retry
 	// or the next poll cycle picks it up.
 	select {

@@ -1642,6 +1642,28 @@ routinely. If neither is acceptable for your estate, set
 `takeover_after_failed_probes` high enough that takeover never happens on its
 own and treat `instance_takeover` as a page.
 
+### 18.3.2 How a dispatched review identifies its PR
+
+A PR's local row ID (`prs.id` in each daemon's own SQLite database) is an
+autoincrement counter private to that daemon — it has no meaning on any other
+instance, and two independent daemons routinely assign the *same* id to two
+completely different pull requests. When the hub hands a review to the
+instance a repository is routed to, it therefore never sends that id: it sends
+the PR's cluster-stable identity instead — its GitHub PR id (`github_id`),
+falling back to `repo` + `number` — over `POST /cluster/prs/review`. The
+receiving instance resolves (or, if it has never seen the PR before, adopts
+it exactly as `POST /prs/add` does) that identity against its *own* store and
+triggers the review using the row ID it finds there.
+
+This closes a failure mode where a dispatch sent an id meaningful only to the
+hub: the receiving instance either found no such row (surfacing as a spurious
+"Review Failed — PR not found" notification, with the reviewer never actually
+running) or, worse, found a row that id happened to match locally and
+reviewed the wrong pull request. `POST /prs/{id}/review` still exists and
+still takes a local row ID — it is what the GUI and CLI use against an
+instance whose id space they already queried — but is never used for
+cross-instance dispatch.
+
 ### 18.4 What propagates, and what does not
 
 "Apply to all instances" pushes the settings every instance should agree on:
@@ -1680,7 +1702,12 @@ all instances") rather than wait. The registry, tokens, `role` and every other
 `cluster.*` key remain exactly as local as the table above says.
 
 **Mixed-version clusters.** A worker running a daemon old enough to predate
-`PUT /cluster/partition` answers that request with 404. The hub falls back to
+`POST /cluster/prs/review` (§18.3.2) answers it with 404, which the dispatch
+code treats as a failed hand-off: the hub logs the failure and reviews the PR
+locally instead, so review coverage is never lost, but that worker will not
+receive its routed work until it is updated. A worker running a daemon old
+enough to predate `PUT /cluster/partition` answers that request with 404. The
+hub falls back to
 folding the partition into an ordinary config patch, unless that worker's own
 reported identity (from `/health`) does not match the id it is registered
 under — applying rules under an identity the worker does not recognise as

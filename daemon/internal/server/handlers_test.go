@@ -1184,6 +1184,67 @@ func TestHandlerTriggerReviewRateLimit(t *testing.T) {
 	close(gate)
 }
 
+// TestHandlerTriggerReviewUnknownIDIs404 guards theburrowhub/heimdallm#799:
+// an id this instance does not recognise — most commonly a rowid minted by a
+// different daemon in a cluster dispatch — must be rejected before the 202,
+// not accepted and then fail invisibly inside the goroutine.
+func TestHandlerTriggerReviewUnknownIDIs404(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+	srv := server.NewWithOptions(s, broker, nil, "", server.Options{})
+
+	var triggered bool
+	srv.SetTriggerReviewFn(func(prID int64) error {
+		triggered = true
+		return nil
+	})
+
+	req := httptest.NewRequest("POST", "/prs/180121/review", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status: got %d want 404, body=%s", w.Code, w.Body.String())
+	}
+	// Give any stray goroutine a chance to run before asserting it didn't.
+	time.Sleep(10 * time.Millisecond)
+	if triggered {
+		t.Error("triggerReviewFn was called for an id this instance has never seen")
+	}
+}
+
+// TestHandlerTriggerReviewStoreErrorIs500 covers the non-ErrPRNotFound branch
+// of the same validation: a store failure that isn't "no such row" (a closed
+// database, here) must not be mistaken for a 404 and must not leak past a
+// generic message.
+func TestHandlerTriggerReviewStoreErrorIs500(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+	srv := server.NewWithOptions(s, broker, nil, "", server.Options{})
+	srv.SetTriggerReviewFn(func(int64) error {
+		t.Fatal("triggerReviewFn must not be called when the store errors")
+		return nil
+	})
+	s.Close() // any query now fails with something other than sql.ErrNoRows
+
+	req := httptest.NewRequest("POST", "/prs/1/review", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500, body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandlerListIssues(t *testing.T) {
 	srv, s := setupServer(t)
 	now := time.Now()

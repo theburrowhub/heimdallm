@@ -1,10 +1,18 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+// ErrPRNotFound means no row exists for the requested PR. Callers that need to
+// tell "not found" apart from other scan/parse failures (a corrupt timestamp,
+// a closed database) should compare against this with errors.Is rather than
+// sql.ErrNoRows directly, since scanPR wraps it.
+var ErrPRNotFound = errors.New("store: pr not found")
 
 // PR represents a GitHub pull request stored locally.
 type PR struct {
@@ -196,6 +204,9 @@ func scanPR(s scanner) (*PR, error) {
 		&pr.AutoImplementIssueID, &pr.ReviewResponseCount, &pr.ReviewFixCount,
 		&lastRespondedAt,
 	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrPRNotFound
+		}
 		return nil, fmt.Errorf("store: scan pr: %w", err)
 	}
 	if pr.UpdatedAt, err = time.Parse(sqliteTimeFormat, updatedAt); err != nil {

@@ -912,7 +912,7 @@ func TestDispatchRoutesToRepoOwner(t *testing.T) {
 	if decode(t, rec)["instance_id"] != "srv-a" {
 		t.Errorf("dispatch went to %v, want the repo owner srv-a", decode(t, rec)["instance_id"])
 	}
-	if !containsAny(a.seen(), "POST /prs/42/review") {
+	if !containsAny(a.seen(), "POST /cluster/prs/review") {
 		t.Errorf("srv-a requests = %v, want the review trigger", a.seen())
 	}
 	// The instance's own token must be used, never the caller's.
@@ -970,7 +970,7 @@ func TestDispatchDeduplicatesPerCommit(t *testing.T) {
 	if decode(t, rec)["duplicate"] != true {
 		t.Errorf("duplicate dispatch = %v, want it reported as a duplicate", decode(t, rec))
 	}
-	if got := countRequests(a.seen(), "POST /prs/42/review"); got != 1 {
+	if got := countRequests(a.seen(), "POST /cluster/prs/review"); got != 1 {
 		t.Errorf("the instance received %d reviews, want exactly 1", got)
 	}
 
@@ -1249,25 +1249,36 @@ func TestDispatchMergeAndIssueOps(t *testing.T) {
 	}
 }
 
-// An instance that does not own the repo has never seen the PR, so it adopts
-// it first.
-func TestDispatchAddsThePRBeforeReviewing(t *testing.T) {
+// An instance that does not own the repo has never seen the PR. Rather than
+// the hub adopting it there with an id of its own and then triggering a
+// review by that id (theburrowhub/heimdallm#799 — prs.id is local to each
+// daemon, so the hub's rowid means nothing on the peer), the hub forwards the
+// PR's stable identity in one call and the peer adopts and resolves it itself.
+func TestDispatchSendsStableIdentityForReview(t *testing.T) {
 	a := newFakeInstance(t, "srv-a", nil)
 	f := newHub(t, map[string]*fakeInstance{"srv-a": a}, config.RoutingConfig{
 		Repos: map[string]string{"acme/tools": "srv-a"},
 	})
 
 	rec := f.do(t, http.MethodPost, "/cluster/dispatch/review",
-		`{"pr_id":42,"repo":"acme/tools","number":7,"head_sha":"s1","pr_url":"https://github.com/acme/tools/pull/7"}`)
+		`{"pr_id":42,"github_id":555,"repo":"acme/tools","number":7,"head_sha":"s1","pr_url":"https://github.com/acme/tools/pull/7"}`)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("dispatch = %d: %s", rec.Code, rec.Body)
 	}
 	seen := a.seen()
-	if !containsAny(seen, "POST /prs/add") {
-		t.Errorf("requests = %v, want the PR adopted first", seen)
+	if got := countRequests(seen, "POST /cluster/prs/review"); got != 1 {
+		t.Fatalf("requests = %v, want exactly one stable-identity dispatch", seen)
 	}
-	if !containsAny(seen, "POST /prs/42/review") {
-		t.Errorf("requests = %v, want the review triggered", seen)
+	// The hub's own pr_id must never reach the peer: it addresses nothing in
+	// the peer's row space and could even collide with an unrelated PR there.
+	last := a.bodies[len(a.bodies)-1]
+	for _, want := range []string{`"github_id":555`, `"repo":"acme/tools"`, `"number":7`} {
+		if !strings.Contains(last, want) {
+			t.Errorf("dispatch body = %s, want it to contain %s", last, want)
+		}
+	}
+	if strings.Contains(last, `"pr_id"`) {
+		t.Errorf("dispatch body = %s, must not carry the hub's local pr_id", last)
 	}
 }
 
@@ -1393,7 +1404,7 @@ func TestFailedDispatchReleasesItsClaim(t *testing.T) {
 	if rec.Code == http.StatusOK && decode(t, rec)["duplicate"] == true {
 		t.Error("the retry was refused as a duplicate of work that never ran")
 	}
-	if got := countRequests(failing.seen(), "POST /prs/42/review"); got != 2 {
+	if got := countRequests(failing.seen(), "POST /cluster/prs/review"); got != 2 {
 		t.Errorf("the instance was asked %d times, want 2 (the retry reached it)", got)
 	}
 }

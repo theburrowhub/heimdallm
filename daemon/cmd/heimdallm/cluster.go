@@ -801,18 +801,13 @@ func (cs *clusterState) OwnerCanHandle(repo string) bool {
 // DispatchPRReview hands a PR review to the instance repo is routed to.
 // true means the caller must not review the PR locally — see dispatch for the
 // two ways that happens.
-func (cs *clusterState) DispatchPRReview(ctx context.Context, repo string, prID int64, prURL string) bool {
+//
+// ref carries the PR's cluster-stable identity rather than a store row ID:
+// the target instance resolves (or adopts) the PR itself, since a rowid
+// minted here has no meaning in its store (theburrowhub/heimdallm#799).
+func (cs *clusterState) DispatchPRReview(ctx context.Context, repo string, ref instances.PRDispatchRef) bool {
 	return cs.dispatch(ctx, repo, "review", func(client *instances.Client) error {
-		// An instance that does not own the repo has never seen the PR, so it
-		// has to adopt it before it can review it. Ignoring an add failure is
-		// deliberate: the PR may already be known there, in which case the
-		// review call below is the one whose result matters.
-		if prURL != "" {
-			if _, err := client.AddPR(ctx, prURL); err != nil {
-				slog.Debug("cluster: add-PR before dispatched review failed", "repo", repo, "err", err)
-			}
-		}
-		return client.TriggerPRReview(ctx, prID)
+		return client.DispatchPRReview(ctx, ref)
 	})
 }
 
