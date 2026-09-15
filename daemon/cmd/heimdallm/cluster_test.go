@@ -357,7 +357,7 @@ func TestTier2FetchFiltersUnownedRepos(t *testing.T) {
 	a.owns = func(repo string) bool { return repo == mine }
 	// theirs is routed away AND successfully dispatched: it must not also be
 	// reviewed here.
-	a.dispatchPR = func(repo string, prID int64, prURL string) bool { return repo == theirs }
+	a.dispatchPR = func(repo string, _ instances.PRDispatchRef) bool { return repo == theirs }
 
 	out, err := a.FetchPRsToReview()
 	if err != nil {
@@ -402,7 +402,7 @@ func TestTier2FetchFallsBackToLocalWhenDispatchFails(t *testing.T) {
 	theirs := "acme/theirs"
 	a := tier2OwnershipHarness(t, []string{theirs})
 	a.owns = func(string) bool { return false }
-	a.dispatchPR = func(string, int64, string) bool { return false } // owner down/unreachable
+	a.dispatchPR = func(string, instances.PRDispatchRef) bool { return false } // owner down/unreachable
 
 	out, err := a.FetchPRsToReview()
 	if err != nil {
@@ -868,7 +868,6 @@ type dispatchRemote struct {
 	*httptest.Server
 	mu        sync.Mutex
 	healthy   bool
-	addPR     []string
 	reviewed  []int64
 	triaged   []int64
 	failNext  bool
@@ -888,17 +887,17 @@ func newDispatchRemote(t *testing.T) *dispatchRemote {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "instance_id": "srv-a", "role": "worker"})
-		case r.URL.Path == "/prs/add":
-			d.addPR = append(d.addPR, "called")
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		case strings.HasPrefix(r.URL.Path, "/prs/") && strings.HasSuffix(r.URL.Path, "/review"):
+		case r.URL.Path == "/cluster/prs/review":
+			// Stands in for the real handleClusterTriggerPRReview: the peer
+			// resolves/adopts the PR by its stable identity in one call,
+			// replacing the old two-call AddPR-then-TriggerPRReview dance.
 			if d.failNext {
 				d.failCount++
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
 			d.reviewed = append(d.reviewed, 1)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "review queued"})
 		case strings.HasPrefix(r.URL.Path, "/issues/") && strings.HasSuffix(r.URL.Path, "/review"):
 			if d.failNext {
 				d.failCount++
@@ -937,12 +936,6 @@ func (d *dispatchRemote) triageCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.triaged)
-}
-
-func (d *dispatchRemote) addPRCount() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return len(d.addPR)
 }
 
 // dispatchHub builds a hub clusterState routing "theirs/*" to a live fake
@@ -989,12 +982,9 @@ func TestClusterStateDispatchPRReviewToHealthyOwner(t *testing.T) {
 	remote := newDispatchRemote(t)
 	cs := dispatchHub(t, remote)
 
-	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "https://github.com/theirs/repo/pull/1")
+	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo", URL: "https://github.com/theirs/repo/pull/1"})
 	if !handled {
 		t.Fatal("DispatchPRReview() = false, want true when the owner is healthy")
-	}
-	if remote.addPRCount() != 1 {
-		t.Errorf("AddPR calls = %d, want 1", remote.addPRCount())
 	}
 	if remote.reviewCount() != 1 {
 		t.Errorf("review calls = %d, want 1", remote.reviewCount())
@@ -1015,7 +1005,7 @@ func TestClusterStateDispatchPRReviewFallsBackWhenOwnerConfirmedDown(t *testing.
 	remote.setHealthy(false)
 	probeUntilConfirmedDown(t, cs)
 
-	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	if handled {
 		t.Error("DispatchPRReview() = true, want false once the owner is confirmed down")
 	}
@@ -1038,7 +1028,7 @@ func TestClusterStateDispatchPRReviewDefersToAnOwnerNotYetConfirmedDown(t *testi
 	if cs.confirmedDown("srv-a") {
 		t.Fatal("one failed probe must not confirm an instance down")
 	}
-	if handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, ""); !handled {
+	if handled := cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}); !handled {
 		t.Error("DispatchPRReview() = false, want true — a single missed probe must not trigger a local takeover")
 	}
 }
@@ -1052,7 +1042,7 @@ func TestClusterStateDispatchPRReviewDefersOnRemoteError(t *testing.T) {
 	cs := dispatchHub(t, remote)
 	remote.setFailNext(true)
 
-	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	if !handled {
 		t.Error("DispatchPRReview() = false, want true — a failed RPC to a healthy owner is not grounds to duplicate its work")
 	}
@@ -1069,11 +1059,11 @@ func TestClusterStateTakesOverAnOwnerThatKeepsRejectingDispatch(t *testing.T) {
 	remote.setFailNext(true) // /health still 200s; only the RPC fails
 
 	for i := 1; i < cs.takeoverThreshold(); i++ {
-		if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+		if !cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 			t.Fatalf("took over after %d rejected RPCs, want to defer until %d", i, cs.takeoverThreshold())
 		}
 	}
-	if cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+	if cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 		t.Errorf("still deferring after %d rejected RPCs to a probe-healthy owner; the work would never be done",
 			cs.takeoverThreshold())
 	}
@@ -1090,16 +1080,16 @@ func TestClusterStateDispatchFailureCounterResetsOnSuccess(t *testing.T) {
 
 	for i := 1; i < cs.takeoverThreshold(); i++ {
 		remote.setFailNext(true)
-		if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+		if !cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 			t.Fatalf("took over after %d rejected RPCs, want to defer", i)
 		}
 		remote.setFailNext(false)
-		if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+		if !cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 			t.Fatal("a successful dispatch reported as not handled")
 		}
 	}
 	remote.setFailNext(true)
-	if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+	if !cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 		t.Error("took over on an isolated failure; the successes in between must reset the count")
 	}
 }
@@ -1112,15 +1102,15 @@ func TestClusterStateDispatchFailureCounterIsPerWorkUnit(t *testing.T) {
 	remote.setFailNext(true)
 
 	for i := 0; i < cs.takeoverThreshold(); i++ {
-		cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+		cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	}
-	if cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+	if cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 		t.Fatal("precondition: theirs/repo should have been taken over by now")
 	}
 	if !cs.DispatchIssueReview(context.Background(), "theirs/repo", 99) {
 		t.Error("a repo taken over for review also took over issue triage on the first rejection")
 	}
-	if !cs.DispatchPRReview(context.Background(), "theirs/other", 43, "") {
+	if !cs.DispatchPRReview(context.Background(), "theirs/other", instances.PRDispatchRef{GithubID: 43, Repo: "theirs/other"}) {
 		t.Error("one repo's rejections triggered a takeover of a different repo")
 	}
 }
@@ -1132,7 +1122,7 @@ func TestClusterStateDispatchPRReviewFallsBackOnRemoteErrorFromADeadOwner(t *tes
 	remote.setHealthy(false)
 	probeUntilConfirmedDown(t, cs)
 
-	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	if handled {
 		t.Error("DispatchPRReview() = true, want false when the owner is confirmed down and the call fails")
 	}
@@ -1174,14 +1164,14 @@ func TestClusterStateAnnouncesATakeoverOnce(t *testing.T) {
 	}
 	drainTakeovers(300 * time.Millisecond) // discard the probe transitions
 
-	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	if got := drainTakeovers(2 * time.Second); got != 1 {
 		t.Fatalf("instance_takeover events = %d, want 1 when the hub takes over a routed repo", got)
 	}
 
 	// Every poll cycle hits this path while the outage lasts; only the first
 	// one may be reported.
-	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	if got := drainTakeovers(300 * time.Millisecond); got != 0 {
 		t.Errorf("instance_takeover events on the second cycle = %d, want 0", got)
 	}
@@ -1194,7 +1184,7 @@ func TestClusterStateReannouncesATakeoverAfterRecovery(t *testing.T) {
 	cs := dispatchHub(t, remote)
 	remote.setHealthy(false)
 	probeUntilConfirmedDown(t, cs)
-	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	if cs.notes.claim("srv-a", noticeSubject("takeover:probes_failed", dispatchUnit("review", "theirs/repo"))) {
 		t.Fatal("takeover was not recorded as announced")
 	}
@@ -1231,7 +1221,7 @@ func TestClusterStateActsLocallyWhenTheRoutedOwnerIsDisabled(t *testing.T) {
 	}
 	cs.Update(cfg)
 
-	if handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, ""); handled {
+	if handled := cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}); handled {
 		t.Error("DispatchPRReview() = true, want false — a disabled owner is not going to review anything")
 	}
 	if !tier2ShouldProcessLocally(cs.Owns, cs.OwnerCanHandle, "theirs/repo") {
@@ -1312,7 +1302,7 @@ func TestClusterStateDispatchNoOpWhenNotRouted(t *testing.T) {
 	remote := newDispatchRemote(t)
 	cs := dispatchHub(t, remote)
 
-	if handled := cs.DispatchPRReview(context.Background(), "ours/repo", 1, ""); handled {
+	if handled := cs.DispatchPRReview(context.Background(), "ours/repo", instances.PRDispatchRef{GithubID: 1, Repo: "ours/repo"}); handled {
 		t.Error("DispatchPRReview() = true for a repo with no configured remote owner")
 	}
 	if remote.reviewCount() != 0 {
@@ -1367,7 +1357,7 @@ func TestClusterStateWithoutAProberFallsBackLocallyOnRPCFailure(t *testing.T) {
 	// escalate on a daemon with no health history, so it must never defer.
 	remote.setFailNext(true)
 	for i := 1; i <= cs.takeoverThreshold()+1; i++ {
-		if cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+		if cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 			t.Fatalf("DispatchPRReview() = true on attempt %d without a prober; the review would be skipped", i)
 		}
 	}
@@ -1380,7 +1370,7 @@ func TestClusterStateUpdatePrunesNotesForRemovedInstances(t *testing.T) {
 	cs := dispatchHub(t, remote)
 	remote.setHealthy(false)
 	probeUntilConfirmedDown(t, cs)
-	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	if cs.notes.claim("srv-a", noticeSubject("takeover:probes_failed", dispatchUnit("review", "theirs/repo"))) {
 		t.Fatal("precondition: the takeover should be recorded")
 	}
@@ -1496,7 +1486,7 @@ func TestClusterStateReannouncesADispatchRejectedTakeoverAfterItRecovers(t *test
 
 	remote.setFailNext(true)
 	for i := 0; i < cs.takeoverThreshold(); i++ {
-		cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+		cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"})
 	}
 	if cs.notes.claim("srv-a", subject) {
 		t.Fatal("precondition: the dispatch-rejected takeover should have been announced")
@@ -1507,7 +1497,7 @@ func TestClusterStateReannouncesADispatchRejectedTakeoverAfterItRecovers(t *test
 
 	// Operator fixes the remote.
 	remote.setFailNext(false)
-	if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+	if !cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 		t.Fatal("a successful dispatch reported as not handled")
 	}
 	if !cs.notes.claim("srv-a", subject) {
@@ -1517,7 +1507,7 @@ func TestClusterStateReannouncesADispatchRejectedTakeoverAfterItRecovers(t *test
 
 func TestClusterStateDispatchNilReceiverIsPermissive(t *testing.T) {
 	var cs *clusterState
-	if cs.DispatchPRReview(context.Background(), "any/repo", 1, "") {
+	if cs.DispatchPRReview(context.Background(), "any/repo", instances.PRDispatchRef{GithubID: 1, Repo: "any/repo"}) {
 		t.Error("nil clusterState.DispatchPRReview = true, want false (fall back to local)")
 	}
 	if cs.DispatchIssueReview(context.Background(), "any/repo", 1) {
@@ -1846,7 +1836,7 @@ func dispatchWorkerAwaitingRules(t *testing.T, selfID string) *clusterState {
 // repo it discovered, and reviewed all of them. It must now wait instead.
 func TestWorkerAwaitingRulesDoesNotActLocally(t *testing.T) {
 	cs := dispatchWorkerAwaitingRules(t, "srv-a")
-	if handled := cs.DispatchPRReview(context.Background(), "freepik-company/ai-platform-terraform", 77, ""); !handled {
+	if handled := cs.DispatchPRReview(context.Background(), "freepik-company/ai-platform-terraform", instances.PRDispatchRef{GithubID: 77, Repo: "freepik-company/ai-platform-terraform"}); !handled {
 		t.Error("DispatchPRReview() = false on a worker with no partition rules, want true (must not review locally)")
 	}
 }
@@ -1869,7 +1859,7 @@ func TestWorkerDoesNotTakeOverReposAssignedToTheHub(t *testing.T) {
 		t.Fatalf("config invalid: %v", err)
 	}
 	cs := newClusterState(cfg, nil, nil)
-	if handled := cs.DispatchPRReview(context.Background(), "freepik-company/ai-platform-terraform", 77, ""); !handled {
+	if handled := cs.DispatchPRReview(context.Background(), "freepik-company/ai-platform-terraform", instances.PRDispatchRef{GithubID: 77, Repo: "freepik-company/ai-platform-terraform"}); !handled {
 		t.Error("DispatchPRReview() = false for a repo assigned to another instance, want true")
 	}
 }
@@ -1887,7 +1877,7 @@ func TestOwnerCanHandleSkipsIssueWorkOnAnUnassignedRepo(t *testing.T) {
 func TestClusterStateNoteNotAssignedIsDedupedPerUnit(t *testing.T) {
 	cs := dispatchWorkerAwaitingRules(t, "srv-a")
 	repo := "freepik-company/ai-platform-terraform"
-	cs.DispatchPRReview(context.Background(), repo, 77, "")
+	cs.DispatchPRReview(context.Background(), repo, instances.PRDispatchRef{GithubID: 77, Repo: repo})
 	if cs.notes.claim(notAssignedNotesBucket, noticeSubject("not_assigned", dispatchUnit("review", repo))) {
 		t.Error("the first dispatch did not claim the not-assigned notice")
 	}

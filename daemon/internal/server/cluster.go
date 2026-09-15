@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/instances"
+	"github.com/heimdallm/daemon/internal/store"
 )
 
 // ClusterSnapshot is the control plane's view at one instant. main rebuilds it
@@ -147,6 +148,13 @@ func (srv *Server) mountClusterRoutes(r chi.Router) {
 	// theburrowhub/heimdallm#769. hubOnly would 404 the one request that
 	// closes that gap.
 	r.Put("/cluster/partition", srv.handlePutPartition)
+
+	// Also deliberately NOT hubOnly: a worker (or a peer hub) is what receives
+	// a dispatched review, not the hub doing the dispatching. Unlike
+	// POST /prs/{id}/review, this takes the PR's cluster-stable identity
+	// instead of a store row ID — prs.id is local to each daemon, so an id
+	// minted by the caller means nothing here (theburrowhub/heimdallm#799).
+	r.Post("/cluster/prs/review", srv.handleClusterTriggerPRReview)
 }
 
 // hubOnly hides a control-plane route on a daemon with no cluster wiring.
@@ -987,13 +995,21 @@ func (srv *Server) handleConfigDrift(w http.ResponseWriter, r *http.Request) {
 
 // dispatchRequest is the POST /cluster/dispatch/{op} body.
 type dispatchRequest struct {
-	PRID    int64  `json:"pr_id"`
-	IssueID int64  `json:"issue_id"`
-	Repo    string `json:"repo"`
-	Number  int    `json:"number"`
-	HeadSHA string `json:"head_sha"`
-	PRURL   string `json:"pr_url"`
-	DryRun  bool   `json:"dry_run"`
+	PRID int64 `json:"pr_id"`
+	// GithubID, together with Repo+Number, is the PR's cluster-stable
+	// identity, forwarded as-is to a remote instance instead of PRID (which
+	// only addresses a row in the dispatching daemon's own store — see
+	// executeDispatch and theburrowhub/heimdallm#799). Optional: when a
+	// caller only has PRID (the hub's own local id, e.g. the GUI's "run this
+	// here" action against the hub itself), Repo+Number alone is enough for
+	// the receiving instance to resolve or adopt the PR.
+	GithubID int64  `json:"github_id"`
+	IssueID  int64  `json:"issue_id"`
+	Repo     string `json:"repo"`
+	Number   int    `json:"number"`
+	HeadSHA  string `json:"head_sha"`
+	PRURL    string `json:"pr_url"`
+	DryRun   bool   `json:"dry_run"`
 	// Instance forces a target, bypassing routing. Used by the GUI's
 	// "run this here" action.
 	Instance string `json:"instance"`
@@ -1141,23 +1157,116 @@ func (srv *Server) executeDispatch(ctx context.Context, op string, inst instance
 	client := srv.clusterDeps().clientFor(inst)
 	switch op {
 	case config.OpReview:
-		// An instance that does not own the repo has never seen the PR, so it
-		// has to adopt it before it can review it. Ignoring an add failure is
-		// deliberate: the PR may already be known, in which case the review
-		// call below is the one whose result matters.
-		if req.PRURL != "" {
-			if _, err := client.AddPR(ctx, req.PRURL); err != nil {
-				slog.Debug("cluster: add-PR before dispatched review failed",
-					"instance", inst.ID, "err", err)
-			}
-		}
-		return client.TriggerPRReview(ctx, req.PRID)
+		// The target instance resolves (or adopts) the PR by its own stable
+		// identity rather than trusting req.PRID, which only addresses a row
+		// in this daemon's store, not the remote one.
+		return client.DispatchPRReview(ctx, instances.PRDispatchRef{
+			GithubID: req.GithubID,
+			Repo:     req.Repo,
+			Number:   req.Number,
+			URL:      req.PRURL,
+		})
 	case config.OpIssue:
 		return client.TriggerIssueReview(ctx, req.IssueID)
 	case config.OpMerge:
 		return client.EvaluateMergeTracking(ctx, req.PRID, req.DryRun)
 	}
 	return fmt.Errorf("unsupported operation %q", op)
+}
+
+// clusterTriggerReviewRequest is the POST /cluster/prs/review body. Unlike
+// POST /prs/{id}/review, it carries the PR's cluster-stable identity
+// (github_id, and repo+number as a fallback) instead of a store row ID:
+// prs.id is an INTEGER PRIMARY KEY AUTOINCREMENT local to each daemon, so a
+// rowid minted by the dispatching instance has no meaning here.
+type clusterTriggerReviewRequest struct {
+	GithubID int64  `json:"github_id"`
+	Repo     string `json:"repo"`
+	Number   int    `json:"number"`
+	PRURL    string `json:"pr_url"`
+}
+
+// handleClusterTriggerPRReview resolves the PR by its stable identity —
+// adopting it first when this instance has never seen it — and only then
+// queues a review.
+//
+// Resolving before answering matters as much as resolving at all: the caller
+// (dispatch(), in cmd/heimdallm/cluster.go) takes a 202 as "handled
+// elsewhere" and stops trying locally, so a request this instance cannot
+// actually satisfy must fail before the response goes out, not silently in a
+// goroutine afterward — that silent-failure gap (POST /prs/{id}/review
+// answering 202 before its own goroutine's GetPR(id) could fail) is exactly
+// what let PR reviews vanish without a trace (theburrowhub/heimdallm#799).
+func (srv *Server) handleClusterTriggerPRReview(w http.ResponseWriter, r *http.Request) {
+	var req clusterTriggerReviewRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		httpJSONErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.GithubID == 0 && (req.Repo == "" || req.Number == 0) {
+		httpJSONErr(w, http.StatusBadRequest, "github_id or repo+number is required")
+		return
+	}
+	if srv.triggerReviewFn == nil {
+		httpJSONErr(w, http.StatusServiceUnavailable, "this daemon cannot trigger reviews")
+		return
+	}
+
+	pr, err := srv.resolveOrAdoptPR(req)
+	if err != nil {
+		httpJSONErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	// The resolved row must actually be the PR that was asked for: a stale
+	// duplicate row (repo/number reused, or a github_id collision from an
+	// older bug) must never trigger a review under someone else's identity.
+	if req.Repo != "" && req.Number != 0 && (pr.Repo != req.Repo || pr.Number != req.Number) {
+		httpJSONErr(w, http.StatusConflict, fmt.Sprintf(
+			"resolved PR %s#%d does not match requested %s#%d", pr.Repo, pr.Number, req.Repo, req.Number))
+		return
+	}
+
+	select {
+	case srv.reviewSem <- struct{}{}:
+	default:
+		httpJSONErr(w, http.StatusTooManyRequests, "too many concurrent reviews — try again later")
+		return
+	}
+	go func() {
+		defer func() { <-srv.reviewSem }()
+		if err := srv.triggerReviewFn(pr.ID); err != nil {
+			slog.Error("cluster trigger review failed", "pr_id", pr.ID, "repo", pr.Repo, "number", pr.Number, "err", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "review queued"})
+}
+
+// resolveOrAdoptPR finds the PR this instance already knows by its stable
+// identity, adopting it via adoptPR (the same helper POST /prs/add uses) when
+// it does not.
+func (srv *Server) resolveOrAdoptPR(req clusterTriggerReviewRequest) (*store.PR, error) {
+	if req.GithubID != 0 {
+		pr, err := srv.store.GetPRByGithubID(req.GithubID)
+		if err == nil {
+			return pr, nil
+		}
+		if !errors.Is(err, store.ErrPRNotFound) {
+			return nil, fmt.Errorf("look up PR by github_id: %w", err)
+		}
+	}
+	if req.Repo != "" && req.Number != 0 {
+		pr, err := srv.store.GetPRByRepoNumber(req.Repo, req.Number)
+		if err == nil {
+			return pr, nil
+		}
+		if !errors.Is(err, store.ErrPRNotFound) {
+			return nil, fmt.Errorf("look up PR by repo/number: %w", err)
+		}
+	}
+	if req.Repo == "" || req.Number == 0 {
+		return nil, errors.New("PR not known locally and no repo/number to adopt it by")
+	}
+	return srv.adoptPR(req.Repo, req.Number)
 }
 
 func dispatchKey(op string, req dispatchRequest) string {

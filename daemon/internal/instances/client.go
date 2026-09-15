@@ -176,9 +176,38 @@ func (c *Client) Reload(ctx context.Context) error {
 	return err
 }
 
-// TriggerPRReview queues a review for a PR the instance already knows about.
-func (c *Client) TriggerPRReview(ctx context.Context, prID int64) error {
-	_, _, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/prs/%d/review", prID), nil, true)
+// PRDispatchRef identifies a PR by cluster-stable keys instead of a store row
+// ID. prs.id is an INTEGER PRIMARY KEY AUTOINCREMENT local to each daemon, so
+// a rowid minted by the dispatching instance (or by GitHub's numeric PR id,
+// which is not that either) has no meaning on the receiving instance — using
+// one there either 404s or, worse, addresses whatever unrelated PR happens to
+// have that rowid locally (theburrowhub/heimdallm#799). GithubID is tried
+// first; Repo+Number is the fallback the receiving instance uses both to
+// resolve an existing row and, together with URL, to adopt the PR when it has
+// never seen it before.
+type PRDispatchRef struct {
+	GithubID int64
+	Repo     string
+	Number   int
+	URL      string
+}
+
+// DispatchPRReview asks the instance to review a PR identified by stable
+// cluster keys, adopting it first if the instance has never seen it. This
+// replaces the older two-call dance (AddPR by URL, then TriggerPRReview by a
+// rowid that only made sense to the caller) with a single request the peer
+// resolves itself.
+func (c *Client) DispatchPRReview(ctx context.Context, ref PRDispatchRef) error {
+	payload, err := json.Marshal(struct {
+		GithubID int64  `json:"github_id"`
+		Repo     string `json:"repo"`
+		Number   int    `json:"number"`
+		PRURL    string `json:"pr_url"`
+	}{ref.GithubID, ref.Repo, ref.Number, ref.URL})
+	if err != nil {
+		return fmt.Errorf("instances: encoding dispatch-review body for %s: %w", c.instance.ID, err)
+	}
+	_, _, err = c.do(ctx, http.MethodPost, "/cluster/prs/review", payload, true)
 	return err
 }
 
@@ -193,18 +222,6 @@ func (c *Client) EvaluateMergeTracking(ctx context.Context, prID int64, dryRun b
 	path := fmt.Sprintf("/merge-tracking/%d/evaluate?dry_run=%t", prID, dryRun)
 	_, _, err := c.do(ctx, http.MethodPost, path, nil, true)
 	return err
-}
-
-// AddPR asks the instance to ingest a PR by URL. This is how an operation can
-// be dispatched to an instance that does not own the repo: it adopts the PR
-// first, then reviews it.
-func (c *Client) AddPR(ctx context.Context, prURL string) ([]byte, error) {
-	payload, err := json.Marshal(map[string]string{"url": prURL})
-	if err != nil {
-		return nil, fmt.Errorf("instances: encoding add-PR body for %s: %w", c.instance.ID, err)
-	}
-	body, _, err := c.do(ctx, http.MethodPost, "/prs/add", payload, true)
-	return body, err
 }
 
 // StatusError is returned when an instance answers with a non-2xx status. It

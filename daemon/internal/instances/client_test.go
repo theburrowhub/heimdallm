@@ -295,8 +295,11 @@ func TestClientOperations(t *testing.T) {
 	c := NewClient(f.instance("a"), f.Client())
 	ctx := context.Background()
 
-	if err := c.TriggerPRReview(ctx, 42); err != nil {
-		t.Errorf("TriggerPRReview() = %v", err)
+	if err := c.DispatchPRReview(ctx, PRDispatchRef{
+		GithubID: 555, Repo: "acme/tools", Number: 42,
+		URL: "https://github.com/acme/tools/pull/42",
+	}); err != nil {
+		t.Errorf("DispatchPRReview() = %v", err)
 	}
 	if err := c.TriggerIssueReview(ctx, 7); err != nil {
 		t.Errorf("TriggerIssueReview() = %v", err)
@@ -304,16 +307,12 @@ func TestClientOperations(t *testing.T) {
 	if err := c.EvaluateMergeTracking(ctx, 99, true); err != nil {
 		t.Errorf("EvaluateMergeTracking() = %v", err)
 	}
-	if _, err := c.AddPR(ctx, "https://github.com/acme/tools/pull/3"); err != nil {
-		t.Errorf("AddPR() = %v", err)
-	}
 
 	seen := f.seen()
 	want := []struct{ method, path, query string }{
-		{http.MethodPost, "/prs/42/review", ""},
+		{http.MethodPost, "/cluster/prs/review", ""},
 		{http.MethodPost, "/issues/7/review", ""},
 		{http.MethodPost, "/merge-tracking/99/evaluate", "dry_run=true"},
-		{http.MethodPost, "/prs/add", ""},
 	}
 	if len(seen) != len(want) {
 		t.Fatalf("got %d requests, want %d", len(seen), len(want))
@@ -380,20 +379,22 @@ func TestClientInstanceAccessor(t *testing.T) {
 	}
 }
 
-func TestClientAddPRSendsTheURL(t *testing.T) {
+func TestClientDispatchPRReviewSendsStableIdentity(t *testing.T) {
 	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":1}`))
+		_, _ = w.Write([]byte(`{"status":"review queued"}`))
 	})
-	body, err := NewClient(f.instance("a"), f.Client()).AddPR(
-		context.Background(), "https://github.com/acme/tools/pull/3")
+	err := NewClient(f.instance("a"), f.Client()).DispatchPRReview(context.Background(), PRDispatchRef{
+		GithubID: 555, Repo: "acme/tools", Number: 3,
+		URL: "https://github.com/acme/tools/pull/3",
+	})
 	if err != nil {
-		t.Fatalf("AddPR: %v", err)
+		t.Fatalf("DispatchPRReview: %v", err)
 	}
-	if len(body) == 0 {
-		t.Error("AddPR returned no body")
-	}
-	if !strings.Contains(f.seen()[0].Body, "acme/tools/pull/3") {
-		t.Errorf("request body = %q, want the PR URL", f.seen()[0].Body)
+	body := f.seen()[0].Body
+	for _, want := range []string{`"github_id":555`, `"repo":"acme/tools"`, `"number":3`, "acme/tools/pull/3"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("request body = %q, want it to contain %q", body, want)
+		}
 	}
 }
 

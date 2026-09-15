@@ -31,6 +31,7 @@ import (
 	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
 	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/instances"
 	issuepipeline "github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/keychain"
 	"github.com/heimdallm/daemon/internal/mergetrack"
@@ -1057,8 +1058,8 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 		lastBreakerTrips:     make(map[breakerTripKey]breakerTripDedup),
 		owns:                 clusterSt.Owns,
-		dispatchPR: func(repo string, prID int64, prURL string) bool {
-			return clusterSt.DispatchPRReview(runtimeCtx, repo, prID, prURL)
+		dispatchPR: func(repo string, ref instances.PRDispatchRef) bool {
+			return clusterSt.DispatchPRReview(runtimeCtx, repo, ref)
 		},
 		ownerCanHandleIssues: clusterSt.OwnerCanHandle,
 	}
@@ -2808,7 +2809,19 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 
 		pr, err := s.GetPR(prID)
 		if err != nil {
-			publishErr(fmt.Sprintf("PR not found: %v", err))
+			// Never surface the raw store error to the UI: before the cluster
+			// dispatch fix (theburrowhub/heimdallm#799), a peer instance
+			// receiving an id minted by a different daemon hit exactly this
+			// path, and "PR not found: store: scan pr: sql: no rows in result
+			// set" is what showed up as the "Review Failed" notification. The
+			// full error still goes to the log for diagnosis. By the time
+			// this callback runs, the caller (handleTriggerReview,
+			// handleAddPR, handleClusterTriggerPRReview) has already
+			// validated or just created prID, so reaching this at all means
+			// something changed underneath it — no need to distinguish
+			// "not found" from other store failures for the operator here.
+			slog.Error("trigger review: get pr failed", "pr_id", prID, "err", err)
+			publishErr(fmt.Sprintf("PR not found (id %d) on this instance.", prID))
 			return fmt.Errorf("trigger review: get pr %d: %w", prID, err)
 		}
 		if pr.Repo == "" {
@@ -4429,7 +4442,12 @@ type tier2Adapter struct {
 	// it and this daemon must not also review it; false (including a nil
 	// dispatchPR) means fall back to reviewing it locally — a PR must never go
 	// unreviewed just because its routed owner is unavailable.
-	dispatchPR func(repo string, prID int64, prURL string) bool
+	//
+	// ref carries the PR's cluster-stable identity (github_id, repo+number)
+	// rather than a store row ID: prs.id is local to each daemon, so this
+	// daemon's rowid for the PR has no meaning on the instance it is routed
+	// to (theburrowhub/heimdallm#799).
+	dispatchPR func(repo string, ref instances.PRDispatchRef) bool
 
 	// ownerCanHandleIssues reports whether repo's routed owner is healthy
 	// enough to be trusted with its own issue processing. Unlike PR review,
@@ -4755,7 +4773,9 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 		// here instead. Silently dropping it (the old behaviour) is what let
 		// PRs in a routed org disappear from the queue entirely.
 		if a.owns != nil && !a.owns(pr.Repo) {
-			if a.dispatchPR != nil && a.dispatchPR(pr.Repo, pr.ID, pr.HTMLURL) {
+			if a.dispatchPR != nil && a.dispatchPR(pr.Repo, instances.PRDispatchRef{
+				GithubID: pr.ID, Repo: pr.Repo, Number: pr.Number, URL: pr.HTMLURL,
+			}) {
 				continue
 			}
 		}
