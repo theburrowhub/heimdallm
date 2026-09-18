@@ -61,4 +61,47 @@ void main() {
     await tester.tap(find.text('repo'));
     expect(tapped, isTrue);
   });
+
+  testWidgets('tapping the checkbox toggles selection', (tester) async {
+    var toggled = false;
+    await tester.pumpWidget(
+      _host(
+        RepoGridTile(
+          repo: 'a/repo',
+          config: const RepoConfig(prEnabled: true),
+          appConfig: appConfig,
+          selected: false,
+          showNew: false,
+          onSelectionToggle: () => toggled = true,
+          onTap: () {},
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('RepoGridTile_checkbox')));
+    await tester.pump();
+
+    expect(toggled, isTrue);
+  });
+
+  testWidgets('selected tiles show their checkmark and new badge', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        RepoGridTile(
+          repo: 'a/repo',
+          config: const RepoConfig(prEnabled: false),
+          appConfig: appConfig,
+          selected: true,
+          showNew: true,
+          onSelectionToggle: () {},
+          onTap: () {},
+        ),
+      ),
+    );
+
+    expect(find.byIcon(Icons.check), findsOneWidget);
+    expect(find.text('NEW'), findsOneWidget);
+  });
 }
