@@ -9,12 +9,22 @@ import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/cli_agents/cli_agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
 
 class _TestConfigNotifier extends ConfigNotifier {
   void showLoading() => state = const AsyncLoading();
   void showData(AppConfig config) => state = AsyncData(config);
+}
+
+Widget _hosted(Widget child) {
+  return MaterialApp(
+    theme: HeimdallmTheme.light(),
+    builder: (context, navigatorChild) =>
+        HeimdallmTheme.scope(child: navigatorChild ?? const SizedBox.shrink()),
+    home: Scaffold(body: child),
+  );
 }
 
 void main() {
@@ -65,7 +75,7 @@ void main() {
             (ref) => Future.value(const <ReviewPrompt>[]),
           ),
         ],
-        child: const MaterialApp(home: Scaffold(body: CLIAgentsScreen())),
+        child: _hosted(const CLIAgentsScreen()),
       ),
     );
     await tester.pumpAndSettle();
