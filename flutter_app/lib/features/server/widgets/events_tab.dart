@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/sse_client.dart';
 import '../../../core/platform/platform_services_provider.dart';
+import '../../../shared/design_system/components/components.dart';
 import '../event_summary.dart';
 import 'connection_status_banner.dart';
 import 'event_row.dart';
@@ -36,22 +37,21 @@ class EventsTab extends ConsumerStatefulWidget {
 
 class _EventsTabState extends ConsumerState<EventsTab> {
   static const _maxEvents = 500;
-  // Newest at index 0. Render order matches insertion order.
   final _events = <_EventRow>[];
   SseClient? _client;
   StreamSubscription<SseEvent>? _sub;
   final _scroll = ScrollController();
-  // Expanded rows are keyed by the row's monotonic id (set on insert) so
-  // a prepend doesn't shift previously-expanded indices.
   final _expanded = <int>{};
   int _nextRowId = 0;
   bool _autoScroll = true;
-  // This tab's own SSE connection health. The shared stream that drives the
-  // global indicator is separate, so a drop isolated to this connection needs
-  // its own in-tab signal (#572). Optimistic on connect — no events arrive for
-  // up to a polling cycle (60 s) under normal operation.
   bool _connected = true;
-  final Set<String> _enabledGroups = {'pr', 'issue', 'polling', 'state', 'circuit_breaker'};
+  final Set<String> _enabledGroups = {
+    'pr',
+    'issue',
+    'polling',
+    'state',
+    'circuit_breaker',
+  };
   String _searchQuery = '';
 
   @override
@@ -59,10 +59,6 @@ class _EventsTabState extends ConsumerState<EventsTab> {
     super.initState();
     final platform = ref.read(platformServicesProvider);
     _client = widget.client ?? SseClient(platform: platform, path: '/events');
-    // The SSE stream forwards transport errors to listeners; the client
-    // auto-reconnects, so flip a local flag to drive an in-tab banner instead
-    // of letting the drop surface as an unhandled async error. _connected is
-    // restored in _onEvent when the stream resumes.
     _sub = _client!.connect().listen(
       _onEvent,
       onError: (_) => _setConnected(false),
@@ -94,8 +90,6 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   }
 
   void _onEvent(SseEvent ev) {
-    // A late event can arrive after dispose() cancels the subscription; bail
-    // before touching state so setState() is never called after dispose.
     if (!mounted) return;
     Map<String, dynamic> payload;
     try {
@@ -105,7 +99,6 @@ class _EventsTabState extends ConsumerState<EventsTab> {
       payload = const {};
     }
     setState(() {
-      // An event arriving means the stream is live again — clear any banner.
       _connected = true;
       final row = _EventRow(
         id: _nextRowId++,
@@ -122,7 +115,6 @@ class _EventsTabState extends ConsumerState<EventsTab> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_autoScroll && _scroll.hasClients) {
-        // Newest is at the top — pin to 0.
         _scroll.jumpTo(0);
       }
     });
@@ -140,7 +132,9 @@ class _EventsTabState extends ConsumerState<EventsTab> {
           eventCount: _events.length,
           onAutoScrollChanged: (v) => setState(() => _autoScroll = v),
           onGroupToggled: (g) => setState(() {
-            _enabledGroups.contains(g) ? _enabledGroups.remove(g) : _enabledGroups.add(g);
+            _enabledGroups.contains(g)
+                ? _enabledGroups.remove(g)
+                : _enabledGroups.add(g);
           }),
           onSearchChanged: (q) => setState(() => _searchQuery = q),
           onClear: () => setState(() {
@@ -148,20 +142,23 @@ class _EventsTabState extends ConsumerState<EventsTab> {
             _expanded.clear();
           }),
         ),
-        if (!_connected) const ConnectionStatusBanner(),
+        if (!_connected)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: ConnectionStatusBanner(),
+          ),
         Expanded(
           child: visible.isEmpty
               ? Center(
-                  child: Text(
+                  child: AppText.muted(
                     'Waiting for events. Polling cycle runs every 60 s by default.',
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
                   ),
                 )
-              : ListView.builder(
+              : ListView.separated(
                   controller: _scroll,
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
                   itemCount: visible.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 6),
                   itemBuilder: (context, i) {
                     final row = visible[i];
                     return EventRow(
@@ -171,7 +168,9 @@ class _EventsTabState extends ConsumerState<EventsTab> {
                       rawData: row.rawData,
                       expanded: _expanded.contains(row.id),
                       onTap: () => setState(() {
-                        _expanded.contains(row.id) ? _expanded.remove(row.id) : _expanded.add(row.id);
+                        _expanded.contains(row.id)
+                            ? _expanded.remove(row.id)
+                            : _expanded.add(row.id);
                       }),
                     );
                   },
@@ -197,8 +196,6 @@ class _EventsTabState extends ConsumerState<EventsTab> {
 }
 
 class _EventRow {
-  /// Stable id assigned on insert; survives the FIFO trim so expand
-  /// state doesn't latch onto the wrong row when older entries drop off.
   final int id;
   final DateTime timestamp;
   final String type;
@@ -244,48 +241,49 @@ class _Toolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: Theme.of(context).dividerColor),
-        ),
-      ),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 4,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          IconButton(
-            tooltip: autoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll',
-            icon: Icon(autoScroll ? Icons.pause : Icons.play_arrow),
-            onPressed: () => onAutoScrollChanged(!autoScroll),
-            visualDensity: VisualDensity.compact,
-          ),
-          ..._groups.entries.map((e) => FilterChip(
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      child: AppSurface(
+        elevation: AppSurfaceElevation.surface,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            IconButton(
+              tooltip: autoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll',
+              icon: Icon(autoScroll ? Icons.pause : Icons.play_arrow),
+              onPressed: () => onAutoScrollChanged(!autoScroll),
+              visualDensity: VisualDensity.compact,
+            ),
+            ..._groups.entries.map(
+              (e) => FilterChip(
                 label: Text(e.value),
                 selected: enabledGroups.contains(e.key),
                 onSelected: (_) => onGroupToggled(e.key),
-              )),
-          SizedBox(
-            width: 200,
-            child: TextField(
-              decoration: const InputDecoration(
-                hintText: 'Search',
-                isDense: true,
-                prefixIcon: Icon(Icons.search, size: 16),
-                border: OutlineInputBorder(),
               ),
-              style: const TextStyle(fontSize: 12),
-              onChanged: onSearchChanged,
             ),
-          ),
-          TextButton.icon(
-            onPressed: onClear,
-            icon: const Icon(Icons.clear_all, size: 16),
-            label: Text('Clear ($eventCount)'),
-          ),
-        ],
+            SizedBox(
+              width: 200,
+              child: TextField(
+                decoration: const InputDecoration(
+                  hintText: 'Search',
+                  isDense: true,
+                  prefixIcon: Icon(Icons.search, size: 16),
+                  border: OutlineInputBorder(),
+                ),
+                style: const TextStyle(fontSize: 12),
+                onChanged: onSearchChanged,
+              ),
+            ),
+            TextButton.icon(
+              onPressed: onClear,
+              icon: const Icon(Icons.clear_all, size: 16),
+              label: Text('Clear ($eventCount)'),
+            ),
+          ],
+        ),
       ),
     );
   }

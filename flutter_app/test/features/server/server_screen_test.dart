@@ -8,12 +8,16 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/server/server_providers.dart';
 import 'package:heimdallm/features/server/server_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
 
-Future<void> _pump(WidgetTester tester, MockApiClient api,
-    {String initialTab = 'status'}) async {
+Future<void> _pump(
+  WidgetTester tester,
+  MockApiClient api, {
+  String initialTab = 'status',
+}) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -25,7 +29,11 @@ Future<void> _pump(WidgetTester tester, MockApiClient api,
           (_) => Stream.value(const HealthDetail()),
         ),
       ],
-      child: MaterialApp(home: ServerScreen(initialTab: initialTab)),
+      child: MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+        home: ServerScreen(initialTab: initialTab),
+      ),
     ),
   );
   await tester.pumpAndSettle();
@@ -36,17 +44,19 @@ void main() {
 
   testWidgets('renders Status / Events / Logs tabs', (tester) async {
     final api = MockApiClient();
-    when(() => api.fetchConfig()).thenAnswer((_) async => {
-          'repositories': <String>[],
-          'server_port': 7842,
-          'bind_addr': '127.0.0.1',
-          'poll_interval': '60s',
-          'retention_days': 30,
-          'ai_primary': 'claude',
-          'ai_fallback': '',
-          'review_mode': 'single',
-          'issue_tracking': {'enabled': false},
-        });
+    when(() => api.fetchConfig()).thenAnswer(
+      (_) async => {
+        'repositories': <String>[],
+        'server_port': 7842,
+        'bind_addr': '127.0.0.1',
+        'poll_interval': '60s',
+        'retention_days': 30,
+        'ai_primary': 'claude',
+        'ai_fallback': '',
+        'review_mode': 'single',
+        'issue_tracking': {'enabled': false},
+      },
+    );
     when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
     when(() => api.fetchHealth()).thenAnswer((_) async => {'status': 'ok'});
 
@@ -57,19 +67,23 @@ void main() {
     expect(find.text('Logs'), findsOneWidget);
   });
 
-  testWidgets('Status tab shows Stop button when daemon running', (tester) async {
+  testWidgets('Status tab shows Stop button when daemon running', (
+    tester,
+  ) async {
     final api = MockApiClient();
-    when(() => api.fetchConfig()).thenAnswer((_) async => {
-          'repositories': <String>[],
-          'server_port': 7842,
-          'bind_addr': '127.0.0.1',
-          'poll_interval': '60s',
-          'retention_days': 30,
-          'ai_primary': 'claude',
-          'ai_fallback': '',
-          'review_mode': 'single',
-          'issue_tracking': {'enabled': false},
-        });
+    when(() => api.fetchConfig()).thenAnswer(
+      (_) async => {
+        'repositories': <String>[],
+        'server_port': 7842,
+        'bind_addr': '127.0.0.1',
+        'poll_interval': '60s',
+        'retention_days': 30,
+        'ai_primary': 'claude',
+        'ai_fallback': '',
+        'review_mode': 'single',
+        'issue_tracking': {'enabled': false},
+      },
+    );
     when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
     when(() => api.fetchHealth()).thenAnswer((_) async => {'status': 'ok'});
 
@@ -79,20 +93,23 @@ void main() {
     expect(find.text('Start server'), findsNothing);
   });
 
-  testWidgets('Status tab shows Start button when daemon stopped',
-      (tester) async {
+  testWidgets('Status tab shows Start button when daemon stopped', (
+    tester,
+  ) async {
     final api = MockApiClient();
-    when(() => api.fetchConfig()).thenAnswer((_) async => {
-          'repositories': <String>[],
-          'server_port': 7842,
-          'bind_addr': '127.0.0.1',
-          'poll_interval': '60s',
-          'retention_days': 30,
-          'ai_primary': 'claude',
-          'ai_fallback': '',
-          'review_mode': 'single',
-          'issue_tracking': {'enabled': false},
-        });
+    when(() => api.fetchConfig()).thenAnswer(
+      (_) async => {
+        'repositories': <String>[],
+        'server_port': 7842,
+        'bind_addr': '127.0.0.1',
+        'poll_interval': '60s',
+        'retention_days': 30,
+        'ai_primary': 'claude',
+        'ai_fallback': '',
+        'review_mode': 'single',
+        'issue_tracking': {'enabled': false},
+      },
+    );
     when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
     when(() => api.fetchHealth()).thenAnswer((_) async => null);
 
@@ -104,17 +121,19 @@ void main() {
 
   testWidgets('initialTab=events selects the Events tab', (tester) async {
     final api = MockApiClient();
-    when(() => api.fetchConfig()).thenAnswer((_) async => {
-          'repositories': <String>[],
-          'server_port': 7842,
-          'bind_addr': '127.0.0.1',
-          'poll_interval': '60s',
-          'retention_days': 30,
-          'ai_primary': 'claude',
-          'ai_fallback': '',
-          'review_mode': 'single',
-          'issue_tracking': {'enabled': false},
-        });
+    when(() => api.fetchConfig()).thenAnswer(
+      (_) async => {
+        'repositories': <String>[],
+        'server_port': 7842,
+        'bind_addr': '127.0.0.1',
+        'poll_interval': '60s',
+        'retention_days': 30,
+        'ai_primary': 'claude',
+        'ai_fallback': '',
+        'review_mode': 'single',
+        'issue_tracking': {'enabled': false},
+      },
+    );
     when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
     when(() => api.fetchHealth()).thenAnswer((_) async => {'status': 'ok'});
 

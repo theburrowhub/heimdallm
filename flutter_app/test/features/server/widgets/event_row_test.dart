@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 import 'package:heimdallm/features/server/widgets/event_row.dart';
 
@@ -17,6 +18,8 @@ void main() {
   }) async {
     await tester.pumpWidget(
       MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
         home: Scaffold(
           body: EventRow(
             timestamp: DateTime(2026, 5, 12, 9, 41, 7),
@@ -31,16 +34,13 @@ void main() {
     );
   }
 
-  testWidgets('renders human label, target, and chips for review_completed',
-      (tester) async {
+  testWidgets('renders human label, target, and chips for review_completed', (
+    tester,
+  ) async {
     await pumpRow(
       tester,
       type: 'review_completed',
-      payload: {
-        'repo': 'acme/foo',
-        'number': 42,
-        'duration_ms': 1500,
-      },
+      payload: {'repo': 'acme/foo', 'number': 42, 'duration_ms': 1500},
     );
 
     expect(find.text('Review completed'), findsOneWidget);
@@ -52,8 +52,9 @@ void main() {
     expect(find.byType(Icon), findsOneWidget);
   });
 
-  testWidgets('omits target + chip wrap when payload has neither',
-      (tester) async {
+  testWidgets('omits target + chip wrap when payload has neither', (
+    tester,
+  ) async {
     // polling_started carries no target but does carry chips; flip to
     // an unknown event with empty payload to exercise the empty wrap.
     await pumpRow(tester, type: 'mystery_event', payload: const {});
@@ -64,8 +65,9 @@ void main() {
     expect(find.byType(Wrap), findsNothing);
   });
 
-  testWidgets('renders multiple detail chips for polling_started',
-      (tester) async {
+  testWidgets('renders multiple detail chips for polling_started', (
+    tester,
+  ) async {
     await pumpRow(
       tester,
       type: 'polling_started',
@@ -80,8 +82,7 @@ void main() {
     expect(find.text('3 repos'), findsOneWidget);
   });
 
-  testWidgets('shows JSON expand block when expanded is true',
-      (tester) async {
+  testWidgets('shows JSON expand block when expanded is true', (tester) async {
     await pumpRow(
       tester,
       type: 'review_completed',
@@ -94,8 +95,7 @@ void main() {
     expect(find.byType(SelectableText), findsOneWidget);
   });
 
-  testWidgets('hides JSON expand block when expanded is false',
-      (tester) async {
+  testWidgets('hides JSON expand block when expanded is false', (tester) async {
     await pumpRow(
       tester,
       type: 'review_completed',

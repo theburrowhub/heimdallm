@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../../../shared/design_system/components/components.dart';
+import '../../../shared/design_system/tokens.dart';
 import '../event_summary.dart';
 
 /// One row of the Server > Events tab. Renders the structured fields of
@@ -34,14 +36,13 @@ class EventRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final ev = format(type, payload);
     final ts = formatTimestamp(timestamp);
-    // Pull surface + secondary-text colours from the theme so the row
-    // renders correctly in both light and dark mode (#453).
-    final scheme = Theme.of(context).colorScheme;
 
     return InkWell(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: AppSurface(
+        elevation: AppSurfaceElevation.surface,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        bordered: false,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -51,59 +52,49 @@ class EventRow extends StatelessWidget {
                 Icon(ev.icon, color: ev.color, size: 18),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
+                  child: AppText(
                     ev.label,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
+                    role: AppTextRole.label,
+                    color: AppColors.text.resolve(context),
                   ),
                 ),
-                Text(
-                  ts,
-                  style: TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 11,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
+                AppText.mono(ts, color: AppColors.textMuted.resolve(context)),
               ],
             ),
             if (ev.target.isNotEmpty || ev.details.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(left: 28, top: 2),
+                padding: const EdgeInsets.only(left: 28, top: 4),
                 child: Wrap(
                   spacing: 8,
-                  runSpacing: 2,
+                  runSpacing: 4,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     if (ev.target.isNotEmpty)
-                      Text(
+                      AppText.mono(
                         ev.target,
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          color: scheme.onSurfaceVariant,
-                        ),
+                        color: AppColors.textMuted.resolve(context),
                       ),
-                    for (final d in ev.details) _DetailChip(text: d),
+                    for (final d in ev.details)
+                      _DetailChip(
+                        text: d,
+                        color: _detailColor(ev.status, context),
+                      ),
                   ],
                 ),
               ),
             if (expanded)
-              Container(
-                margin: const EdgeInsets.only(left: 28, top: 6),
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: SelectableText(
-                  _pretty(rawData),
-                  style: TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 11,
-                    color: scheme.onSurface,
+              Padding(
+                padding: const EdgeInsets.only(left: 28, top: 8),
+                child: AppSurface(
+                  elevation: AppSurfaceElevation.raised,
+                  padding: const EdgeInsets.all(8),
+                  child: SelectableText(
+                    _pretty(rawData),
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                      color: AppColors.text.resolve(context),
+                    ),
                   ),
                 ),
               ),
@@ -111,6 +102,17 @@ class EventRow extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Color _detailColor(EventStatus status, BuildContext context) {
+    return switch (status) {
+      EventStatus.started => AppColors.warning.resolve(context),
+      EventStatus.succeeded => AppColors.success.resolve(context),
+      EventStatus.failed => AppColors.danger.resolve(context),
+      EventStatus.skipped => AppColors.textMuted.resolve(context),
+      EventStatus.info => AppColors.info.resolve(context),
+      EventStatus.warning => AppColors.warning.resolve(context),
+    };
   }
 
   static String _pretty(String raw) {
@@ -130,24 +132,24 @@ String formatTimestamp(DateTime t) {
   return '$hh:$mm:$ss';
 }
 
-/// Subtle pill-style chip for one detail span (agent, duration, …).
-/// Kept light-weight (no Material Chip) so dozens of rows stay snappy.
 class _DetailChip extends StatelessWidget {
-  const _DetailChip({required this.text});
+  const _DetailChip({required this.text, required this.color});
+
   final String text;
+  final Color color;
+
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
+    return AppBadge(
+      label: text,
+      foreground: color,
+      background: color.withValues(alpha: 0.12),
+      border: color.withValues(alpha: 0.18),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(3),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-      ),
+      radius: 6,
+      fontSize: 11,
+      letterSpacing: 0,
+      fontWeight: FontWeight.w500,
     );
   }
 }
