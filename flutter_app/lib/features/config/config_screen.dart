@@ -1994,33 +1994,43 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         key: _sectionKeys[id],
         elevation: AppSurfaceElevation.surface,
         padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(meta.icon, size: 20, color: theme.colorScheme.primary),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      AppText.sectionTitle(meta.title),
-                      const SizedBox(height: 4),
-                      AppText.muted(meta.summary),
-                    ],
-                  ),
-                ),
-                if (trailing != null) ...[
+        // The AppSurface below paints a colored/bordered DecoratedBox. Any
+        // SwitchListTile/CheckboxListTile/RadioListTile in `children` needs
+        // its own nearest Material ancestor to paint ink/background, or it
+        // throws a "ListTile background color or ink splashes may be
+        // invisible" assertion — fatal in widget tests (see
+        // theburrowhub/heimdallm c1eb4e7). Wrapping the whole card body once
+        // here covers every section instead of patching each tile.
+        child: Material(
+          type: MaterialType.transparency,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(meta.icon, size: 20, color: theme.colorScheme.primary),
                   const SizedBox(width: 12),
-                  trailing,
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AppText.sectionTitle(meta.title),
+                        const SizedBox(height: 4),
+                        AppText.muted(meta.summary),
+                      ],
+                    ),
+                  ),
+                  if (trailing != null) ...[
+                    const SizedBox(width: 12),
+                    trailing,
+                  ],
                 ],
-              ],
-            ),
-            const SizedBox(height: 16),
-            ...children,
-          ],
+              ),
+              const SizedBox(height: 16),
+              ...children,
+            ],
+          ),
         ),
       ),
     );
