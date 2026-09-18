@@ -29,10 +29,7 @@ void main() {
     });
 
     test('review_completed omits duration chip when payload lacks it', () {
-      final ev = format('review_completed', {
-        'repo': 'acme/foo',
-        'number': 42,
-      });
+      final ev = format('review_completed', {'repo': 'acme/foo', 'number': 42});
       expect(ev.details, isEmpty);
     });
 
@@ -106,9 +103,7 @@ void main() {
     });
 
     test('repo_discovered uses repo as target without number', () {
-      final ev = format('repo_discovered', {
-        'repo': 'acme/foo',
-      });
+      final ev = format('repo_discovered', {'repo': 'acme/foo'});
       expect(ev.label, 'Repo discovered');
       expect(ev.target, 'acme/foo');
       expect(ev.details, isEmpty);

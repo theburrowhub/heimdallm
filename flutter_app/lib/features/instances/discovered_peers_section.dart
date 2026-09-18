@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mix/mix.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/api/cluster_api.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import 'instance_dialog.dart';
 
 /// Heimdallm daemons the hub can see on the local network but nobody has
@@ -62,54 +65,49 @@ class _FoundList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
     final empty = peers.isEmpty;
-    return Card(
-      color: scheme.surfaceContainerHighest,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.wifi_find_outlined,
-                  size: 18,
-                  color: empty ? scheme.onSurfaceVariant : scheme.primary,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(switch (peers.length) {
-                    0 => 'No unregistered daemons on this network',
-                    1 => '1 daemon found on this network, not registered',
-                    _ =>
-                      '${peers.length} daemons found on this network, '
-                          'not registered',
-                  }, style: Theme.of(context).textTheme.titleSmall),
-                ),
-                const _ScanButton(),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              empty
-                  ? 'Every daemon answering here is already registered. One '
-                        'that has just started can take a few seconds to '
-                        'announce itself, and discovery does not leave this '
-                        'subnet.'
-                  : 'Registering one still needs its API token, which does '
-                        'not travel over the network. Anything on this LAN '
-                        'can advertise itself, so only adopt machines you '
-                        'recognise.',
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-            ),
-            if (!empty) ...[
-              const SizedBox(height: 8),
-              for (final peer in peers) _PeerRow(peer: peer),
+    final accent = empty
+        ? AppColors.textMuted.resolve(context)
+        : AppColors.accent.resolve(context);
+    return AppSurface(
+      elevation: AppSurfaceElevation.raised,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.wifi_find_outlined, size: 18, color: accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: AppText.sectionTitle(switch (peers.length) {
+                  0 => 'No unregistered daemons on this network',
+                  1 => '1 daemon found on this network, not registered',
+                  _ =>
+                    '${peers.length} daemons found on this network, '
+                        'not registered',
+                }),
+              ),
+              const _ScanButton(),
             ],
+          ),
+          const SizedBox(height: 4),
+          AppText.muted(
+            empty
+                ? 'Every daemon answering here is already registered. One '
+                      'that has just started can take a few seconds to '
+                      'announce itself, and discovery does not leave this '
+                      'subnet.'
+                : 'Registering one still needs its API token, which does '
+                      'not travel over the network. Anything on this LAN '
+                      'can advertise itself, so only adopt machines you '
+                      'recognise.',
+          ),
+          if (!empty) ...[
+            const SizedBox(height: 8),
+            for (final peer in peers) _PeerRow(peer: peer),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -122,39 +120,37 @@ class _PeerRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(top: 6),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  peer.displayName,
-                  style: const TextStyle(fontWeight: FontWeight.w500),
-                ),
-                Text(
-                  [
-                    peer.baseUrl,
-                    if (peer.role.isNotEmpty) peer.role,
-                    if (peer.version.isNotEmpty) 'v${peer.version}',
-                  ].join(' · '),
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: scheme.onSurfaceVariant,
+      child: AppSurface(
+        elevation: AppSurfaceElevation.surface,
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AppText.label(peer.displayName),
+                  const SizedBox(height: 2),
+                  AppText.muted(
+                    [
+                      peer.baseUrl,
+                      if (peer.role.isNotEmpty) peer.role,
+                      if (peer.version.isNotEmpty) 'v${peer.version}',
+                    ].join(' · '),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          const SizedBox(width: 8),
-          FilledButton.tonal(
-            onPressed: () => showInstanceDialog(context, ref, discovered: peer),
-            child: const Text('Register'),
-          ),
-        ],
+            const SizedBox(width: 8),
+            FilledButton.tonal(
+              onPressed: () =>
+                  showInstanceDialog(context, ref, discovered: peer),
+              child: const Text('Register'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -195,52 +191,46 @@ class _DiscoveryOffCardState extends ConsumerState<_DiscoveryOffCard> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
-      color: scheme.surfaceContainerHighest,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.wifi_find_outlined,
-                  size: 18,
-                  color: scheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Find instances on this network',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-                FilledButton.tonal(
-                  onPressed: _saving ? null : _enable,
-                  child: Text(_saving ? 'Enabling…' : 'Turn on'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Daemons can announce themselves over mDNS so this hub can offer '
-              'them for registration, and so their addresses follow a DHCP '
-              'change instead of going stale. Off by default: announcing a '
-              'service on a shared network should be a choice. Only works '
-              'within one subnet, and not across a container bridge.',
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                _error!,
-                style: TextStyle(fontSize: 11, color: scheme.error),
+    return AppSurface(
+      elevation: AppSurfaceElevation.raised,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.wifi_find_outlined,
+                size: 18,
+                color: AppColors.textMuted.resolve(context),
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: AppText.sectionTitle('Find instances on this network'),
+              ),
+              FilledButton.tonal(
+                onPressed: _saving ? null : _enable,
+                child: Text(_saving ? 'Enabling…' : 'Turn on'),
               ),
             ],
+          ),
+          const SizedBox(height: 4),
+          const AppText.muted(
+            'Daemons can announce themselves over mDNS so this hub can offer '
+            'them for registration, and so their addresses follow a DHCP '
+            'change instead of going stale. Off by default: announcing a '
+            'service on a shared network should be a choice. Only works '
+            'within one subnet, and not across a container bridge.',
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            AppText(
+              _error!,
+              role: AppTextRole.bodyMuted,
+              color: AppColors.danger.resolve(context),
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -339,50 +329,43 @@ class _AddressChangedBannerState extends ConsumerState<AddressChangedBanner> {
         );
     if (peer == null) return const SizedBox.shrink();
 
-    final scheme = Theme.of(context).colorScheme;
+    final accent = AppColors.warning.resolve(context);
     return Padding(
       padding: const EdgeInsets.only(top: 8),
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: scheme.tertiaryContainer.withValues(alpha: 0.4),
-          borderRadius: BorderRadius.circular(6),
-        ),
+      child: Box(
+        style: BoxStyler()
+            .color(accent.withValues(alpha: 0.12))
+            .borderAll(color: accent.withValues(alpha: 0.24), width: 1)
+            .borderRadiusAll(AppRadius.md())
+            .padding(EdgeInsetsGeometryMix.value(const EdgeInsets.all(8))),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(Icons.swap_horiz, size: 16, color: scheme.tertiary),
+                Icon(Icons.swap_horiz, size: 16, color: accent),
                 const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    'Answering at ${peer.baseUrl}',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
+                Expanded(child: AppText.label('Answering at ${peer.baseUrl}')),
                 TextButton(
                   onPressed: _saving ? null : () => _apply(peer.baseUrl),
                   child: Text(_saving ? 'Updating…' : 'Update address'),
                 ),
               ],
             ),
-            Text(
+            const SizedBox(height: 4),
+            AppText.muted(
               'This instance is registered at ${peer.registeredBaseUrl}, which '
               'it no longer answers on. Until the address is corrected the '
               'other instances will take over its repositories while it keeps '
               'reviewing them.',
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
             ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
-                child: Text(
+                child: AppText(
                   _error!,
-                  style: TextStyle(fontSize: 11, color: scheme.error),
+                  role: AppTextRole.bodyMuted,
+                  color: AppColors.danger.resolve(context),
                 ),
               ),
           ],

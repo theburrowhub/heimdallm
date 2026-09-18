@@ -9,6 +9,7 @@ import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/server/server_providers.dart';
 import 'package:heimdallm/features/server/server_screen.dart';
 import 'package:heimdallm/core/models/agent.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../../core/platform/fake_platform_services.dart';
@@ -47,7 +48,11 @@ Future<_MockApiClient> _mount(WidgetTester tester) async {
         ),
         platformServicesProvider.overrideWithValue(FakePlatformServices()),
       ],
-      child: const MaterialApp(home: ServerScreen(initialTab: 'status')),
+      child: MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+        home: const ServerScreen(initialTab: 'status'),
+      ),
     ),
   );
   await tester.pumpAndSettle();
@@ -64,7 +69,9 @@ void main() {
     await tester.pump();
 
     expect(
-      find.text('Listen URL changed. Restart the server for it to take effect.'),
+      find.text(
+        'Listen URL changed. Restart the server for it to take effect.',
+      ),
       findsOneWidget,
     );
     expect(
@@ -81,7 +88,10 @@ void main() {
     // path once the binary lookup returns null, so it settles quickly.
     when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
 
-    await tester.enterText(find.widgetWithText(TextField, 'Bind address'), '0.0.0.0');
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Bind address'),
+      '0.0.0.0',
+    );
     await tester.pump();
 
     await tester.tap(find.text('Restart server'));

@@ -76,13 +76,13 @@ class FormattedEvent {
 /// silently regress to a runtime null when the enum drifts ahead of the
 /// palette.
 Color _color(EventStatus s) => switch (s) {
-      EventStatus.started => const Color(0xFFFFB347), // orange
-      EventStatus.succeeded => const Color(0xFF6CCA6C), // green
-      EventStatus.failed => const Color(0xFFFF6B6B), // red
-      EventStatus.skipped => const Color(0xFF888888), // gray
-      EventStatus.info => const Color(0xFF6CA0FF), // blue
-      EventStatus.warning => const Color(0xFFB070FF), // purple
-    };
+  EventStatus.started => const Color(0xFFE3B341), // warning
+  EventStatus.succeeded => const Color(0xFF6CCA6C), // green
+  EventStatus.failed => const Color(0xFFFF6B6B), // red
+  EventStatus.skipped => const Color(0xFF888888), // gray
+  EventStatus.info => const Color(0xFF58A6FF), // accent/info
+  EventStatus.warning => const Color(0xFFB070FF), // purple
+};
 
 /// Build a [FormattedEvent] from the raw SSE wire payload. Each branch
 /// owns its label + status + icon + which payload keys feed the target

@@ -8,6 +8,7 @@ import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/core/api/daemon_endpoint.dart';
 import 'package:heimdallm/features/instances/config_propagation_dialog.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -34,6 +35,8 @@ Future<void> _open(
         if (api != null) hubApiClientProvider.overrideWithValue(api),
       ],
       child: MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
         home: Scaffold(
           body: Consumer(
             builder: (context, ref, _) => TextButton(
@@ -57,10 +60,7 @@ void main() {
   ) async {
     await _open(tester, drift: const []);
 
-    expect(
-      find.textContaining('Shared settings'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('Shared settings'), findsOneWidget);
     // The operator has to know a port or a token was deliberately not sent,
     // rather than wondering why it did not take effect.
     expect(find.textContaining('never sent'), findsOneWidget);
@@ -153,10 +153,7 @@ void main() {
 
     expect(find.text('Applied 2 settings'), findsOneWidget);
     expect(find.text('daemon is starting'), findsOneWidget);
-    expect(
-      find.text('Kept local: server.port, github.token'),
-      findsOneWidget,
-    );
+    expect(find.text('Kept local: server.port, github.token'), findsOneWidget);
     expect(find.text('Close'), findsOneWidget);
   });
 
@@ -164,10 +161,8 @@ void main() {
     tester,
   ) async {
     final api = _fakeHub(
-      (_) async => http.Response(
-        jsonEncode({'error': 'hub is unreachable'}),
-        502,
-      ),
+      (_) async =>
+          http.Response(jsonEncode({'error': 'hub is unreachable'}), 502),
     );
 
     await _open(tester, drift: const [], api: api);

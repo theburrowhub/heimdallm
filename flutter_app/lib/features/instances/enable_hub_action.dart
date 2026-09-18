@@ -5,6 +5,7 @@ import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
+import '../../shared/design_system/components/components.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
 import '../server/server_actions.dart' as server_actions;
@@ -25,8 +26,8 @@ Future<bool> enableHubMode(BuildContext context, WidgetRef ref) async {
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
-      title: const Text('Make this daemon a cluster hub?'),
-      content: const Text(
+      title: const AppText.sectionTitle('Make this daemon a cluster hub?'),
+      content: const AppText(
         'A hub manages other Heimdallm daemons: it registers them, routes '
         'organizations and repositories to them, and can push the same '
         'configuration to all of them. The setting is saved immediately, but '

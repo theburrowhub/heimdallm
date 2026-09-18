@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:mix/mix.dart';
+
+import '../../../shared/design_system/components/components.dart';
+import '../../../shared/design_system/tokens.dart';
 
 /// Thin in-tab banner shown when the Events tab's own SSE stream has dropped.
 ///
@@ -12,32 +16,31 @@ class ConnectionStatusBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const amber = Color(0xFFFFB347);
-    // liveRegion so assistive tech announces the drop/recovery as it toggles.
+    final accent = AppColors.warning.resolve(context);
     return Semantics(
       liveRegion: true,
       label: 'Live stream disconnected, reconnecting',
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        color: amber.withValues(alpha: 0.15),
+      child: Box(
+        style: BoxStyler()
+            .color(accent.withValues(alpha: 0.12))
+            .borderAll(color: accent.withValues(alpha: 0.24), width: 1)
+            .borderRadiusAll(AppRadius.md())
+            .padding(
+              EdgeInsetsGeometryMix.value(
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+            ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(
+            SizedBox(
               width: 12,
               height: 12,
-              child: CircularProgressIndicator(strokeWidth: 2, color: amber),
+              child: CircularProgressIndicator(strokeWidth: 2, color: accent),
             ),
             const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                'Live stream disconnected — reconnecting…',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.onSurface,
-                ),
-              ),
+            const Flexible(
+              child: AppText('Live stream disconnected — reconnecting…'),
             ),
           ],
         ),

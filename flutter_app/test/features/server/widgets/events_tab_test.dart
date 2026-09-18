@@ -10,6 +10,7 @@ import 'package:heimdallm/core/api/sse_client.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/server/widgets/connection_status_banner.dart';
 import 'package:heimdallm/features/server/widgets/events_tab.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 import '../../../core/platform/fake_platform_services.dart';
 
@@ -18,7 +19,9 @@ void main() {
     'EventsTab shows the reconnecting banner on a stream error and clears it '
     'when events resume',
     (tester) async {
-      final platform = FakePlatformServices(apiBaseUrl: 'http://127.0.0.1:7842');
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+      );
       // One controllable transport per HTTP attempt: the first carries the
       // error, the reconnect opens a second on which we deliver an event.
       final transports = <StreamController<List<int>>>[];
@@ -45,10 +48,12 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            platformServicesProvider.overrideWithValue(platform),
-          ],
-          child: MaterialApp(home: Scaffold(body: EventsTab(client: client))),
+          overrides: [platformServicesProvider.overrideWithValue(platform)],
+          child: MaterialApp(
+            builder: (context, child) =>
+                HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+            home: Scaffold(body: EventsTab(client: client)),
+          ),
         ),
       );
       await tester.pump(const Duration(milliseconds: 20));

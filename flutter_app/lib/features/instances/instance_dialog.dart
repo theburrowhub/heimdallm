@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mix/mix.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/api/cluster_api.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import 'enable_hub_action.dart';
 
 /// How an instance's API token is supplied.
@@ -81,7 +84,7 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text(
+      title: AppText.sectionTitle(
         _isEdit
             ? 'Edit ${widget.existing!.displayName}'
             : widget.discovered != null
@@ -118,19 +121,12 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                Text(
-                  'API token',
-                  style: Theme.of(context).textTheme.labelLarge,
-                ),
+                const AppText.label('API token'),
                 const SizedBox(height: 4),
-                Text(
+                const AppText.muted(
                   'Each daemon generates its own token in its data directory '
                   '(api_token). Point at an env var or a file to keep the '
                   'secret out of config.toml.',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
                 ),
                 const SizedBox(height: 8),
                 SegmentedButton<_TokenSource>(
@@ -143,7 +139,10 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
                       value: _TokenSource.env,
                       label: Text('Env var'),
                     ),
-                    ButtonSegment(value: _TokenSource.file, label: Text('File')),
+                    ButtonSegment(
+                      value: _TokenSource.file,
+                      label: Text('File'),
+                    ),
                   ],
                   selected: {_tokenSource},
                   onSelectionChanged: (selection) =>
@@ -167,7 +166,9 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
                     // Editing without touching the token keeps the stored one:
                     // making the operator re-paste a secret to rename a machine
                     // would be a good way to get it wrong.
-                    helperText: _isEdit ? 'Leave blank to keep the current token' : null,
+                    helperText: _isEdit
+                        ? 'Leave blank to keep the current token'
+                        : null,
                   ),
                   validator: (value) {
                     if (_isEdit && (value == null || value.trim().isEmpty)) {
@@ -210,13 +211,7 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
                   if (isNotAClusterHubError(_error))
                     _NotAHubError(onEnable: _enableHubMode)
                   else
-                    Text(
-                      _error!,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                        fontSize: 12,
-                      ),
-                    ),
+                    AppText(_error!, color: AppColors.danger.resolve(context)),
                 ],
               ],
             ),
@@ -343,46 +338,38 @@ class _NotAHubError extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Theme.of(
-          context,
-        ).colorScheme.errorContainer.withValues(alpha: 0.4),
-        borderRadius: BorderRadius.circular(6),
-      ),
+    final background = AppColors.danger
+        .resolve(context)
+        .withValues(alpha: 0.12);
+    final foreground = AppColors.danger.resolve(context);
+    return Box(
+      style: BoxStyler()
+          .color(background)
+          .borderAll(color: foreground.withValues(alpha: 0.28), width: 1)
+          .borderRadiusAll(AppRadius.md())
+          .padding(EdgeInsetsGeometryMix.value(const EdgeInsets.all(10))),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(
-                Icons.hub_outlined,
-                size: 16,
-                color: Theme.of(context).colorScheme.onErrorContainer,
-              ),
+              Icon(Icons.hub_outlined, size: 16, color: foreground),
               const SizedBox(width: 6),
               Expanded(
-                child: Text(
+                child: AppText.label(
                   'This daemon is not a cluster hub yet',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Theme.of(context).colorScheme.onErrorContainer,
-                  ),
+                  color: foreground,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 4),
-          Text(
+          AppText(
             'Only a hub can register other instances. Enabling hub mode '
             'saves the setting and restarts the daemon; then add this '
             'instance again.',
-            style: TextStyle(
-              fontSize: 11,
-              color: Theme.of(context).colorScheme.onErrorContainer,
-            ),
+            role: AppTextRole.bodyMuted,
+            color: foreground,
           ),
           const SizedBox(height: 8),
           FilledButton.icon(

@@ -11,6 +11,7 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart'
     show apiClientProvider;
 import 'package:heimdallm/features/instances/instance_dialog.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:mocktail/mocktail.dart';
@@ -40,6 +41,8 @@ Future<void> _open(
         ...extraOverrides,
       ],
       child: MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
         home: Scaffold(
           body: Consumer(
             builder: (context, ref, _) => TextButton(
@@ -80,10 +83,7 @@ void main() {
 
       // The regression this test exists to catch: the raw sentinel must
       // never reach the screen.
-      expect(
-        find.text('this daemon is not a cluster hub'),
-        findsNothing,
-      );
+      expect(find.text('this daemon is not a cluster hub'), findsNothing);
       expect(find.text('This daemon is not a cluster hub yet'), findsOneWidget);
       expect(find.text('Enable hub mode'), findsOneWidget);
     },

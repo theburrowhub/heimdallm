@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/sse_client.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/logs/logs_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -42,6 +43,8 @@ void main() {
       ProviderScope(
         overrides: [platformServicesProvider.overrideWithValue(platform)],
         child: MaterialApp(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           home: Scaffold(body: LogsView(client: client)),
         ),
       ),
@@ -78,7 +81,11 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [platformServicesProvider.overrideWithValue(platform)],
-        child: const MaterialApp(home: Scaffold(body: LogsView())),
+        child: MaterialApp(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          home: const Scaffold(body: LogsView()),
+        ),
       ),
     );
 

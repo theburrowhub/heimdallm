@@ -16,6 +16,7 @@ import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
 import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/widgets/pr_review_state_badge.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -165,6 +166,9 @@ Future<void> _pumpDashboard(
         sseStreamProvider.overrideWith((ref) => const Stream.empty()),
       ],
       child: MaterialApp.router(
+        builder: (context, navigatorChild) => HeimdallmTheme.scope(
+          child: navigatorChild ?? const SizedBox.shrink(),
+        ),
         routerConfig: GoRouter(
           routes: [
             GoRoute(path: '/', builder: (_, _) => const _DashboardHost()),

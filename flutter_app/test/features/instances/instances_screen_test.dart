@@ -7,6 +7,7 @@ import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/features/instances/instances_screen.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
 import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 ClusterRegistry _registry({List<Map<String, dynamic>> instances = const []}) {
   return ClusterRegistry.fromJson({
@@ -21,6 +22,8 @@ ClusterRegistry _registry({List<Map<String, dynamic>> instances = const []}) {
 /// flutter_riverpod does not export the Override type to name here.
 Widget _app(Widget child) {
   return MaterialApp.router(
+    builder: (context, navigatorChild) =>
+        HeimdallmTheme.scope(child: navigatorChild ?? const SizedBox.shrink()),
     routerConfig: GoRouter(
       routes: [GoRoute(path: '/', builder: (_, _) => child)],
     ),
@@ -165,6 +168,9 @@ void main() {
             daemonInstancesProvider.overrideWith((ref) async => _registry()),
           ],
           child: MaterialApp.router(
+            builder: (context, navigatorChild) => HeimdallmTheme.scope(
+              child: navigatorChild ?? const SizedBox.shrink(),
+            ),
             routerConfig: GoRouter(
               initialLocation: '/instances',
               routes: [
@@ -269,13 +275,15 @@ void main() {
             daemonInstancesProvider.overrideWith((ref) async => _registry()),
           ],
           child: MaterialApp.router(
+            builder: (context, navigatorChild) => HeimdallmTheme.scope(
+              child: navigatorChild ?? const SizedBox.shrink(),
+            ),
             routerConfig: GoRouter(
               initialLocation: '/instances',
               routes: [
                 GoRoute(
                   path: '/instances',
-                  builder: (_, _) =>
-                      const Scaffold(body: InstancesTabView()),
+                  builder: (_, _) => const Scaffold(body: InstancesTabView()),
                   routes: [
                     GoRoute(
                       path: 'routing',
@@ -313,36 +321,28 @@ void main() {
       await tester.tap(find.text('Add instance'));
       await tester.pumpAndSettle();
 
-      expect(
-        find.widgetWithText(AlertDialog, 'Add instance'),
-        findsOneWidget,
-      );
+      expect(find.widgetWithText(AlertDialog, 'Add instance'), findsOneWidget);
     });
 
-    testWidgets(
-      'propagate config button opens the configuration dialog',
-      (tester) async {
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              daemonInstancesProvider.overrideWith(
-                (ref) async => _registry(),
-              ),
-              configDriftProvider.overrideWith((ref) async => const []),
-            ],
-            child: _app(const Scaffold(body: InstancesTabView())),
-          ),
-        );
-        await tester.pumpAndSettle();
+    testWidgets('propagate config button opens the configuration dialog', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+            configDriftProvider.overrideWith((ref) async => const []),
+          ],
+          child: _app(const Scaffold(body: InstancesTabView())),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        await tester.tap(
-          find.byTooltip('Apply configuration to all instances'),
-        );
-        await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Apply configuration to all instances'));
+      await tester.pumpAndSettle();
 
-        expect(find.text('Configuration across instances'), findsOneWidget);
-      },
-    );
+      expect(find.text('Configuration across instances'), findsOneWidget);
+    });
 
     testWidgets('refresh button reloads the registry', (tester) async {
       var loads = 0;
@@ -409,10 +409,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.textContaining('Could not load instances:'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('Could not load instances:'), findsOneWidget);
       expect(find.textContaining('daemon unreachable'), findsOneWidget);
     });
   });
@@ -473,7 +470,11 @@ void main() {
     testWidgets('renders nothing without an instance id', (tester) async {
       // On a single-daemon install every row would carry the same badge.
       await tester.pumpWidget(
-        const MaterialApp(home: Scaffold(body: InstanceBadge(instanceId: ''))),
+        MaterialApp(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          home: const Scaffold(body: InstanceBadge(instanceId: '')),
+        ),
       );
       expect(find.byType(Text), findsNothing);
     });
@@ -482,8 +483,10 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(
+        MaterialApp(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          home: const Scaffold(
             body: InstanceBadge(
               instanceId: 'srv-a',
               instanceName: 'Server A',

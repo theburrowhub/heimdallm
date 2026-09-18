@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mix/mix.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/api/cluster_api.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/restart_required_banner.dart';
 import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -27,7 +30,7 @@ class InstancesScreen extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Instances'),
+        title: const AppText.sectionTitle('Instances'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).maybePop(),
@@ -66,7 +69,9 @@ class InstancesScreen extends ConsumerWidget {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: isHub == false ? null : () => showInstanceDialog(context, ref),
+        onPressed: isHub == false
+            ? null
+            : () => showInstanceDialog(context, ref),
         icon: const Icon(Icons.add),
         label: const Text('Add instance'),
       ),
@@ -77,7 +82,7 @@ class InstancesScreen extends ConsumerWidget {
             child: registryAsync.when(
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (e, _) =>
-                  Center(child: Text('Could not load instances: $e')),
+                  Center(child: AppText('Could not load instances: $e')),
               data: (registry) => _InstanceList(registry: registry),
             ),
           ),
@@ -118,8 +123,9 @@ class InstancesTabView extends ConsumerWidget {
                 label: const Text('Add instance'),
               ),
               IconButton(
-                tooltip:
-                    isHub == false ? 'Enable hub mode first' : 'Routing rules',
+                tooltip: isHub == false
+                    ? 'Enable hub mode first'
+                    : 'Routing rules',
                 icon: const Icon(Icons.alt_route),
                 onPressed: isHub == false
                     ? null
@@ -150,7 +156,7 @@ class InstancesTabView extends ConsumerWidget {
           child: registryAsync.when(
             loading: () => const Center(child: CircularProgressIndicator()),
             error: (e, _) =>
-                Center(child: Text('Could not load instances: $e')),
+                Center(child: AppText('Could not load instances: $e')),
             data: (registry) => _InstanceList(registry: registry),
           ),
         ),
@@ -199,22 +205,29 @@ class _HubSetupBanner extends ConsumerWidget {
 
     return Padding(
       padding: padding,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(6),
-        ),
+      child: Box(
+        style: BoxStyler()
+            .color(
+              AppColors.accentMuted.resolve(context).withValues(alpha: 0.20),
+            )
+            .borderAll(
+              color: AppColors.accent.resolve(context).withValues(alpha: 0.22),
+              width: 1,
+            )
+            .borderRadiusAll(AppRadius.md())
+            .padding(EdgeInsetsGeometryMix.value(const EdgeInsets.all(12))),
         child: Row(
           children: [
-            const Icon(Icons.hub_outlined, size: 18),
+            Icon(
+              Icons.hub_outlined,
+              size: 18,
+              color: AppColors.accent.resolve(context),
+            ),
             const SizedBox(width: 8),
             const Expanded(
-              child: Text(
+              child: AppText(
                 'This daemon is not a cluster hub. Registering another '
                 'Heimdallm instance requires enabling hub mode first.',
-                style: TextStyle(fontSize: 12),
               ),
             ),
             FilledButton.icon(
@@ -279,22 +292,23 @@ class _EmptyState extends ConsumerWidget {
         constraints: const BoxConstraints(maxWidth: 460),
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.dns_outlined, size: 40),
-              const SizedBox(height: 12),
-              Text(
-                'No instances registered',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                body,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 12),
-              ),
-            ],
+          child: AppSurface(
+            elevation: AppSurfaceElevation.raised,
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.dns_outlined,
+                  size: 40,
+                  color: AppColors.textMuted.resolve(context),
+                ),
+                const SizedBox(height: 12),
+                const AppText.sectionTitle('No instances registered'),
+                const SizedBox(height: 8),
+                AppText(body, textAlign: TextAlign.center),
+              ],
+            ),
           ),
         ),
       ),
@@ -309,122 +323,124 @@ class _InstanceCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
     final state = instance.state;
     final unreachable = state != null && !state.reachable;
+    final primary = AppColors.accent.resolve(context);
+    final muted = AppColors.textMuted.resolve(context);
 
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  unreachable ? Icons.cloud_off_outlined : Icons.dns_outlined,
-                  color: unreachable ? scheme.error : null,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Flexible(
-                            child: Text(
-                              instance.displayName,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
+    return AppSurface(
+      elevation: AppSurfaceElevation.surface,
+      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                unreachable ? Icons.cloud_off_outlined : Icons.dns_outlined,
+                color: unreachable
+                    ? AppColors.danger.resolve(context)
+                    : primary,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: AppText(
+                            instance.displayName,
+                            role: AppTextRole.label,
+                            color: AppColors.text.resolve(context),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          if (instance.isSelf) ...[
-                            const SizedBox(width: 6),
-                            _Tag(label: 'hub', color: scheme.primary),
-                          ],
-                          if (!instance.enabled) ...[
-                            const SizedBox(width: 6),
-                            _Tag(
-                              label: 'disabled',
-                              color: scheme.onSurfaceVariant,
-                            ),
-                          ],
-                        ],
-                      ),
-                      Text(
-                        instance.baseUrl,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: scheme.onSurfaceVariant,
                         ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
+                        if (instance.isSelf) ...[
+                          const SizedBox(width: 6),
+                          _Tag(label: 'hub', color: primary),
+                        ],
+                        if (!instance.enabled) ...[
+                          const SizedBox(width: 6),
+                          _Tag(label: 'disabled', color: muted),
+                        ],
+                      ],
+                    ),
+                    AppText.muted(
+                      instance.baseUrl,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ),
-                _InstanceMenu(instance: instance),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 14,
-              runSpacing: 4,
-              children: [
-                _Metric(
-                  icon: unreachable
+              ),
+              _InstanceMenu(instance: instance),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 14,
+            runSpacing: 4,
+            children: [
+              AppBadge(
+                label: _statusLabel(state),
+                foreground: unreachable
+                    ? AppColors.danger.resolve(context)
+                    : AppColors.success.resolve(context),
+                background: (unreachable ? AppColors.danger : AppColors.success)
+                    .resolve(context)
+                    .withValues(alpha: 0.12),
+                border: (unreachable ? AppColors.danger : AppColors.success)
+                    .resolve(context)
+                    .withValues(alpha: 0.28),
+                icon: Icon(
+                  unreachable
                       ? Icons.error_outline
                       : Icons.check_circle_outline,
-                  label: _statusLabel(state),
-                  color: unreachable ? scheme.error : null,
                 ),
-                if (state != null && state.version.isNotEmpty)
-                  _Metric(icon: Icons.tag, label: state.version),
-                if (state != null && state.uptimeSeconds > 0)
-                  _Metric(
-                    icon: Icons.schedule,
-                    label: 'up ${_formatUptime(state.uptimeSeconds)}',
-                  ),
+              ),
+              if (state != null && state.version.isNotEmpty)
+                _Metric(icon: Icons.tag, label: state.version),
+              if (state != null && state.uptimeSeconds > 0)
                 _Metric(
-                  icon: Icons.folder_outlined,
-                  label: instance.assignedRepos == 1
-                      ? '1 repo routed here'
-                      : '${instance.assignedRepos} repos routed here',
+                  icon: Icons.schedule,
+                  label: 'up ${_formatUptime(state.uptimeSeconds)}',
                 ),
-                if (instance.isFallback)
-                  const _Metric(
-                    icon: Icons.call_split,
-                    label: 'owns unrouted repos',
-                  ),
-                if (instance.inPool)
-                  const _Metric(
-                    icon: Icons.loop,
-                    label: 'in round-robin pool',
-                  ),
-                for (final label in instance.labels)
-                  _Metric(icon: Icons.label_outline, label: label),
-              ],
+              _Metric(
+                icon: Icons.folder_outlined,
+                label: instance.assignedRepos == 1
+                    ? '1 repo routed here'
+                    : '${instance.assignedRepos} repos routed here',
+              ),
+              if (instance.isFallback)
+                const _Metric(
+                  icon: Icons.call_split,
+                  label: 'owns unrouted repos',
+                ),
+              if (instance.inPool)
+                const _Metric(icon: Icons.loop, label: 'in round-robin pool'),
+              for (final label in instance.labels)
+                _Metric(icon: Icons.label_outline, label: label),
+            ],
+          ),
+          if (instance.tokenError.isNotEmpty)
+            _Problem(
+              text: 'Token unavailable: ${instance.tokenError}',
+              color: AppColors.danger.resolve(context),
             ),
-            if (instance.tokenError.isNotEmpty)
-              _Problem(
-                text: 'Token unavailable: ${instance.tokenError}',
-                color: scheme.error,
-              ),
-            if (unreachable && state.lastError.isNotEmpty)
-              _Problem(
-                text: state.consecutiveFailures > 1
-                    ? '${state.lastError} (${state.consecutiveFailures} failed probes)'
-                    : state.lastError,
-                color: scheme.error,
-              ),
-            // Only renders when the network says this instance moved, so it
-            // costs nothing on a healthy fleet.
-            AddressChangedBanner(instanceId: instance.id),
-          ],
-        ),
+          if (unreachable && state.lastError.isNotEmpty)
+            _Problem(
+              text: state.consecutiveFailures > 1
+                  ? '${state.lastError} (${state.consecutiveFailures} failed probes)'
+                  : state.lastError,
+              color: AppColors.danger.resolve(context),
+            ),
+          // Only renders when the network says this instance moved, so it
+          // costs nothing on a healthy fleet.
+          AddressChangedBanner(instanceId: instance.id),
+        ],
       ),
     );
   }
@@ -515,8 +531,8 @@ class _InstanceMenu extends ConsumerWidget {
     return showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Remove ${instance.displayName}?'),
-        content: const Text(
+        title: AppText.sectionTitle('Remove ${instance.displayName}?'),
+        content: const AppText(
           'The instance keeps running; it is only removed from this hub. '
           'Any organization or repository routed to it is unrouted, so those '
           'repos fall back to the default instance.',
@@ -544,33 +560,35 @@ class _Tag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return AppBadge(
+      label: label,
+      foreground: color,
+      background: color.withValues(alpha: 0.10),
+      border: color.withValues(alpha: 0.28),
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-      decoration: BoxDecoration(
-        border: Border.all(color: color.withValues(alpha: 0.5)),
-        borderRadius: BorderRadius.circular(3),
-      ),
-      child: Text(label, style: TextStyle(fontSize: 10, color: color)),
+      radius: 6,
+      fontSize: 10,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0,
     );
   }
 }
 
 class _Metric extends StatelessWidget {
-  const _Metric({required this.icon, required this.label, this.color});
+  const _Metric({required this.icon, required this.label});
 
   final IconData icon;
   final String label;
-  final Color? color;
 
   @override
   Widget build(BuildContext context) {
-    final fg = color ?? Theme.of(context).colorScheme.onSurfaceVariant;
+    final fg = AppColors.textMuted.resolve(context);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(icon, size: 13, color: fg),
         const SizedBox(width: 4),
-        Text(label, style: TextStyle(fontSize: 11, color: fg)),
+        AppText.label(label, color: fg),
       ],
     );
   }
@@ -586,7 +604,7 @@ class _Problem extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(top: 8),
-      child: Text(text, style: TextStyle(fontSize: 11, color: color)),
+      child: AppText(text, role: AppTextRole.bodyMuted, color: color),
     );
   }
 }

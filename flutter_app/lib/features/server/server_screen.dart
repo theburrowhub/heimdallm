@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../shared/design_system/components/components.dart';
 import '../../shared/widgets/keep_alive_tab.dart';
 import '../config/config_providers.dart';
 import '../logs/logs_screen.dart' show LogsView;
@@ -42,7 +43,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen>
     final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Server'),
+        title: const AppText.sectionTitle('Server'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).maybePop(),
@@ -83,17 +84,32 @@ class _DaemonStoppedPlaceholder extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.power_off, size: 48, color: Colors.grey),
-          const SizedBox(height: 12),
-          Text('Server is stopped — start it to see $label.',
-              style: const TextStyle(color: Colors.grey)),
-          const SizedBox(height: 8),
-          const Text('Switch to the Status tab to start the server.',
-              style: TextStyle(color: Colors.grey, fontSize: 12)),
-        ],
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: AppSurface(
+          elevation: AppSurfaceElevation.raised,
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.power_off,
+                size: 48,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(height: 12),
+              AppText(
+                'Server is stopped — start it to see $label.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              const AppText.muted(
+                'Switch to the Status tab to start the server.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

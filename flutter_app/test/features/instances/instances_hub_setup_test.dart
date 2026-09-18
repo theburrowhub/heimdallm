@@ -11,6 +11,8 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart'
     show apiClientProvider;
 import 'package:heimdallm/features/instances/instances_screen.dart';
+import 'package:heimdallm/shared/design_system/components/components.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../core/platform/fake_platform_services.dart';
@@ -28,6 +30,8 @@ ClusterRegistry _registry({List<Map<String, dynamic>> instances = const []}) {
 
 Widget _app(Widget child) {
   return MaterialApp.router(
+    builder: (context, navigatorChild) =>
+        HeimdallmTheme.scope(child: navigatorChild ?? const SizedBox.shrink()),
     routerConfig: GoRouter(
       routes: [
         GoRoute(
@@ -47,11 +51,15 @@ Widget _app(Widget child) {
 
 /// Whether the widget carrying an "Add instance" label/icon is enabled.
 /// [InstancesScreen] uses a [FloatingActionButton]; [InstancesTabView] uses a
-/// plain [TextButton] — different types, both exposing `onPressed`.
+/// [TextButton] — different types, both exposing `onPressed`.
 bool _addInstanceEnabled(WidgetTester tester) {
   final fab = find.byType(FloatingActionButton);
   if (fab.evaluate().isNotEmpty) {
     return tester.widget<FloatingActionButton>(fab).onPressed != null;
+  }
+  final appButton = find.byType(AppButton);
+  if (appButton.evaluate().isNotEmpty) {
+    return tester.widget<AppButton>(appButton.first).onPressed != null;
   }
   final button = find.ancestor(
     of: find.text('Add instance'),
@@ -68,30 +76,33 @@ void main() {
     'InstancesTabView': const InstancesTabView(),
   }.entries) {
     group(entry.key, () {
-      testWidgets('not a hub: shows the enable CTA, disables hub-only actions', (
-        tester,
-      ) async {
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              daemonInstancesProvider.overrideWith((ref) async => _registry()),
-              localClusterRoleProvider.overrideWith((ref) async => ''),
-              configNotifierProvider.overrideWith(
-                () => _FakeConfigNotifier(
-                  const AppConfig(clusterRole: ClusterRole.standalone),
+      testWidgets(
+        'not a hub: shows the enable CTA, disables hub-only actions',
+        (tester) async {
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                daemonInstancesProvider.overrideWith(
+                  (ref) async => _registry(),
                 ),
-              ),
-            ],
-            child: _app(entry.value),
-          ),
-        );
-        await tester.pumpAndSettle();
+                localClusterRoleProvider.overrideWith((ref) async => ''),
+                configNotifierProvider.overrideWith(
+                  () => _FakeConfigNotifier(
+                    const AppConfig(clusterRole: ClusterRole.standalone),
+                  ),
+                ),
+              ],
+              child: _app(entry.value),
+            ),
+          );
+          await tester.pumpAndSettle();
 
-        expect(find.text('Enable clustering'), findsOneWidget);
-        expect(find.text('Restart server'), findsNothing);
-        expect(_addInstanceEnabled(tester), isFalse);
-        expect(find.byTooltip('Enable hub mode first'), findsWidgets);
-      });
+          expect(find.text('Enable clustering'), findsOneWidget);
+          expect(find.text('Restart server'), findsNothing);
+          expect(_addInstanceEnabled(tester), isFalse);
+          expect(find.byTooltip('Enable hub mode first'), findsWidgets);
+        },
+      );
 
       testWidgets('confirmed hub: no CTA, actions enabled', (tester) async {
         await tester.pumpWidget(
@@ -225,9 +236,7 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
-              daemonInstancesProvider.overrideWith(
-                (ref) async => _registry(),
-              ),
+              daemonInstancesProvider.overrideWith((ref) async => _registry()),
               localClusterRoleProvider.overrideWith((ref) async => ''),
               apiClientProvider.overrideWithValue(api),
               platformServicesProvider.overrideWithValue(
