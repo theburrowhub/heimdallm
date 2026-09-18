@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../design_system/components/app_badge.dart';
+import '../design_system/color_resolver.dart';
+import '../design_system/tokens.dart';
 
 /// PRReviewStateBadge renders the aggregated external review state
 /// of the PR auto_implement created from an issue (#482). The state
@@ -13,14 +15,23 @@ class PRReviewStateBadge extends StatelessWidget {
 
   const PRReviewStateBadge({super.key, required this.state});
 
-  ({String label, Color color})? get _style {
+  ({String label, Color color})? _style(BuildContext context) {
     switch (state) {
       case 'APPROVED':
-        return (label: 'PR APPROVED', color: Colors.green.shade700);
+        return (
+          label: 'PR APPROVED',
+          color: resolveAppColor(context, AppColors.success),
+        );
       case 'CHANGES_REQUESTED':
-        return (label: 'CHANGES REQUESTED', color: Colors.red.shade700);
+        return (
+          label: 'CHANGES REQUESTED',
+          color: resolveAppColor(context, AppColors.danger),
+        );
       case 'COMMENTED':
-        return (label: 'PR COMMENTED', color: Colors.blue.shade700);
+        return (
+          label: 'PR COMMENTED',
+          color: resolveAppColor(context, AppColors.info),
+        );
       case 'FIX_PUSHED':
         return (label: 'FIX PUSHED', color: Colors.purple.shade700);
       default:
@@ -30,7 +41,7 @@ class PRReviewStateBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final style = _style;
+    final style = _style(context);
     if (style == null) {
       return const SizedBox.shrink();
     }

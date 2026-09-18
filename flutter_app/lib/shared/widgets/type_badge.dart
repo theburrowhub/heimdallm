@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:mix/mix.dart';
 
+import '../design_system/color_resolver.dart';
+import '../design_system/tokens.dart';
+
 class TypeBadge extends StatelessWidget {
   final String type; // 'pr', 'it', 'dev'
   const TypeBadge({super.key, required this.type});
@@ -8,10 +11,10 @@ class TypeBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (label, color) = switch (type) {
-      'pr' => ('PR', Colors.blue),
-      'it' => ('IT', Colors.orange),
-      'dev' => ('DEV', Colors.green),
-      _ => ('?', Colors.grey),
+      'pr' => ('PR', resolveAppColor(context, AppColors.featurePrReview)),
+      'it' => ('IT', resolveAppColor(context, AppColors.featureIssueTracking)),
+      'dev' => ('DEV', resolveAppColor(context, AppColors.featureDevelop)),
+      _ => ('?', Colors.grey.shade600),
     };
     return Box(
       style: BoxStyler()

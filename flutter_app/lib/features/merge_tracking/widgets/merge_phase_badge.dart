@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../../../shared/design_system/color_resolver.dart';
 import '../../../shared/design_system/components/components.dart';
+import '../../../shared/design_system/tokens.dart';
 
 /// The merge-tracking phase of a PR, rendered as a compact badge.
 ///
@@ -33,15 +35,35 @@ class MergePhaseBadge extends StatelessWidget {
       case 'auto_merge_armed':
         return ('Auto-merge on', const Color(0xFF00695C), Icons.schedule_send);
       case 'updating':
-        return ('Updating', const Color(0xFF1565C0), Icons.sync);
+        return (
+          'Updating',
+          resolveAppColor(context, AppColors.info),
+          Icons.sync,
+        );
       case 'update_pending':
-        return ('Syncing', const Color(0xFF1565C0), Icons.sync);
+        return (
+          'Syncing',
+          resolveAppColor(context, AppColors.info),
+          Icons.sync,
+        );
       case 'resolving':
-        return ('Resolving', const Color(0xFF1565C0), Icons.merge);
+        return (
+          'Resolving',
+          resolveAppColor(context, AppColors.info),
+          Icons.merge,
+        );
       case 'merging':
-        return ('Merging', const Color(0xFF2E7D32), Icons.merge_type);
+        return (
+          'Merging',
+          resolveAppColor(context, AppColors.success),
+          Icons.merge_type,
+        );
       case 'blocked':
-        return ('Blocked', Theme.of(context).colorScheme.error, Icons.block);
+        return (
+          'Blocked',
+          resolveAppColor(context, AppColors.danger),
+          Icons.block,
+        );
       case 'abandoned':
         return ('Not tracked', Colors.grey.shade600, Icons.do_not_disturb_on);
       default:

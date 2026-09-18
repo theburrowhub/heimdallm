@@ -1,20 +1,22 @@
 import 'package:flutter/material.dart';
 
 import '../design_system/components/app_badge.dart';
+import '../design_system/color_resolver.dart';
+import '../design_system/tokens.dart';
 
 class SeverityBadge extends StatelessWidget {
   final String severity;
 
   const SeverityBadge({super.key, required this.severity});
 
-  Color get _color {
+  Color _color(BuildContext context) {
     switch (severity.toLowerCase()) {
       case 'high':
-        return Colors.red.shade700;
+        return resolveAppColor(context, AppColors.danger);
       case 'medium':
-        return Colors.orange.shade700;
+        return resolveAppColor(context, AppColors.warning);
       default:
-        return Colors.green.shade700;
+        return resolveAppColor(context, AppColors.success);
     }
   }
 
@@ -23,7 +25,7 @@ class SeverityBadge extends StatelessWidget {
     return AppBadge(
       label: severity.toUpperCase(),
       foreground: Colors.white,
-      background: _color,
+      background: _color(context),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       radius: 4,
     );

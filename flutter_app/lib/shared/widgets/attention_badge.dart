@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../design_system/components/app_badge.dart';
+import '../design_system/color_resolver.dart';
+import '../design_system/tokens.dart';
 
 /// AttentionBadge surfaces a non-severity terminal state that a user
 /// needs to look at — currently the only producer is
@@ -19,7 +21,7 @@ class AttentionBadge extends StatelessWidget {
     return AppBadge(
       label: label,
       foreground: Colors.white,
-      background: Colors.deepOrange.shade700,
+      background: resolveAppColor(context, AppColors.warning),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       radius: 4,
     );
