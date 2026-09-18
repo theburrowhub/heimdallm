@@ -96,10 +96,13 @@ class AppButton extends StatelessWidget {
         children: [
           if (leading != null) ...[
             IconTheme.merge(
-              data: IconThemeData(color: palette.foreground(), size: 18),
+              data: IconThemeData(
+                color: palette.foreground.resolve(context),
+                size: 18,
+              ),
               child: leading!,
             ),
-            SizedBox(width: AppSpace.sm()),
+            SizedBox(width: AppSpace.sm.resolve(context)),
           ],
           AppText.label(label, color: palette.foreground()),
         ],
