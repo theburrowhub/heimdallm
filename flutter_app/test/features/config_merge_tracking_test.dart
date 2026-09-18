@@ -9,6 +9,7 @@ import 'package:heimdallm/features/config/config_providers.dart'
     show ConfigNotifier, configNotifierProvider;
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../core/platform/fake_platform_services.dart';
@@ -46,6 +47,9 @@ Future<_MockApiClient> _mount(
         platformServicesProvider.overrideWithValue(FakePlatformServices()),
       ],
       child: MaterialApp.router(
+        theme: HeimdallmTheme.light(),
+        darkTheme: HeimdallmTheme.dark(),
+        builder: (context, child) => HeimdallmTheme.scope(child: child!),
         routerConfig: GoRouter(
           routes: [GoRoute(path: '/', builder: (_, _) => const ConfigScreen())],
         ),
@@ -59,10 +63,6 @@ Future<_MockApiClient> _mount(
 Future<void> _reveal(WidgetTester tester, Finder finder) async {
   final scrollable = find.byType(Scrollable).first;
   await tester.scrollUntilVisible(finder, 200, scrollable: scrollable);
-  await tester.pumpAndSettle();
-  // scrollUntilVisible stops as soon as the target is on screen, which can
-  // leave it under the header. Nudge it clear so taps land on it.
-  await tester.drag(scrollable, const Offset(0, 120));
   await tester.pumpAndSettle();
 }
 
@@ -148,12 +148,13 @@ void main() {
     await _mount(tester, const MergeTrackingConfig(enabled: true, merge: true));
     await _reveal(tester, find.text('Must be enabled on the repository'));
 
-    await tester.tap(
-      find.ancestor(
-        of: find.text('Must be enabled on the repository'),
-        matching: find.byType(DropdownButtonFormField<String>),
-      ),
+    final mergeMethodDropdown = find.ancestor(
+      of: find.text('Must be enabled on the repository'),
+      matching: find.byType(DropdownButtonFormField<String>),
     );
+    await tester.ensureVisible(mergeMethodDropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(mergeMethodDropdown.hitTestable());
     await tester.pumpAndSettle();
     for (final method in ['squash', 'merge', 'rebase']) {
       expect(find.text(method), findsWidgets, reason: method);
