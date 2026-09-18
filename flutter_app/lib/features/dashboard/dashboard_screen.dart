@@ -566,7 +566,10 @@ class _PRTileState extends ConsumerState<_PRTile> {
           await Future.wait(
             members.map((m) async {
               try {
-                await clientForInstanceOf(ref, m.instanceId).undismissPR(m.value.id);
+                await clientForInstanceOf(
+                  ref,
+                  m.instanceId,
+                ).undismissPR(m.value.id);
               } catch (_) {
                 // Best-effort undo: a member that fails to un-dismiss stays
                 // dismissed there, which is recoverable from the Dismissed
@@ -578,7 +581,11 @@ class _PRTileState extends ConsumerState<_PRTile> {
         },
       );
     } else {
-      showToast(context, 'Error dismissing PR #${_pr.number}: ${errors.first}', isError: true);
+      showToast(
+        context,
+        'Error dismissing PR #${_pr.number}: ${errors.first}',
+        isError: true,
+      );
     }
   }
 
@@ -718,74 +725,82 @@ class _PRTileState extends ConsumerState<_PRTile> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                // Trailing: badge/spinner + Review + dismiss — all in one row
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Status indicator
-                    if (isReviewing)
-                      SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                      )
-                    else if (failure != null)
-                      Tooltip(
-                        message: failure.error,
-                        child: _chip(
-                          failure.isCancelled ? 'CANCELLED' : 'FAILED',
-                          Theme.of(context).colorScheme.error,
-                        ),
-                      )
-                    else if (reviewed)
-                      SeverityBadge(severity: pr.latestReview!.severity)
-                    else
-                      _chip('PENDING', Colors.grey.shade700),
-                    const SizedBox(width: 8),
-                    if (isReviewing)
-                      SizedBox(
-                        height: 28,
-                        child: OutlinedButton.icon(
-                          icon: _cancelling
-                              ? const SizedBox(
-                                  width: 12,
-                                  height: 12,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(
-                                  Icons.stop_circle_outlined,
-                                  size: 15,
-                                ),
-                          label: Text(_cancelling ? 'Cancelling…' : 'Cancel'),
-                          onPressed: _cancelling ? null : _cancelReview,
-                        ),
-                      )
-                    else
-                      SizedBox(
-                        height: 28,
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
-                            textStyle: const TextStyle(fontSize: 12),
+                // Trailing: badge/spinner + Review + dismiss. Wrapped in a
+                // Wrap (not a plain Row) so it reflows onto a second line
+                // instead of overflowing at narrow (mobile) widths.
+                Flexible(
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      // Status indicator
+                      if (isReviewing)
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Theme.of(context).colorScheme.primary,
                           ),
-                          onPressed: _triggerReview,
-                          child: Text(failure == null ? 'Review' : 'Retry'),
+                        )
+                      else if (failure != null)
+                        Tooltip(
+                          message: failure.error,
+                          child: _chip(
+                            failure.isCancelled ? 'CANCELLED' : 'FAILED',
+                            Theme.of(context).colorScheme.error,
+                          ),
+                        )
+                      else if (reviewed)
+                        SeverityBadge(severity: pr.latestReview!.severity)
+                      else
+                        _chip('PENDING', Colors.grey.shade700),
+                      if (isReviewing)
+                        SizedBox(
+                          height: 28,
+                          child: OutlinedButton.icon(
+                            icon: _cancelling
+                                ? const SizedBox(
+                                    width: 12,
+                                    height: 12,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.stop_circle_outlined,
+                                    size: 15,
+                                  ),
+                            label: Text(_cancelling ? 'Cancelling…' : 'Cancel'),
+                            onPressed: _cancelling ? null : _cancelReview,
+                          ),
+                        )
+                      else
+                        SizedBox(
+                          height: 28,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                              ),
+                              textStyle: const TextStyle(fontSize: 12),
+                            ),
+                            onPressed: _triggerReview,
+                            child: Text(failure == null ? 'Review' : 'Retry'),
+                          ),
                         ),
+                      // Dismiss
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 14),
+                        tooltip: 'Dismiss PR',
+                        color: Colors.grey.shade600,
+                        visualDensity: VisualDensity.compact,
+                        onPressed: _dismiss,
                       ),
-                    // Dismiss
-                    IconButton(
-                      icon: const Icon(Icons.close, size: 14),
-                      tooltip: 'Dismiss PR',
-                      color: Colors.grey.shade600,
-                      visualDensity: VisualDensity.compact,
-                      onPressed: _dismiss,
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -863,7 +878,10 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
           await Future.wait(
             members.map((m) async {
               try {
-                await clientForInstanceOf(ref, m.instanceId).undismissIssue(m.value.id);
+                await clientForInstanceOf(
+                  ref,
+                  m.instanceId,
+                ).undismissIssue(m.value.id);
               } catch (_) {}
             }),
           );
@@ -871,7 +889,11 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
         },
       );
     } else {
-      showToast(context, 'Error dismissing issue #${_issue.number}: ${errors.first}', isError: true);
+      showToast(
+        context,
+        'Error dismissing issue #${_issue.number}: ${errors.first}',
+        isError: true,
+      );
     }
   }
 
@@ -958,48 +980,52 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                // Trailing: severity/PENDING badge + dismiss — mirrors _PRTile.
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (issue.linkedPR != null &&
-                        issue.linkedPR!.externalReviewState.isNotEmpty) ...[
-                      PRReviewStateBadge(
-                        state: issue.linkedPR!.externalReviewState,
-                      ),
-                      const SizedBox(width: 6),
-                    ],
-                    if (needsAttention)
-                      const AttentionBadge()
-                    else if (reviewed)
-                      SeverityBadge(severity: severity)
-                    else
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 3,
+                // Trailing: severity/PENDING badge + dismiss — mirrors
+                // _PRTile's Wrap-based reflow to avoid narrow-width overflow.
+                Flexible(
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      if (issue.linkedPR != null &&
+                          issue.linkedPR!.externalReviewState.isNotEmpty)
+                        PRReviewStateBadge(
+                          state: issue.linkedPR!.externalReviewState,
                         ),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade700,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: const Text(
-                          'PENDING',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
+                      if (needsAttention)
+                        const AttentionBadge()
+                      else if (reviewed)
+                        SeverityBadge(severity: severity)
+                      else
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade700,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'PENDING',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 14),
+                        tooltip: 'Dismiss issue',
+                        color: Colors.grey.shade600,
+                        visualDensity: VisualDensity.compact,
+                        onPressed: _dismiss,
                       ),
-                    IconButton(
-                      icon: const Icon(Icons.close, size: 14),
-                      tooltip: 'Dismiss issue',
-                      color: Colors.grey.shade600,
-                      visualDensity: VisualDensity.compact,
-                      onPressed: _dismiss,
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
