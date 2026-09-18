@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../design_system/components/app_badge.dart';
+
 /// PRReviewStateBadge renders the aggregated external review state
 /// of the PR auto_implement created from an issue (#482). The state
 /// strings mirror GitHub's review API (APPROVED, CHANGES_REQUESTED,
@@ -32,21 +34,12 @@ class PRReviewStateBadge extends StatelessWidget {
     if (style == null) {
       return const SizedBox.shrink();
     }
-    return Container(
+    return AppBadge(
+      label: style.label,
+      foreground: Colors.white,
+      background: style.color,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: style.color,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        style.label,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.5,
-        ),
-      ),
+      radius: 4,
     );
   }
 }

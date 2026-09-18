@@ -6,6 +6,8 @@ import 'core/daemon/daemon_startup.dart';
 import 'core/models/config_model.dart';
 import 'core/platform/platform_services.dart';
 import 'core/platform/platform_services_provider.dart';
+import 'core/state/appearance_preferences.dart';
+import 'shared/design_system/theme.dart';
 import 'shared/router.dart';
 
 /// Global router — accessible via the container so the tray menu +
@@ -474,25 +476,19 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   }
 }
 
-class _SplashApp extends StatelessWidget {
+class _SplashApp extends ConsumerWidget {
   final String status;
   const _SplashApp({required this.status});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0969DA)),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF0969DA),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: HeimdallmTheme.light(),
+      darkTheme: HeimdallmTheme.dark(),
+      themeMode: ref.watch(appearanceProvider),
+      builder: (context, child) =>
+          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
       home: Scaffold(
         body: Center(
           child: Column(
@@ -525,7 +521,7 @@ class _SplashApp extends StatelessWidget {
   }
 }
 
-class _ErrorApp extends StatelessWidget {
+class _ErrorApp extends ConsumerWidget {
   final String title;
   final String details;
   final String? hint;
@@ -541,20 +537,14 @@ class _ErrorApp extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0969DA)),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF0969DA),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: HeimdallmTheme.light(),
+      darkTheme: HeimdallmTheme.dark(),
+      themeMode: ref.watch(appearanceProvider),
+      builder: (context, child) =>
+          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
       home: Scaffold(
         body: Center(
           child: ConstrainedBox(
@@ -628,27 +618,21 @@ class _ErrorApp extends StatelessWidget {
   }
 }
 
-class HeimdallmApp extends StatelessWidget {
+class HeimdallmApp extends ConsumerWidget {
   final String initialLocation;
   final GoRouter? router;
   const HeimdallmApp({super.key, this.initialLocation = '/', this.router});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp.router(
       title: 'Heimdallm',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0969DA)),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF0969DA),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: HeimdallmTheme.light(),
+      darkTheme: HeimdallmTheme.dark(),
+      themeMode: ref.watch(appearanceProvider),
+      builder: (context, child) =>
+          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
       routerConfig: router ?? createRouter(initialLocation: initialLocation),
     );
   }
