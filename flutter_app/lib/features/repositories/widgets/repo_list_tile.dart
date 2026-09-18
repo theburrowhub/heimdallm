@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:mix/mix.dart';
+
 import '../../../core/models/config_model.dart';
+import '../../../shared/design_system/components/components.dart';
+import '../../../shared/design_system/tokens.dart';
 import 'feature_led.dart';
 import 'feature_palette.dart';
 import 'led_source.dart';
@@ -37,150 +41,163 @@ class RepoListTile extends StatelessWidget {
     final theme = Theme.of(context);
     final selectedBg = theme.colorScheme.primary.withValues(alpha: 0.12);
 
-    return Card(
-      color: selected ? selectedBg : null,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: selected
-            ? BorderSide(
-                color: theme.colorScheme.primary.withValues(alpha: 0.55),
-              )
-            : BorderSide.none,
-      ),
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(10),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            children: [
-              GestureDetector(
-                key: const Key('RepoListTile_checkbox'),
-                onTap: onSelectionToggle,
-                behavior: HitTestBehavior.opaque,
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 10),
-                  child: _CheckboxIcon(selected: selected),
-                ),
-              ),
-              // Two by two rather than a single column: a fourth feature stacked
-              // vertically would make every row in the list taller, and the LEDs are
-              // an at-a-glance indicator, not a list to read top to bottom.
-              Column(
-                mainAxisSize: MainAxisSize.min,
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
+      child: Box(
+        style: BoxStyler()
+            .color(selected ? selectedBg : AppColors.surface())
+            .borderAll(
+              color: selected
+                  ? theme.colorScheme.primary.withValues(alpha: 0.55)
+                  : AppColors.border(),
+              width: 1,
+            )
+            .borderRadiusAll(AppRadius.lg())
+            .clipBehavior(Clip.antiAlias),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
                 children: [
-                  Row(
+                  GestureDetector(
+                    key: const Key('RepoListTile_checkbox'),
+                    onTap: onSelectionToggle,
+                    behavior: HitTestBehavior.opaque,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 10),
+                      child: _CheckboxIcon(selected: selected),
+                    ),
+                  ),
+                  Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      FeatureLed(
-                        feature: Feature.prReview,
-                        isOn: featureIsOn(
-                          feature: Feature.prReview,
-                          repo: repo,
-                          config: config,
-                          appConfig: appConfig,
-                        ),
-                        sourceLine: featureSourceLine(
-                          feature: Feature.prReview,
-                          repo: repo,
-                          config: config,
-                          appConfig: appConfig,
-                        ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FeatureLed(
+                            feature: Feature.prReview,
+                            isOn: featureIsOn(
+                              feature: Feature.prReview,
+                              repo: repo,
+                              config: config,
+                              appConfig: appConfig,
+                            ),
+                            sourceLine: featureSourceLine(
+                              feature: Feature.prReview,
+                              repo: repo,
+                              config: config,
+                              appConfig: appConfig,
+                            ),
+                          ),
+                          const SizedBox(width: 3),
+                          FeatureLed(
+                            feature: Feature.issueTracking,
+                            isOn: featureIsOn(
+                              feature: Feature.issueTracking,
+                              repo: repo,
+                              config: config,
+                              appConfig: appConfig,
+                            ),
+                            sourceLine: featureSourceLine(
+                              feature: Feature.issueTracking,
+                              repo: repo,
+                              config: config,
+                              appConfig: appConfig,
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: 3),
-                      FeatureLed(
-                        feature: Feature.issueTracking,
-                        isOn: featureIsOn(
-                          feature: Feature.issueTracking,
-                          repo: repo,
-                          config: config,
-                          appConfig: appConfig,
-                        ),
-                        sourceLine: featureSourceLine(
-                          feature: Feature.issueTracking,
-                          repo: repo,
-                          config: config,
-                          appConfig: appConfig,
-                        ),
+                      const SizedBox(height: 3),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FeatureLed(
+                            feature: Feature.develop,
+                            isOn: featureIsOn(
+                              feature: Feature.develop,
+                              repo: repo,
+                              config: config,
+                              appConfig: appConfig,
+                            ),
+                            sourceLine: featureSourceLine(
+                              feature: Feature.develop,
+                              repo: repo,
+                              config: config,
+                              appConfig: appConfig,
+                            ),
+                          ),
+                          const SizedBox(width: 3),
+                          FeatureLed(
+                            feature: Feature.mergeTracking,
+                            isOn: featureIsOn(
+                              feature: Feature.mergeTracking,
+                              repo: repo,
+                              config: config,
+                              appConfig: appConfig,
+                            ),
+                            sourceLine: featureSourceLine(
+                              feature: Feature.mergeTracking,
+                              repo: repo,
+                              config: config,
+                              appConfig: appConfig,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                  const SizedBox(height: 3),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      FeatureLed(
-                        feature: Feature.develop,
-                        isOn: featureIsOn(
-                          feature: Feature.develop,
-                          repo: repo,
-                          config: config,
-                          appConfig: appConfig,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: StyledText(
+                                repo,
+                                style: TextStyler()
+                                    .style(AppTextStyles.body.mix())
+                                    .fontWeight(
+                                      config.isMonitored
+                                          ? FontWeight.w600
+                                          : FontWeight.normal,
+                                    )
+                                    .color(
+                                      config.isMonitored
+                                          ? AppColors.text()
+                                          : AppColors.textMuted(),
+                                    )
+                                    .overflow(TextOverflow.ellipsis),
+                              ),
+                            ),
+                            if (showNew) ...[
+                              const SizedBox(width: 6),
+                              const _NewBadge(),
+                            ],
+                          ],
                         ),
-                        sourceLine: featureSourceLine(
-                          feature: Feature.develop,
-                          repo: repo,
-                          config: config,
-                          appConfig: appConfig,
+                        const SizedBox(height: 2),
+                        LocalDirBadge(
+                          resolution: localDir,
+                          fontSize: 11,
+                          iconSize: 13,
                         ),
-                      ),
-                      const SizedBox(width: 3),
-                      FeatureLed(
-                        feature: Feature.mergeTracking,
-                        isOn: featureIsOn(
-                          feature: Feature.mergeTracking,
-                          repo: repo,
-                          config: config,
-                          appConfig: appConfig,
-                        ),
-                        sourceLine: featureSourceLine(
-                          feature: Feature.mergeTracking,
-                          repo: repo,
-                          config: config,
-                          appConfig: appConfig,
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
+                  ),
+                  Icon(
+                    Icons.chevron_right,
+                    size: 18,
+                    color: theme.colorScheme.onSurfaceVariant,
                   ),
                 ],
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            repo,
-                            style: TextStyle(
-                              fontWeight: config.isMonitored
-                                  ? FontWeight.w600
-                                  : FontWeight.normal,
-                              color: config.isMonitored ? null : Colors.grey,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (showNew) ...[
-                          const SizedBox(width: 6),
-                          const _NewBadge(),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 2),
-                    LocalDirBadge(
-                      resolution: localDir,
-                      fontSize: 11,
-                      iconSize: 13,
-                    ),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right, size: 18, color: Colors.grey.shade600),
-            ],
+            ),
           ),
         ),
       ),
@@ -195,17 +212,16 @@ class _CheckboxIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
-    return Container(
-      width: 16,
-      height: 16,
-      decoration: BoxDecoration(
-        color: selected ? primary : Colors.transparent,
-        border: Border.all(
-          color: selected ? primary : const Color(0xFF6E7681),
-          width: 1.5,
-        ),
-        borderRadius: BorderRadius.circular(3),
-      ),
+    return Box(
+      style: BoxStyler()
+          .width(16)
+          .height(16)
+          .color(selected ? primary : Colors.transparent)
+          .borderAll(
+            color: selected ? primary : AppColors.textMuted(),
+            width: 1.5,
+          )
+          .borderRadiusAll(Radius.circular(3)),
       child: selected
           ? const Icon(Icons.check, size: 12, color: Colors.white)
           : null,
@@ -218,21 +234,15 @@ class _NewBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
-    return Container(
+    return AppBadge(
+      label: 'NEW',
+      foreground: primary,
+      background: primary.withValues(alpha: 0.18),
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
-      decoration: BoxDecoration(
-        color: primary.withValues(alpha: 0.22),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Text(
-        'NEW',
-        style: TextStyle(
-          color: primary,
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.4,
-        ),
-      ),
+      radius: 8,
+      fontSize: 10,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0.4,
     );
   }
 }

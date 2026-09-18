@@ -14,6 +14,7 @@ import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/repositories/repos_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -32,20 +33,21 @@ class _HubRecorder {
   final List<String> bodies = [];
 
   /// [rules] is what GET /cluster/routing answers; [status] applies to the PUT.
-  ApiClient client({int status = 200, Map<String, dynamic>? rules}) => ApiClient(
-    httpClient: MockClient((request) async {
-      requests.add('${request.method} ${request.url.path}');
-      bodies.add(request.body);
-      if (request.method == 'GET') {
-        return http.Response(jsonEncode(rules ?? const {}), 200);
-      }
-      return http.Response(
-        status >= 400 ? '{"error":"unknown instance"}' : '{}',
-        status,
+  ApiClient client({int status = 200, Map<String, dynamic>? rules}) =>
+      ApiClient(
+        httpClient: MockClient((request) async {
+          requests.add('${request.method} ${request.url.path}');
+          bodies.add(request.body);
+          if (request.method == 'GET') {
+            return http.Response(jsonEncode(rules ?? const {}), 200);
+          }
+          return http.Response(
+            status >= 400 ? '{"error":"unknown instance"}' : '{}',
+            status,
+          );
+        }),
+        endpoint: DaemonEndpoint.raw(baseUrl: 'http://hub:7842', token: 't'),
       );
-    }),
-    endpoint: DaemonEndpoint.raw(baseUrl: 'http://hub:7842', token: 't'),
-  );
 }
 
 const _config = AppConfig(
@@ -92,7 +94,13 @@ Future<void> _pump(
         ),
         routingRulesProvider.overrideWith((ref) async => rules),
       ],
-      child: const MaterialApp(home: Scaffold(body: ReposScreen())),
+      child: MaterialApp(
+        theme: HeimdallmTheme.light(),
+        builder: (context, navigatorChild) => HeimdallmTheme.scope(
+          child: navigatorChild ?? const SizedBox.shrink(),
+        ),
+        home: const Scaffold(body: ReposScreen()),
+      ),
     ),
   );
   await tester.pumpAndSettle();
@@ -152,7 +160,9 @@ void main() {
       tester,
       recorder,
       registry: _registry(),
-      rules: const RoutingRules(repos: {'acme/one': 'srv-a', 'acme/two': 'srv-a'}),
+      rules: const RoutingRules(
+        repos: {'acme/one': 'srv-a', 'acme/two': 'srv-a'},
+      ),
     );
     await _selectFirstRepo(tester);
 
@@ -170,12 +180,7 @@ void main() {
 
   testWidgets('a rejected write surfaces the reason', (tester) async {
     final recorder = _HubRecorder();
-    await _pump(
-      tester,
-      recorder,
-      registry: _registry(),
-      status: 400,
-    );
+    await _pump(tester, recorder, registry: _registry(), status: 400);
     await _selectFirstRepo(tester);
 
     await tester.tap(find.text('Choose…'));

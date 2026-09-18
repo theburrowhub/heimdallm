@@ -7,6 +7,7 @@ import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/organizations/org_detail_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -81,7 +82,13 @@ Future<MockApiClient> _pumpOrgDetail(
         configNotifierProvider.overrideWith(ConfigNotifier.new),
         agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
       ],
-      child: const MaterialApp(home: OrgDetailScreen(orgName: 'acme')),
+      child: MaterialApp(
+        theme: HeimdallmTheme.light(),
+        builder: (context, navigatorChild) => HeimdallmTheme.scope(
+          child: navigatorChild ?? const SizedBox.shrink(),
+        ),
+        home: const OrgDetailScreen(orgName: 'acme'),
+      ),
     ),
   );
   await tester.pumpAndSettle();

@@ -4,8 +4,11 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mix/mix.dart';
 import '../../core/models/config_model.dart';
 import '../../core/models/agent.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/autocomplete_chip_field.dart';
 import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
@@ -166,27 +169,21 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
   // ── Section card ─────────────────────────────────────────────────────────────
 
   Widget _sectionCard(String title, List<Widget> children, {Color? accent}) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: accent != null
-            ? BorderSide(color: accent, width: 2)
-            : BorderSide.none,
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Box(
+        style: BoxStyler()
+            .color(AppColors.surface())
+            .borderAll(
+              color: accent ?? AppColors.border(),
+              width: accent != null ? 2 : 1,
+            )
+            .borderRadiusAll(AppRadius.lg())
+            .padding(EdgeInsetsGeometryMix.value(const EdgeInsets.all(14))),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              title,
-              style: TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 15,
-                color: accent,
-              ),
-            ),
+            AppText.sectionTitle(title, color: accent),
             const SizedBox(height: 12),
             ...children,
           ],
@@ -211,7 +208,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
       ),
       body: configAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, _) => const Center(child: Text('Could not load config')),
+        error: (_, _) => const Center(child: AppText('Could not load config')),
         data: (appConfig) {
           _initFrom(appConfig);
           final prompts = ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
@@ -238,14 +235,10 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
               children: [
                 // ── Section 1: General ─────────────────────────────────
                 _sectionCard('General', [
-                  const Text(
-                    'Local directory',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
+                  const AppText.label('Local directory'),
                   const SizedBox(height: 4),
-                  Text(
+                  const AppText.muted(
                     'When set, the AI agent runs inside this directory and can read all project files.',
-                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                   ),
                   const SizedBox(height: 8),
                   _LocalDirField(
@@ -264,12 +257,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                 _sectionCard('PR Review', [
                   Row(
                     children: [
-                      const Expanded(
-                        child: Text(
-                          'Auto-review PRs',
-                          style: TextStyle(fontSize: 13),
-                        ),
-                      ),
+                      const Expanded(child: AppText('Auto-review PRs')),
                       FeatureSwitch(
                         feature: Feature.prReview,
                         value: _config.prEnabled ?? false,
@@ -361,12 +349,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                 _sectionCard('Issue Tracking', [
                   Row(
                     children: [
-                      const Expanded(
-                        child: Text(
-                          'Triage issues',
-                          style: TextStyle(fontSize: 13),
-                        ),
-                      ),
+                      const Expanded(child: AppText('Triage issues')),
                       FeatureSwitch(
                         feature: Feature.issueTracking,
                         value:
@@ -612,12 +595,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                 _sectionCard('Develop', [
                   Row(
                     children: [
-                      const Expanded(
-                        child: Text(
-                          'Auto-implement issues',
-                          style: TextStyle(fontSize: 13),
-                        ),
-                      ),
+                      const Expanded(child: AppText('Auto-implement issues')),
                       FeatureSwitch(
                         feature: Feature.develop,
                         value:
@@ -827,10 +805,7 @@ class _LocalDirFieldState extends State<_LocalDirField> {
       children: [
         Padding(
           padding: const EdgeInsets.only(bottom: 6),
-          child: Text(
-            widget.sourceLabel,
-            style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-          ),
+          child: AppText.label(widget.sourceLabel, color: Colors.grey.shade600),
         ),
         Row(
           children: [
@@ -903,10 +878,11 @@ class _LocalDirFieldState extends State<_LocalDirField> {
               Icon(Icons.auto_awesome, size: 12, color: Colors.blue.shade400),
               const SizedBox(width: 4),
               Expanded(
-                child: Text(
+                child: AppText(
                   'Leave empty to use the auto-detected path above. '
                   'Type a different path to override.',
-                  style: TextStyle(fontSize: 11, color: Colors.blue.shade400),
+                  role: AppTextRole.bodyMuted,
+                  color: Colors.blue.shade400,
                 ),
               ),
             ],
