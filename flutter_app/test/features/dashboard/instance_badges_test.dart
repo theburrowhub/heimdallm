@@ -14,7 +14,9 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
+import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
+import 'package:heimdallm/shared/widgets/pr_review_state_badge.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../core/platform/fake_platform_services.dart';
@@ -56,6 +58,7 @@ TrackedIssue _issue(
   int number,
   String title, {
   TrackedIssueReview? latestReview,
+  TrackedIssueLinkedPR? linkedPR,
 }) => TrackedIssue(
   id: id,
   githubId: 2000 + id,
@@ -71,6 +74,7 @@ TrackedIssue _issue(
   fetchedAt: DateTime(2026, 9, 1),
   dismissed: false,
   latestReview: latestReview,
+  linkedPR: linkedPR,
 );
 
 TrackedIssueReview _issueReview(int id) => TrackedIssueReview(
@@ -92,6 +96,32 @@ ClusterRegistry _registry() => ClusterRegistry.fromJson({
     {'id': 'srv-a', 'name': 'Server A', 'enabled': true},
   ],
 });
+
+/// The instance selector, badges and partial-read banner now live in the
+/// navigation shell (`shared/layout/app_shell.dart`) rather than
+/// `DashboardScreen` itself. This minimal stand-in reproduces just the piece
+/// of that shell these tests assert on, without pulling in the full
+/// production router/shell (and every other branch screen's providers).
+class _DashboardHost extends ConsumerWidget {
+  const _DashboardHost();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final failureLabels = ref
+        .watch(instanceReadFailuresProvider)
+        .map((f) => f.label)
+        .toList();
+    return Scaffold(
+      appBar: AppBar(actions: const [InstanceSelector()]),
+      body: Column(
+        children: [
+          InstanceFailureBanner(failureLabels: failureLabels),
+          const Expanded(child: DashboardScreen()),
+        ],
+      ),
+    );
+  }
+}
 
 Future<void> _pumpDashboard(
   WidgetTester tester, {
@@ -131,7 +161,7 @@ Future<void> _pumpDashboard(
       child: MaterialApp.router(
         routerConfig: GoRouter(
           routes: [
-            GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            GoRoute(path: '/', builder: (_, _) => const _DashboardHost()),
             // Placeholders so a tap-to-navigate test can assert on arrival
             // without pulling in the real detail screens' own providers.
             GoRoute(
@@ -579,6 +609,40 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Issue detail 9'), findsOneWidget);
+  });
+
+  testWidgets('an issue with a reviewed linked PR shows its review state', (
+    tester,
+  ) async {
+    await _pumpDashboard(
+      tester,
+      registry: _registry(),
+      prs: singleInstanceResult(const <PR>[]),
+      issues: AggregatedResult<TrackedIssue>(
+        items: [
+          InstanceScoped(
+            instanceId: 'srv-a',
+            instanceName: 'Server A',
+            value: _issue(
+              10,
+              'acme/tools',
+              13,
+              'Issue with a linked PR',
+              linkedPR: const TrackedIssueLinkedPR(
+                number: 14,
+                url: 'https://github.com/acme/tools/pull/14',
+                state: 'open',
+                externalReviewState: 'APPROVED',
+                externalReviewer: 'bob',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(find.text('Issue with a linked PR'), findsOneWidget);
+    expect(find.byType(PRReviewStateBadge), findsOneWidget);
   });
 
   testWidgets('undoing a dismissed issue un-dismisses it on every instance', (

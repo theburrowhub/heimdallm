@@ -6,33 +6,18 @@ import '../../core/api/api_client.dart';
 import '../../core/instances/aggregation.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart' show RoutingRules;
-import '../instances/instances_screen.dart';
 import '../instances/widgets/instance_badge.dart';
-import '../instances/widgets/instance_selector.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review_status.dart';
 import '../../core/models/tracked_issue.dart';
-import '../../shared/widgets/keep_alive_tab.dart';
 import '../../shared/widgets/attention_badge.dart';
 import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../../shared/widgets/type_badge.dart';
-import '../activity/activity_screen.dart';
-import '../activity/activity_providers.dart';
 import '../activity/add_pr_dialog.dart';
-import '../agents/agents_screen.dart';
-import '../circuit_breaker/circuit_breaker_banner.dart';
-import '../cli_agents/cli_agents_screen.dart';
-import '../config/config_providers.dart';
 import '../issues/issues_providers.dart';
-import '../merge_tracking/merge_tracking_providers.dart';
-import '../merge_tracking/merge_tracking_screen.dart';
-import '../repositories/repos_screen.dart';
-import '../organizations/orgs_screen.dart';
-import '../stats/stats_screen.dart';
-import '../updates/check_for_updates_button.dart';
 import 'activity_filter_bar.dart';
 import 'activity_filters.dart';
 import 'dashboard_providers.dart';
@@ -43,207 +28,12 @@ class DashboardScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final cbMessage = ref.watch(circuitBreakerProvider);
-    final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
-    final daemonStarting = ref.watch(daemonStartingProvider);
-    final connection = daemonRunning
-        ? ref.watch(daemonConnectionProvider)
-        : null;
-    // Surfaced on the Merge tab so a PR held up by CI is visible without
-    // opening the tab at all.
-    final checkProblems = ref.watch(mergeTrackingCheckProblemCountProvider);
-    return DefaultTabController(
-      length: 9,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Heimdallm'),
-          actions: [
-            // Renders nothing unless more than one instance is registered, so a
-            // single-daemon install sees exactly the toolbar it always had.
-            const InstanceSelector(),
-            const CheckForUpdatesButton(),
-            IconButton(
-              icon: daemonStarting
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(
-                      daemonRunning
-                          ? Icons.power_settings_new
-                          : Icons.play_arrow,
-                    ),
-              tooltip: daemonRunning ? 'Stop Server' : 'Start Server',
-              onPressed: daemonStarting
-                  ? null
-                  : daemonRunning
-                  ? () => _confirmShutdown(context, ref)
-                  : () => _startDaemon(context, ref),
-            ),
-            IconButton(
-              icon: const Icon(Icons.dns_outlined),
-              tooltip: 'Server',
-              onPressed: () => context.push('/server'),
-            ),
-            IconButton(
-              icon: const Icon(Icons.settings),
-              onPressed: () => context.push('/config'),
-            ),
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              onPressed: () {
-                // Invalidate the aggregating providers: the flat lists derive
-                // from them, so refreshing only the derived ones would replay
-                // the same cached fan-out.
-                ref.invalidate(daemonInstancesProvider);
-                ref.invalidate(prsByInstanceProvider);
-                ref.invalidate(issuesByInstanceProvider);
-                ref.invalidate(mergeTrackingByInstanceProvider);
-                ref.invalidate(statsByInstanceProvider);
-                ref.invalidate(githubRateLimitProvider);
-                ref.invalidate(activityEntriesProvider);
-                ref.invalidate(activityOptionsProvider);
-              },
-            ),
-          ],
-          bottom: TabBar(
-            tabs: [
-              const Tab(icon: Icon(Icons.dashboard), text: 'Activity'),
-              const Tab(icon: Icon(Icons.timeline), text: 'Activity log'),
-              Tab(
-                icon: _MergeTabIcon(count: checkProblems),
-                text: 'Merge',
-              ),
-              const Tab(
-                icon: Icon(Icons.folder_outlined),
-                text: 'Repositories',
-              ),
-              const Tab(
-                icon: Icon(Icons.business_outlined),
-                text: 'Organizations',
-              ),
-              const Tab(icon: Icon(Icons.auto_awesome), text: 'Prompts'),
-              const Tab(icon: Icon(Icons.smart_toy), text: 'Agents'),
-              const Tab(icon: Icon(Icons.bar_chart), text: 'Stats'),
-              const Tab(icon: Icon(Icons.dns_outlined), text: 'Instances'),
-            ],
-          ),
-        ),
-        body: Column(
-          children: [
-            const AppUpdateBanner(),
-            if (cbMessage != null)
-              CircuitBreakerBanner(
-                message: cbMessage,
-                onDismiss: () =>
-                    ref.read(circuitBreakerProvider.notifier).set(null),
-              ),
-            if (connection != null &&
-                connection.phase != DaemonConnectionPhase.connected)
-              _ConnectionBanner(
-                status: connection,
-                onRestart: () => server_actions.restartDaemon(context, ref),
-              ),
-            InstanceFailureBanner(
-              failureLabels: ref
-                  .watch(instanceReadFailuresProvider)
-                  .map((f) => f.label)
-                  .toList(),
-            ),
-            const Expanded(
-              child: TabBarView(
-                children: [
-                  KeepAliveTab(child: _ActivityTab()),
-                  KeepAliveTab(child: ActivityScreen()),
-                  KeepAliveTab(child: MergeTrackingScreen()),
-                  KeepAliveTab(child: ReposScreen()),
-                  KeepAliveTab(child: OrgsScreen()),
-                  KeepAliveTab(child: AgentsScreen()),
-                  KeepAliveTab(child: CLIAgentsScreen()),
-                  KeepAliveTab(child: StatsScreen()),
-                  KeepAliveTab(child: InstancesTabView()),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    // A bare Scaffold (no AppBar) guarantees a Material ancestor for this
+    // screen's TextFields/buttons whether it's hosted inside the app shell
+    // (which has its own outer Scaffold) or pumped standalone in tests.
+    return const Scaffold(body: _ActivityTab());
   }
 }
-
-class _ConnectionBanner extends StatelessWidget {
-  const _ConnectionBanner({required this.status, required this.onRestart});
-
-  final DaemonConnectionStatus status;
-  final VoidCallback onRestart;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final (color, icon, label) = switch (status.phase) {
-      DaemonConnectionPhase.connected => (
-        Colors.green,
-        Icons.check_circle_outline,
-        'Connected',
-      ),
-      DaemonConnectionPhase.stale => (
-        Colors.amber,
-        Icons.sync_problem,
-        'No events received — reconnecting',
-      ),
-      DaemonConnectionPhase.offline => (
-        theme.colorScheme.error,
-        Icons.error_outline,
-        'Server unavailable',
-      ),
-      DaemonConnectionPhase.connecting => (
-        Colors.blueGrey,
-        Icons.sync,
-        'Connecting',
-      ),
-    };
-    return Material(
-      color: color.withValues(alpha: 0.10),
-      child: SafeArea(
-        bottom: false,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 36),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            child: Row(
-              children: [
-                Icon(icon, size: 18, color: color),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    label,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: color,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                if (status.phase == DaemonConnectionPhase.offline)
-                  TextButton(
-                    onPressed: onRestart,
-                    child: const Text('Restart'),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-Future<void> _confirmShutdown(BuildContext context, WidgetRef ref) =>
-    server_actions.confirmShutdown(context, ref);
-
-Future<void> _startDaemon(BuildContext context, WidgetRef ref) =>
-    server_actions.startDaemon(context, ref);
 
 // ── Reviews tab ──────────────────────────────────────────────────────────────
 
@@ -693,7 +483,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
                 label: Text(daemonStarting ? 'Starting...' : 'Start Server'),
                 onPressed: daemonStarting
                     ? null
-                    : () => _startDaemon(context, ref),
+                    : () => server_actions.startDaemon(context, ref),
               ),
               FilledButton.icon(
                 icon: const Icon(Icons.settings, size: 16),
@@ -776,7 +566,10 @@ class _PRTileState extends ConsumerState<_PRTile> {
           await Future.wait(
             members.map((m) async {
               try {
-                await clientForInstanceOf(ref, m.instanceId).undismissPR(m.value.id);
+                await clientForInstanceOf(
+                  ref,
+                  m.instanceId,
+                ).undismissPR(m.value.id);
               } catch (_) {
                 // Best-effort undo: a member that fails to un-dismiss stays
                 // dismissed there, which is recoverable from the Dismissed
@@ -788,7 +581,11 @@ class _PRTileState extends ConsumerState<_PRTile> {
         },
       );
     } else {
-      showToast(context, 'Error dismissing PR #${_pr.number}: ${errors.first}', isError: true);
+      showToast(
+        context,
+        'Error dismissing PR #${_pr.number}: ${errors.first}',
+        isError: true,
+      );
     }
   }
 
@@ -928,74 +725,82 @@ class _PRTileState extends ConsumerState<_PRTile> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                // Trailing: badge/spinner + Review + dismiss — all in one row
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Status indicator
-                    if (isReviewing)
-                      SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                      )
-                    else if (failure != null)
-                      Tooltip(
-                        message: failure.error,
-                        child: _chip(
-                          failure.isCancelled ? 'CANCELLED' : 'FAILED',
-                          Theme.of(context).colorScheme.error,
-                        ),
-                      )
-                    else if (reviewed)
-                      SeverityBadge(severity: pr.latestReview!.severity)
-                    else
-                      _chip('PENDING', Colors.grey.shade700),
-                    const SizedBox(width: 8),
-                    if (isReviewing)
-                      SizedBox(
-                        height: 28,
-                        child: OutlinedButton.icon(
-                          icon: _cancelling
-                              ? const SizedBox(
-                                  width: 12,
-                                  height: 12,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(
-                                  Icons.stop_circle_outlined,
-                                  size: 15,
-                                ),
-                          label: Text(_cancelling ? 'Cancelling…' : 'Cancel'),
-                          onPressed: _cancelling ? null : _cancelReview,
-                        ),
-                      )
-                    else
-                      SizedBox(
-                        height: 28,
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
-                            textStyle: const TextStyle(fontSize: 12),
+                // Trailing: badge/spinner + Review + dismiss. Wrapped in a
+                // Wrap (not a plain Row) so it reflows onto a second line
+                // instead of overflowing at narrow (mobile) widths.
+                Flexible(
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      // Status indicator
+                      if (isReviewing)
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Theme.of(context).colorScheme.primary,
                           ),
-                          onPressed: _triggerReview,
-                          child: Text(failure == null ? 'Review' : 'Retry'),
+                        )
+                      else if (failure != null)
+                        Tooltip(
+                          message: failure.error,
+                          child: _chip(
+                            failure.isCancelled ? 'CANCELLED' : 'FAILED',
+                            Theme.of(context).colorScheme.error,
+                          ),
+                        )
+                      else if (reviewed)
+                        SeverityBadge(severity: pr.latestReview!.severity)
+                      else
+                        _chip('PENDING', Colors.grey.shade700),
+                      if (isReviewing)
+                        SizedBox(
+                          height: 28,
+                          child: OutlinedButton.icon(
+                            icon: _cancelling
+                                ? const SizedBox(
+                                    width: 12,
+                                    height: 12,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.stop_circle_outlined,
+                                    size: 15,
+                                  ),
+                            label: Text(_cancelling ? 'Cancelling…' : 'Cancel'),
+                            onPressed: _cancelling ? null : _cancelReview,
+                          ),
+                        )
+                      else
+                        SizedBox(
+                          height: 28,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                              ),
+                              textStyle: const TextStyle(fontSize: 12),
+                            ),
+                            onPressed: _triggerReview,
+                            child: Text(failure == null ? 'Review' : 'Retry'),
+                          ),
                         ),
+                      // Dismiss
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 14),
+                        tooltip: 'Dismiss PR',
+                        color: Colors.grey.shade600,
+                        visualDensity: VisualDensity.compact,
+                        onPressed: _dismiss,
                       ),
-                    // Dismiss
-                    IconButton(
-                      icon: const Icon(Icons.close, size: 14),
-                      tooltip: 'Dismiss PR',
-                      color: Colors.grey.shade600,
-                      visualDensity: VisualDensity.compact,
-                      onPressed: _dismiss,
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -1073,7 +878,10 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
           await Future.wait(
             members.map((m) async {
               try {
-                await clientForInstanceOf(ref, m.instanceId).undismissIssue(m.value.id);
+                await clientForInstanceOf(
+                  ref,
+                  m.instanceId,
+                ).undismissIssue(m.value.id);
               } catch (_) {}
             }),
           );
@@ -1081,7 +889,11 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
         },
       );
     } else {
-      showToast(context, 'Error dismissing issue #${_issue.number}: ${errors.first}', isError: true);
+      showToast(
+        context,
+        'Error dismissing issue #${_issue.number}: ${errors.first}',
+        isError: true,
+      );
     }
   }
 
@@ -1168,48 +980,52 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                // Trailing: severity/PENDING badge + dismiss — mirrors _PRTile.
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (issue.linkedPR != null &&
-                        issue.linkedPR!.externalReviewState.isNotEmpty) ...[
-                      PRReviewStateBadge(
-                        state: issue.linkedPR!.externalReviewState,
-                      ),
-                      const SizedBox(width: 6),
-                    ],
-                    if (needsAttention)
-                      const AttentionBadge()
-                    else if (reviewed)
-                      SeverityBadge(severity: severity)
-                    else
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 3,
+                // Trailing: severity/PENDING badge + dismiss — mirrors
+                // _PRTile's Wrap-based reflow to avoid narrow-width overflow.
+                Flexible(
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      if (issue.linkedPR != null &&
+                          issue.linkedPR!.externalReviewState.isNotEmpty)
+                        PRReviewStateBadge(
+                          state: issue.linkedPR!.externalReviewState,
                         ),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade700,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: const Text(
-                          'PENDING',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
+                      if (needsAttention)
+                        const AttentionBadge()
+                      else if (reviewed)
+                        SeverityBadge(severity: severity)
+                      else
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade700,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'PENDING',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 14),
+                        tooltip: 'Dismiss issue',
+                        color: Colors.grey.shade600,
+                        visualDensity: VisualDensity.compact,
+                        onPressed: _dismiss,
                       ),
-                    IconButton(
-                      icon: const Icon(Icons.close, size: 14),
-                      tooltip: 'Dismiss issue',
-                      color: Colors.grey.shade600,
-                      visualDensity: VisualDensity.compact,
-                      onPressed: _dismiss,
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -1351,26 +1167,5 @@ class _ActivityGridTile extends StatelessWidget {
     if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
     if (diff.inHours < 24) return '${diff.inHours}h ago';
     return '${diff.inDays}d ago';
-  }
-}
-
-/// The Merge tab's icon, badged with the number of tracked PRs whose merge is
-/// held up by CI.
-///
-/// The badge exists so a failing check on your own PR is visible from any tab —
-/// the whole point of the feature is that you stop having to go looking.
-class _MergeTabIcon extends StatelessWidget {
-  final int count;
-
-  const _MergeTabIcon({required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    if (count == 0) return const Icon(Icons.merge_type);
-    return Badge.count(
-      count: count,
-      backgroundColor: Theme.of(context).colorScheme.error,
-      child: const Icon(Icons.merge_type),
-    );
   }
 }
