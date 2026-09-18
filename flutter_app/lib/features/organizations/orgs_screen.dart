@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+
+import '../../shared/design_system/components/components.dart';
 import '../config/config_providers.dart';
 
 /// First-class Organizations list (top-level tab). Each entry opens the
@@ -14,14 +16,19 @@ class OrgsScreen extends ConsumerWidget {
     final configAsync = ref.watch(configNotifierProvider);
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => Center(child: Text('Could not load config: $e')),
+      error: (e, _) => Center(
+        child: AppText(
+          'Could not load config: $e',
+          textAlign: TextAlign.center,
+        ),
+      ),
       data: (config) {
         final orgs = config.knownOrganizations;
         if (orgs.isEmpty) {
           return const Center(
             child: Padding(
               padding: EdgeInsets.all(24),
-              child: Text(
+              child: AppText(
                 'No organizations yet — they appear automatically from your '
                 'monitored repositories.',
                 textAlign: TextAlign.center,
@@ -36,18 +43,19 @@ class OrgsScreen extends ConsumerWidget {
           itemBuilder: (context, i) {
             final org = orgs[i];
             final overridden = config.orgConfigs[org]?.hasOverride ?? false;
-            return Card(
-              margin: EdgeInsets.zero,
+            return AppSurface(
               child: ListTile(
                 leading: const Icon(Icons.business_outlined),
-                title: Text(org),
-                subtitle: Text(
+                title: AppText.sectionTitle(org),
+                subtitle: AppText.muted(
                   overridden
                       ? 'Custom overrides on global defaults'
                       : 'Inherits global defaults',
-                  style: const TextStyle(fontSize: 12),
                 ),
-                trailing: const Icon(Icons.chevron_right),
+                trailing: Icon(
+                  Icons.chevron_right,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
                 onTap: () => context.push('/orgs/${Uri.encodeComponent(org)}'),
               ),
             );
