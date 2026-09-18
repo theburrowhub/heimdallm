@@ -58,6 +58,22 @@ void main() {
     expect(find.text('raised'), findsOneWidget);
   });
 
+  testWidgets('AppSurface honors an explicit padding override', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _hosted(
+        const AppSurface(
+          padding: EdgeInsets.all(20),
+          child: Text('padded'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('padded'), findsOneWidget);
+  });
+
   testWidgets('AppButton fires onPressed and reflects disabled state', (
     tester,
   ) async {
@@ -78,6 +94,22 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Disabled'), findsOneWidget);
+  });
+
+  testWidgets('AppButton renders a leading icon', (tester) async {
+    await tester.pumpWidget(
+      _hosted(
+        AppButton(
+          label: 'Add',
+          onPressed: () {},
+          leading: const Icon(Icons.add),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Add'), findsOneWidget);
+    expect(find.byIcon(Icons.add), findsOneWidget);
   });
 
   testWidgets('AppButton variants all render', (tester) async {
@@ -114,6 +146,22 @@ void main() {
 
     expect(find.text('Open'), findsOneWidget);
     expect(find.byIcon(Icons.check), findsOneWidget);
+  });
+
+  testWidgets('AppBadge honors an explicit border color', (tester) async {
+    await tester.pumpWidget(
+      _hosted(
+        const AppBadge(
+          label: 'Bordered',
+          foreground: Colors.white,
+          background: Colors.green,
+          border: Colors.black,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Bordered'), findsOneWidget);
   });
 
   testWidgets('components render under dark theme without error', (
