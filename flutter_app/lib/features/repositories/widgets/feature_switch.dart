@@ -6,7 +6,7 @@ import 'feature_palette.dart';
 /// thumb — used by the bulk actions bar when the selection is mixed.
 class FeatureSwitch extends StatelessWidget {
   final Feature feature;
-  final bool? value;                    // null = mixed aggregate
+  final bool? value; // null = mixed aggregate
   final ValueChanged<bool> onChanged;
 
   const FeatureSwitch({
@@ -19,9 +19,7 @@ class FeatureSwitch extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (value == null) {
-      return _MixedSwitch(
-        onTap: () => onChanged(true),
-      );
+      return _MixedSwitch(onTap: () => onChanged(true));
     }
     final color = FeaturePalette.forFeature(feature);
     return Switch(
@@ -45,12 +43,13 @@ class _MixedSwitch extends StatelessWidget {
       key: const Key('FeatureSwitch_mixed'),
       onTap: onTap,
       child: Container(
-        width: 36, height: 20,
+        width: 36,
+        height: 20,
         decoration: BoxDecoration(
-          color: FeaturePalette.mixed.withValues(alpha:0.22),
+          color: FeaturePalette.mixed.withValues(alpha: 0.22),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: FeaturePalette.mixed.withValues(alpha:0.45),
+            color: FeaturePalette.mixed.withValues(alpha: 0.45),
             width: 1,
           ),
         ),
@@ -58,19 +57,18 @@ class _MixedSwitch extends StatelessWidget {
           alignment: Alignment.center,
           children: [
             Positioned(
-              left: 10, top: 2,
+              left: 10,
+              top: 2,
               child: Container(
-                width: 16, height: 16,
-                decoration: const BoxDecoration(
+                width: 16,
+                height: 16,
+                decoration: BoxDecoration(
                   color: FeaturePalette.mixed,
                   shape: BoxShape.circle,
                 ),
               ),
             ),
-            Container(
-              width: 6, height: 1.5,
-              color: const Color(0xFF1C1F24),
-            ),
+            Container(width: 6, height: 1.5, color: const Color(0xFF1C1F24)),
           ],
         ),
       ),

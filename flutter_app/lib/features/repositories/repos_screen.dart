@@ -2,10 +2,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mix/mix.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/api/cluster_api.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/models/config_model.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -288,7 +291,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
 
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (_, _) => const Center(child: Text('Could not load config')),
+      error: (_, _) => const Center(child: AppText('Could not load config')),
       data: (config) {
         _syncFrom(config);
 
@@ -329,89 +332,96 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
             // Toolbar
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      decoration: const InputDecoration(
-                        hintText: 'Filter repos…',
-                        prefixIcon: Icon(Icons.search, size: 18),
-                        isDense: true,
-                        border: OutlineInputBorder(),
-                        contentPadding: EdgeInsets.symmetric(vertical: 8),
-                      ),
-                      onChanged: (v) => setState(() => _search = v),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  RepoFilterChips(
-                    counts: {
-                      'all': _repoConfigs.length,
-                      'monitored': _repoConfigs.values
-                          .where((c) => c.isMonitored)
-                          .length,
-                      'not_monitored': _repoConfigs.values
-                          .where((c) => !c.isMonitored)
-                          .length,
-                    },
-                    current: _filter,
-                    onChanged: (v) => setState(() => _filter = v),
-                  ),
-                  const SizedBox(width: 8),
-                  // Org multi-select (hidden when there's only one org).
-                  if (allOrgs.length > 1) ...[
-                    _OrgFilterChip(
-                      orgs: allOrgs,
-                      selected: _orgFilter,
-                      onChanged: (s) => setState(() => _orgFilter = s),
-                    ),
-                    if (_orgFilter.isNotEmpty) ...[
-                      const SizedBox(width: 4),
-                      GestureDetector(
-                        onTap: () => setState(() => _orgFilter = {}),
-                        child: const Icon(
-                          Icons.clear,
-                          size: 16,
-                          color: Colors.grey,
+              child: AppSurface(
+                elevation: AppSurfaceElevation.canvas,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        decoration: const InputDecoration(
+                          hintText: 'Filter repos…',
+                          prefixIcon: Icon(Icons.search, size: 18),
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                          contentPadding: EdgeInsets.symmetric(vertical: 8),
                         ),
+                        onChanged: (v) => setState(() => _search = v),
                       ),
-                    ],
+                    ),
                     const SizedBox(width: 8),
-                  ],
-                  Row(
-                    children: [
-                      _ViewToggleButton(
-                        icon: Icons.view_list,
-                        active: _viewMode == 'list',
-                        onTap: () => _setViewMode('list'),
-                        buttonKey: const Key('repos_view_toggle_list'),
+                    RepoFilterChips(
+                      counts: {
+                        'all': _repoConfigs.length,
+                        'monitored': _repoConfigs.values
+                            .where((c) => c.isMonitored)
+                            .length,
+                        'not_monitored': _repoConfigs.values
+                            .where((c) => !c.isMonitored)
+                            .length,
+                      },
+                      current: _filter,
+                      onChanged: (v) => setState(() => _filter = v),
+                    ),
+                    const SizedBox(width: 8),
+                    if (allOrgs.length > 1) ...[
+                      _OrgFilterChip(
+                        orgs: allOrgs,
+                        selected: _orgFilter,
+                        onChanged: (s) => setState(() => _orgFilter = s),
                       ),
-                      _ViewToggleButton(
-                        icon: Icons.grid_view,
-                        active: _viewMode == 'grid',
-                        onTap: () => _setViewMode('grid'),
-                        buttonKey: const Key('repos_view_toggle_grid'),
-                      ),
+                      if (_orgFilter.isNotEmpty) ...[
+                        const SizedBox(width: 4),
+                        GestureDetector(
+                          onTap: () => setState(() => _orgFilter = {}),
+                          child: Icon(
+                            Icons.clear,
+                            size: 16,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(width: 8),
                     ],
-                  ),
-                  const SizedBox(width: 12),
-                  // Auto-save status indicator
-                  SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: switch (_syncStatus) {
-                      _SyncStatus.saving => const CircularProgressIndicator(
-                        strokeWidth: 2,
-                      ),
-                      _SyncStatus.saved => Icon(
-                        Icons.cloud_done_outlined,
-                        size: 20,
-                        color: Colors.green.shade500,
-                      ),
-                      _SyncStatus.idle => const SizedBox.shrink(),
-                    },
-                  ),
-                ],
+                    Row(
+                      children: [
+                        _ViewToggleButton(
+                          icon: Icons.view_list,
+                          active: _viewMode == 'list',
+                          onTap: () => _setViewMode('list'),
+                          buttonKey: const Key('repos_view_toggle_list'),
+                        ),
+                        _ViewToggleButton(
+                          icon: Icons.grid_view,
+                          active: _viewMode == 'grid',
+                          onTap: () => _setViewMode('grid'),
+                          buttonKey: const Key('repos_view_toggle_grid'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(width: 12),
+                    SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: switch (_syncStatus) {
+                        _SyncStatus.saving => const CircularProgressIndicator(
+                          strokeWidth: 2,
+                        ),
+                        _SyncStatus.saved => Icon(
+                          Icons.cloud_done_outlined,
+                          size: 20,
+                          color: Colors.green.shade500,
+                        ),
+                        _SyncStatus.idle => const SizedBox.shrink(),
+                      },
+                    ),
+                  ],
+                ),
               ),
             ),
             if (_selected.isNotEmpty)
@@ -423,10 +433,14 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                 instances: _routableInstances(),
                 onAssignInstance: _assignSelectionToInstance,
               ),
-            // Repo list with section dividers
             Expanded(
               child: filtered.isEmpty
-                  ? Center(child: Text(_emptyStateText()))
+                  ? Center(
+                      child: AppText(
+                        _emptyStateText(),
+                        textAlign: TextAlign.center,
+                      ),
+                    )
                   : _viewMode == 'grid'
                   ? _ReposGrid(
                       repos: filtered,
@@ -499,11 +513,9 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
       final org = r.contains('/') ? r.split('/').first : r;
       groups.putIfAbsent(org, () => []).add(r);
     }
-    // Sort repos within each org alphabetically
     for (final list in groups.values) {
       list.sort();
     }
-    // Return sorted by org name
     return Map.fromEntries(
       groups.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
     );
@@ -526,7 +538,7 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
             context,
             'Monitored — auto-review enabled',
             monitored.length,
-            Colors.green.shade700,
+            AppColors.success(),
           ),
           ..._buildOrgGroups('monitored', monitored),
         ],
@@ -534,14 +546,13 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
           context,
           'Not monitored — PRs visible, no auto-review',
           disabled.length,
-          Colors.grey.shade600,
+          AppColors.textMuted(),
         ),
         if (disabled.isEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-            child: Text(
+            child: AppText.muted(
               'No repos disabled. Toggle the switch on any repo above to stop auto-reviewing it.',
-              style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
             ),
           )
         else
@@ -596,28 +607,30 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
     int count,
     Color color,
   ) {
+    final muted = Theme.of(ctx).colorScheme.onSurfaceVariant;
+    final raised = Theme.of(ctx).colorScheme.surfaceContainerHighest;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
       child: Row(
         children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          Box(
+            style: BoxStyler()
+                .width(8)
+                .height(8)
+                .borderRadiusAll(Radius.circular(999))
+                .color(color),
           ),
           const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.grey.shade400,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
+          AppText.label(label, color: muted),
           const SizedBox(width: 6),
-          Text(
-            '$count',
-            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+          AppBadge(
+            label: '$count',
+            foreground: muted,
+            background: raised,
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            radius: 10,
+            fontSize: 11,
+            letterSpacing: 0,
           ),
         ],
       ),
@@ -631,6 +644,8 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
     VoidCallback onTap,
     VoidCallback onConfig,
   ) {
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    final raised = Theme.of(context).colorScheme.surfaceContainerHighest;
     return InkWell(
       onTap: onTap,
       child: Padding(
@@ -640,21 +655,19 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
             Icon(
               expanded ? Icons.expand_less : Icons.expand_more,
               size: 16,
-              color: Colors.grey.shade500,
+              color: muted,
             ),
             const SizedBox(width: 4),
-            Text(
-              org,
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey.shade400,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
+            AppText.label(org, color: muted),
             const SizedBox(width: 6),
-            Text(
-              '$count',
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            AppBadge(
+              label: '$count',
+              foreground: muted,
+              background: raised,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+              radius: 10,
+              fontSize: 11,
+              letterSpacing: 0,
             ),
             const Spacer(),
             IconButton(
@@ -684,16 +697,18 @@ class _ViewToggleButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
-    return InkWell(
-      key: buttonKey,
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        color: active ? primary.withValues(alpha: 0.22) : null,
-        child: Icon(
-          icon,
-          size: 18,
-          color: active ? primary : Colors.grey.shade500,
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Box(
+      style: BoxStyler()
+          .color(active ? primary.withValues(alpha: 0.18) : Colors.transparent)
+          .borderRadiusAll(AppRadius.sm())
+          .clipBehavior(Clip.antiAlias),
+      child: InkWell(
+        key: buttonKey,
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Icon(icon, size: 18, color: active ? primary : muted),
         ),
       ),
     );
@@ -723,6 +738,7 @@ class _ReposGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     final monitored = repos.where((r) => configs[r]!.isMonitored).toList();
     final disabled = repos.where((r) => !configs[r]!.isMonitored).toList();
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
 
     return CustomScrollView(
       slivers: [
@@ -732,22 +748,17 @@ class _ReposGrid extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
               child: Row(
                 children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF3FB950),
-                      shape: BoxShape.circle,
-                    ),
+                  Box(
+                    style: BoxStyler()
+                        .width(8)
+                        .height(8)
+                        .borderRadiusAll(Radius.circular(999))
+                        .color(AppColors.success()),
                   ),
                   const SizedBox(width: 6),
-                  Text(
+                  AppText.label(
                     'MONITORED · ${monitored.length}',
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Colors.grey.shade400,
-                      fontWeight: FontWeight.w600,
-                    ),
+                    color: muted,
                   ),
                 ],
               ),
@@ -786,22 +797,17 @@ class _ReposGrid extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
               child: Row(
                 children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade600,
-                      shape: BoxShape.circle,
-                    ),
+                  Box(
+                    style: BoxStyler()
+                        .width(8)
+                        .height(8)
+                        .borderRadiusAll(Radius.circular(999))
+                        .color(muted),
                   ),
                   const SizedBox(width: 6),
-                  Text(
+                  AppText.label(
                     'NOT MONITORED · ${disabled.length}',
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Colors.grey.shade400,
-                      fontWeight: FontWeight.w600,
-                    ),
+                    color: muted,
                   ),
                 ],
               ),
@@ -855,6 +861,8 @@ class _OrgFilterChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    final border = Theme.of(context).colorScheme.outlineVariant;
     final isActive = selected.isNotEmpty;
     return GestureDetector(
       onTap: () async {
@@ -872,16 +880,17 @@ class _OrgFilterChip extends StatelessWidget {
         avatar: Icon(
           Icons.business,
           size: 14,
-          color: isActive ? primary : Colors.grey,
+          color: isActive ? primary : muted,
         ),
-        label: Text(
+        label: AppText(
           isActive ? 'Org (${selected.length})' : 'Org',
-          style: TextStyle(fontSize: 12, color: isActive ? primary : null),
+          role: AppTextRole.label,
+          color: isActive ? primary : null,
         ),
         visualDensity: VisualDensity.compact,
         side: isActive
             ? BorderSide(color: primary.withValues(alpha: 0.5))
-            : const BorderSide(color: Colors.transparent),
+            : BorderSide(color: border),
       ),
     );
   }
@@ -916,7 +925,7 @@ class _MultiSelectDialogState extends State<_MultiSelectDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text(widget.title, style: const TextStyle(fontSize: 16)),
+      title: AppText.sectionTitle(widget.title),
       contentPadding: const EdgeInsets.only(top: 12),
       content: SizedBox(
         width: 300,
@@ -927,7 +936,11 @@ class _MultiSelectDialogState extends State<_MultiSelectDialog> {
             final item = widget.items[i];
             return CheckboxListTile(
               dense: true,
-              title: Text(item, style: const TextStyle(fontSize: 13)),
+              title: AppText(
+                item,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
               value: _selected.contains(item),
               onChanged: (val) {
                 setState(() {

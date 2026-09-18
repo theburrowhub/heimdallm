@@ -13,6 +13,7 @@ import 'package:heimdallm/features/repositories/repos_screen.dart';
 import 'package:heimdallm/features/repositories/widgets/bulk_actions_bar.dart';
 import 'package:heimdallm/features/repositories/widgets/repo_grid_tile.dart';
 import 'package:heimdallm/features/repositories/widgets/repo_list_tile.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mocktail/mocktail.dart';
 import '../../core/platform/fake_platform_services.dart';
@@ -23,7 +24,12 @@ Widget _host(AppConfig cfg) => ProviderScope(
     configNotifierProvider.overrideWith(() => _FakeConfig(cfg)),
     sseStreamProvider.overrideWith((_) => const Stream<SseEvent>.empty()),
   ],
-  child: const MaterialApp(home: Scaffold(body: ReposScreen())),
+  child: MaterialApp(
+    theme: HeimdallmTheme.light(),
+    builder: (context, navigatorChild) =>
+        HeimdallmTheme.scope(child: navigatorChild ?? const SizedBox.shrink()),
+    home: const Scaffold(body: ReposScreen()),
+  ),
 );
 
 Widget _hostWithConfig(_FakeConfig config, {ApiClient? api}) => ProviderScope(
@@ -33,7 +39,12 @@ Widget _hostWithConfig(_FakeConfig config, {ApiClient? api}) => ProviderScope(
     sseStreamProvider.overrideWith((_) => const Stream<SseEvent>.empty()),
     if (api != null) apiClientProvider.overrideWithValue(api),
   ],
-  child: const MaterialApp(home: Scaffold(body: ReposScreen())),
+  child: MaterialApp(
+    theme: HeimdallmTheme.light(),
+    builder: (context, navigatorChild) =>
+        HeimdallmTheme.scope(child: navigatorChild ?? const SizedBox.shrink()),
+    home: const Scaffold(body: ReposScreen()),
+  ),
 );
 
 class _FakeConfig extends ConfigNotifier {

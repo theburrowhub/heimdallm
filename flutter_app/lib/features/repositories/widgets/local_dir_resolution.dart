@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../../../shared/design_system/components/components.dart';
 import '../../../core/models/config_model.dart';
 
 /// Resolution of the "effective local_dir" for a single repo, consumed by
@@ -99,9 +101,10 @@ class LocalDirBadge extends StatelessWidget {
         ),
         const SizedBox(width: 4),
         Flexible(
-          child: Text(
+          child: AppText(
             label,
-            style: TextStyle(fontSize: fontSize, color: color),
+            role: AppTextRole.label,
+            color: color,
             overflow: TextOverflow.ellipsis,
           ),
         ),

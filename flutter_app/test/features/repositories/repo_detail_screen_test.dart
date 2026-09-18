@@ -7,6 +7,7 @@ import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/repositories/repo_detail_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -90,7 +91,13 @@ Future<MockApiClient> _mountMergeTrackingDetail(
         configNotifierProvider.overrideWith(ConfigNotifier.new),
         agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
       ],
-      child: const MaterialApp(home: RepoDetailScreen(repoName: _repoName)),
+      child: MaterialApp(
+        theme: HeimdallmTheme.light(),
+        builder: (context, navigatorChild) => HeimdallmTheme.scope(
+          child: navigatorChild ?? const SizedBox.shrink(),
+        ),
+        home: const RepoDetailScreen(repoName: _repoName),
+      ),
     ),
   );
   await tester.pumpAndSettle();
@@ -138,7 +145,13 @@ void main() {
           configNotifierProvider.overrideWith(ConfigNotifier.new),
           agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
         ],
-        child: const MaterialApp(home: RepoDetailScreen(repoName: repoName)),
+        child: MaterialApp(
+          theme: HeimdallmTheme.light(),
+          builder: (context, navigatorChild) => HeimdallmTheme.scope(
+            child: navigatorChild ?? const SizedBox.shrink(),
+          ),
+          home: const RepoDetailScreen(repoName: repoName),
+        ),
       ),
     );
     await tester.pumpAndSettle();
