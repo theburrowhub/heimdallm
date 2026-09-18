@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mix/mix.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/models/merge_tracking.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/type_badge.dart';
 import '../dashboard/dashboard_providers.dart';
 import 'add_merge_pr_dialog.dart';
@@ -29,7 +32,12 @@ class MergeTrackingScreen extends ConsumerWidget {
       // the scroll position back to the top every few seconds, mid-read.
       skipLoadingOnReload: true,
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => Center(child: Text('Error loading merge tracking: $e')),
+      error: (e, _) => Center(
+        child: AppText(
+          'Error loading merge tracking: $e',
+          textAlign: TextAlign.center,
+        ),
+      ),
       data: (entries) => Column(
         children: [
           const _TrackPRBar(),
@@ -100,17 +108,15 @@ class _EmptyState extends StatelessWidget {
               color: theme.colorScheme.onSurfaceVariant,
             ),
             const SizedBox(height: 12),
-            Text(
+            AppText.sectionTitle(
               'No pull requests tracked yet',
-              style: theme.textTheme.titleMedium,
             ),
             const SizedBox(height: 6),
-            Text(
+            AppText.muted(
               'Heimdallm tracks the open PRs you authored or are assigned to, '
               'in the repositories it monitors. Turn merge tracking on in '
               'Settings, or paste a PR link with "Track a PR" above.',
               textAlign: TextAlign.center,
-              style: theme.textTheme.bodySmall,
             ),
           ],
         ),
@@ -143,136 +149,137 @@ class _MergeTrackingCardState extends ConsumerState<_MergeTrackingCard> {
     // the two must not look like different applications.
     return Opacity(
       opacity: entry.isTerminal ? 0.6 : 1.0,
-      child: Card(
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 4,
-                    height: 48,
-                    margin: const EdgeInsets.only(right: 12),
-                    decoration: BoxDecoration(
-                      color: _accentColour(context, entry),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.only(right: 6),
-                    child: TypeBadge(type: 'pr'),
-                  ),
-                  const SizedBox(width: 4),
-                  MergePhaseBadge(phase: entry.phase),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          entry.title.isNotEmpty
-                              ? entry.title
-                              : '${entry.repo} #${entry.number}',
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${entry.repo} · #${entry.number}'
-                          '${entry.author.isNotEmpty ? ' · ${entry.author}' : ''}'
-                          '${entry.isAuthor ? ' · yours' : ''}'
-                          '${!entry.isAuthor && entry.isAssignee ? ' · assigned to you' : ''}',
-                          style: theme.textTheme.bodySmall,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  CheckCountChips(
-                    failing: entry.checksRequiredFailing,
-                    pending: entry.checksRequiredPending,
-                  ),
-                ],
-              ),
-
-              // The check warning is the most important thing on the row when it
-              // applies, so it sits directly under the title at full width.
-              if (entry.blockedByChecks) ...[
-                const SizedBox(height: 10),
-                ChecksWarningBanner(entry: entry),
-              ],
-              // The primary blocker still gets its line when it is something
-              // other than CI — a PR can be both behind its base and failing a
-              // check, and the reader needs both facts.
-              if (entry.blockReason.isNotEmpty &&
-                  !entry.blockReasonIsChecks &&
-                  !entry.isMerged) ...[
-                const SizedBox(height: 8),
-                _BlockLine(entry: entry),
-              ],
-
-              if (entry.lastError.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(
-                  entry.lastError,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.error,
-                  ),
-                ),
-              ],
-
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  TextButton.icon(
-                    icon: Icon(
-                      _expanded ? Icons.expand_less : Icons.expand_more,
-                      size: 18,
-                    ),
-                    label: Text(_expanded ? 'Hide checks' : 'Show checks'),
-                    onPressed: () => setState(() => _expanded = !_expanded),
-                  ),
-                  const Spacer(),
-                  if (_busy)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 12),
-                      child: SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
+        child: AppSurface(
+          bordered: false,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 4,
+                      height: 48,
+                      margin: const EdgeInsets.only(right: 12),
+                      decoration: BoxDecoration(
+                        color: _accentColour(context, entry),
+                        borderRadius: BorderRadius.circular(2),
                       ),
-                    )
-                  else ...[
-                    TextButton(
-                      onPressed: _reEvaluate,
-                      child: const Text('Re-check'),
                     ),
-                    TextButton(
-                      onPressed: _toggleExcluded,
-                      child: Text(entry.excluded ? 'Include' : 'Exclude'),
+                    const Padding(
+                      padding: EdgeInsets.only(right: 6),
+                      child: TypeBadge(type: 'pr'),
+                    ),
+                    const SizedBox(width: 4),
+                    MergePhaseBadge(phase: entry.phase),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          StyledText(
+                            entry.title.isNotEmpty
+                                ? entry.title
+                                : '${entry.repo} #${entry.number}',
+                            style: TextStyler()
+                                .style(AppTextStyles.body.mix())
+                                .fontWeight(FontWeight.w600)
+                                .maxLines(1)
+                                .overflow(TextOverflow.ellipsis),
+                          ),
+                          const SizedBox(height: 4),
+                          StyledText(
+                            '${entry.repo} · #${entry.number}'
+                            '${entry.author.isNotEmpty ? ' · ${entry.author}' : ''}'
+                            '${entry.isAuthor ? ' · yours' : ''}'
+                            '${!entry.isAuthor && entry.isAssignee ? ' · assigned to you' : ''}',
+                            style: TextStyler()
+                                .style(AppTextStyles.bodyMuted.mix())
+                                .maxLines(1)
+                                .overflow(TextOverflow.ellipsis),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    CheckCountChips(
+                      failing: entry.checksRequiredFailing,
+                      pending: entry.checksRequiredPending,
                     ),
                   ],
-                  if (entry.url.isNotEmpty)
-                    IconButton(
-                      icon: const Icon(Icons.open_in_new, size: 18),
-                      tooltip: 'Open on GitHub',
-                      onPressed: () => _open(entry.url),
-                    ),
-                ],
-              ),
+                ),
 
-              if (_expanded) ...[
-                const Divider(height: 20),
-                _ChecksSection(prId: entry.prId, onOpenUrl: _open),
+                // The check warning is the most important thing on the row when it
+                // applies, so it sits directly under the title at full width.
+                if (entry.blockedByChecks) ...[
+                  const SizedBox(height: 10),
+                  ChecksWarningBanner(entry: entry),
+                ],
+                // The primary blocker still gets its line when it is something
+                // other than CI — a PR can be both behind its base and failing a
+                // check, and the reader needs both facts.
+                if (entry.blockReason.isNotEmpty &&
+                    !entry.blockReasonIsChecks &&
+                    !entry.isMerged) ...[
+                  const SizedBox(height: 8),
+                  _BlockLine(entry: entry),
+                ],
+
+                if (entry.lastError.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  AppText(entry.lastError, color: theme.colorScheme.error),
+                ],
+
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    TextButton.icon(
+                      icon: Icon(
+                        _expanded ? Icons.expand_less : Icons.expand_more,
+                        size: 18,
+                      ),
+                      label: Text(_expanded ? 'Hide checks' : 'Show checks'),
+                      onPressed: () => setState(() => _expanded = !_expanded),
+                    ),
+                    const Spacer(),
+                    if (_busy)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 12),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    else ...[
+                      TextButton(
+                        onPressed: _reEvaluate,
+                        child: const Text('Re-check'),
+                      ),
+                      TextButton(
+                        onPressed: _toggleExcluded,
+                        child: Text(entry.excluded ? 'Include' : 'Exclude'),
+                      ),
+                    ],
+                    if (entry.url.isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.open_in_new, size: 18),
+                        tooltip: 'Open on GitHub',
+                        onPressed: () => _open(entry.url),
+                      ),
+                  ],
+                ),
+
+                if (_expanded) ...[
+                  const Divider(height: 20),
+                  _ChecksSection(prId: entry.prId, onOpenUrl: _open),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -370,11 +377,11 @@ class _BlockLine extends StatelessWidget {
         ),
         const SizedBox(width: 6),
         Expanded(
-          child: Text(
+          child: StyledText(
             text,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            style: TextStyler()
+                .style(AppTextStyles.bodyMuted.mix())
+                .color(theme.colorScheme.onSurfaceVariant),
           ),
         ),
       ],
@@ -397,14 +404,11 @@ class _ChecksSection extends ConsumerWidget {
         padding: EdgeInsets.all(8),
         child: LinearProgressIndicator(),
       ),
-      error: (e, _) => Text('Could not load checks: $e'),
+      error: (e, _) => AppText('Could not load checks: $e'),
       data: (entry) {
         final decision = entry.decision;
         if (decision == null) {
-          return Text(
-            'Heimdallm has not evaluated this PR yet.',
-            style: Theme.of(context).textTheme.bodySmall,
-          );
+          return const AppText.muted('Heimdallm has not evaluated this PR yet.');
         }
         return ChecksTable(decision: decision, onOpenUrl: onOpenUrl);
       },

@@ -6,6 +6,7 @@ import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
@@ -24,7 +25,10 @@ Widget _host(ApiClient api, {List<MergeTrackingEntry> entries = const []}) =>
         mergeTrackingSseListenerProvider.overrideWithValue(null),
         apiClientProvider.overrideWithValue(api),
       ],
-      child: const MaterialApp(home: Scaffold(body: MergeTrackingScreen())),
+      child: const MaterialApp(
+        builder: _withMixScope,
+        home: Scaffold(body: MergeTrackingScreen()),
+      ),
     );
 
 void main() {
@@ -38,7 +42,7 @@ void main() {
 
     expect(find.byKey(const Key('track-pr-button')), findsOneWidget);
     // Present with an empty listing too: that is exactly when it is needed.
-    expect(find.text('No pull requests tracked yet'), findsOneWidget);
+    expect(_text('No pull requests tracked yet'), findsOneWidget);
   });
 
   testWidgets('adding a PR calls the merge-tracking endpoint, not the review one', (
@@ -82,7 +86,7 @@ void main() {
     await tester.tap(find.text('Track'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('Enter a GitHub PR link'), findsOneWidget);
+    expect(_textContaining('Enter a GitHub PR link'), findsOneWidget);
     verifyNever(() => api.addMergeTracking(any()));
   });
 
@@ -106,8 +110,16 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text('merge tracking is disabled for acme/widgets'),
+      _text('merge tracking is disabled for acme/widgets'),
       findsOneWidget,
     );
   });
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());
+
+Finder _text(String value) => find.text(value, findRichText: true);
+
+Finder _textContaining(String value) =>
+    find.textContaining(value, findRichText: true);

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/features/merge_tracking/widgets/checks_table.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 MergeCheck _check({
   required String name,
@@ -23,6 +24,7 @@ MergeCheck _check({
 
 Widget _host(MergeDecision decision, {void Function(String)? onOpenUrl}) =>
     MaterialApp(
+      builder: _withMixScope,
       home: Scaffold(
         body: SingleChildScrollView(
           child: ChecksTable(decision: decision, onOpenUrl: onOpenUrl),
@@ -59,7 +61,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text(
+      _text(
         'This PR cannot be merged: 1 of the 4 required checks is failing.',
       ),
       findsOneWidget,
@@ -87,7 +89,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.textContaining('The PR merges on its own once they pass.'),
+      _textContaining('The PR merges on its own once they pass.'),
       findsOneWidget,
     );
   });
@@ -117,17 +119,17 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.textContaining('which does not block the merge'),
+      _textContaining('which does not block the merge'),
       findsOneWidget,
     );
     // Collapsed by default so its noise cannot hide what is blocking.
     expect(find.text('coverage'), findsNothing);
     expect(
-      find.text('1 optional check (do not block the merge)'),
+      _text('1 optional check (do not block the merge)'),
       findsOneWidget,
     );
 
-    await tester.tap(find.text('1 optional check (do not block the merge)'));
+    await tester.tap(_text('1 optional check (do not block the merge)'));
     await tester.pumpAndSettle();
     expect(find.text('coverage'), findsOneWidget);
   });
@@ -176,9 +178,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Required checks that have not reported'), findsOneWidget);
-    expect(find.text('• e2e'), findsOneWidget);
-    expect(find.textContaining('has not run yet'), findsOneWidget);
+    expect(_text('Required checks that have not reported'), findsOneWidget);
+    expect(_text('• e2e'), findsOneWidget);
+    expect(_textContaining('has not run yet'), findsOneWidget);
   });
 
   testWidgets('a truncated check list is reported, never treated as green', (
@@ -200,7 +202,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.textContaining('merge state cannot be confirmed'),
+      _textContaining('merge state cannot be confirmed'),
       findsOneWidget,
     );
   });
@@ -224,7 +226,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('All 2 checks passed.'), findsOneWidget);
+    expect(_text('All 2 checks passed.'), findsOneWidget);
   });
 
   testWidgets('no checks configured is stated rather than left blank', (
@@ -237,7 +239,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('This PR has no checks configured.'), findsOneWidget);
+    expect(_text('This PR has no checks configured.'), findsOneWidget);
   });
 
   testWidgets('a check with a log URL opens it', (tester) async {
@@ -304,6 +306,7 @@ void _optionalOnlyRegression() {
   ) async {
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(
           body: ChecksTable(
             decision: const MergeDecision(
@@ -325,10 +328,18 @@ void _optionalOnlyRegression() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('All 2 checks passed'), findsNothing);
-    expect(find.textContaining('No required checks are configured'), findsOneWidget);
-    expect(find.textContaining('does not block the merge'), findsOneWidget);
+    expect(_textContaining('All 2 checks passed'), findsNothing);
+    expect(_textContaining('No required checks are configured'), findsOneWidget);
+    expect(_textContaining('does not block the merge'), findsOneWidget);
   });
 }
 
 void _noop(String _) {}
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());
+
+Finder _text(String value) => find.text(value, findRichText: true);
+
+Finder _textContaining(String value) =>
+    find.textContaining(value, findRichText: true);

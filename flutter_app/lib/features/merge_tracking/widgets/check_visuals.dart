@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/models/merge_tracking.dart';
+import '../../../shared/design_system/components/components.dart';
 
 /// The one place that maps a check state to an icon and a colour, so the
 /// listing warning, the badge and the detail table can never disagree about
@@ -102,28 +103,17 @@ class CheckCountChips extends StatelessWidget {
       container: true,
       excludeSemantics: true,
       label: semantics,
-      child: Container(
+      child: AppBadge(
+        label: '$count',
+        foreground: color,
+        background: color.withValues(alpha: 0.12),
+        border: color.withValues(alpha: 0.4),
+        icon: Icon(icon, size: 12),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: color.withValues(alpha: 0.4)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 12, color: color),
-            const SizedBox(width: 3),
-            Text(
-              '$count',
-              style: TextStyle(
-                color: color,
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-        ),
+        radius: 4,
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 0,
       ),
     );
   }
@@ -160,30 +150,27 @@ class ChecksWarningBanner extends StatelessWidget {
         ? entry.blockDetail
         : _fallbackDetail();
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+    return DecoratedBox(
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(6),
         border: Border(left: BorderSide(color: fg, width: 4)),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 18, color: fg),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              detail,
-              style: TextStyle(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 18, color: fg),
+            const SizedBox(width: 8),
+            Expanded(
+              child: AppText(
+                detail,
                 color: fg,
-                fontSize: 13,
-                fontWeight: failing ? FontWeight.w600 : FontWeight.w500,
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

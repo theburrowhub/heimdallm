@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../../shared/design_system/components/components.dart';
+
 /// The merge-tracking phase of a PR, rendered as a compact badge.
 ///
 /// Matches StateBadge's shape so the two read as one family when they sit side
@@ -12,27 +14,15 @@ class MergePhaseBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (label, color, icon) = _visuals(context);
-    return Container(
+    return AppBadge(
+      label: label,
+      foreground: Colors.white,
+      background: color,
+      icon: Icon(icon, size: 12),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: color,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 12, color: Colors.white),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
+      radius: 10,
+      fontSize: 10,
+      letterSpacing: 0,
     );
   }
 

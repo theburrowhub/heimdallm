@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 MergeTrackingEntry _entry({
   int prId = 1,
@@ -36,7 +37,10 @@ Widget _host(List<MergeTrackingEntry> entries) => ProviderScope(
     // widget test; overriding it to a no-op keeps the test hermetic.
     mergeTrackingSseListenerProvider.overrideWithValue(null),
   ],
-  child: const MaterialApp(home: Scaffold(body: MergeTrackingScreen())),
+  child: const MaterialApp(
+    builder: _withMixScope,
+    home: Scaffold(body: MergeTrackingScreen()),
+  ),
 );
 
 void main() {
@@ -44,8 +48,8 @@ void main() {
     await tester.pumpWidget(_host(const []));
     await tester.pumpAndSettle();
 
-    expect(find.text('No pull requests tracked yet'), findsOneWidget);
-    expect(find.textContaining('authored or are assigned to'), findsOneWidget);
+    expect(_text('No pull requests tracked yet'), findsOneWidget);
+    expect(_textContaining('authored or are assigned to'), findsOneWidget);
   });
 
   // The whole point of the check warning: it must show the daemon's detail
@@ -68,7 +72,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text('1 required check is failing: build (GitHub Actions)'),
+      _text('1 required check is failing: build (GitHub Actions)'),
       findsOneWidget,
     );
     // The counter chip makes the state legible even when the text is clipped.
@@ -94,7 +98,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text('2 required checks are still running: build, lint'),
+      _text('2 required checks are still running: build, lint'),
       findsOneWidget,
     );
     expect(find.bySemanticsLabel('2 required checks running'), findsOneWidget);
@@ -110,7 +114,7 @@ void main() {
     await tester.pumpWidget(_host([_entry(blockReason: 'unresolved_threads')]));
     await tester.pumpAndSettle();
 
-    expect(find.text('Unresolved review conversations'), findsOneWidget);
+    expect(_text('Unresolved review conversations'), findsOneWidget);
     expect(find.text('unresolved_threads'), findsNothing);
   });
 
@@ -127,7 +131,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('alice requested changes'), findsOneWidget);
+    expect(_text('alice requested changes'), findsOneWidget);
   });
 
   // A PR that is both behind its base and failing a check reports
@@ -149,8 +153,8 @@ void main() {
     await tester.pumpAndSettle();
 
     // Both facts are present: the check warning and the primary blocker.
-    expect(find.textContaining('1 required check is failing'), findsOneWidget);
-    expect(find.text('the head branch is behind main'), findsOneWidget);
+    expect(_textContaining('1 required check is failing'), findsOneWidget);
+    expect(_text('the head branch is behind main'), findsOneWidget);
   });
 
   // A merged PR keeps no warning, whatever its last recorded counts were.
@@ -171,7 +175,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Auto-merge on'), findsOneWidget);
+    expect(_text('Auto-merge on'), findsOneWidget);
   });
 
   testWidgets('a merged PR shows no block line', (tester) async {
@@ -180,7 +184,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Merged'), findsOneWidget);
+    expect(_text('Merged'), findsOneWidget);
     expect(find.text('Already merged'), findsNothing);
   });
 
@@ -199,7 +203,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('assigned to you'), findsOneWidget);
+    expect(_textContaining('assigned to you'), findsOneWidget);
   });
 
   testWidgets('the check-problem count only counts live PRs', (tester) async {
@@ -223,3 +227,11 @@ void main() {
     expect(container.read(mergeTrackingCheckProblemCountProvider), 2);
   });
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());
+
+Finder _text(String value) => find.text(value, findRichText: true);
+
+Finder _textContaining(String value) =>
+    find.textContaining(value, findRichText: true);
