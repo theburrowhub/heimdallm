@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 void main() {
   Future<void> pump(WidgetTester tester, Widget child, {double width = 400}) {
     return tester.pumpWidget(
       MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
         home: Scaffold(
           body: Align(
             alignment: Alignment.topLeft,
@@ -35,7 +38,10 @@ void main() {
     await pump(
       tester,
       const InstanceBadges(
-        instances: [(id: 'hub-1', name: 'Local hub'), (id: 'srv-a', name: 'Server A')],
+        instances: [
+          (id: 'hub-1', name: 'Local hub'),
+          (id: 'srv-a', name: 'Server A'),
+        ],
       ),
     );
     expect(find.byType(InstanceBadge), findsNWidgets(2));
@@ -95,10 +101,7 @@ void main() {
       ),
     );
     final tooltip = tester.widget<Tooltip>(
-      find.ancestor(
-        of: find.text('+1'),
-        matching: find.byType(Tooltip),
-      ),
+      find.ancestor(of: find.text('+1'), matching: find.byType(Tooltip)),
     );
     expect(tooltip.message, contains('Charlie'));
   });

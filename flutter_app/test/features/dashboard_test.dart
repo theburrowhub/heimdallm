@@ -84,7 +84,9 @@ Future<void> _pumpOfflineDashboard(
         apiClientProvider.overrideWithValue(api),
         platformServicesProvider.overrideWithValue(platform),
         daemonHealthProvider.overrideWith((ref) => Future.value(false)),
-        prsByInstanceProvider.overrideWith((ref) => Future.error(Exception('offline'))),
+        prsByInstanceProvider.overrideWith(
+          (ref) => Future.error(Exception('offline')),
+        ),
         issuesByInstanceProvider.overrideWith(
           (ref) => Future.error(Exception('offline')),
         ),
@@ -303,9 +305,7 @@ void main() {
       () => api.daemonReachable(),
     ).thenAnswer((_) async => PortOwner.foreign);
     when(() => api.daemonPort).thenReturn(8123);
-    final platform = FakePlatformServices(
-      daemonBinaryPath: '/tmp/heimdallm',
-    );
+    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
     await _pumpRestartHarness(tester, api: api, platform: platform);
 
     await tester.tap(find.text('Restart harness'));
@@ -538,9 +538,7 @@ void main() {
     expect(find.textContaining('Fix critical bug'), findsOneWidget);
     expect(find.textContaining('org/repo'), findsOneWidget);
 
-    final toolbarFinder = find.byKey(
-      const Key('activity-filter-toolbar-row'),
-    );
+    final toolbarFinder = find.byKey(const Key('activity-filter-toolbar-row'));
     final toolbar = tester.getRect(toolbarFinder);
     final addButton = tester.getRect(
       find.byKey(const Key('dashboard-add-pr-button')),
@@ -606,7 +604,11 @@ void main() {
               }),
             ),
           ],
-          child: MaterialApp.router(routerConfig: createRouter()),
+          child: MaterialApp.router(
+            builder: (context, child) =>
+                HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+            routerConfig: createRouter(),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -668,7 +670,10 @@ void main() {
 
       await tester.tap(addControl);
       await tester.pumpAndSettle();
-      expect(find.text('Add a pull request', findRichText: true), findsOneWidget);
+      expect(
+        find.text('Add a pull request', findRichText: true),
+        findsOneWidget,
+      );
 
       final urlField = find.byKey(const Key('add-pr-url-field'));
       await tester.enterText(urlField, 'not a GitHub PR');

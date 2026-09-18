@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:mix/mix.dart';
+
+import '../../../shared/design_system/tokens.dart';
 
 /// Small chip identifying which instance a row came from.
 ///
@@ -23,49 +26,55 @@ class InstanceBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (instanceId.isEmpty) return const SizedBox.shrink();
-    final scheme = Theme.of(context).colorScheme;
     final label = instanceName.isNotEmpty ? instanceName : instanceId;
-    final fg = reachable ? scheme.onSurfaceVariant : scheme.error;
+    final fg = reachable
+        ? AppColors.textMuted.resolve(context)
+        : AppColors.danger.resolve(context);
 
     return Tooltip(
       message: reachable
           ? 'Served by $label'
           : 'Served by $label — currently unreachable',
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 140),
-        padding: EdgeInsets.symmetric(
-          horizontal: compact ? 5 : 7,
-          vertical: compact ? 1 : 2,
-        ),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: fg.withValues(alpha: 0.35)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (!compact) ...[
-              Icon(
-                reachable ? Icons.dns_outlined : Icons.cloud_off_outlined,
-                size: 11,
-                color: fg,
-              ),
-              const SizedBox(width: 3),
-            ],
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: compact ? 10 : 11,
-                  color: fg,
-                  fontWeight: FontWeight.w500,
+      child: Box(
+        style: BoxStyler()
+            .color(AppColors.surfaceRaised())
+            .borderAll(color: fg.withValues(alpha: 0.35), width: 1)
+            .borderRadiusAll(AppRadius.sm())
+            .padding(
+              EdgeInsetsGeometryMix.value(
+                EdgeInsets.symmetric(
+                  horizontal: compact ? 5 : 7,
+                  vertical: compact ? 1 : 2,
                 ),
               ),
             ),
-          ],
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 140),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!compact) ...[
+                Icon(
+                  reachable ? Icons.dns_outlined : Icons.cloud_off_outlined,
+                  size: 11,
+                  color: fg,
+                ),
+                const SizedBox(width: 3),
+              ],
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: compact ? 10 : 11,
+                    color: fg,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -139,24 +148,26 @@ class _OverflowChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final fg = scheme.onSurfaceVariant;
+    final fg = AppColors.textMuted.resolve(context);
     final names = hidden
         .map((i) => i.name.isNotEmpty ? i.name : i.id)
         .join(', ');
 
     return Tooltip(
       message: 'Also on: $names',
-      child: Container(
-        padding: EdgeInsets.symmetric(
-          horizontal: compact ? 5 : 7,
-          vertical: compact ? 1 : 2,
-        ),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: fg.withValues(alpha: 0.35)),
-        ),
+      child: Box(
+        style: BoxStyler()
+            .color(AppColors.surfaceRaised())
+            .borderAll(color: fg.withValues(alpha: 0.35), width: 1)
+            .borderRadiusAll(AppRadius.sm())
+            .padding(
+              EdgeInsetsGeometryMix.value(
+                EdgeInsets.symmetric(
+                  horizontal: compact ? 5 : 7,
+                  vertical: compact ? 1 : 2,
+                ),
+              ),
+            ),
         child: Text(
           '+${hidden.length}',
           style: TextStyle(

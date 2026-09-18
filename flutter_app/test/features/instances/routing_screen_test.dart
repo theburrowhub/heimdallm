@@ -9,6 +9,7 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:heimdallm/features/instances/routing_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 ClusterRegistry _registry() => ClusterRegistry.fromJson({
   'role': 'hub',
@@ -20,6 +21,8 @@ ClusterRegistry _registry() => ClusterRegistry.fromJson({
 });
 
 Widget _app(Widget child) => MaterialApp.router(
+  builder: (context, navigatorChild) =>
+      HeimdallmTheme.scope(child: navigatorChild ?? const SizedBox.shrink()),
   routerConfig: GoRouter(
     routes: [GoRoute(path: '/', builder: (_, _) => child)],
   ),

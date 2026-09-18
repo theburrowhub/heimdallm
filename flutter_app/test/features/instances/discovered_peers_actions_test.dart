@@ -8,6 +8,7 @@ import 'package:heimdallm/core/api/daemon_endpoint.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/features/instances/discovered_peers_section.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -76,7 +77,11 @@ Future<void> _pump(
         localClusterRoleProvider.overrideWith((ref) async => 'hub'),
         hubApiClientProvider.overrideWithValue(api),
       ],
-      child: MaterialApp(home: Scaffold(body: child)),
+      child: MaterialApp(
+        builder: (context, appChild) =>
+            HeimdallmTheme.scope(child: appChild ?? const SizedBox.shrink()),
+        home: Scaffold(body: child),
+      ),
     ),
   );
   await tester.pumpAndSettle();
@@ -95,7 +100,7 @@ void main() {
         api: _api(rec),
       );
 
-      await tester.tap(find.widgetWithText(FilledButton, 'Turn on'));
+      await tester.tap(find.text('Turn on'));
       await tester.pumpAndSettle();
 
       expect(rec.calls, contains('PATCH /config'));
@@ -117,12 +122,12 @@ void main() {
         api: _api(rec, status: 500, body: {'error': 'config is read-only'}),
       );
 
-      await tester.tap(find.widgetWithText(FilledButton, 'Turn on'));
+      await tester.tap(find.text('Turn on'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('read-only'), findsOneWidget);
       // The button comes back, so the operator can retry.
-      expect(find.widgetWithText(FilledButton, 'Turn on'), findsOneWidget);
+      expect(find.text('Turn on'), findsOneWidget);
     });
   });
 
@@ -178,7 +183,7 @@ void main() {
         api: _api(rec),
       );
 
-      await tester.tap(find.widgetWithText(TextButton, 'Update address'));
+      await tester.tap(find.text('Update address'));
       await tester.pumpAndSettle();
 
       expect(rec.calls, contains('PATCH /instances/srv-a'));
@@ -203,7 +208,7 @@ void main() {
         api: _api(rec, status: 400, body: {'error': 'base_url is invalid'}),
       );
 
-      await tester.tap(find.widgetWithText(TextButton, 'Update address'));
+      await tester.tap(find.text('Update address'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('invalid'), findsOneWidget);

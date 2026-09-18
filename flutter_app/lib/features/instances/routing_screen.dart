@@ -5,6 +5,7 @@ import '../../core/api/api_client.dart';
 import '../../core/api/cluster_api.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart';
+import '../../shared/design_system/components/components.dart';
 import '../config/config_providers.dart';
 
 /// Edits which instance owns which organizations and repositories, and how
@@ -19,7 +20,7 @@ class RoutingScreen extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Routing'),
+        title: const AppText.sectionTitle('Routing'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).maybePop(),
@@ -37,10 +38,10 @@ class RoutingScreen extends ConsumerWidget {
       ),
       body: switch ((registryAsync, rulesAsync)) {
         (AsyncError(:final error), _) => Center(
-          child: Text('Could not load instances: $error'),
+          child: AppText('Could not load instances: $error'),
         ),
         (_, AsyncError(:final error)) => Center(
-          child: Text('Could not load routing: $error'),
+          child: AppText('Could not load routing: $error'),
         ),
         (AsyncData(value: final registry), AsyncData(value: final rules)) =>
           _RoutingBody(registry: registry, rules: rules),
@@ -61,7 +62,8 @@ class _RoutingBody extends ConsumerWidget {
     final config = ref.watch(configNotifierProvider).value;
     // List.of, not the const fallback: sorting a const list throws.
     final repos = List.of(config?.repositories ?? const <String>[])..sort();
-    final orgs = List.of(config?.knownOrganizations ?? const <String>[])..sort();
+    final orgs = List.of(config?.knownOrganizations ?? const <String>[])
+      ..sort();
 
     return ListView(
       padding: const EdgeInsets.all(12),
@@ -137,108 +139,92 @@ class _ModeSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Mode', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 8),
-            SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(
-                  value: RoutingMode.assignment,
-                  label: Text('Assignment'),
-                  icon: Icon(Icons.call_split, size: 16),
-                ),
-                ButtonSegment(
-                  value: RoutingMode.dispatch,
-                  label: Text('Dispatch'),
-                  icon: Icon(Icons.loop, size: 16),
-                ),
-              ],
-              selected: {rules.mode},
-              onSelectionChanged: (selection) =>
-                  _setMode(context, ref, selection.first),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              rules.mode == RoutingMode.dispatch
-                  ? 'Repositories stay partitioned for polling, and each '
-                        'operation you trigger by hand also rotates across the '
-                        'pool below — regardless of which instance owns the repo.'
-                  : 'Repositories are partitioned across instances: each daemon '
-                        'polls, reviews and merges only what is routed to it. '
-                        'Unrouted repositories are handed out round-robin and '
-                        'then stay put.',
-              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-            ),
-            if (rules.mode == RoutingMode.dispatch) ...[
-              const SizedBox(height: 12),
-              Text(
-                'Rotate these operations',
-                style: Theme.of(context).textTheme.labelLarge,
+    return AppSurface(
+      elevation: AppSurfaceElevation.surface,
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const AppText.sectionTitle('Mode'),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: RoutingMode.assignment,
+                label: Text('Assignment'),
+                icon: Icon(Icons.call_split, size: 16),
               ),
-              const SizedBox(height: 4),
-              Wrap(
-                spacing: 8,
-                children: [
-                  for (final op in RoutingOp.all)
-                    FilterChip(
-                      label: Text(op),
-                      selected:
-                          rules.roundRobinOps.isEmpty ||
-                          rules.roundRobinOps.contains(op),
-                      onSelected: (selected) =>
-                          _toggleOp(context, ref, op, selected),
-                    ),
-                ],
+              ButtonSegment(
+                value: RoutingMode.dispatch,
+                label: Text('Dispatch'),
+                icon: Icon(Icons.loop, size: 16),
               ),
             ],
+            selected: {rules.mode},
+            onSelectionChanged: (selection) =>
+                _setMode(context, ref, selection.first),
+          ),
+          const SizedBox(height: 8),
+          AppText.muted(
+            rules.mode == RoutingMode.dispatch
+                ? 'Repositories stay partitioned for polling, and each '
+                      'operation you trigger by hand also rotates across the '
+                      'pool below — regardless of which instance owns the repo.'
+                : 'Repositories are partitioned across instances: each daemon '
+                      'polls, reviews and merges only what is routed to it. '
+                      'Unrouted repositories are handed out round-robin and '
+                      'then stay put.',
+          ),
+          if (rules.mode == RoutingMode.dispatch) ...[
             const SizedBox(height: 12),
-            Text(
-              'Round-robin pool',
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
+            const AppText.label('Rotate these operations'),
             const SizedBox(height: 4),
-            Text(
-              'Empty means every enabled instance takes part.',
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-            ),
-            const SizedBox(height: 6),
             Wrap(
               spacing: 8,
               children: [
-                for (final instance in registry.instances)
+                for (final op in RoutingOp.all)
                   FilterChip(
-                    label: Text(instance.displayName),
+                    label: Text(op),
                     selected:
-                        rules.roundRobinPool.isEmpty ||
-                        rules.roundRobinPool.contains(instance.id),
-                    onSelected: instance.usable
-                        ? (selected) =>
-                              _togglePool(context, ref, instance.id, selected)
-                        : null,
+                        rules.roundRobinOps.isEmpty ||
+                        rules.roundRobinOps.contains(op),
+                    onSelected: (selected) =>
+                        _toggleOp(context, ref, op, selected),
                   ),
               ],
             ),
-            const SizedBox(height: 12),
-            Text(
-              'Owner of everything unrouted',
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
-            const SizedBox(height: 4),
-            _InstanceDropdown(
-              registry: registry,
-              value: rules.defaultInstance,
-              allowNone: false,
-              onChanged: (id) => _setDefault(context, ref, id),
-            ),
           ],
-        ),
+          const SizedBox(height: 12),
+          const AppText.label('Round-robin pool'),
+          const SizedBox(height: 4),
+          const AppText.muted('Empty means every enabled instance takes part.'),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final instance in registry.instances)
+                FilterChip(
+                  label: Text(instance.displayName),
+                  selected:
+                      rules.roundRobinPool.isEmpty ||
+                      rules.roundRobinPool.contains(instance.id),
+                  onSelected: instance.usable
+                      ? (selected) =>
+                            _togglePool(context, ref, instance.id, selected)
+                      : null,
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const AppText.label('Owner of everything unrouted'),
+          const SizedBox(height: 4),
+          _InstanceDropdown(
+            registry: registry,
+            value: rules.defaultInstance,
+            allowNone: false,
+            onChanged: (id) => _setDefault(context, ref, id),
+          ),
+        ],
       ),
     );
   }
@@ -319,56 +305,51 @@ class _ScopeSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 8),
-            if (ids.isEmpty)
-              Text(emptyHint, style: const TextStyle(fontSize: 12))
-            else
-              for (final id in ids)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(id, style: const TextStyle(fontSize: 13)),
-                            if (assignments[id] == null &&
-                                inheritedFrom?.call(id) != null)
-                              Text(
-                                'inherits ${inheritedFrom!(id)}',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: Theme.of(
-                                    context,
-                                  ).colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                          ],
-                        ),
+    return AppSurface(
+      elevation: AppSurfaceElevation.surface,
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AppText.sectionTitle(title),
+          const SizedBox(height: 8),
+          if (ids.isEmpty)
+            AppText(emptyHint)
+          else
+            for (final id in ids)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          AppText(
+                            id,
+                            role: AppTextRole.mono,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (assignments[id] == null &&
+                              inheritedFrom?.call(id) != null)
+                            AppText.muted('inherits ${inheritedFrom!(id)}'),
+                        ],
                       ),
-                      SizedBox(
-                        width: 220,
-                        child: _InstanceDropdown(
-                          registry: registry,
-                          value: assignments[id],
-                          allowNone: true,
-                          onChanged: (instanceId) => onAssign(id, instanceId),
-                        ),
+                    ),
+                    SizedBox(
+                      width: 220,
+                      child: _InstanceDropdown(
+                        registry: registry,
+                        value: assignments[id],
+                        allowNone: true,
+                        onChanged: (instanceId) => onAssign(id, instanceId),
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-          ],
-        ),
+              ),
+        ],
       ),
     );
   }
@@ -411,10 +392,7 @@ class _InstanceDropdown extends StatelessWidget {
           DropdownMenuItem(
             value: instance.id,
             enabled: instance.usable,
-            child: Text(
-              instance.displayName,
-              overflow: TextOverflow.ellipsis,
-            ),
+            child: Text(instance.displayName, overflow: TextOverflow.ellipsis),
           ),
       ],
       onChanged: (selected) =>

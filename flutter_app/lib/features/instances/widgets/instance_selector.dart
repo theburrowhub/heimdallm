@@ -4,6 +4,8 @@ import 'package:go_router/go_router.dart';
 
 import '../../../core/instances/instances_providers.dart';
 import '../../../core/instances/models.dart';
+import '../../../shared/design_system/components/components.dart';
+import '../../../shared/design_system/tokens.dart';
 
 /// AppBar control for scoping the dashboard to one instance, or to all of them.
 ///
@@ -55,9 +57,7 @@ class InstanceSelector extends ConsumerWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    instance.reachable
-                        ? Icons.circle
-                        : Icons.circle_outlined,
+                    instance.reachable ? Icons.circle : Icons.circle_outlined,
                     size: 9,
                     color: instance.reachable ? Colors.green : scheme.error,
                   ),
@@ -70,12 +70,20 @@ class InstanceSelector extends ConsumerWidget {
                   ),
                   if (instance.isSelf) ...[
                     const SizedBox(width: 6),
-                    Text(
-                      'hub',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: scheme.onSurfaceVariant,
+                    AppBadge(
+                      label: 'hub',
+                      foreground: AppColors.accent.resolve(context),
+                      background: AppColors.accentMuted
+                          .resolve(context)
+                          .withValues(alpha: 0.22),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 1,
                       ),
+                      radius: 8,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0,
                     ),
                   ],
                 ],
@@ -101,12 +109,14 @@ class InstanceSelector extends ConsumerWidget {
             const SizedBox(width: 6),
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 160),
-              child: Text(
+              child: AppText(
                 active == null
                     ? 'All instances'
                     : (registry.byId(active)?.displayName ?? active),
+                role: AppTextRole.label,
+                color: AppColors.text.resolve(context),
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13),
               ),
             ),
             const Icon(Icons.arrow_drop_down, size: 18),
@@ -130,22 +140,26 @@ class InstanceFailureBanner extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (failureLabels.isEmpty) return const SizedBox.shrink();
-    final scheme = Theme.of(context).colorScheme;
     final names = failureLabels.join(', ');
+    final background = AppColors.danger
+        .resolve(context)
+        .withValues(alpha: 0.12);
+    final foreground = AppColors.danger.resolve(context);
     return Material(
-      color: scheme.errorContainer,
+      color: background,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           children: [
-            Icon(Icons.cloud_off_outlined, size: 16, color: scheme.onErrorContainer),
+            Icon(Icons.cloud_off_outlined, size: 16, color: foreground),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
+              child: AppText(
                 failureLabels.length == 1
                     ? 'Showing partial data — $names could not be reached.'
                     : 'Showing partial data — ${failureLabels.length} instances could not be reached ($names).',
-                style: TextStyle(fontSize: 12, color: scheme.onErrorContainer),
+                role: AppTextRole.bodyMuted,
+                color: foreground,
               ),
             ),
             TextButton(

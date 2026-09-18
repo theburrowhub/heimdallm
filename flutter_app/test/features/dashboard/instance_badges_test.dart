@@ -16,30 +16,26 @@ import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
 import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../core/platform/fake_platform_services.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
 
-PR _pr(
-  int id,
-  String repo,
-  int number,
-  String title, {
-  Review? latestReview,
-}) => PR(
-  id: id,
-  githubId: 1000 + id,
-  repo: repo,
-  number: number,
-  title: title,
-  author: 'alice',
-  url: 'https://github.com/$repo/pull/$number',
-  state: 'open',
-  updatedAt: DateTime(2026, 9, 1),
-  latestReview: latestReview,
-);
+PR _pr(int id, String repo, int number, String title, {Review? latestReview}) =>
+    PR(
+      id: id,
+      githubId: 1000 + id,
+      repo: repo,
+      number: number,
+      title: title,
+      author: 'alice',
+      url: 'https://github.com/$repo/pull/$number',
+      state: 'open',
+      updatedAt: DateTime(2026, 9, 1),
+      latestReview: latestReview,
+    );
 
 Review _review(int id, String severity) => Review(
   id: id,
@@ -152,10 +148,15 @@ Future<void> _pumpDashboard(
         issuesByInstanceProvider.overrideWith(
           (ref) async => issues ?? singleInstanceResult(<TrackedIssue>[]),
         ),
-        routingRulesProvider.overrideWith((ref) async => routing ?? RoutingRules.empty),
+        routingRulesProvider.overrideWith(
+          (ref) async => routing ?? RoutingRules.empty,
+        ),
         sseStreamProvider.overrideWith((ref) => const Stream.empty()),
       ],
       child: MaterialApp.router(
+        builder: (context, navigatorChild) => HeimdallmTheme.scope(
+          child: navigatorChild ?? const SizedBox.shrink(),
+        ),
         routerConfig: GoRouter(
           routes: [
             GoRoute(path: '/', builder: (_, _) => const _DashboardHost()),
@@ -163,8 +164,9 @@ Future<void> _pumpDashboard(
             // without pulling in the real detail screens' own providers.
             GoRoute(
               path: '/prs/:id',
-              builder: (_, state) =>
-                  Scaffold(body: Text('PR detail ${state.pathParameters['id']}')),
+              builder: (_, state) => Scaffold(
+                body: Text('PR detail ${state.pathParameters['id']}'),
+              ),
             ),
             GoRoute(
               path: '/issues/:id',
@@ -498,45 +500,42 @@ void main() {
     verify(() => srvApi.undismissPR(42)).called(1);
   });
 
-  testWidgets(
-    'a partial dismiss failure is reported and does not offer Undo',
-    (tester) async {
-      final hubApi = _MockApiClient();
-      final srvApi = _MockApiClient();
-      when(() => hubApi.dismissPR(any())).thenAnswer((_) async {});
-      when(() => srvApi.dismissPR(any())).thenThrow(Exception('offline'));
-
-      await _pumpDashboard(
-        tester,
-        registry: _registry(),
-        apiByInstance: {'hub-1': hubApi, 'srv-a': srvApi},
-        prs: AggregatedResult<PR>(
-          items: [
-            InstanceScoped(
-              instanceId: 'hub-1',
-              instanceName: 'Local hub',
-              value: _pr(11, 'theburrowhub/heimdallm', 769, 'Same PR'),
-            ),
-            InstanceScoped(
-              instanceId: 'srv-a',
-              instanceName: 'Server A',
-              value: _pr(42, 'theburrowhub/heimdallm', 769, 'Same PR'),
-            ),
-          ],
-        ),
-      );
-
-      await tester.tap(find.byTooltip('Dismiss PR'));
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('Error dismissing PR #769'), findsOneWidget);
-      expect(find.text('Undo'), findsNothing);
-    },
-  );
-
-  testWidgets('tapping a PR row navigates to its detail route', (
+  testWidgets('a partial dismiss failure is reported and does not offer Undo', (
     tester,
   ) async {
+    final hubApi = _MockApiClient();
+    final srvApi = _MockApiClient();
+    when(() => hubApi.dismissPR(any())).thenAnswer((_) async {});
+    when(() => srvApi.dismissPR(any())).thenThrow(Exception('offline'));
+
+    await _pumpDashboard(
+      tester,
+      registry: _registry(),
+      apiByInstance: {'hub-1': hubApi, 'srv-a': srvApi},
+      prs: AggregatedResult<PR>(
+        items: [
+          InstanceScoped(
+            instanceId: 'hub-1',
+            instanceName: 'Local hub',
+            value: _pr(11, 'theburrowhub/heimdallm', 769, 'Same PR'),
+          ),
+          InstanceScoped(
+            instanceId: 'srv-a',
+            instanceName: 'Server A',
+            value: _pr(42, 'theburrowhub/heimdallm', 769, 'Same PR'),
+          ),
+        ],
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Dismiss PR'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Error dismissing PR #769'), findsOneWidget);
+    expect(find.text('Undo'), findsNothing);
+  });
+
+  testWidgets('tapping a PR row navigates to its detail route', (tester) async {
     await _pumpDashboard(
       tester,
       registry: _registry(),
@@ -795,10 +794,7 @@ void main() {
       await tester.tap(find.byTooltip('Dismiss issue'));
       await tester.pumpAndSettle();
 
-      expect(
-        find.textContaining('Error dismissing issue #12'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('Error dismissing issue #12'), findsOneWidget);
       expect(find.text('Undo'), findsNothing);
     },
   );

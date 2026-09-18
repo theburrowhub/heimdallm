@@ -8,6 +8,7 @@ import 'package:heimdallm/core/api/daemon_endpoint.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/features/instances/instance_dialog.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -34,6 +35,8 @@ Future<void> _open(
     ProviderScope(
       overrides: [hubApiClientProvider.overrideWithValue(api)],
       child: MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
         home: Scaffold(
           body: Consumer(
             builder: (context, ref, _) => TextButton(

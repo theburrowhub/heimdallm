@@ -12,6 +12,7 @@ import 'package:heimdallm/features/instances/instances_screen.dart';
 import 'package:heimdallm/features/instances/routing_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:mocktail/mocktail.dart';
@@ -43,6 +44,8 @@ class _HubRecorder {
 }
 
 Widget _app(Widget child) => MaterialApp.router(
+  builder: (context, navigatorChild) =>
+      HeimdallmTheme.scope(child: navigatorChild ?? const SizedBox.shrink()),
   routerConfig: GoRouter(
     routes: [GoRoute(path: '/', builder: (_, _) => child)],
   ),
@@ -87,7 +90,10 @@ void main() {
     testWidgets('a failed probe shows the reason', (tester) async {
       final recorder = _HubRecorder();
       final api = recorder.client(
-        respond: (_) => {'reachable': false, 'last_error': 'connection refused'},
+        respond: (_) => {
+          'reachable': false,
+          'last_error': 'connection refused',
+        },
       );
 
       await tester.pumpWidget(
@@ -187,7 +193,9 @@ void main() {
       expect(find.textContaining('Removed Server A'), findsOneWidget);
     });
 
-    testWidgets('an action failure surfaces the daemon message', (tester) async {
+    testWidgets('an action failure surfaces the daemon message', (
+      tester,
+    ) async {
       final recorder = _HubRecorder();
       final api = recorder.client(
         status: 409,
@@ -288,7 +296,10 @@ void main() {
       await tester.pumpAndSettle();
 
       final body = jsonDecode(recorder.bodies.last) as Map<String, dynamic>;
-      expect(body['round_robin_ops'], containsAll([RoutingOp.review, RoutingOp.issue]));
+      expect(
+        body['round_robin_ops'],
+        containsAll([RoutingOp.review, RoutingOp.issue]),
+      );
       expect(body['round_robin_ops'], isNot(contains(RoutingOp.merge)));
     });
 

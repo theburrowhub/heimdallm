@@ -6,6 +6,7 @@ import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/features/instances/discovered_peers_section.dart';
 import 'package:heimdallm/features/instances/instances_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 ClusterRegistry _registry({List<Map<String, dynamic>> instances = const []}) {
   return ClusterRegistry.fromJson({
@@ -45,6 +46,8 @@ Map<String, dynamic> _peer({
 
 Widget _app(Widget child) {
   return MaterialApp.router(
+    builder: (context, navigatorChild) =>
+        HeimdallmTheme.scope(child: navigatorChild ?? const SizedBox.shrink()),
     routerConfig: GoRouter(
       routes: [GoRoute(path: '/', builder: (_, _) => child)],
     ),
@@ -92,7 +95,7 @@ void main() {
       );
       expect(find.text('Server A'), findsOneWidget);
       expect(find.textContaining('http://srv-a.local:7842'), findsOneWidget);
-      expect(find.widgetWithText(FilledButton, 'Register'), findsOneWidget);
+      expect(find.text('Register'), findsOneWidget);
     });
 
     testWidgets('says the token does not travel over the network', (
@@ -129,7 +132,7 @@ void main() {
       );
 
       expect(find.textContaining('found on this network'), findsNothing);
-      expect(find.widgetWithText(FilledButton, 'Register'), findsNothing);
+      expect(find.text('Register'), findsNothing);
     });
 
     testWidgets('Scan is reachable when nothing has been found yet', (
@@ -147,7 +150,7 @@ void main() {
         findsOneWidget,
       );
       // Nothing to register, so no row and no offer.
-      expect(find.widgetWithText(FilledButton, 'Register'), findsNothing);
+      expect(find.text('Register'), findsNothing);
     });
 
     testWidgets('Scan is reachable when every peer is already registered', (
@@ -169,7 +172,7 @@ void main() {
       await _pump(tester, found: _found(enabled: false));
 
       expect(find.text('Find instances on this network'), findsOneWidget);
-      expect(find.widgetWithText(FilledButton, 'Turn on'), findsOneWidget);
+      expect(find.text('Turn on'), findsOneWidget);
       expect(
         find.textContaining('Only works within one subnet'),
         findsOneWidget,
@@ -234,7 +237,7 @@ void main() {
         find.textContaining('Answering at http://srv-a.local:7842'),
         findsOneWidget,
       );
-      expect(find.widgetWithText(TextButton, 'Update address'), findsOneWidget);
+      expect(find.text('Update address'), findsOneWidget);
       // The consequence, not just the fact — this is the #765 failure forming.
       expect(find.textContaining('take over its repositories'), findsOneWidget);
     });
@@ -277,7 +280,7 @@ void main() {
         ),
       );
 
-      expect(find.widgetWithText(TextButton, 'Update address'), findsOneWidget);
+      expect(find.text('Update address'), findsOneWidget);
     });
 
     testWidgets('renders nothing standalone when there is no match', (
