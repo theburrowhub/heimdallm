@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../design_system/components/app_badge.dart';
+
 class SeverityBadge extends StatelessWidget {
   final String severity;
 
@@ -18,21 +20,12 @@ class SeverityBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return AppBadge(
+      label: severity.toUpperCase(),
+      foreground: Colors.white,
+      background: _color,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: _color,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        severity.toUpperCase(),
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.5,
-        ),
-      ),
+      radius: 4,
     );
   }
 }

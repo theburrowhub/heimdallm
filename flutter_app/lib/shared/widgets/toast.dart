@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:mix/mix.dart';
 
 /// Shows a temporary toast notification that auto-dismisses.
 /// Uses Overlay instead of SnackBar to avoid macOS desktop SnackBar
@@ -100,41 +101,38 @@ class _ToastWidgetState extends State<_ToastWidget>
           alignment: Alignment.bottomCenter,
           child: Material(
             color: Colors.transparent,
-            child: Container(
-              constraints: const BoxConstraints(maxWidth: 500),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: widget.isError ? Colors.red.shade700 : Colors.green.shade700,
-                borderRadius: BorderRadius.circular(8),
-                boxShadow: [
-                  BoxShadow(
+            child: Box(
+              style: BoxStyler()
+                  .maxWidth(500)
+                  .paddingX(16)
+                  .paddingY(12)
+                  .color(widget.isError ? Colors.red.shade700 : Colors.green.shade700)
+                  .borderRounded(8)
+                  .shadowOnly(
                     color: Colors.black.withValues(alpha: 0.3),
                     blurRadius: 8,
                     offset: const Offset(0, 2),
                   ),
-                ],
-              ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Flexible(
-                    child: Text(
+                    child: StyledText(
                       widget.message,
-                      style: const TextStyle(color: Colors.white, fontSize: 13),
+                      style: TextStyler().color(Colors.white).fontSize(13),
                     ),
                   ),
                   if (widget.actionLabel != null) ...[
                     const SizedBox(width: 12),
                     GestureDetector(
                       onTap: _onActionTap,
-                      child: Text(
+                      child: StyledText(
                         widget.actionLabel!,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          decoration: TextDecoration.underline,
-                        ),
+                        style: TextStyler()
+                            .color(Colors.white)
+                            .fontSize(13)
+                            .fontWeight(FontWeight.bold)
+                            .decoration(TextDecoration.underline),
                       ),
                     ),
                   ],

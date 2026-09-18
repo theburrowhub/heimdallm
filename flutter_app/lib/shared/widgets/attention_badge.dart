@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../design_system/components/app_badge.dart';
+
 /// AttentionBadge surfaces a non-severity terminal state that a user
 /// needs to look at — currently the only producer is
 /// `auto_implement_no_changes`, where the agent ran to completion but
@@ -14,21 +16,12 @@ class AttentionBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return AppBadge(
+      label: label,
+      foreground: Colors.white,
+      background: Colors.deepOrange.shade700,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: Colors.deepOrange.shade700,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.5,
-        ),
-      ),
+      radius: 4,
     );
   }
 }

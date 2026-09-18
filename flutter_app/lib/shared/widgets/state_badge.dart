@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../design_system/components/app_badge.dart';
+
 class StateBadge extends StatelessWidget {
   final String state;
   const StateBadge({super.key, required this.state});
@@ -8,27 +10,15 @@ class StateBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return AppBadge(
+      label: _isOpen ? 'Open' : 'Closed',
+      foreground: Colors.white,
+      background: _isOpen ? Colors.green.shade700 : Colors.grey.shade600,
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: _isOpen ? Colors.green.shade700 : Colors.grey.shade600,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            _isOpen ? Icons.circle_outlined : Icons.check_circle,
-            size: 12,
-            color: Colors.white,
-          ),
-          const SizedBox(width: 4),
-          Text(
-            _isOpen ? 'Open' : 'Closed',
-            style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600),
-          ),
-        ],
-      ),
+      radius: 10,
+      fontSize: 10,
+      letterSpacing: 0,
+      icon: Icon(_isOpen ? Icons.circle_outlined : Icons.check_circle),
     );
   }
 }
