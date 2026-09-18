@@ -17,7 +17,7 @@ void main() {
   testWidgets('AppText renders every role without error', (tester) async {
     await tester.pumpWidget(
       _hosted(
-        const Column(
+        Column(
           children: [
             AppText.pageTitle('Page title'),
             AppText.sectionTitle('Section title'),
@@ -63,9 +63,7 @@ void main() {
   ) async {
     var tapped = false;
     await tester.pumpWidget(
-      _hosted(
-        AppButton(label: 'Save', onPressed: () => tapped = true),
-      ),
+      _hosted(AppButton(label: 'Save', onPressed: () => tapped = true)),
     );
     await tester.pumpAndSettle();
 
@@ -85,7 +83,11 @@ void main() {
       _hosted(
         Column(
           children: [
-            AppButton.secondary(label: 'Secondary', onPressed: () {}),
+            AppButton.secondary(
+              label: 'Secondary',
+              leading: const Icon(Icons.add),
+              onPressed: () {},
+            ),
             AppButton.subtle(label: 'Subtle', onPressed: () {}),
             AppButton.destructive(label: 'Delete', onPressed: () {}),
           ],
@@ -97,6 +99,7 @@ void main() {
     expect(find.text('Secondary'), findsOneWidget);
     expect(find.text('Subtle'), findsOneWidget);
     expect(find.text('Delete'), findsOneWidget);
+    expect(find.byIcon(Icons.add), findsOneWidget);
   });
 
   testWidgets('AppBadge renders label with icon', (tester) async {
@@ -142,5 +145,12 @@ void main() {
     expect(find.text('dark surface'), findsOneWidget);
     expect(find.text('Dark button'), findsOneWidget);
     expect(find.text('Dark badge'), findsOneWidget);
+  });
+
+  test('components.dart keeps the design-system barrel in coverage', () {
+    expect(
+      designSystemComponentTypes(),
+      containsAll(<Type>[AppBadge, AppButton, AppSurface, AppText]),
+    );
   });
 }

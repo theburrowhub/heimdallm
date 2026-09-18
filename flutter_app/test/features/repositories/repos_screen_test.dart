@@ -69,6 +69,11 @@ class _FakeConfig extends ConfigNotifier {
   }
 }
 
+class _ErrorConfig extends ConfigNotifier {
+  @override
+  Future<AppConfig> build() async => throw Exception('boom');
+}
+
 class _MockApiClient extends Mock implements ApiClient {}
 
 Finder _bulkPrSwitch() => find
@@ -167,6 +172,100 @@ void main() {
 
     expect(find.byType(RepoGridTile), findsWidgets);
     expect(find.byType(RepoListTile), findsNothing);
+  });
+
+  testWidgets('switching back to list view renders RepoListTile', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'repos_view': 'grid'});
+    await tester.pumpWidget(_host(_cfg()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('repos_view_toggle_list')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(RepoListTile), findsWidgets);
+    expect(find.byType(RepoGridTile), findsNothing);
+  });
+
+  testWidgets('shows an error when config loading fails', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          platformServicesProvider.overrideWithValue(FakePlatformServices()),
+          configNotifierProvider.overrideWith(_ErrorConfig.new),
+          sseStreamProvider.overrideWith((_) => const Stream<SseEvent>.empty()),
+        ],
+        child: MaterialApp(
+          theme: HeimdallmTheme.light(),
+          builder: (context, navigatorChild) => HeimdallmTheme.scope(
+            child: navigatorChild ?? const SizedBox.shrink(),
+          ),
+          home: const Scaffold(body: ReposScreen()),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not load config'), findsOneWidget);
+  });
+
+  testWidgets('searching for an unknown repo shows the search empty state', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'repos_view': 'list'});
+    await tester.pumpWidget(_host(_cfg()));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).first, 'missing/repo');
+    await tester.pumpAndSettle();
+
+    expect(find.text('No repos match “missing/repo”.'), findsOneWidget);
+  });
+
+  testWidgets('org filter dialog narrows the repo list and can be cleared', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1600, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    SharedPreferences.setMockInitialValues({'repos_view': 'list'});
+    const cfg = AppConfig(
+      serverPort: 1,
+      pollInterval: '60s',
+      retentionDays: 30,
+      aiPrimary: 'claude',
+      aiFallback: '',
+      reviewMode: 'single',
+      repoConfigs: {
+        'alpha/one': RepoConfig(prEnabled: true),
+        'beta/two': RepoConfig(prEnabled: true),
+      },
+      issueTracking: IssueTrackingConfig(),
+    );
+
+    await tester.pumpWidget(_host(cfg));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Org'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('alpha').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Org (1)'), findsOneWidget);
+    expect(find.text('alpha/one'), findsOneWidget);
+    expect(find.text('beta/two'), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.clear));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Org'), findsOneWidget);
+    expect(find.text('alpha/one'), findsOneWidget);
+    expect(find.text('beta/two'), findsOneWidget);
   });
 
   testWidgets(

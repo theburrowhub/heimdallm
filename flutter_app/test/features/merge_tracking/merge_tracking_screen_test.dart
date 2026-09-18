@@ -1,10 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/merge_tracking.dart';
+import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
+import 'package:mocktail/mocktail.dart';
+
+class _MockApiClient extends Mock implements ApiClient {}
 
 MergeTrackingEntry _entry({
   int prId = 1,
@@ -30,18 +38,20 @@ MergeTrackingEntry _entry({
   checksRequiredPending: pending,
 );
 
-Widget _host(List<MergeTrackingEntry> entries) => ProviderScope(
-  overrides: [
-    mergeTrackingProvider.overrideWith((ref) async => entries),
-    // The listener subscribes to the SSE stream, which has no daemon in a
-    // widget test; overriding it to a no-op keeps the test hermetic.
-    mergeTrackingSseListenerProvider.overrideWithValue(null),
-  ],
-  child: const MaterialApp(
-    builder: _withMixScope,
-    home: Scaffold(body: MergeTrackingScreen()),
-  ),
-);
+Widget _host(List<MergeTrackingEntry> entries, {ApiClient? api}) =>
+    ProviderScope(
+      overrides: [
+        mergeTrackingProvider.overrideWith((ref) async => entries),
+        // The listener subscribes to the SSE stream, which has no daemon in a
+        // widget test; overriding it to a no-op keeps the test hermetic.
+        mergeTrackingSseListenerProvider.overrideWithValue(null),
+        if (api != null) apiClientProvider.overrideWithValue(api),
+      ],
+      child: const MaterialApp(
+        builder: _withMixScope,
+        home: Scaffold(body: MergeTrackingScreen()),
+      ),
+    );
 
 void main() {
   testWidgets('empty state explains what the tab tracks', (tester) async {
@@ -178,6 +188,15 @@ void main() {
     expect(_text('Auto-merge on'), findsOneWidget);
   });
 
+  testWidgets('a row with no title falls back to repo and number', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_host([_entry(title: '')]));
+    await tester.pumpAndSettle();
+
+    expect(_text('acme/widgets #7'), findsOneWidget);
+  });
+
   testWidgets('a merged PR shows no block line', (tester) async {
     await tester.pumpWidget(
       _host([_entry(phase: 'merged', blockReason: 'already_merged')]),
@@ -225,6 +244,83 @@ void main() {
 
     await container.read(mergeTrackingProvider.future);
     expect(container.read(mergeTrackingCheckProblemCountProvider), 2);
+  });
+
+  testWidgets('a re-check shows a busy spinner while the request is running', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final completer = Completer<MergeTrackingEntry>();
+    when(
+      () => api.evaluateMergeTracking(any(), dryRun: any(named: 'dryRun')),
+    ).thenAnswer((_) => completer.future);
+
+    await tester.pumpWidget(_host([_entry()], api: api));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Re-check'));
+    await tester.pump();
+
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    completer.complete(_entry());
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('the GitHub button launches the PR URL', (tester) async {
+    const channel = MethodChannel('plugins.flutter.io/url_launcher');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final launchedUrls = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'launch') {
+        launchedUrls.add((call.arguments as Map)['url'] as String);
+        return true;
+      }
+      if (call.method == 'canLaunch') return true;
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    await tester.pumpWidget(_host([_entry()]));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Open on GitHub'));
+    await tester.pumpAndSettle();
+
+    expect(launchedUrls, contains('https://github.com/acme/widgets/pull/7'));
+  });
+
+  testWidgets('an expanded row renders detail-load failures inline', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mergeTrackingProvider.overrideWith((ref) async => [_entry()]),
+          mergeTrackingSseListenerProvider.overrideWithValue(null),
+          mergeTrackingDetailProvider.overrideWith(
+            (ref, id) async => throw ApiException('detail unavailable'),
+          ),
+        ],
+        child: const MaterialApp(
+          builder: _withMixScope,
+          home: Scaffold(body: MergeTrackingScreen()),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Show checks'));
+    await tester.pumpAndSettle();
+
+    expect(
+      _textContaining(
+        'Could not load checks: ApiException: detail unavailable',
+      ),
+      findsOneWidget,
+    );
   });
 }
 

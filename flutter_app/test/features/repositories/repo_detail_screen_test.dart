@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/agent.dart';
+import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
@@ -11,6 +12,11 @@ import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
+
+class _ErrorConfigNotifier extends ConfigNotifier {
+  @override
+  Future<AppConfig> build() async => throw Exception('boom');
+}
 
 const _repoName = 'theburrowhub/heimdallm';
 const _orgName = 'theburrowhub';
@@ -173,6 +179,75 @@ void main() {
     expect(find.text('Default action'), findsOneWidget);
     expect(find.text('Assignees'), findsOneWidget);
     expect(find.text('Prompt'), findsWidgets);
+  });
+
+  testWidgets('RepoDetailScreen shows a config error state', (tester) async {
+    final mockApi = MockApiClient();
+    when(
+      () => mockApi.fetchRepoLabels(_repoName),
+    ).thenAnswer((_) async => <String>[]);
+    when(
+      () => mockApi.fetchRepoCollaborators(_repoName),
+    ).thenAnswer((_) async => <String>[]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(_ErrorConfigNotifier.new),
+          agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
+        ],
+        child: MaterialApp(
+          theme: HeimdallmTheme.light(),
+          builder: (context, navigatorChild) => HeimdallmTheme.scope(
+            child: navigatorChild ?? const SizedBox.shrink(),
+          ),
+          home: const RepoDetailScreen(repoName: _repoName),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not load config'), findsOneWidget);
+  });
+
+  testWidgets('shows the auto-detected local directory helper', (tester) async {
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer(
+      (_) async => {
+        ..._configJson(),
+        'local_dirs_detected': {_repoName: '/repos/heimdallm'},
+      },
+    );
+    when(
+      () => mockApi.fetchRepoLabels(_repoName),
+    ).thenAnswer((_) async => <String>[]);
+    when(
+      () => mockApi.fetchRepoCollaborators(_repoName),
+    ).thenAnswer((_) async => <String>[]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
+        ],
+        child: MaterialApp(
+          theme: HeimdallmTheme.light(),
+          builder: (context, navigatorChild) => HeimdallmTheme.scope(
+            child: navigatorChild ?? const SizedBox.shrink(),
+          ),
+          home: const RepoDetailScreen(repoName: _repoName),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('Leave empty to use the auto-detected path above'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('merge-tracking switch persists through its scoped endpoint', (
