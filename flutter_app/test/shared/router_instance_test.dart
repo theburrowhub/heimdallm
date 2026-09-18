@@ -8,6 +8,7 @@ import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/router.dart';
 
 // Overrides are typed loosely because flutter_riverpod does not export the
@@ -16,6 +17,8 @@ Widget _routedApp(String location, List<dynamic> overrides) {
   return ProviderScope(
     overrides: overrides.cast(),
     child: MaterialApp.router(
+      builder: (context, child) =>
+          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
       routerConfig: createRouter(initialLocation: location),
     ),
   );
