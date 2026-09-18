@@ -4,10 +4,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/activity.dart';
 import 'package:heimdallm/features/activity/activity_providers.dart';
 import 'package:heimdallm/features/activity/widgets/activity_filter_chips.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 Widget _host({List<String> orgs = const ['acme', 'initech']}) {
   return ProviderScope(
     child: MaterialApp(
+      builder: (context, child) =>
+          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
       home: Scaffold(
         body: ActivityFilterChips(
           availableOrgs: orgs,
@@ -90,6 +93,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: const MaterialApp(
+          builder: _withMixScope,
           home: Scaffold(
             body: ActivityFilterChips(
               availableOrgs: [],
@@ -121,6 +125,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: const MaterialApp(
+          builder: _withMixScope,
           home: Scaffold(
             body: ActivityFilterChips(
               availableOrgs: ['acme'],
@@ -146,6 +151,7 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: const MaterialApp(
+            builder: _withMixScope,
             home: Scaffold(
               body: ActivityFilterChips(
                 availableOrgs: ['acme'],
@@ -166,3 +172,6 @@ void main() {
     },
   );
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());

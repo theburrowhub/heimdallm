@@ -2,9 +2,12 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mix/mix.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/models/activity.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import 'add_pr_dialog.dart';
 import 'activity_providers.dart';
 import 'widgets/activity_entry_tile.dart';
@@ -81,14 +84,12 @@ class _ErrorView extends StatelessWidget {
             children: [
               Icon(Icons.toggle_off_outlined, size: 48, color: Colors.grey),
               SizedBox(height: 12),
-              Text(
+              AppText.sectionTitle(
                 'Activity log is disabled',
-                style: TextStyle(fontWeight: FontWeight.w600),
               ),
               SizedBox(height: 4),
-              Text(
+              AppText.muted(
                 'Enable activity_log in the daemon config to start recording activity.',
-                style: TextStyle(color: Colors.grey),
                 textAlign: TextAlign.center,
               ),
             ],
@@ -99,7 +100,10 @@ class _ErrorView extends StatelessWidget {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: Text('Could not load activity: $error'),
+        child: AppText(
+          'Could not load activity: $error',
+          textAlign: TextAlign.center,
+        ),
       ),
     );
   }
@@ -255,7 +259,7 @@ class _Timeline extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (page.entries.isEmpty) {
-      return const Center(child: Text('No activity for this period.'));
+      return const Center(child: AppText.muted('No activity for this period.'));
     }
 
     final items = _buildItems();
@@ -268,30 +272,31 @@ class _Timeline extends StatelessWidget {
   Widget _renderItem(BuildContext context, _TimelineItem item) {
     switch (item) {
       case _TruncationBanner(:final shown):
-        return Container(
-          width: double.infinity,
+        return Padding(
           padding: const EdgeInsets.all(12),
-          color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          child: Text(
-            'Showing $shown most recent entries. Narrow filters to see more.',
+          child: AppSurface(
+            elevation: AppSurfaceElevation.raised,
+            padding: const EdgeInsets.all(12),
+            child: SizedBox(
+              width: double.infinity,
+              child: AppText(
+                'Showing $shown most recent entries. Narrow filters to see more.',
+              ),
+            ),
           ),
         );
       case _DateHeader(:final day):
         return Padding(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-          child: Text(
+          child: AppText.sectionTitle(
             _formatDay(day),
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
           ),
         );
       case _HourHeader(:final hour):
         return Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-          child: Text(
+          child: AppText.label(
             '${hour.toString().padLeft(2, '0')}:00',
-            style: Theme.of(context).textTheme.titleSmall,
           ),
         );
       case _EntryItem(:final entry):
@@ -360,18 +365,15 @@ class _ActivityDetailSheet extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 14),
-            Text(
+            StyledText(
               activityEntryTitle(entry),
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+              style: TextStyler()
+                  .style(AppTextStyles.sectionTitle.mix())
+                  .fontWeight(FontWeight.w700),
             ),
             const SizedBox(height: 6),
-            Text(
+            AppText.muted(
               activityOutcomeText(entry),
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: 18),
             _DetailRow(label: 'Repository', value: entry.repo),
@@ -394,24 +396,21 @@ class _ActivityDetailSheet extends StatelessWidget {
             ),
             if (entry.details.isNotEmpty) ...[
               const SizedBox(height: 20),
-              Text(
-                'Details',
-                style: Theme.of(
-                  context,
-                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
-              ),
+              const AppText.label('Details'),
               const SizedBox(height: 8),
-              Container(
-                width: double.infinity,
+              AppSurface(
+                elevation: AppSurfaceElevation.canvas,
                 padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: scheme.outlineVariant),
-                ),
-                child: SelectableText(
-                  details,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: SelectableText(
+                    details,
+                    style: TextStyle(
+                      color: scheme.onSurface,
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -450,12 +449,12 @@ class _DetailRow extends StatelessWidget {
         children: [
           SizedBox(
             width: 96,
-            child: Text(
+            child: StyledText(
               label,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-                fontWeight: FontWeight.w600,
-              ),
+              style: TextStyler()
+                  .style(AppTextStyles.label.mix())
+                  .color(Theme.of(context).colorScheme.onSurfaceVariant)
+                  .fontWeight(FontWeight.w600),
             ),
           ),
           Expanded(child: SelectableText(value)),

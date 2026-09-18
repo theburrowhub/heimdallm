@@ -8,6 +8,7 @@ import 'package:heimdallm/core/models/activity.dart';
 import 'package:heimdallm/features/activity/activity_providers.dart';
 import 'package:heimdallm/features/activity/activity_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -49,7 +50,10 @@ ProviderScope _scope({
       activityOptionsProvider.overrideWith((ref) => resolve()),
       if (api != null) apiClientProvider.overrideWithValue(api),
     ],
-    child: const MaterialApp(home: Scaffold(body: ActivityScreen())),
+    child: const MaterialApp(
+      builder: _withMixScope,
+      home: Scaffold(body: ActivityScreen()),
+    ),
   );
 }
 
@@ -67,7 +71,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.textContaining('No activity'), findsOneWidget);
+    expect(_textContaining('No activity'), findsOneWidget);
   });
 
   testWidgets('groups entries by hour', (tester) async {
@@ -88,8 +92,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('09:00'), findsOneWidget);
-    expect(find.text('10:00'), findsOneWidget);
+    expect(_text('09:00'), findsOneWidget);
+    expect(_text('10:00'), findsOneWidget);
   });
 
   testWidgets('shows truncation banner when truncated', (tester) async {
@@ -105,8 +109,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.textContaining('Showing'), findsOneWidget);
-    expect(find.textContaining('Narrow filters'), findsOneWidget);
+    expect(_textContaining('Showing'), findsOneWidget);
+    expect(_textContaining('Narrow filters'), findsOneWidget);
   });
 
   testWidgets('emits a date header per day in multi-day ranges', (
@@ -128,11 +132,11 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Apr 18, 2026'), findsOneWidget);
-    expect(find.text('Apr 19, 2026'), findsOneWidget);
+    expect(_text('Apr 18, 2026'), findsOneWidget);
+    expect(_text('Apr 19, 2026'), findsOneWidget);
     // '09:00' appears twice — once per day — which was the pre-fix bug
-    expect(find.text('09:00'), findsNWidgets(2));
-    expect(find.text('10:00'), findsOneWidget);
+    expect(_text('09:00'), findsNWidgets(2));
+    expect(_text('10:00'), findsOneWidget);
   });
 
   testWidgets('ActivityDisabledException renders friendly empty state', (
@@ -148,13 +152,16 @@ void main() {
             (ref) => Future<ActivityPage>.error(ActivityDisabledException()),
           ),
         ],
-        child: const MaterialApp(home: Scaffold(body: ActivityScreen())),
+        child: const MaterialApp(
+          builder: _withMixScope,
+          home: Scaffold(body: ActivityScreen()),
+        ),
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Activity log is disabled'), findsOneWidget);
-    expect(find.textContaining('Enable activity_log'), findsOneWidget);
-    expect(find.textContaining('Error:'), findsNothing);
+    expect(_text('Activity log is disabled'), findsOneWidget);
+    expect(_textContaining('Enable activity_log'), findsOneWidget);
+    expect(_textContaining('Error:'), findsNothing);
   });
 
   testWidgets('filter options fall back to visible entries when options fail', (
@@ -174,16 +181,19 @@ void main() {
             (ref) => Future<ActivityPage>.error(Exception('bad limit')),
           ),
         ],
-        child: const MaterialApp(home: Scaffold(body: ActivityScreen())),
+        child: const MaterialApp(
+          builder: _withMixScope,
+          home: Scaffold(body: ActivityScreen()),
+        ),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Organization'));
+    await tester.tap(_text('Organization'));
     await tester.pumpAndSettle();
 
-    expect(find.text('acme'), findsOneWidget);
-    expect(find.text('Options limited to visible activity'), findsOneWidget);
+    expect(_text('acme'), findsOneWidget);
+    expect(_text('Options limited to visible activity'), findsOneWidget);
   });
 
   testWidgets('filter options are sorted for stable picker order', (
@@ -205,7 +215,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Organization'));
+    await tester.tap(_text('Organization'));
     await tester.pumpAndSettle();
 
     final tiles = tester
@@ -222,15 +232,15 @@ void main() {
     await tester.pumpWidget(_scope(value: emptyPage, api: api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Add PR'));
+    await tester.tap(_text('Add PR'));
     await tester.pumpAndSettle();
-    expect(find.text('Add a pull request'), findsOneWidget);
+    expect(_text('Add a pull request'), findsOneWidget);
 
     await tester.enterText(find.byType(TextField), 'not a GitHub PR');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();
 
-    expect(find.textContaining('Enter a GitHub PR link'), findsOneWidget);
+    expect(_textContaining('Enter a GitHub PR link'), findsOneWidget);
     verifyNever(() => api.addPRByUrl(any()));
   });
 
@@ -242,16 +252,16 @@ void main() {
     await tester.pumpWidget(_scope(value: emptyPage, api: api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Add PR'));
+    await tester.tap(_text('Add PR'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byType(TextField),
       'https://github.com/acme/widgets/pull/404',
     );
-    await tester.tap(find.text('Add & review'));
+    await tester.tap(_text('Add & review'));
     await tester.pumpAndSettle();
 
-    expect(find.text('PR not found'), findsOneWidget);
+    expect(_text('PR not found'), findsOneWidget);
     final submit = tester.widget<FilledButton>(find.byType(FilledButton));
     expect(submit.onPressed, isNotNull);
     verify(
@@ -268,13 +278,13 @@ void main() {
     await tester.pumpWidget(_scope(value: emptyPage, api: api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Add PR'));
+    await tester.tap(_text('Add PR'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byType(TextField),
       'https://github.com/acme/widgets/pull/42',
     );
-    await tester.tap(find.text('Add & review'));
+    await tester.tap(_text('Add & review'));
     await tester.pump();
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
@@ -283,11 +293,8 @@ void main() {
     result.complete(73);
     await tester.pumpAndSettle();
 
-    expect(find.text('Add a pull request'), findsNothing);
-    expect(
-      find.text('PR added — repository monitored and review started.'),
-      findsOneWidget,
-    );
+    expect(_text('Add a pull request'), findsNothing);
+    expect(_text('PR added — repository monitored and review started.'), findsOneWidget);
   });
 
   testWidgets('Add PR dialog can be cancelled', (tester) async {
@@ -295,12 +302,20 @@ void main() {
     await tester.pumpWidget(_scope(value: emptyPage, api: api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Add PR'));
+    await tester.tap(_text('Add PR'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Cancel'));
+    await tester.tap(_text('Cancel'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Add a pull request'), findsNothing);
+    expect(_text('Add a pull request'), findsNothing);
     verifyNever(() => api.addPRByUrl(any()));
   });
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());
+
+Finder _text(String value) => find.text(value, findRichText: true);
+
+Finder _textContaining(String value) =>
+    find.textContaining(value, findRichText: true);

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:mix/mix.dart';
 
 import '../../../core/models/activity.dart';
+import '../../../shared/design_system/tokens.dart';
 
 /// One row in the activity timeline.
 class ActivityEntryTile extends StatelessWidget {
@@ -11,7 +13,7 @@ class ActivityEntryTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final divider = Theme.of(context).dividerColor.withValues(alpha: 0.45);
+    final divider = AppColors.border.resolve(context).withValues(alpha: 0.45);
 
     return Material(
       color: Colors.transparent,
@@ -46,12 +48,11 @@ class _WideEntryRow extends StatelessWidget {
       children: [
         SizedBox(
           width: 78,
-          child: Text(
+          child: StyledText(
             activityTimeLabel(entry.timestamp),
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              fontFamily: 'monospace',
-              fontWeight: FontWeight.w600,
-            ),
+            style: TextStyler()
+                .style(AppTextStyles.mono.mix())
+                .fontWeight(FontWeight.w600),
           ),
         ),
         SizedBox(width: 128, child: ActivityActionBadge(action: entry.action)),
@@ -82,12 +83,11 @@ class _CompactEntryRow extends StatelessWidget {
             const SizedBox(width: 8),
             ActivityItemTypeBadge(itemType: entry.itemType),
             const Spacer(),
-            Text(
+            StyledText(
               activityTimeLabel(entry.timestamp),
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                fontFamily: 'monospace',
-                fontWeight: FontWeight.w600,
-              ),
+              style: TextStyler()
+                  .style(AppTextStyles.mono.mix())
+                  .fontWeight(FontWeight.w600),
             ),
           ],
         ),
@@ -104,28 +104,24 @@ class _EntryText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final titleStyle = Theme.of(
-      context,
-    ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600);
-    final subtitleStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
-      color: Theme.of(context).colorScheme.onSurfaceVariant,
-    );
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        StyledText(
           activityEntryTitle(entry),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: titleStyle,
+          style: TextStyler()
+              .style(AppTextStyles.body.mix())
+              .fontWeight(FontWeight.w600)
+              .maxLines(1)
+              .overflow(TextOverflow.ellipsis),
         ),
         const SizedBox(height: 2),
-        Text(
+        StyledText(
           activityOutcomeText(entry),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: subtitleStyle,
+          style: TextStyler()
+              .style(AppTextStyles.bodyMuted.mix())
+              .maxLines(1)
+              .overflow(TextOverflow.ellipsis),
         ),
       ],
     );
@@ -139,33 +135,34 @@ class ActivityActionBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = activityActionColor(Theme.of(context).colorScheme, action);
-    return Container(
-      height: 28,
+    return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 120),
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: color.withValues(alpha: 0.28)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(activityIconFor(action), size: 15, color: color),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              activityActionLabel(action),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.w700,
-                fontSize: 12,
+      child: Box(
+        style: BoxStyler()
+            .color(color.withValues(alpha: 0.12))
+            .borderAll(color: color.withValues(alpha: 0.28), width: 1)
+            .borderRadiusAll(Radius.circular(6))
+            .paddingX(8)
+            .paddingY(6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(activityIconFor(action), size: 15, color: color),
+            const SizedBox(width: 6),
+            Flexible(
+              child: StyledText(
+                activityActionLabel(action),
+                style: TextStyler()
+                    .color(color)
+                    .fontSize(12)
+                    .fontWeight(FontWeight.w700)
+                    .letterSpacing(0)
+                    .maxLines(1)
+                    .overflow(TextOverflow.ellipsis),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -181,24 +178,22 @@ class ActivityItemTypeBadge extends StatelessWidget {
     final isIssue = itemType == 'issue';
     final color = isIssue ? scheme.tertiary : scheme.primary;
     final label = isIssue ? 'Issue' : 'PR';
-    return Container(
-      height: 28,
-      alignment: Alignment.center,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: color.withValues(alpha: 0.22)),
-      ),
-      child: Text(
+    return Box(
+      style: BoxStyler()
+          .color(color.withValues(alpha: 0.10))
+          .borderAll(color: color.withValues(alpha: 0.22), width: 1)
+          .borderRadiusAll(Radius.circular(6))
+          .paddingX(8)
+          .paddingY(6),
+      child: StyledText(
         label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          color: color,
-          fontWeight: FontWeight.w700,
-          fontSize: 12,
-        ),
+        style: TextStyler()
+            .color(color)
+            .fontSize(12)
+            .fontWeight(FontWeight.w700)
+            .letterSpacing(0)
+            .maxLines(1)
+            .overflow(TextOverflow.ellipsis),
       ),
     );
   }
