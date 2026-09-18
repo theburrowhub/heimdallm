@@ -1,10 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mix/mix.dart';
+
 import '../../core/api/sse_client.dart';
 import '../../core/platform/platform_services_provider.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
 
 // Terminal-style colors per log level
@@ -41,7 +46,10 @@ class _LogsViewState extends ConsumerState<LogsView> {
   static const _maxLines = 2000;
   static const _bottomThreshold = 20.0;
   static const _bgColor = Color(0xFF0D1117);
-  static const _fontFamily = 'Courier New';
+  static const _toolbarColor = Color(0xFF161B22);
+  static const _buttonColor = Color(0xFFD4D4D4);
+  static const _successColor = Color(0xFF3FB950);
+  static const _dangerColor = Color(0xFFFF6B6B);
 
   @override
   void initState() {
@@ -118,8 +126,11 @@ class _LogsViewState extends ConsumerState<LogsView> {
   Future<void> _copyAll() async {
     await Clipboard.setData(ClipboardData(text: _lines.join('\n')));
     if (mounted) {
-      showToast(context, 'Logs copiados al portapapeles',
-          duration: const Duration(seconds: 2));
+      showToast(
+        context,
+        'Logs copiados al portapapeles',
+        duration: const Duration(seconds: 2),
+      );
     }
   }
 
@@ -140,11 +151,15 @@ class _LogsViewState extends ConsumerState<LogsView> {
         children: [
           Column(
             children: [
-              // Toolbar row: connection status + wrap toggle + copy
-              Container(
-                color: const Color(0xFF161B22),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              Box(
+                style: BoxStyler()
+                    .color(_toolbarColor)
+                    .padding(
+                      EdgeInsetsGeometryMix.value(
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      ),
+                    )
+                    .borderBottom(color: AppColors.border(), width: 1),
                 child: Row(
                   children: [
                     Container(
@@ -153,37 +168,44 @@ class _LogsViewState extends ConsumerState<LogsView> {
                       height: 7,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: _connected
-                            ? const Color(0xFF3FB950)
-                            : const Color(0xFFFF6B6B),
+                        color: _connected ? _successColor : _dangerColor,
                         boxShadow: _connected
                             ? [
                                 BoxShadow(
-                                    color: const Color(0xFF3FB950)
-                                        .withValues(alpha: 0.5),
-                                    blurRadius: 4)
+                                  color: _successColor.withValues(alpha: 0.5),
+                                  blurRadius: 4,
+                                ),
                               ]
                             : null,
                       ),
                     ),
+                    const SizedBox(width: 8),
+                    AppText.mono(
+                      _connected ? 'Connected' : 'Reconnecting…',
+                      color: _connected ? _successColor : _dangerColor,
+                    ),
                     const Spacer(),
                     IconButton(
-                      icon: Icon(_wrap ? Icons.wrap_text : Icons.notes,
-                          size: 18),
+                      icon: Icon(
+                        _wrap ? Icons.wrap_text : Icons.notes,
+                        size: 18,
+                      ),
                       tooltip: _wrap ? 'Desactivar wrap' : 'Activar wrap',
-                      color: _wrap ? const Color(0xFF3FB950) : const Color(0xFFD4D4D4),
+                      color: _wrap ? _successColor : _buttonColor,
                       onPressed: () => setState(() => _wrap = !_wrap),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.copy_outlined,
-                          size: 18, color: Color(0xFFD4D4D4)),
+                      icon: const Icon(
+                        Icons.copy_outlined,
+                        size: 18,
+                        color: _buttonColor,
+                      ),
                       tooltip: 'Copiar todo',
                       onPressed: _lines.isEmpty ? null : _copyAll,
                     ),
                   ],
                 ),
               ),
-              // Log lines
               Expanded(
                 child: _lines.isEmpty
                     ? Center(
@@ -191,13 +213,14 @@ class _LogsViewState extends ConsumerState<LogsView> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             const CircularProgressIndicator(
-                                color: Color(0xFF3FB950), strokeWidth: 2),
+                              color: _successColor,
+                              strokeWidth: 2,
+                            ),
                             const SizedBox(height: 12),
-                            Text('Conectando...',
-                                style: TextStyle(
-                                    fontFamily: _fontFamily,
-                                    fontSize: 12,
-                                    color: Colors.grey.shade600)),
+                            AppText.mono(
+                              'Conectando...',
+                              color: AppColors.textMuted.resolve(context),
+                            ),
                           ],
                         ),
                       )
@@ -206,7 +229,9 @@ class _LogsViewState extends ConsumerState<LogsView> {
                         child: ListView.builder(
                           controller: _scrollController,
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 8),
+                            horizontal: 16,
+                            vertical: 8,
+                          ),
                           itemCount: _lines.length,
                           itemBuilder: (_, i) {
                             final line = _lines[i];
@@ -218,8 +243,9 @@ class _LogsViewState extends ConsumerState<LogsView> {
                                 overflow: _wrap
                                     ? TextOverflow.visible
                                     : TextOverflow.fade,
+                                maxLines: _wrap ? null : 1,
                                 style: TextStyle(
-                                  fontFamily: _fontFamily,
+                                  fontFamily: 'Courier New',
                                   fontSize: 11.5,
                                   height: 1.5,
                                   color: _levelColor(line),
@@ -240,8 +266,8 @@ class _LogsViewState extends ConsumerState<LogsView> {
               bottom: 16,
               child: FloatingActionButton.small(
                 onPressed: _scrollToBottom,
-                backgroundColor: const Color(0xFF21262D),
-                foregroundColor: const Color(0xFFD4D4D4),
+                backgroundColor: _toolbarColor,
+                foregroundColor: _buttonColor,
                 tooltip: 'Ir al final',
                 child: const Icon(Icons.arrow_downward, size: 18),
               ),
@@ -259,14 +285,11 @@ class LogsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: const Color(0xFF161B22),
-        foregroundColor: const Color(0xFFD4D4D4),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).maybePop(),
         ),
-        title: const Text('Daemon Logs',
-            style: TextStyle(fontFamily: 'Courier New', fontSize: 14)),
+        title: const AppText.mono('Daemon Logs'),
       ),
       body: const LogsView(),
     );
