@@ -3,14 +3,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/agent.dart';
+import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/organizations/org_detail_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
+import 'package:heimdallm/shared/widgets/override_field.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
+
+class _ErrorConfigNotifier extends ConfigNotifier {
+  @override
+  Future<AppConfig> build() async => throw Exception('boom');
+}
 
 Map<String, dynamic> _configJson({
   Map<String, dynamic> orgMergeTracking = const {},
@@ -72,6 +79,9 @@ Future<MockApiClient> _pumpOrgDetail(
   final config = _configJson(orgMergeTracking: orgMergeTracking);
   when(() => mockApi.fetchConfig()).thenAnswer((_) async => config);
   when(
+    () => mockApi.patchOrgConfig('acme', any()),
+  ).thenAnswer((_) async => config);
+  when(
     () => mockApi.patchMergeTrackingOrgConfig('acme', any()),
   ).thenAnswer((_) async => config);
 
@@ -96,6 +106,8 @@ Future<MockApiClient> _pumpOrgDetail(
 }
 
 void main() {
+  setUpAll(() => registerFallbackValue(<String, dynamic>{}));
+
   testWidgets('OrgDetailScreen exposes pipeline and merge-tracking overrides', (
     tester,
   ) async {
@@ -214,5 +226,47 @@ void main() {
     ).captured;
     expect(captured, hasLength(1));
     expect(captured.single, {'enable_auto_merge': null});
+  });
+
+  testWidgets('OrgDetailScreen shows a config error state', (tester) async {
+    final mockApi = MockApiClient();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(_ErrorConfigNotifier.new),
+          agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
+        ],
+        child: MaterialApp(
+          theme: HeimdallmTheme.light(),
+          builder: (context, navigatorChild) => HeimdallmTheme.scope(
+            child: navigatorChild ?? const SizedBox.shrink(),
+          ),
+          home: const OrgDetailScreen(orgName: 'acme'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not load config'), findsOneWidget);
+  });
+
+  testWidgets('save persists non-merge-tracking org overrides', (tester) async {
+    final mockApi = await _pumpOrgDetail(tester);
+    final cloneDirField = find.descendant(
+      of: find.widgetWithText(OverrideTextField, 'Clone directory'),
+      matching: find.byType(TextFormField),
+    );
+
+    await tester.enterText(cloneDirField, '/work/custom-acme');
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    final captured = verify(
+      () => mockApi.patchOrgConfig('acme', captureAny()),
+    ).captured;
+    expect(captured.single, {'clone_dir': '/work/custom-acme'});
   });
 }

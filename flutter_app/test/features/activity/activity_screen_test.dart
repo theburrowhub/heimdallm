@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/api_client.dart';
@@ -164,6 +165,20 @@ void main() {
     expect(_textContaining('Error:'), findsNothing);
   });
 
+  testWidgets('unexpected activity failures render the generic error state', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _scope(value: AsyncError(Exception('daemon is down'), StackTrace.empty)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      _textContaining('Could not load activity: Exception: daemon is down'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('filter options fall back to visible entries when options fail', (
     tester,
   ) async {
@@ -294,7 +309,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(_text('Add a pull request'), findsNothing);
-    expect(_text('PR added — repository monitored and review started.'), findsOneWidget);
+    expect(
+      _text('PR added — repository monitored and review started.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('Add PR dialog can be cancelled', (tester) async {
@@ -310,6 +328,75 @@ void main() {
     expect(_text('Add a pull request'), findsNothing);
     verifyNever(() => api.addPRByUrl(any()));
   });
+
+  testWidgets(
+    'tapping an entry opens details and reports GitHub launch failures',
+    (tester) async {
+      const channel = MethodChannel('plugins.flutter.io/url_launcher');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final launchedUrls = <String>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'launch') {
+          launchedUrls.add((call.arguments as Map)['url'] as String);
+          return false;
+        }
+        if (call.method == 'canLaunch') return true;
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+      await tester.pumpWidget(
+        _scope(
+          value: AsyncData(
+            ActivityPage(
+              entries: [
+                ActivityEntry(
+                  id: 42,
+                  timestamp: DateTime(2026, 4, 20, 9, 34, 12),
+                  org: 'acme',
+                  repo: 'acme/widgets',
+                  itemType: 'pr',
+                  itemNumber: 42,
+                  itemTitle: 'Title 42',
+                  action: ActivityAction.review,
+                  outcome: 'major',
+                  details: const {'cli_used': 'claude', 'attempts': 2},
+                ),
+              ],
+              truncated: false,
+              count: 1,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(_textContaining('Title 42'));
+      await tester.pumpAndSettle();
+
+      expect(_textContaining('major review by claude'), findsWidgets);
+      expect(_text('Repository'), findsWidgets);
+      expect(_text('acme/widgets'), findsOneWidget);
+      expect(_text('Details'), findsOneWidget);
+      expect(_textContaining('"attempts": 2'), findsOneWidget);
+
+      await tester.tap(_text('Open in GitHub'));
+      await tester.pumpAndSettle();
+
+      expect(launchedUrls, contains('https://github.com/acme/widgets/pull/42'));
+      expect(
+        _textContaining(
+          'Could not open https://github.com/acme/widgets/pull/42',
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+      expect(_text('Details'), findsNothing);
+    },
+  );
 }
 
 Widget _withMixScope(BuildContext context, Widget? child) =>
