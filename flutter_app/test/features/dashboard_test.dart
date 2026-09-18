@@ -22,6 +22,7 @@ import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/core/models/tracked_issue.dart';
+import 'package:heimdallm/shared/router.dart';
 import '../core/platform/fake_platform_services.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -573,8 +574,8 @@ void main() {
   });
 
   testWidgets(
-    'DashboardScreen exposes an Instances tab reachable without a second '
-    'instance already registered',
+    'the navigation shell exposes an Instances destination reachable without '
+    'a second instance already registered',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(1800, 700));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -592,7 +593,7 @@ void main() {
             // A plain single-daemon install: no instances registered at all.
             // The InstanceSelector's "Manage instances…" entry only appears
             // once a second instance already exists, so it can never be the
-            // way in — the tab must work regardless of this state.
+            // way in — the destination must work regardless of this state.
             daemonInstancesProvider.overrideWith(
               (ref) async => ClusterRegistry.fromJson({
                 'role': 'hub',
@@ -602,21 +603,20 @@ void main() {
               }),
             ),
           ],
-          child: MaterialApp.router(
-            routerConfig: GoRouter(
-              routes: [
-                GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
-              ],
-            ),
-          ),
+          child: MaterialApp.router(routerConfig: createRouter()),
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(find.widgetWithText(Tab, 'Instances'), findsOneWidget);
+      expect(find.text('Instances'), findsOneWidget);
       expect(find.text('Manage instances…'), findsNothing);
 
-      await tester.tap(find.widgetWithText(Tab, 'Instances'));
+      // The extended NavigationRail label sits behind an offstage-during
+      // -animation copy that flutter_test's hit testing can pick instead of
+      // the real one, so drive the destination directly through the rail's
+      // callback rather than simulating a raw tap on the label text.
+      final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
+      rail.onDestinationSelected!(8);
       await tester.pumpAndSettle();
 
       expect(find.text('No instances registered'), findsOneWidget);

@@ -14,6 +14,7 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
+import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -93,6 +94,32 @@ ClusterRegistry _registry() => ClusterRegistry.fromJson({
   ],
 });
 
+/// The instance selector, badges and partial-read banner now live in the
+/// navigation shell (`shared/layout/app_shell.dart`) rather than
+/// `DashboardScreen` itself. This minimal stand-in reproduces just the piece
+/// of that shell these tests assert on, without pulling in the full
+/// production router/shell (and every other branch screen's providers).
+class _DashboardHost extends ConsumerWidget {
+  const _DashboardHost();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final failureLabels = ref
+        .watch(instanceReadFailuresProvider)
+        .map((f) => f.label)
+        .toList();
+    return Scaffold(
+      appBar: AppBar(actions: const [InstanceSelector()]),
+      body: Column(
+        children: [
+          InstanceFailureBanner(failureLabels: failureLabels),
+          const Expanded(child: DashboardScreen()),
+        ],
+      ),
+    );
+  }
+}
+
 Future<void> _pumpDashboard(
   WidgetTester tester, {
   required AggregatedResult<PR> prs,
@@ -131,7 +158,7 @@ Future<void> _pumpDashboard(
       child: MaterialApp.router(
         routerConfig: GoRouter(
           routes: [
-            GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            GoRoute(path: '/', builder: (_, _) => const _DashboardHost()),
             // Placeholders so a tap-to-navigate test can assert on arrival
             // without pulling in the real detail screens' own providers.
             GoRoute(
