@@ -16,6 +16,7 @@ import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
 import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
+import 'package:heimdallm/shared/widgets/pr_review_state_badge.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../core/platform/fake_platform_services.dart';
@@ -57,6 +58,7 @@ TrackedIssue _issue(
   int number,
   String title, {
   TrackedIssueReview? latestReview,
+  TrackedIssueLinkedPR? linkedPR,
 }) => TrackedIssue(
   id: id,
   githubId: 2000 + id,
@@ -72,6 +74,7 @@ TrackedIssue _issue(
   fetchedAt: DateTime(2026, 9, 1),
   dismissed: false,
   latestReview: latestReview,
+  linkedPR: linkedPR,
 );
 
 TrackedIssueReview _issueReview(int id) => TrackedIssueReview(
@@ -606,6 +609,40 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Issue detail 9'), findsOneWidget);
+  });
+
+  testWidgets('an issue with a reviewed linked PR shows its review state', (
+    tester,
+  ) async {
+    await _pumpDashboard(
+      tester,
+      registry: _registry(),
+      prs: singleInstanceResult(const <PR>[]),
+      issues: AggregatedResult<TrackedIssue>(
+        items: [
+          InstanceScoped(
+            instanceId: 'srv-a',
+            instanceName: 'Server A',
+            value: _issue(
+              10,
+              'acme/tools',
+              13,
+              'Issue with a linked PR',
+              linkedPR: const TrackedIssueLinkedPR(
+                number: 14,
+                url: 'https://github.com/acme/tools/pull/14',
+                state: 'open',
+                externalReviewState: 'APPROVED',
+                externalReviewer: 'bob',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(find.text('Issue with a linked PR'), findsOneWidget);
+    expect(find.byType(PRReviewStateBadge), findsOneWidget);
   });
 
   testWidgets('undoing a dismissed issue un-dismisses it on every instance', (

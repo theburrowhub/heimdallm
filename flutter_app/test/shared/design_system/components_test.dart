@@ -17,7 +17,10 @@ void main() {
   testWidgets('AppText renders every role without error', (tester) async {
     await tester.pumpWidget(
       _hosted(
-        const Column(
+        Column(
+          // Not const: these named constructors only assign fields via an
+          // initializer list, so a const invocation is folded at compile
+          // time and never shows up in the coverage report.
           children: [
             AppText.pageTitle('Page title'),
             AppText.sectionTitle('Section title'),
@@ -42,8 +45,8 @@ void main() {
       _hosted(
         Column(
           children: [
-            const AppSurface(child: Text('canvas')),
-            const AppSurface(
+            AppSurface(child: Text('canvas')),
+            AppSurface(
               elevation: AppSurfaceElevation.raised,
               bordered: false,
               child: Text('raised'),
@@ -63,7 +66,7 @@ void main() {
   ) async {
     await tester.pumpWidget(
       _hosted(
-        const AppSurface(
+        AppSurface(
           padding: EdgeInsets.all(20),
           child: Text('padded'),
         ),
