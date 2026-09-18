@@ -5,9 +5,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart' show ClusterRole;
+import '../../core/state/appearance_preferences.dart';
 import '../instances/config_propagation_dialog.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/autocomplete_chip_field.dart';
 import '../../shared/widgets/restart_required_banner.dart';
 import '../../shared/widgets/toast.dart';
@@ -84,6 +87,117 @@ String? validatePollInterval(String? raw) {
   return null;
 }
 
+enum _ConfigSectionId {
+  appearance,
+  token,
+  poll,
+  retention,
+  ai,
+  polling,
+  issueTracking,
+  pipeline,
+  develop,
+  autonomous,
+  mergeTracking,
+  circuitBreaker,
+  cluster,
+}
+
+class _ConfigSectionMeta {
+  final _ConfigSectionId id;
+  final String title;
+  final String summary;
+  final IconData icon;
+
+  const _ConfigSectionMeta({
+    required this.id,
+    required this.title,
+    required this.summary,
+    required this.icon,
+  });
+}
+
+const _configSections = <_ConfigSectionMeta>[
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.appearance,
+    title: 'Appearance',
+    summary: 'Local UI preference for this device. Does not change daemon configuration.',
+    icon: Icons.palette_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.token,
+    title: 'GitHub Token',
+    summary: 'Credentials Heimdallm uses to talk to GitHub.',
+    icon: Icons.key_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.poll,
+    title: 'Polling',
+    summary: 'How often Heimdallm checks GitHub for new review work.',
+    icon: Icons.schedule_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.retention,
+    title: 'Retention',
+    summary: 'How long local review history is kept.',
+    icon: Icons.archive_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.ai,
+    title: 'AI defaults',
+    summary: 'Default agent and review behavior used across the app.',
+    icon: Icons.smart_toy_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.polling,
+    title: 'Polling / Rate Limit',
+    summary: 'Adaptive polling and API backoff safeguards.',
+    icon: Icons.tune_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.issueTracking,
+    title: 'Issue Tracking',
+    summary: 'Issue triage scope, filters, and prompts.',
+    icon: Icons.bug_report_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.pipeline,
+    title: 'Pipeline',
+    summary: 'Shared defaults for triage ownership, clone paths, and promotions.',
+    icon: Icons.account_tree_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.develop,
+    title: 'Develop',
+    summary: 'Auto-implementation labels, reviewers, and PR defaults.',
+    icon: Icons.code_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.autonomous,
+    title: 'Autonomous Mode',
+    summary: 'How Heimdallm acts on tasks when autonomous execution is enabled.',
+    icon: Icons.auto_mode_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.mergeTracking,
+    title: 'Merge Tracking',
+    summary: 'Tracking and automation for your pull requests.',
+    icon: Icons.merge_type_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.circuitBreaker,
+    title: 'Circuit Breaker',
+    summary: 'Safety limits that cap automated activity.',
+    icon: Icons.health_and_safety_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.cluster,
+    title: 'Cluster',
+    summary: 'Role and restart flow for multi-instance deployments.',
+    icon: Icons.dns_outlined,
+  ),
+];
+
 class ConfigScreen extends ConsumerStatefulWidget {
   const ConfigScreen({super.key});
 
@@ -95,9 +209,15 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   final _tokenController = TextEditingController();
   final _pollController = TextEditingController();
   final _cloneDirController = TextEditingController();
+  final _formScrollController = ScrollController();
   final _pollFieldKey = GlobalKey<FormFieldState<String>>();
+  final Map<_ConfigSectionId, GlobalKey> _sectionKeys = {
+    for (final section in _configSections) section.id: GlobalKey(),
+  };
   bool _obscureToken = true;
   bool _tokenFromGh = false; // true = auto-detected from gh CLI
+  _ConfigSectionId _selectedSection = _ConfigSectionId.appearance;
+  String? _saveError;
 
   String _pollInterval = '5m';
   int _retentionDays = 90;
@@ -149,6 +269,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _tokenController.dispose();
     _pollController.dispose();
     _cloneDirController.dispose();
+    _formScrollController.dispose();
     _devMaxTurnsController.dispose();
     _devTimeoutController.dispose();
     _claimLeaseController.dispose();
@@ -256,64 +377,250 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         ),
         data: (config) {
           _initFromConfig(config);
-          return _buildForm(context, config, daemonRunning);
+          return _buildScreenContent(context, config, daemonRunning);
         },
       ),
     );
   }
 
-  Widget _buildForm(
+  Widget _buildScreenContent(
     BuildContext context,
     AppConfig config,
     bool daemonRunning,
   ) {
+    final width = MediaQuery.sizeOf(context).width;
+    final isWide = width >= AppBreakpoints.medium;
+    final visibleSections = _visibleSections();
+    final selectedSection = visibleSections.any((s) => s.id == _selectedSection)
+        ? _selectedSection
+        : visibleSections.first.id;
+
+    final form = SingleChildScrollView(
+      key: const Key('config-scroll-view'),
+      controller: _formScrollController,
+      padding: EdgeInsets.fromLTRB(24, isWide ? 24 : 16, 24, 24),
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: isWide ? 980 : double.infinity,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!daemonRunning) _setupBanner(),
+              const AppUpdateSettingsCard(),
+              _appearanceSection(),
+              _tokenSection(),
+              _pollSection(),
+              _retentionSection(),
+              _aiSection(config),
+              _pollingSection(),
+              _issueTrackingSection(config),
+              _pipelineSection(config),
+              _developSection(config),
+              _autonomousSection(),
+              _mergeTrackingSection(),
+              _circuitBreakerSection(),
+              if (_showClusterSection()) _clusterSection(config),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    final content = isWide
+        ? Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 280,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 24, 0, 24),
+                  child: _buildWideSectionIndex(
+                    context,
+                    sections: visibleSections,
+                    selectedSection: selectedSection,
+                  ),
+                ),
+              ),
+              Expanded(child: form),
+            ],
+          )
+        : Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                child: _buildCompactSectionIndex(
+                  sections: visibleSections,
+                  selectedSection: selectedSection,
+                ),
+              ),
+              Expanded(child: form),
+            ],
+          );
+
+    return Column(
+      children: [
+        Expanded(child: content),
+        _buildSaveBar(context, config, daemonRunning),
+      ],
+    );
+  }
+
+  List<_ConfigSectionMeta> _visibleSections() => [
+    for (final section in _configSections)
+      if (section.id != _ConfigSectionId.cluster || _showClusterSection())
+        section,
+  ];
+
+  bool _showClusterSection() {
+    final activeInstance = ref.watch(activeInstanceProvider);
+    return activeInstance == null || activeInstance.isEmpty;
+  }
+
+  _ConfigSectionMeta _sectionMeta(_ConfigSectionId id) =>
+      _configSections.firstWhere((section) => section.id == id);
+
+  _ConfigSectionId _sectionIdForTitle(String title) => switch (title) {
+    'GitHub Token' => _ConfigSectionId.token,
+    'Polling' => _ConfigSectionId.poll,
+    'Retention' => _ConfigSectionId.retention,
+    'AI defaults' => _ConfigSectionId.ai,
+    'Polling / Rate Limit' => _ConfigSectionId.polling,
+    'Issue Tracking' => _ConfigSectionId.issueTracking,
+    'Pipeline' => _ConfigSectionId.pipeline,
+    'Develop' => _ConfigSectionId.develop,
+    'Autonomous Mode' => _ConfigSectionId.autonomous,
+    'Merge Tracking' => _ConfigSectionId.mergeTracking,
+    'Circuit Breaker' => _ConfigSectionId.circuitBreaker,
+    'Cluster' => _ConfigSectionId.cluster,
+    _ => throw ArgumentError.value(title, 'title', 'Unknown config section'),
+  };
+
+  String _navLabel(int index, _ConfigSectionMeta section) =>
+      '${index + 1}. ${section.title}';
+
+  Future<void> _scrollToSection(_ConfigSectionId id) async {
+    setState(() => _selectedSection = id);
+    final targetContext = _sectionKeys[id]?.currentContext;
+    if (targetContext == null) return;
+    await Scrollable.ensureVisible(
+      targetContext,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeInOut,
+      alignment: 0.04,
+    );
+  }
+
+  Widget _buildWideSectionIndex(
+    BuildContext context, {
+    required List<_ConfigSectionMeta> sections,
+    required _ConfigSectionId selectedSection,
+  }) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: double.infinity),
+      child: AppSurface(
+        elevation: AppSurfaceElevation.raised,
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (!daemonRunning) _setupBanner(),
-            const AppUpdateSettingsCard(),
-            const SizedBox(height: 8),
-            _tokenSection(),
-            const SizedBox(height: 20),
-            _pollSection(),
-            const SizedBox(height: 20),
-            _retentionSection(),
-            const SizedBox(height: 20),
-            _aiSection(config),
-            _pollingSection(),
-            const SizedBox(height: 20),
-            _issueTrackingSection(config),
-            const SizedBox(height: 20),
-            _pipelineSection(config),
-            const SizedBox(height: 20),
-            _developSection(config),
-            const SizedBox(height: 20),
-            _autonomousSection(),
-            const SizedBox(height: 20),
-            _mergeTrackingSection(),
-            const SizedBox(height: 20),
-            _circuitBreakerSection(),
-            const SizedBox(height: 20),
-            _clusterSection(config),
-            const SizedBox(height: 28),
-            _saveButton(context, config, daemonRunning),
+            const AppText.sectionTitle('Settings sections'),
+            const SizedBox(height: 6),
+            const AppText.muted(
+              'Jump within the single settings draft. Appearance is local to this device; everything else saves to the daemon.',
+            ),
+            const SizedBox(height: 16),
+            for (var i = 0; i < sections.length; i++) ...[
+              _SectionIndexButton(
+                icon: sections[i].icon,
+                label: _navLabel(i, sections[i]),
+                summary: sections[i].summary,
+                selected: sections[i].id == selectedSection,
+                onTap: () => _scrollToSection(sections[i].id),
+              ),
+              const SizedBox(height: 8),
+            ],
           ],
         ),
       ),
     );
   }
 
+  Widget _buildCompactSectionIndex({
+    required List<_ConfigSectionMeta> sections,
+    required _ConfigSectionId selectedSection,
+  }) {
+    return AppSurface(
+      elevation: AppSurfaceElevation.raised,
+      padding: const EdgeInsets.all(16),
+      child: DropdownButtonFormField<_ConfigSectionId>(
+        key: ValueKey(selectedSection),
+        initialValue: selectedSection,
+        decoration: const InputDecoration(
+          labelText: 'Jump to section',
+          helperText: 'One page, one draft',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: [
+          for (var i = 0; i < sections.length; i++)
+            DropdownMenuItem(
+              value: sections[i].id,
+              child: Text(_navLabel(i, sections[i])),
+            ),
+        ],
+        onChanged: (value) {
+          if (value != null) _scrollToSection(value);
+        },
+      ),
+    );
+  }
+
+  Widget _appearanceSection() {
+    final mode = ref.watch(appearanceProvider);
+    final theme = Theme.of(context);
+
+    return _buildSectionCard(
+      _ConfigSectionId.appearance,
+      trailing: AppBadge(
+        label: 'Local only',
+        foreground: theme.colorScheme.onSecondaryContainer,
+        background: theme.colorScheme.secondaryContainer,
+      ),
+      children: [
+        const AppText.muted(
+          'This changes only the app theme on this device. It saves immediately and never touches config.toml.',
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final option in const [
+              (mode: ThemeMode.system, label: 'System', icon: Icons.brightness_auto),
+              (mode: ThemeMode.light, label: 'Light', icon: Icons.light_mode_outlined),
+              (mode: ThemeMode.dark, label: 'Dark', icon: Icons.dark_mode_outlined),
+            ])
+              ChoiceChip(
+                label: Text(option.label),
+                avatar: Icon(option.icon, size: 18),
+                selected: mode == option.mode,
+                onSelected: (_) =>
+                    ref.read(appearanceProvider.notifier).set(option.mode),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
   // ── Token ───────────────────────────────────────────────────────────────
 
   Widget _tokenSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return _buildSectionCard(
+      _ConfigSectionId.token,
       children: [
-        _sectionHeader('GitHub Token'),
         if (_tokenFromGh)
           _infoChip(
             Icons.check_circle,
@@ -353,10 +660,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   // ── Poll interval ─────────────────────────────────────────────────────────
 
   Widget _pollSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return _buildSectionCard(
+      _ConfigSectionId.poll,
       children: [
-        _sectionHeader('Polling'),
         TextFormField(
           key: _pollFieldKey,
           controller: _pollController,
@@ -406,10 +712,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   // ── Retention ────────────────────────────────────────────────────────────
 
   Widget _retentionSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return _buildSectionCard(
+      _ConfigSectionId.retention,
       children: [
-        _sectionHeader('Retention'),
         TextFormField(
           initialValue: _retentionDays.toString(),
           decoration: const InputDecoration(
@@ -1498,8 +1803,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   /// from here, so scoping the dropdown to one would be a trap — it would
   /// look like it worked and then nothing would ever restart.
   Widget _clusterSection(AppConfig config) {
-    final activeInstance = ref.watch(activeInstanceProvider);
-    if (activeInstance != null && activeInstance.isNotEmpty) {
+    if (!_showClusterSection()) {
       return const SizedBox.shrink();
     }
 
@@ -1670,26 +1974,53 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   }
 
   Widget _settingsCard(String title, List<Widget> children) {
-    return SizedBox(
-      width: double.infinity,
-      child: Card(
-        margin: const EdgeInsets.only(bottom: 12),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 15,
+    return _buildSectionCard(
+      _sectionIdForTitle(title),
+      children: children,
+    );
+  }
+
+  Widget _buildSectionCard(
+    _ConfigSectionId id, {
+    required List<Widget> children,
+    Widget? trailing,
+  }) {
+    final meta = _sectionMeta(id);
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: AppSurface(
+        key: _sectionKeys[id],
+        elevation: AppSurfaceElevation.surface,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(meta.icon, size: 20, color: theme.colorScheme.primary),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      AppText.sectionTitle(meta.title),
+                      const SizedBox(height: 4),
+                      AppText.muted(meta.summary),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              ...children,
-            ],
-          ),
+                if (trailing != null) ...[
+                  const SizedBox(width: 12),
+                  trailing,
+                ],
+              ],
+            ),
+            const SizedBox(height: 16),
+            ...children,
+          ],
         ),
       ),
     );
@@ -1697,126 +2028,165 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   // ── Save button ──────────────────────────────────────────────────────────
 
-  Widget _saveButton(BuildContext context, AppConfig base, bool daemonRunning) {
+  Widget _buildSaveBar(
+    BuildContext context,
+    AppConfig base,
+    bool daemonRunning,
+  ) {
     final isLoading = ref.watch(configNotifierProvider).isLoading;
-    // NOTE: _buildConfig is called inside onPressed (not here at build time) so it
-    // always reads the current state at the moment the user taps Save, avoiding
-    // stale closure captures when setState and Save happen in the same frame.
-
-    // Gate Save on a valid poll_interval so the client-side check actually
-    // prevents the round-trip 400 (the inline validator alone only displays the
-    // error). onChanged/_pickPollInterval call setState, so this re-evaluates as
-    // the user types or picks a chip. The daemon stays authoritative.
     final pollInvalid = validatePollInterval(_pollInterval) != null;
+    final multiInstance =
+        ref.watch(daemonInstancesProvider).value?.isMultiInstance ?? false;
 
-    if (daemonRunning) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-        width: double.infinity,
-        child: ElevatedButton(
-          onPressed: pollInvalid
-              ? null
-              : () async {
-                  final updated = _buildConfig(base);
-                  try {
-                    final token = _tokenController.text.trim();
-                    if (token.isNotEmpty && !_tokenFromGh) {
-                      await ref
-                          .read(platformServicesProvider)
-                          .storeGitHubToken(token);
-                      // Invalidate the cached token so the ApiClient re-reads it on the next request.
-                      ref.read(apiClientProvider).clearTokenCache();
-                    }
-                    await ref
-                        .read(configNotifierProvider.notifier)
-                        .save(updated);
-                    if (context.mounted) showToast(context, 'Settings saved');
-                  } catch (e) {
-                    if (context.mounted) {
-                      showToast(context, 'Error: $e', isError: true);
-                    }
-                  }
-                },
-          child: const Text('Save'),
-        ),
-          ),
-          // Only meaningful once more than one instance is registered, and
-          // hidden otherwise so a single-daemon install sees the same screen
-          // it always had.
-          if (ref.watch(daemonInstancesProvider).value?.isMultiInstance ??
-              false) ...[
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              icon: const Icon(Icons.sync_alt, size: 16),
-              label: const Text('Apply to all instances…'),
-              onPressed: () => showConfigPropagationDialog(context, ref),
+    return Material(
+      elevation: 8,
+      color: Theme.of(context).colorScheme.surface,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 16, 24, 20),
+          child: AppSurface(
+            elevation: AppSurfaceElevation.raised,
+            padding: const EdgeInsets.all(16),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final stacked = constraints.maxWidth < 860;
+                final actions = _buildSaveActions(
+                  context,
+                  base,
+                  daemonRunning,
+                  isLoading,
+                  pollInvalid,
+                  multiInstance,
+                );
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_saveError != null) ...[
+                      _statusMessage(
+                        icon: Icons.error_outline,
+                        text: _saveError!,
+                        background:
+                            Theme.of(context).colorScheme.errorContainer,
+                        foreground:
+                            Theme.of(context).colorScheme.onErrorContainer,
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    stacked
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: actions,
+                          )
+                        : Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(child: actions.first),
+                              if (actions.length > 1) ...[
+                                const SizedBox(width: 16),
+                                Expanded(child: actions.last),
+                              ],
+                            ],
+                          ),
+                  ],
+                );
+              },
             ),
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                'Pushes the shared settings above to every registered '
-                'instance. Ports, tokens and local paths stay per-machine.',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildSaveActions(
+    BuildContext context,
+    AppConfig base,
+    bool daemonRunning,
+    bool isLoading,
+    bool pollInvalid,
+    bool multiInstance,
+  ) {
+    if (daemonRunning) {
+      return [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const AppText.sectionTitle('Daemon settings'),
+            const SizedBox(height: 4),
+            const AppText.muted(
+              'All sections above except Appearance save into the same daemon-backed draft.',
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: pollInvalid
+                    ? null
+                    : () => _saveDaemonSettings(context, base),
+                child: const Text('Save'),
               ),
             ),
           ],
-        ],
-      );
+        ),
+        if (multiInstance)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const AppText.sectionTitle('Cluster propagation'),
+              const SizedBox(height: 4),
+              AppText.muted(
+                'Pushes shared settings to every registered instance. Ports, tokens and local paths stay per-machine.',
+                overflow: TextOverflow.visible,
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.sync_alt, size: 16),
+                  label: const Text('Apply to all instances…'),
+                  onPressed: () => showConfigPropagationDialog(context, ref),
+                ),
+              ),
+            ],
+          ),
+      ];
     }
 
-    return SizedBox(
-      width: double.infinity,
-      child: FilledButton.icon(
-        icon: isLoading
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              )
-            : const Icon(Icons.rocket_launch),
-        label: Text(isLoading ? 'Starting…' : 'Save and start Heimdallm'),
-        onPressed: (isLoading || pollInvalid)
-            ? null
-            : () async {
-                final updated = _buildConfig(base);
-                final token = _tokenController.text.trim();
-                if (!_tokenFromGh && token.isEmpty) {
-                  showToast(context, 'GitHub token is required', isError: true);
-                  return;
-                }
-                await ref
-                    .read(configNotifierProvider.notifier)
-                    .saveAndStartDaemon(
-                      token: _tokenFromGh
-                          ? (_tokenController.text.trim())
-                          : token,
-                      config: updated,
-                      daemonBinaryPath:
-                          ref
-                              .read(platformServicesProvider)
-                              .defaultDaemonBinaryPath() ??
-                          '',
-                    );
-                if (context.mounted) {
-                  final state = ref.read(configNotifierProvider);
-                  if (state.hasError) {
-                    showToast(context, '${state.error}', isError: true);
-                  } else {
-                    ref.invalidate(daemonHealthProvider);
-                    context.canPop() ? context.pop() : context.go('/');
-                  }
-                }
-              },
+    return [
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const AppText.sectionTitle('First-run setup'),
+          const SizedBox(height: 4),
+          const AppText.muted(
+            'Save the daemon configuration and start Heimdallm with the current draft.',
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              icon: isLoading
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.rocket_launch),
+              label: Text(
+                isLoading ? 'Starting…' : 'Save and start Heimdallm',
+              ),
+              onPressed: (isLoading || pollInvalid)
+                  ? null
+                  : () => _saveAndStartDaemon(context, base),
+            ),
+          ),
+        ],
       ),
-    );
+    ];
   }
 
   AppConfig _buildConfig(AppConfig base) => base.copyWith(
@@ -1847,6 +2217,60 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     clusterRole: _clusterRole,
     // agentConfigs (per-CLI) managed in Agents tab
   );
+
+  Future<void> _saveDaemonSettings(BuildContext context, AppConfig base) async {
+    final updated = _buildConfig(base);
+    setState(() => _saveError = null);
+    try {
+      final token = _tokenController.text.trim();
+      if (token.isNotEmpty && !_tokenFromGh) {
+        await ref.read(platformServicesProvider).storeGitHubToken(token);
+        // Invalidate the cached token so the ApiClient re-reads it on the next request.
+        ref.read(apiClientProvider).clearTokenCache();
+      }
+      await ref.read(configNotifierProvider.notifier).save(updated);
+      if (context.mounted) showToast(context, 'Settings saved');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saveError = 'Could not save settings: $e');
+      if (context.mounted) {
+        showToast(context, 'Error: $e', isError: true);
+      }
+    }
+  }
+
+  Future<void> _saveAndStartDaemon(
+    BuildContext context,
+    AppConfig base,
+  ) async {
+    final updated = _buildConfig(base);
+    final token = _tokenController.text.trim();
+    setState(() => _saveError = null);
+    if (!_tokenFromGh && token.isEmpty) {
+      showToast(context, 'GitHub token is required', isError: true);
+      return;
+    }
+
+    await ref.read(configNotifierProvider.notifier).saveAndStartDaemon(
+      token: _tokenFromGh ? _tokenController.text.trim() : token,
+      config: updated,
+      daemonBinaryPath:
+          ref.read(platformServicesProvider).defaultDaemonBinaryPath() ?? '',
+    );
+
+    if (!context.mounted) return;
+    final state = ref.read(configNotifierProvider);
+    if (state.hasError) {
+      if (mounted) {
+        setState(() => _saveError = '${state.error}');
+      }
+      showToast(context, '${state.error}', isError: true);
+      return;
+    }
+
+    ref.invalidate(daemonHealthProvider);
+    context.canPop() ? context.pop() : context.go('/');
+  }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -1893,11 +2317,100 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     ),
   );
 
-  Widget _sectionHeader(String title) => Padding(
-    padding: const EdgeInsets.only(bottom: 10),
-    child: Text(
-      title,
-      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-    ),
-  );
+  Widget _statusMessage({
+    required IconData icon,
+    required String text,
+    required Color background,
+    required Color foreground,
+  }) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 18, color: foreground),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(color: foreground),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionIndexButton extends StatelessWidget {
+  const _SectionIndexButton({
+    required this.icon,
+    required this.label,
+    required this.summary,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final String summary;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final background = selected
+        ? theme.colorScheme.secondaryContainer
+        : theme.colorScheme.surface;
+    final foreground = selected
+        ? theme.colorScheme.onSecondaryContainer
+        : theme.colorScheme.onSurface;
+
+    return Material(
+      color: background,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, size: 18, color: foreground),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: foreground,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      summary,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: foreground.withValues(alpha: 0.8),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

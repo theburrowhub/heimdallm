@@ -11,6 +11,7 @@ import 'package:heimdallm/features/config/config_providers.dart'
     show ConfigNotifier, configNotifierProvider;
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../core/platform/fake_platform_services.dart';
@@ -51,6 +52,9 @@ Future<_MockApiClient> _mount(
         ...extraOverrides,
       ],
       child: MaterialApp.router(
+        theme: HeimdallmTheme.light(),
+        darkTheme: HeimdallmTheme.dark(),
+        builder: (context, child) => HeimdallmTheme.scope(child: child!),
         routerConfig: GoRouter(
           routes: [GoRoute(path: '/', builder: (_, _) => const ConfigScreen())],
         ),
@@ -64,8 +68,6 @@ Future<_MockApiClient> _mount(
 Future<void> _reveal(WidgetTester tester, Finder finder) async {
   final scrollable = find.byType(Scrollable).first;
   await tester.scrollUntilVisible(finder, 200, scrollable: scrollable);
-  await tester.pumpAndSettle();
-  await tester.drag(scrollable, const Offset(0, 120));
   await tester.pumpAndSettle();
 }
 
@@ -93,7 +95,10 @@ void main() {
     );
     await _reveal(tester, find.text('Role'));
 
-    await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+    final roleDropdown = find.byType(DropdownButtonFormField<String>).last;
+    await tester.ensureVisible(roleDropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(roleDropdown.hitTestable().last);
     await tester.pumpAndSettle();
     await tester.tap(find.text('hub').hitTestable().last);
     await tester.pumpAndSettle();
@@ -175,7 +180,10 @@ void main() {
       when(() => api.daemonPort).thenReturn(7842);
       await _reveal(tester, find.text('Restart server'));
 
-      await tester.tap(find.text('Restart server'));
+      final restart = find.text('Restart server');
+      await tester.ensureVisible(restart);
+      await tester.pumpAndSettle();
+      await tester.tap(restart.hitTestable());
       await tester.pump();
       await tester.pump(const Duration(seconds: 3));
       await tester.pumpAndSettle();
@@ -208,7 +216,10 @@ void main() {
       );
       await _reveal(tester, find.text('Role'));
 
-      await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+      final roleDropdown = find.byType(DropdownButtonFormField<String>).last;
+      await tester.ensureVisible(roleDropdown);
+      await tester.pumpAndSettle();
+      await tester.tap(roleDropdown.hitTestable().last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('standalone').hitTestable().last);
       await tester.pumpAndSettle();
@@ -258,12 +269,15 @@ void main() {
       );
       await _reveal(tester, find.text('Role'));
 
-      await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+      final roleDropdown = find.byType(DropdownButtonFormField<String>).last;
+      await tester.ensureVisible(roleDropdown);
+      await tester.pumpAndSettle();
+      await tester.tap(roleDropdown.hitTestable().last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('standalone').hitTestable().last);
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Change role'));
+      await tester.tap(find.text('Change role').hitTestable());
       await tester.pumpAndSettle();
 
       final save = find.widgetWithText(ElevatedButton, 'Save');

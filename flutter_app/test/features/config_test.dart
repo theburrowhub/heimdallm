@@ -7,6 +7,7 @@ import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/models.dart' show ClusterRole;
 import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
+import 'package:heimdallm/core/state/appearance_preferences.dart';
 import 'package:heimdallm/core/setup/first_run_setup.dart';
 import 'package:heimdallm/features/config/config_providers.dart'
     show
@@ -17,6 +18,8 @@ import 'package:heimdallm/features/config/config_providers.dart'
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/repositories/repo_diff.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/platform/fake_platform_services.dart';
 
 // Expose _computeGlobalDiff for testing via the public save path.
@@ -36,9 +39,30 @@ class ThrowingPlatformServices extends FakePlatformServices {
   }
 }
 
+Widget _configTestApp() {
+  final router = GoRouter(
+    routes: [
+      GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
+    ],
+  );
+  return Consumer(
+    builder: (context, ref, _) => MaterialApp.router(
+      theme: HeimdallmTheme.light(),
+      darkTheme: HeimdallmTheme.dark(),
+      themeMode: ref.watch(appearanceProvider),
+      builder: (context, child) => HeimdallmTheme.scope(child: child!),
+      routerConfig: router,
+    ),
+  );
+}
+
 void main() {
   setUpAll(() {
     registerFallbackValue(<String, dynamic>{});
+  });
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
   });
 
   test(
@@ -79,13 +103,7 @@ void main() {
           configNotifierProvider.overrideWith(ConfigNotifier.new),
           platformServicesProvider.overrideWithValue(FakePlatformServices()),
         ],
-        child: MaterialApp.router(
-          routerConfig: GoRouter(
-            routes: [
-              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
-            ],
-          ),
-        ),
+        child: _configTestApp(),
       ),
     );
     await tester.pumpAndSettle();
@@ -122,13 +140,7 @@ void main() {
           configNotifierProvider.overrideWith(ConfigNotifier.new),
           platformServicesProvider.overrideWithValue(FakePlatformServices()),
         ],
-        child: MaterialApp.router(
-          routerConfig: GoRouter(
-            routes: [
-              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
-            ],
-          ),
-        ),
+        child: _configTestApp(),
       ),
     );
     await tester.pumpAndSettle();
@@ -170,13 +182,7 @@ void main() {
           configNotifierProvider.overrideWith(ConfigNotifier.new),
           platformServicesProvider.overrideWithValue(FakePlatformServices()),
         ],
-        child: MaterialApp.router(
-          routerConfig: GoRouter(
-            routes: [
-              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
-            ],
-          ),
-        ),
+        child: _configTestApp(),
       ),
     );
     await tester.pumpAndSettle();
@@ -213,13 +219,7 @@ void main() {
           configNotifierProvider.overrideWith(ConfigNotifier.new),
           platformServicesProvider.overrideWithValue(FakePlatformServices()),
         ],
-        child: MaterialApp.router(
-          routerConfig: GoRouter(
-            routes: [
-              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
-            ],
-          ),
-        ),
+        child: _configTestApp(),
       ),
     );
     await tester.pumpAndSettle();
@@ -245,6 +245,139 @@ void main() {
     await tester.enterText(pollField, '90m');
     await tester.pumpAndSettle();
     expect(tester.widget<FilledButton>(saveButton).onPressed, isNotNull);
+  });
+
+  testWidgets('editing survives a theme change', (tester) async {
+    const config = AppConfig(
+      pollInterval: '5m',
+      aiPrimary: 'claude',
+      repoConfigs: {'org/repo': RepoConfig(prEnabled: true)},
+    );
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
+    when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
+    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        configNotifierProvider.overrideWith(ConfigNotifier.new),
+        platformServicesProvider.overrideWithValue(FakePlatformServices()),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _configTestApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final pollField = find.ancestor(
+      of: find.text('Poll interval'),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(pollField, '90m');
+    await tester.pumpAndSettle();
+
+    container.read(appearanceProvider.notifier).set(ThemeMode.dark);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<TextField>(pollField).controller?.text, '90m');
+    expect(find.widgetWithText(ElevatedButton, 'Save'), findsOneWidget);
+  });
+
+  testWidgets('editing survives a width change', (tester) async {
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(1400, 900));
+
+    const config = AppConfig(
+      pollInterval: '5m',
+      aiPrimary: 'claude',
+      repoConfigs: {'org/repo': RepoConfig(prEnabled: true)},
+    );
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
+    when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
+    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        configNotifierProvider.overrideWith(ConfigNotifier.new),
+        platformServicesProvider.overrideWithValue(FakePlatformServices()),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _configTestApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final pollField = find.ancestor(
+      of: find.text('Poll interval'),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(pollField, '2h');
+    await tester.pumpAndSettle();
+
+    await tester.binding.setSurfaceSize(const Size(700, 900));
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<TextField>(pollField).controller?.text, '2h');
+    expect(find.byKey(const Key('config-scroll-view')), findsOneWidget);
+  });
+
+  testWidgets('save error is surfaced clearly without losing the draft', (
+    tester,
+  ) async {
+    const config = AppConfig(
+      pollInterval: '5m',
+      aiPrimary: 'claude',
+      repoConfigs: {'org/repo': RepoConfig(prEnabled: true)},
+    );
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
+    when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
+    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(() => mockApi.patchConfig(any())).thenThrow(Exception('save failed'));
+
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        configNotifierProvider.overrideWith(ConfigNotifier.new),
+        platformServicesProvider.overrideWithValue(FakePlatformServices()),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _configTestApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final pollField = find.ancestor(
+      of: find.text('Poll interval'),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(pollField, '15m');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Save'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Could not save settings:'), findsOneWidget);
+    expect(find.textContaining('save failed'), findsWidgets);
+    expect(tester.widget<TextField>(pollField).controller?.text, '15m');
   });
 
   group('validatePollInterval', () {
@@ -549,13 +682,7 @@ void main() {
           configNotifierProvider.overrideWith(ConfigNotifier.new),
           platformServicesProvider.overrideWithValue(FakePlatformServices()),
         ],
-        child: MaterialApp.router(
-          routerConfig: GoRouter(
-            routes: [
-              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
-            ],
-          ),
-        ),
+        child: _configTestApp(),
       ),
     );
     await tester.pumpAndSettle();
