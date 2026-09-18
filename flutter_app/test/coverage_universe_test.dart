@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/features/issues/issues_screen.dart';
+import 'package:heimdallm/shared/design_system/components/components.dart';
 
 // Flutter only adds libraries reachable from a test entrypoint to its LCOV
 // report. Keep a direct import and a minimal reference here for each production
@@ -14,5 +15,14 @@ void main() {
     // only reached from widget callbacks, which coverage does not walk into.
     expect(prDetailRoute(1, ''), '/prs/1');
     expect(issueDetailRoute(2, 'srv-a'), contains('instance=srv-a'));
+  });
+
+  test('design-system components barrel re-exports its widgets', () {
+    expect(designSystemComponentTypes(), [
+      AppBadge,
+      AppButton,
+      AppSurface,
+      AppText,
+    ]);
   });
 }

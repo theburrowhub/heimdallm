@@ -667,6 +667,40 @@ void main() {
     expect(find.text('Issue detail 9'), findsOneWidget);
   });
 
+  testWidgets('an issue with a reviewed linked PR shows its review state', (
+    tester,
+  ) async {
+    await _pumpDashboard(
+      tester,
+      registry: _registry(),
+      prs: singleInstanceResult(const <PR>[]),
+      issues: AggregatedResult<TrackedIssue>(
+        items: [
+          InstanceScoped(
+            instanceId: 'srv-a',
+            instanceName: 'Server A',
+            value: _issue(
+              10,
+              'acme/tools',
+              13,
+              'Issue with a linked PR',
+              linkedPR: const TrackedIssueLinkedPR(
+                number: 14,
+                url: 'https://github.com/acme/tools/pull/14',
+                state: 'open',
+                externalReviewState: 'APPROVED',
+                externalReviewer: 'bob',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(find.text('Issue with a linked PR'), findsOneWidget);
+    expect(find.byType(PRReviewStateBadge), findsOneWidget);
+  });
+
   testWidgets('undoing a dismissed issue un-dismisses it on every instance', (
     tester,
   ) async {
