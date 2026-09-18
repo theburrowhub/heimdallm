@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/config_model.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
@@ -47,7 +49,9 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   }
 
   void _markDirty() {
-    if (_saved) setState(() => _saved = false);
+    if (_saved) {
+      setState(() => _saved = false);
+    }
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 800), _autoSave);
   }
@@ -59,21 +63,27 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   }
 
   Future<void> _save(AppConfig current) async {
-    if (mounted) setState(() { _saving = true; _saved = false; });
+    if (mounted) {
+      setState(() {
+        _saving = true;
+        _saved = false;
+      });
+    }
     final agentConfigs = <String, CLIAgentConfig>{
-      for (final name in _cliNames)
-        name: _agents[name]!.toConfig(),
+      for (final name in _cliNames) name: _agents[name]!.toConfig(),
     };
-    final updated = current.copyWith(
-      agentConfigs: agentConfigs,
-    );
+    final updated = current.copyWith(agentConfigs: agentConfigs);
     try {
       await ref.read(configNotifierProvider.notifier).save(updated);
       if (!mounted) return;
-      setState(() { _saved = true; _saving = false; });
+      setState(() {
+        _saved = true;
+        _saving = false;
+      });
       _savedResetTimer?.cancel();
-      _savedResetTimer = Timer(const Duration(seconds: 3),
-          () { if (mounted) setState(() => _saved = false); });
+      _savedResetTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _saved = false);
+      });
     } catch (e) {
       if (mounted) {
         setState(() => _saving = false);
@@ -89,7 +99,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
 
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (_, _) => const Center(child: Text('Could not load config')),
+      error: (_, _) => const Center(child: AppText('Could not load config')),
       data: (config) {
         _initFrom(config);
         return Column(
@@ -100,33 +110,87 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                 children: [
                   // ── Per-agent sections ───────────────────────────────────
                   for (final name in _cliNames) ...[
-                    const SizedBox(height: 16),
                     _AgentSection(
                       key: ValueKey('agent-section-$name'),
                       name: name,
                       state: _agents[name]!,
                       prompts: prompts,
-                      onChanged: (s) { setState(() => _agents[name] = s); _markDirty(); },
+                      onChanged: (s) {
+                        setState(() => _agents[name] = s);
+                        _markDirty();
+                      },
                     ),
-                    const Divider(),
+                    const SizedBox(height: 12),
                   ],
                 ],
               ),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              child: SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  style: _saved
-                      ? FilledButton.styleFrom(backgroundColor: Colors.green.shade700)
-                      : null,
-                  icon: _saving
-                      ? const SizedBox(width: 16, height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                      : Icon(_saved ? Icons.check : Icons.save_outlined, size: 18),
-                  label: Text(_saving ? 'Saving…' : (_saved ? 'Saved' : 'Save')),
-                  onPressed: _saving ? null : () => _save(config),
+              child: AppSurface(
+                elevation: AppSurfaceElevation.canvas,
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    if (_saving)
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    else
+                      AppBadge(
+                        label: _saved ? 'Saved' : 'Ready',
+                        foreground: _saved
+                            ? AppColors.success.resolve(context)
+                            : AppColors.textMuted.resolve(context),
+                        background: _saved
+                            ? AppColors.success
+                                  .resolve(context)
+                                  .withValues(alpha: 0.14)
+                            : AppColors.surfaceRaised.resolve(context),
+                        border: _saved
+                            ? AppColors.success
+                                  .resolve(context)
+                                  .withValues(alpha: 0.35)
+                            : AppColors.border.resolve(context),
+                      ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: AppText.muted(
+                        _saving
+                            ? 'Saving agent settings…'
+                            : _saved
+                            ? 'Saved'
+                            : 'Changes auto-save after edits.',
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    FilledButton.icon(
+                      style: _saved
+                          ? FilledButton.styleFrom(
+                              backgroundColor: Colors.green.shade700,
+                            )
+                          : null,
+                      icon: _saving
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : Icon(
+                              _saved ? Icons.check : Icons.save_outlined,
+                              size: 18,
+                            ),
+                      label: Text(
+                        _saving ? 'Saving…' : (_saved ? 'Saved' : 'Save'),
+                      ),
+                      onPressed: _saving ? null : () => _save(config),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -135,7 +199,6 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
       },
     );
   }
-
 }
 
 // ── Per-agent editable state ────────────────────────────────────────────────
@@ -157,37 +220,36 @@ class _AgentState {
 
   _AgentState();
 
-  _AgentState.from(
-    CLIAgentConfig ac, {
-    required List<String> modelOptions,
-  }) {
-    model               = ac.model;
+  _AgentState.from(CLIAgentConfig ac, {required List<String> modelOptions}) {
+    model = ac.model;
     unlistedModel = model.isNotEmpty && !modelOptions.contains(model)
         ? model
         : null;
-    maxTurns            = ac.maxTurns;
-    approvalMode        = ac.approvalMode;
-    extraFlags          = ac.extraFlags;
-    promptId            = ac.promptId;
-    effort              = ac.effort;
-    permissionMode      = ac.permissionMode;
-    bare                = ac.bare;
+    maxTurns = ac.maxTurns;
+    approvalMode = ac.approvalMode;
+    extraFlags = ac.extraFlags;
+    promptId = ac.promptId;
+    effort = ac.effort;
+    permissionMode = ac.permissionMode;
+    bare = ac.bare;
     dangerouslySkipPerms = ac.dangerouslySkipPerms;
     noSessionPersistence = ac.noSessionPersistence;
   }
 
   CLIAgentConfig toConfig() => CLIAgentConfig(
-    model:                model,
-    maxTurns:             maxTurns,
-    approvalMode:         approvalMode,
-    extraFlags:           extraFlags,
-    promptId:             promptId,
-    effort:               effort,
-    permissionMode:       permissionMode,
-    bare:                 bare,
+    model: model,
+    maxTurns: maxTurns,
+    approvalMode: approvalMode,
+    extraFlags: extraFlags,
+    promptId: promptId,
+    effort: effort,
+    permissionMode: permissionMode,
+    bare: bare,
     dangerouslySkipPerms: dangerouslySkipPerms,
     noSessionPersistence: noSessionPersistence,
   );
+
+  bool get hasOverrides => toConfig().hasConfig;
 }
 
 // ── Agent section card ──────────────────────────────────────────────────────
@@ -211,9 +273,10 @@ class _AgentSection extends StatefulWidget {
 }
 
 class _AgentSectionState extends State<_AgentSection> {
-  late List<String> _flags; // each element = one flag entry (may contain spaces)
+  late List<String>
+  _flags; // each element = one flag entry (may contain spaces)
   final _newFlagCtrl = TextEditingController();
-  int? _editingIndex;       // index of chip being edited (null = none)
+  int? _editingIndex; // index of chip being edited (null = none)
   final _editCtrl = TextEditingController();
 
   @override
@@ -281,171 +344,230 @@ class _AgentSectionState extends State<_AgentSection> {
 
   @override
   Widget build(BuildContext context) {
-    final name   = widget.name;
-    final s      = widget.state;
+    final name = widget.name;
+    final s = widget.state;
     final models = CLIAgentConfig.modelOptions[name] ?? [];
     final preservedUnlistedModel = s.unlistedModel;
-    final unlistedModel = preservedUnlistedModel != null &&
+    final unlistedModel =
+        preservedUnlistedModel != null &&
             !models.contains(preservedUnlistedModel)
         ? preservedUnlistedModel
         : null;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Header
-        Row(children: [
-          Text(_cliEmoji(name), style: const TextStyle(fontSize: 20)),
-          const SizedBox(width: 8),
-          Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-        ]),
-        const SizedBox(height: 12),
-
-        // Row 1: Model + CLI-specific field
-        Row(children: [
-          Expanded(child: DropdownButtonFormField<String>(
-            key: ValueKey('model-$name'),
-            // ignore: deprecated_member_use
-            value: s.model.isEmpty ? null : s.model,
-            decoration: const InputDecoration(labelText: 'Model', border: OutlineInputBorder()),
-            items: [
-              const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
-              if (unlistedModel != null)
-                DropdownMenuItem(
-                  value: unlistedModel,
-                  child: Text('$unlistedModel (not listed)'),
-                ),
-              ...models.map((m) => DropdownMenuItem(value: m, child: Text(m))),
+    final accent = _cliColor(context, name);
+    return AppSurface(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(_cliEmoji(name), style: const TextStyle(fontSize: 20)),
+              const SizedBox(width: 8),
+              AppText.sectionTitle(name),
+              const SizedBox(width: 8),
+              AppBadge(
+                label: s.hasOverrides ? 'Configured' : 'CLI default',
+                foreground: accent,
+                background: accent.withValues(alpha: 0.14),
+                border: accent.withValues(alpha: 0.35),
+              ),
             ],
-            onChanged: (v) { setState(() => s.model = v ?? ''); widget.onChanged(s); },
-          )),
-          if (name == 'claude') ...[
-            const SizedBox(width: 12),
-            SizedBox(
-              width: 140,
-              child: TextFormField(
-                initialValue: s.maxTurns > 0 ? '${s.maxTurns}' : '',
-                decoration: const InputDecoration(
-                    labelText: '--max-turns', hintText: 'default',
-                    border: OutlineInputBorder()),
-                keyboardType: TextInputType.number,
-                onChanged: (v) { setState(() => s.maxTurns = int.tryParse(v) ?? 0); widget.onChanged(s); },
-              ),
-            ),
-          ],
-          if (name == 'codex') ...[
-            const SizedBox(width: 12),
-            SizedBox(
-              width: 190,
-              child: DropdownButtonFormField<String>(
-                // ignore: deprecated_member_use
-                value: s.approvalMode.isEmpty ? null : s.approvalMode,
-                decoration: const InputDecoration(
-                    labelText: '--ask-for-approval', border: OutlineInputBorder()),
-                items: [
-                  const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
-                  ...CLIAgentConfig.approvalModeOptions.map(
-                      (v) => DropdownMenuItem(value: v, child: Text(v))),
-                ],
-                onChanged: (v) { setState(() => s.approvalMode = v ?? ''); widget.onChanged(s); },
-              ),
-            ),
-          ],
-        ]),
-        const SizedBox(height: 10),
-
-        // Row 2: Default prompt (full width)
-        _promptDropdown(s),
-        const SizedBox(height: 12),
-
-        // Row 3: Claude-specific execution options
-        if (name == 'claude') ...[
-          _claudeOptions(s),
+          ),
           const SizedBox(height: 12),
-        ],
 
-        // Row 4: Execution flags — chip list
-        Text('Execution flags',
-            style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-        const SizedBox(height: 8),
-
-        // Chip list
-        if (_flags.isNotEmpty)
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: List.generate(_flags.length, (idx) {
-              if (_editingIndex == idx) {
-                // Inline edit
-                return SizedBox(
-                  width: 260,
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: _editCtrl,
-                        autofocus: true,
-                        decoration: const InputDecoration(
-                            border: OutlineInputBorder(), isDense: true,
-                            contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 6)),
-                        onFieldSubmitted: (_) => _confirmEdit(),
+          Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  key: ValueKey('model-$name'),
+                  // ignore: deprecated_member_use
+                  value: s.model.isEmpty ? null : s.model,
+                  decoration: const InputDecoration(
+                    labelText: 'Model',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    const DropdownMenuItem<String>(
+                      value: null,
+                      child: Text('CLI default'),
+                    ),
+                    if (unlistedModel != null)
+                      DropdownMenuItem(
+                        value: unlistedModel,
+                        child: Text('$unlistedModel (not listed)'),
                       ),
+                    ...models.map(
+                      (m) => DropdownMenuItem(value: m, child: Text(m)),
                     ),
-                    const SizedBox(width: 4),
-                    IconButton(
-                      icon: const Icon(Icons.check, size: 16),
-                      onPressed: _confirmEdit,
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close, size: 16),
-                      onPressed: _cancelEdit,
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                    ),
-                  ]),
-                );
-              }
-              return InputChip(
-                label: Text(_flags[idx],
-                    style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
-                deleteIcon: const Icon(Icons.close, size: 14),
-                onDeleted: () => _removeFlag(idx),
-                onPressed: () => _startEdit(idx),
-                labelPadding: const EdgeInsets.symmetric(horizontal: 4),
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                tooltip: 'Tap to edit',
-              );
-            }),
-          ),
-
-        if (_flags.isNotEmpty) const SizedBox(height: 8),
-
-        // Add new flag
-        Row(children: [
-          Expanded(
-            child: TextFormField(
-              controller: _newFlagCtrl,
-              decoration: InputDecoration(
-                hintText: _extraFlagsHint(name),
-                border: const OutlineInputBorder(),
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  ],
+                  onChanged: (v) {
+                    setState(() => s.model = v ?? '');
+                    widget.onChanged(s);
+                  },
+                ),
               ),
-              onFieldSubmitted: (_) => _addFlag(),
+              if (name == 'claude') ...[
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 140,
+                  child: TextFormField(
+                    initialValue: s.maxTurns > 0 ? '${s.maxTurns}' : '',
+                    decoration: const InputDecoration(
+                      labelText: '--max-turns',
+                      hintText: 'default',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) {
+                      setState(() => s.maxTurns = int.tryParse(v) ?? 0);
+                      widget.onChanged(s);
+                    },
+                  ),
+                ),
+              ],
+              if (name == 'codex') ...[
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 190,
+                  child: DropdownButtonFormField<String>(
+                    // ignore: deprecated_member_use
+                    value: s.approvalMode.isEmpty ? null : s.approvalMode,
+                    decoration: const InputDecoration(
+                      labelText: '--ask-for-approval',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: [
+                      const DropdownMenuItem<String>(
+                        value: null,
+                        child: Text('CLI default'),
+                      ),
+                      ...CLIAgentConfig.approvalModeOptions.map(
+                        (v) => DropdownMenuItem(value: v, child: Text(v)),
+                      ),
+                    ],
+                    onChanged: (v) {
+                      setState(() => s.approvalMode = v ?? '');
+                      widget.onChanged(s);
+                    },
+                  ),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 10),
+
+          _promptDropdown(s),
+          const SizedBox(height: 12),
+
+          if (name == 'claude') ...[
+            AppSurface(
+              elevation: AppSurfaceElevation.canvas,
+              padding: const EdgeInsets.all(12),
+              child: _claudeOptions(s),
             ),
+            const SizedBox(height: 12),
+          ],
+
+          AppText.label(
+            'Execution flags',
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
-          const SizedBox(width: 8),
-          FilledButton.tonal(
-            onPressed: _addFlag,
-            style: FilledButton.styleFrom(
-                minimumSize: const Size(0, 40),
-                padding: const EdgeInsets.symmetric(horizontal: 16)),
-            child: const Text('Add'),
+          const SizedBox(height: 8),
+
+          if (_flags.isNotEmpty)
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: List.generate(_flags.length, (idx) {
+                if (_editingIndex == idx) {
+                  return SizedBox(
+                    width: 260,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            controller: _editCtrl,
+                            autofocus: true,
+                            decoration: const InputDecoration(
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 6,
+                              ),
+                            ),
+                            onFieldSubmitted: (_) => _confirmEdit(),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        IconButton(
+                          icon: const Icon(Icons.check, size: 16),
+                          onPressed: _confirmEdit,
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 16),
+                          onPressed: _cancelEdit,
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                return InputChip(
+                  label: Text(
+                    _flags[idx],
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                  deleteIcon: const Icon(Icons.close, size: 14),
+                  onDeleted: () => _removeFlag(idx),
+                  onPressed: () => _startEdit(idx),
+                  labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  tooltip: 'Tap to edit',
+                );
+              }),
+            )
+          else
+            AppSurface(
+              elevation: AppSurfaceElevation.canvas,
+              padding: const EdgeInsets.all(12),
+              child: const AppText.muted('No extra execution flags'),
+            ),
+
+          if (_flags.isNotEmpty) const SizedBox(height: 8),
+
+          Row(
+            children: [
+              Expanded(
+                child: TextFormField(
+                  controller: _newFlagCtrl,
+                  decoration: InputDecoration(
+                    hintText: _extraFlagsHint(name),
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                  ),
+                  onFieldSubmitted: (_) => _addFlag(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              AppButton.secondary(label: 'Add', onPressed: _addFlag),
+            ],
           ),
-        ]),
-        const SizedBox(height: 8),
-      ],
+          const SizedBox(height: 8),
+        ],
+      ),
     );
   }
 
@@ -454,36 +576,58 @@ class _AgentSectionState extends State<_AgentSection> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Dropdowns: effort + permission-mode
-        Row(children: [
-          Expanded(child: _tipDropdown<String>(
-            label: '--effort',
-            value: s.effort.isEmpty ? null : s.effort,
-            tooltip: 'How much compute Claude uses.\n'
-                'low = quick scan · medium = balanced · high = thorough · max = exhaustive.\n'
-                'Higher effort improves quality but increases cost and latency.',
-            items: [
-              const DropdownMenuItem<String>(value: null, child: Text('Not set (CLI default)')),
-              ...CLIAgentConfig.effortOptions.map(
-                  (v) => DropdownMenuItem(value: v, child: Text(v))),
-            ],
-            onChanged: (v) { setState(() => s.effort = v ?? ''); widget.onChanged(s); },
-          )),
-          const SizedBox(width: 12),
-          Expanded(child: _tipDropdown<String>(
-            label: '--permission-mode',
-            value: s.permissionMode.isEmpty ? null : s.permissionMode,
-            tooltip: 'Controls how Claude handles tool permissions.\n'
-                'default: standard prompts · auto: minimal prompts · '
-                'bypassPermissions: no prompts (use with local dir) · '
-                'acceptEdits: auto-accept file edits · dontAsk: never ask.',
-            items: [
-              const DropdownMenuItem<String>(value: null, child: Text('Not set (CLI default)')),
-              ...CLIAgentConfig.permissionModeOptions.map(
-                  (v) => DropdownMenuItem(value: v, child: Text(v))),
-            ],
-            onChanged: (v) { setState(() => s.permissionMode = v ?? ''); widget.onChanged(s); },
-          )),
-        ]),
+        Row(
+          children: [
+            Expanded(
+              child: _tipDropdown<String>(
+                label: '--effort',
+                value: s.effort.isEmpty ? null : s.effort,
+                tooltip:
+                    'How much compute Claude uses.\n'
+                    'low = quick scan · medium = balanced · high = thorough · max = exhaustive.\n'
+                    'Higher effort improves quality but increases cost and latency.',
+                items: [
+                  const DropdownMenuItem<String>(
+                    value: null,
+                    child: Text('Not set (CLI default)'),
+                  ),
+                  ...CLIAgentConfig.effortOptions.map(
+                    (v) => DropdownMenuItem(value: v, child: Text(v)),
+                  ),
+                ],
+                onChanged: (v) {
+                  setState(() => s.effort = v ?? '');
+                  widget.onChanged(s);
+                },
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _tipDropdown<String>(
+                label: '--permission-mode',
+                value: s.permissionMode.isEmpty ? null : s.permissionMode,
+                tooltip:
+                    'Controls how Claude handles tool permissions.\n'
+                    'default: standard prompts · auto: minimal prompts · '
+                    'bypassPermissions: no prompts (use with local dir) · '
+                    'acceptEdits: auto-accept file edits · dontAsk: never ask.',
+                items: [
+                  const DropdownMenuItem<String>(
+                    value: null,
+                    child: Text('Not set (CLI default)'),
+                  ),
+                  ...CLIAgentConfig.permissionModeOptions.map(
+                    (v) => DropdownMenuItem(value: v, child: Text(v)),
+                  ),
+                ],
+                onChanged: (v) {
+                  setState(() => s.permissionMode = v ?? '');
+                  widget.onChanged(s);
+                },
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 10),
 
         // Toggles
@@ -494,23 +638,34 @@ class _AgentSectionState extends State<_AgentSection> {
             _tipToggle(
               label: '--bare',
               value: s.bare,
-              tooltip: 'Minimal mode: disables auto-memory, hooks, LSP, plugins '
+              tooltip:
+                  'Minimal mode: disables auto-memory, hooks, LSP, plugins '
                   'and CLAUDE.md discovery.\nFaster and more predictable for automated reviews.',
-              onChanged: (v) { setState(() => s.bare = v); widget.onChanged(s); },
+              onChanged: (v) {
+                setState(() => s.bare = v);
+                widget.onChanged(s);
+              },
             ),
             _tipToggle(
               label: '--no-session-persistence',
               value: s.noSessionPersistence,
-              tooltip: 'Disables saving sessions to disk.\n'
+              tooltip:
+                  'Disables saving sessions to disk.\n'
                   'Keeps automated reviews clean and isolated — '
                   'prevents session accumulation over time.',
-              onChanged: (v) { setState(() => s.noSessionPersistence = v); widget.onChanged(s); },
+              onChanged: (v) {
+                setState(() => s.noSessionPersistence = v);
+                widget.onChanged(s);
+              },
             ),
             _tipToggle(
-              switchKey: ValueKey('dangerously-skip-permissions-${widget.name}'),
+              switchKey: ValueKey(
+                'dangerously-skip-permissions-${widget.name}',
+              ),
               label: '--dangerously-skip-permissions',
               value: s.dangerouslySkipPerms,
-              tooltip: '⚠️ Bypasses ALL permission checks.\n'
+              tooltip:
+                  '⚠️ Bypasses ALL permission checks.\n'
                   'This screen can only disable it. To enable it, edit '
                   'config.toml directly in a sandboxed or trusted environment.',
               onChanged: s.dangerouslySkipPerms
@@ -543,7 +698,11 @@ class _AgentSectionState extends State<_AgentSection> {
         decoration: InputDecoration(
           labelText: label,
           border: const OutlineInputBorder(),
-          suffixIcon: Icon(Icons.info_outline, size: 16, color: Colors.grey.shade500),
+          suffixIcon: Icon(
+            Icons.info_outline,
+            size: 16,
+            color: Colors.grey.shade500,
+          ),
         ),
         items: items,
         onChanged: onChanged,
@@ -562,28 +721,31 @@ class _AgentSectionState extends State<_AgentSection> {
     return Tooltip(
       message: tooltip,
       waitDuration: const Duration(milliseconds: 600),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Switch(
-          key: switchKey,
-          value: value,
-          onChanged: onChanged,
-          // ignore: deprecated_member_use
-          activeColor: danger ? Colors.orange.shade700 : null,
-        ),
-        const SizedBox(width: 4),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 12,
-            fontFamily: 'monospace',
-            color: danger
-                ? (value ? Colors.orange.shade700 : Colors.grey.shade500)
-                : null,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Switch(
+            key: switchKey,
+            value: value,
+            onChanged: onChanged,
+            // ignore: deprecated_member_use
+            activeColor: danger ? Colors.orange.shade700 : null,
           ),
-        ),
-        const SizedBox(width: 4),
-        Icon(Icons.info_outline, size: 13, color: Colors.grey.shade500),
-      ]),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontFamily: 'monospace',
+              color: danger
+                  ? (value ? Colors.orange.shade700 : Colors.grey.shade500)
+                  : null,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Icon(Icons.info_outline, size: 13, color: Colors.grey.shade500),
+        ],
+      ),
     );
   }
 
@@ -597,31 +759,60 @@ class _AgentSectionState extends State<_AgentSection> {
         border: OutlineInputBorder(),
       ),
       items: [
-        const DropdownMenuItem<String?>(value: null, child: Text('Global active')),
-        ...widget.prompts.map((p) => DropdownMenuItem<String?>(
-          value: p.id as String,
-          child: Text(p.name as String),
-        )),
+        const DropdownMenuItem<String?>(
+          value: null,
+          child: Text('Global active'),
+        ),
+        ...widget.prompts.map(
+          (p) => DropdownMenuItem<String?>(
+            value: p.id as String,
+            child: Text(p.name as String),
+          ),
+        ),
       ],
-      onChanged: (v) { setState(() => s.promptId = v); widget.onChanged(s); },
+      onChanged: (v) {
+        setState(() => s.promptId = v);
+        widget.onChanged(s);
+      },
     );
   }
 
   String _cliEmoji(String name) {
     switch (name) {
-      case 'claude': return '🔷';
-      case 'gemini': return '🟡';
-      case 'codex':  return '🟢';
-      default:       return '🤖';
+      case 'claude':
+        return '🔷';
+      case 'gemini':
+        return '🟡';
+      case 'codex':
+        return '🟢';
+      default:
+        return '🤖';
     }
   }
 
   String _extraFlagsHint(String name) {
     switch (name) {
-      case 'claude': return '--allowedTools Bash,Read';
-      case 'gemini': return '--all-files';
-      case 'codex':  return '--sandbox workspace-write';
-      default:       return '--flag value';
+      case 'claude':
+        return '--allowedTools Bash,Read';
+      case 'gemini':
+        return '--all-files';
+      case 'codex':
+        return '--sandbox workspace-write';
+      default:
+        return '--flag value';
     }
+  }
+}
+
+Color _cliColor(BuildContext context, String name) {
+  switch (name) {
+    case 'claude':
+      return AppColors.accent.resolve(context);
+    case 'gemini':
+      return AppColors.warning.resolve(context);
+    case 'codex':
+      return AppColors.success.resolve(context);
+    default:
+      return AppColors.textMuted.resolve(context);
   }
 }

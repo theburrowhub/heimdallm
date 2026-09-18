@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mix/mix.dart';
 import '../../core/models/agent.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/keep_alive_tab.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -24,7 +27,8 @@ class AgentsScreen extends ConsumerWidget {
 
     return promptsAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => Center(child: Text('Error: $e')),
+      error: (e, _) =>
+          Center(child: AppText('Error: $e', textAlign: TextAlign.center)),
       data: (prompts) => _PromptsView(prompts: prompts),
     );
   }
@@ -131,11 +135,15 @@ class _CategoryTab extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final filtered = prompts.where((p) => switch (category) {
-          PromptCategory.prReview => p.hasPRReview,
-          PromptCategory.issueTriage => p.hasIssueTriage,
-          PromptCategory.development => p.hasDevelopment,
-        }).toList();
+    final filtered = prompts
+        .where(
+          (p) => switch (category) {
+            PromptCategory.prReview => p.hasPRReview,
+            PromptCategory.issueTriage => p.hasIssueTriage,
+            PromptCategory.development => p.hasDevelopment,
+          },
+        )
+        .toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -149,12 +157,14 @@ class _CategoryTab extends ConsumerWidget {
           ),
         ),
         SizedBox(
-          height: 130,
+          height: 148,
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
             children: presets.map((preset) {
-              final stored = prompts.where((p) => p.id == preset.id).firstOrNull;
+              final stored = prompts
+                  .where((p) => p.id == preset.id)
+                  .firstOrNull;
               final alreadyActive = stored?.isDefaultFor(category) ?? false;
               return _PresetCard(
                 preset: preset,
@@ -183,9 +193,11 @@ class _CategoryTab extends ConsumerWidget {
                   prompt: filtered[i],
                   subtitleOverride: subtitle,
                   category: category,
-                  onEdit: () => _openEditor(context, ref, filtered[i], category),
+                  onEdit: () =>
+                      _openEditor(context, ref, filtered[i], category),
                   onDelete: () => _delete(context, ref, filtered[i]),
-                  onActivate: () => _setDefault(context, ref, filtered[i], category),
+                  onActivate: () =>
+                      _setDefault(context, ref, filtered[i], category),
                 );
               },
             ),
@@ -193,7 +205,17 @@ class _CategoryTab extends ConsumerWidget {
         ] else
           Expanded(
             child: Center(
-              child: Text(emptyMessage, style: const TextStyle(color: Colors.grey)),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: AppSurface(
+                  elevation: AppSurfaceElevation.canvas,
+                  padding: const EdgeInsets.all(16),
+                  child: AppText.muted(
+                    emptyMessage,
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
             ),
           ),
       ],
@@ -218,7 +240,11 @@ class _CategoryTab extends ConsumerWidget {
 
 // ── Shared actions ───────────────────────────────────────────────────────────
 
-Future<void> _addPreset(BuildContext context, WidgetRef ref, PresetDef preset) async {
+Future<void> _addPreset(
+  BuildContext context,
+  WidgetRef ref,
+  PresetDef preset,
+) async {
   final p = ReviewPrompt.fromPreset(preset);
   try {
     await ref.read(apiClientProvider).upsertAgent(p.toJson());
@@ -243,8 +269,10 @@ Future<void> _setDefault(
         .upsertAgent(p.withActive(category, true).toJson());
     ref.invalidate(agentsProvider);
     if (context.mounted) {
-      showToast(context,
-          '"${p.name}" is now active for ${_categoryName(category)}');
+      showToast(
+        context,
+        '"${p.name}" is now active for ${_categoryName(category)}',
+      );
     }
   } catch (e) {
     if (context.mounted) showToast(context, 'Error: $e', isError: true);
@@ -253,22 +281,56 @@ Future<void> _setDefault(
 
 String _categoryName(PromptCategory c) {
   switch (c) {
-    case PromptCategory.prReview: return 'PR Review';
-    case PromptCategory.issueTriage: return 'Issue Triage';
-    case PromptCategory.development: return 'Development';
+    case PromptCategory.prReview:
+      return 'PR Review';
+    case PromptCategory.issueTriage:
+      return 'Issue Triage';
+    case PromptCategory.development:
+      return 'Development';
   }
 }
 
-Future<void> _delete(BuildContext context, WidgetRef ref, ReviewPrompt p) async {
+Future<void> _delete(
+  BuildContext context,
+  WidgetRef ref,
+  ReviewPrompt p,
+) async {
   final ok = await showDialog<bool>(
     context: context,
-    builder: (_) => AlertDialog(
-      title: const Text('Remove prompt?'),
-      content: Text('Remove "${p.name}"?'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Remove')),
-      ],
+    builder: (_) => Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: AppSurface(
+          radius: AppRadius.lg,
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const AppText.sectionTitle('Remove prompt?'),
+              const SizedBox(height: 8),
+              AppText('Remove "${p.name}"?'),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  AppButton.secondary(
+                    label: 'Cancel',
+                    onPressed: () => Navigator.pop(context, false),
+                  ),
+                  const SizedBox(width: 8),
+                  AppButton.destructive(
+                    label: 'Remove',
+                    onPressed: () => Navigator.pop(context, true),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     ),
   );
   if (ok != true) return;
@@ -280,7 +342,12 @@ Future<void> _delete(BuildContext context, WidgetRef ref, ReviewPrompt p) async 
   }
 }
 
-Future<void> _openEditor(BuildContext context, WidgetRef ref, ReviewPrompt? existing, PromptCategory category) async {
+Future<void> _openEditor(
+  BuildContext context,
+  WidgetRef ref,
+  ReviewPrompt? existing,
+  PromptCategory category,
+) async {
   final saved = await showDialog<ReviewPrompt>(
     context: context,
     barrierDismissible: false,
@@ -300,9 +367,11 @@ Future<void> _openEditor(BuildContext context, WidgetRef ref, ReviewPrompt? exis
 
 class _PresetCard extends StatelessWidget {
   final PresetDef preset;
+
   /// True when an agent with this preset id exists in the store (regardless
   /// of activation status).
   final bool added;
+
   /// True when the stored agent is currently active for the *enclosing tab's*
   /// category — controls the footer text and whether onActivate is a no-op.
   final bool activeForCategory;
@@ -318,7 +387,18 @@ class _PresetCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final primary = Theme.of(context).colorScheme.primary;
+    final focusColor = _focusColor(context, preset.focus);
+    final activeColor = _categoryColor(context, _categoryForPreset(preset));
+    final borderColor = activeForCategory
+        ? activeColor.withValues(alpha: 0.65)
+        : added
+        ? AppColors.border.resolve(context)
+        : AppColors.border.resolve(context).withValues(alpha: 0.75);
+    final backgroundColor = activeForCategory
+        ? activeColor.withValues(alpha: 0.12)
+        : added
+        ? AppColors.surfaceRaised.resolve(context)
+        : AppColors.surface.resolve(context);
     final String footer;
     if (!added) {
       footer = 'Tap to add';
@@ -330,38 +410,62 @@ class _PresetCard extends StatelessWidget {
     return Container(
       width: 160,
       margin: const EdgeInsets.only(right: 10),
-      child: Card(
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: !added ? onAdd : (activeForCategory ? null : onActivate),
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(children: [
-                  Text(_focusEmoji(preset.focus), style: const TextStyle(fontSize: 18)),
+      child: Box(
+        style: BoxStyler()
+            .color(backgroundColor)
+            .borderRadiusAll(AppRadius.lg())
+            .borderAll(color: borderColor, width: 1),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: !added ? onAdd : (activeForCategory ? null : onActivate),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        _focusEmoji(preset.focus),
+                        style: const TextStyle(fontSize: 18),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: AppText.label(
+                          _focusLabel(preset.focus),
+                          color: focusColor,
+                        ),
+                      ),
+                      Icon(
+                        activeForCategory
+                            ? Icons.check_circle
+                            : added
+                            ? Icons.check_circle_outline
+                            : Icons.add_circle_outline,
+                        size: 16,
+                        color: activeForCategory
+                            ? activeColor
+                            : Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  AppText(
+                    preset.name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                   const Spacer(),
-                  if (activeForCategory)
-                    Icon(Icons.check_circle, size: 16, color: primary)
-                  else if (added)
-                    Icon(Icons.check_circle_outline, size: 16,
-                        color: Colors.grey.shade500)
-                  else
-                    Icon(Icons.add_circle_outline, size: 16, color: Colors.grey.shade500),
-                ]),
-                const SizedBox(height: 6),
-                Text(preset.name,
-                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-                    maxLines: 2, overflow: TextOverflow.ellipsis),
-                const Spacer(),
-                Text(footer,
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: activeForCategory ? primary : Colors.grey.shade500,
-                      fontWeight: activeForCategory ? FontWeight.w600 : FontWeight.normal,
-                    )),
-              ],
+                  AppText.label(
+                    footer,
+                    color: activeForCategory
+                        ? activeColor
+                        : Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -374,6 +478,7 @@ class _PresetCard extends StatelessWidget {
 
 class _PromptTile extends StatelessWidget {
   final ReviewPrompt prompt;
+
   /// The tab this tile is rendered under. Drives the ACTIVE badge and
   /// whether the Activate button is shown — each are category-scoped, so
   /// an agent active for PR review does NOT show ACTIVE on the Issue
@@ -393,42 +498,71 @@ class _PromptTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isActive = prompt.isDefaultFor(category);
-    return Card(
-      margin: const EdgeInsets.only(bottom: 6),
-      child: ListTile(
-        leading: Text(_focusEmoji(prompt.focus), style: const TextStyle(fontSize: 22)),
-        title: Row(children: [
-          Text(prompt.name, style: const TextStyle(fontWeight: FontWeight.w600)),
-          if (isActive) ...[
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.primary,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Text('ACTIVE',
-                  style: TextStyle(color: Colors.white, fontSize: 10,
-                      fontWeight: FontWeight.bold)),
-            ),
-          ],
-        ]),
-        subtitle: Text(
-          subtitleOverride ?? (prompt.instructions.isNotEmpty ? prompt.instructions : 'Custom template'),
-          maxLines: 1, overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 12),
-        ),
-        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (!isActive)
-            TextButton(onPressed: onActivate, child: const Text('Activate')),
-          IconButton(icon: const Icon(Icons.edit, size: 18), onPressed: onEdit),
-          IconButton(
-            icon: const Icon(Icons.delete, size: 18),
-            color: Colors.red.shade400,
-            onPressed: onDelete,
+    final focusColor = _focusColor(context, prompt.focus);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: AppSurface(
+        child: ListTile(
+          leading: Text(
+            _focusEmoji(prompt.focus),
+            style: const TextStyle(fontSize: 22),
           ),
-        ]),
-        onTap: onEdit,
+          title: Row(
+            children: [
+              Expanded(
+                child: StyledText(
+                  prompt.name,
+                  style: TextStyler()
+                      .style(AppTextStyles.body.mix())
+                      .fontWeight(FontWeight.w600)
+                      .maxLines(1)
+                      .overflow(TextOverflow.ellipsis),
+                ),
+              ),
+              const SizedBox(width: 8),
+              AppBadge(
+                label: isActive ? 'ACTIVE' : _focusLabel(prompt.focus),
+                foreground: isActive
+                    ? AppColors.onAccent.resolve(context)
+                    : focusColor,
+                background: isActive
+                    ? _categoryColor(context, category)
+                    : focusColor.withValues(alpha: 0.14),
+                border: isActive
+                    ? _categoryColor(context, category)
+                    : focusColor.withValues(alpha: 0.35),
+              ),
+            ],
+          ),
+          subtitle: AppText.muted(
+            subtitleOverride ??
+                (prompt.instructions.isNotEmpty
+                    ? prompt.instructions
+                    : 'Custom template'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!isActive)
+                TextButton(
+                  onPressed: onActivate,
+                  child: const Text('Activate'),
+                ),
+              IconButton(
+                icon: const Icon(Icons.edit, size: 18),
+                onPressed: onEdit,
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete, size: 18),
+                color: AppColors.danger.resolve(context),
+                onPressed: onDelete,
+              ),
+            ],
+          ),
+          onTap: onEdit,
+        ),
       ),
     );
   }
@@ -446,61 +580,108 @@ class _ActiveBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final primary = Theme.of(context).colorScheme.primary;
-    final outline = Theme.of(context).colorScheme.outline;
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.25),
-        border: Border.all(color: primary.withValues(alpha: 0.3)),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        children: [
-          Expanded(child: _bannerRow(PromptCategory.prReview, primary, outline)),
-          _divider(outline),
-          Expanded(child: _bannerRow(PromptCategory.issueTriage, primary, outline)),
-          _divider(outline),
-          Expanded(child: _bannerRow(PromptCategory.development, primary, outline)),
-        ],
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Box(
+        style: BoxStyler()
+            .color(
+              AppColors.accentMuted.resolve(context).withValues(alpha: 0.18),
+            )
+            .borderAll(
+              color: AppColors.accent.resolve(context).withValues(alpha: 0.25),
+              width: 1,
+            )
+            .borderRadiusAll(AppRadius.lg())
+            .padding(
+              EdgeInsetsGeometryMix.value(
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              ),
+            ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 720;
+            final children = [
+              _bannerRow(context, PromptCategory.prReview),
+              _bannerRow(context, PromptCategory.issueTriage),
+              _bannerRow(context, PromptCategory.development),
+            ];
+            if (compact) {
+              return Column(
+                children: [
+                  for (var i = 0; i < children.length; i++) ...[
+                    if (i > 0) _divider(context, Axis.horizontal),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: children[i],
+                    ),
+                  ],
+                ],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: children[0]),
+                _divider(context, Axis.vertical),
+                Expanded(child: children[1]),
+                _divider(context, Axis.vertical),
+                Expanded(child: children[2]),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
 
-  Widget _bannerRow(PromptCategory c, Color activeColor, Color mutedColor) {
+  Widget _bannerRow(BuildContext context, PromptCategory c) {
     final p = active[c];
     final name = p?.name ?? 'Built-in default';
     final emoji = p != null ? _focusEmoji(p.focus) : '⚙️';
-    return Row(children: [
-      Text(emoji, style: const TextStyle(fontSize: 16)),
-      const SizedBox(width: 8),
-      Expanded(child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(_categoryName(c),
-              style: TextStyle(fontSize: 10, color: mutedColor,
-                  fontWeight: FontWeight.w500, letterSpacing: 0.4)),
-          Text(name,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: p != null ? null : mutedColor,
+    final categoryColor = _categoryColor(context, c);
+    return Row(
+      children: [
+        Text(emoji, style: const TextStyle(fontSize: 16)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AppBadge(
+                label: _categoryName(c),
+                foreground: categoryColor,
+                background: categoryColor.withValues(alpha: 0.12),
+                border: categoryColor.withValues(alpha: 0.35),
               ),
-              maxLines: 1, overflow: TextOverflow.ellipsis),
-        ],
-      )),
-    ]);
+              const SizedBox(height: 6),
+              StyledText(
+                name,
+                style: TextStyler()
+                    .style(AppTextStyles.body.mix())
+                    .fontWeight(FontWeight.w600)
+                    .color(
+                      p != null
+                          ? AppColors.text.resolve(context)
+                          : AppColors.textMuted.resolve(context),
+                    )
+                    .maxLines(1)
+                    .overflow(TextOverflow.ellipsis),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
-  Widget _divider(Color color) => Container(
-        width: 1,
-        height: 28,
-        margin: const EdgeInsets.symmetric(horizontal: 10),
-        color: color.withValues(alpha: 0.3),
-      );
+  Widget _divider(BuildContext context, Axis axis) => Container(
+    width: axis == Axis.vertical ? 1 : double.infinity,
+    height: axis == Axis.vertical ? 36 : 1,
+    margin: axis == Axis.vertical
+        ? const EdgeInsets.symmetric(horizontal: 10)
+        : const EdgeInsets.symmetric(vertical: 2),
+    color: AppColors.border.resolve(context).withValues(alpha: 0.55),
+  );
 }
 
 class _SectionHeader extends StatelessWidget {
@@ -512,12 +693,13 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-      child: Row(children: [
-        Text(title, style: Theme.of(context).textTheme.titleSmall
-            ?.copyWith(fontWeight: FontWeight.bold)),
-        const Spacer(),
-        ?trailing,
-      ]),
+      child: Row(
+        children: [
+          AppText.sectionTitle(title),
+          const Spacer(),
+          trailing ?? const SizedBox.shrink(),
+        ],
+      ),
     );
   }
 }
@@ -604,13 +786,15 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
     String instrDescription,
     String templateDescription,
     List<String> placeholders,
-  }) _categoryFields() {
+  })
+  _categoryFields() {
     switch (widget.category) {
       case PromptCategory.issueTriage:
         return (
           instrCtrl: _issueInstrCtrl,
           templateCtrl: _issueTemplateCtrl,
-          instrHint: 'e.g. Categorise by severity, suggest labels, identify duplicates...',
+          instrHint:
+              'e.g. Categorise by severity, suggest labels, identify duplicates...',
           instrDescription:
               'Describe how issues should be triaged. Heimdallm will inject '
               'these instructions into the issue triage pipeline.',
@@ -622,7 +806,8 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
         return (
           instrCtrl: _implInstrCtrl,
           templateCtrl: _implTemplateCtrl,
-          instrHint: 'e.g. Follow TDD, write tests first, keep functions under 30 lines...',
+          instrHint:
+              'e.g. Follow TDD, write tests first, keep functions under 30 lines...',
           instrDescription:
               'Describe how code should be implemented. Heimdallm will inject '
               'these instructions into the development pipeline.',
@@ -634,7 +819,8 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
         return (
           instrCtrl: _instrCtrl,
           templateCtrl: _templateCtrl,
-          instrHint: 'e.g. Focus on security vulnerabilities and potential injection attacks...',
+          instrHint:
+              'e.g. Focus on security vulnerabilities and potential injection attacks...',
           instrDescription:
               'Describe what to look for. Heimdallm will inject these '
               'instructions into its default review template.',
@@ -647,9 +833,12 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
 
   String get _categoryLabel {
     switch (widget.category) {
-      case PromptCategory.prReview: return 'PR Review';
-      case PromptCategory.issueTriage: return 'Issue Triage';
-      case PromptCategory.development: return 'Development';
+      case PromptCategory.prReview:
+        return 'PR Review';
+      case PromptCategory.issueTriage:
+        return 'Issue Triage';
+      case PromptCategory.development:
+        return 'Development';
     }
   }
 
@@ -659,51 +848,86 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
     final fields = _categoryFields();
 
     return Dialog(
+      backgroundColor: Colors.transparent,
       child: SizedBox(
         width: 720,
         height: 660,
-        child: Padding(
+        child: AppSurface(
+          radius: AppRadius.lg,
           padding: const EdgeInsets.all(24),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // Header
-              Row(children: [
-                Text(isNew ? 'New $_categoryLabel Prompt' : 'Edit $_categoryLabel Prompt',
-                    style: Theme.of(context).textTheme.titleLarge),
-                const Spacer(),
-                IconButton(icon: const Icon(Icons.close),
-                    onPressed: () => Navigator.pop(context)),
-              ]),
+              Row(
+                children: [
+                  AppText.pageTitle(
+                    isNew
+                        ? 'New $_categoryLabel Prompt'
+                        : 'Edit $_categoryLabel Prompt',
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
               const SizedBox(height: 16),
 
               // Name + focus row
-              Row(children: [
-                Expanded(child: TextFormField(
-                  controller: _nameCtrl,
-                  decoration: const InputDecoration(
-                      labelText: 'Name', border: OutlineInputBorder()),
-                )),
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 200,
-                  child: DropdownButtonFormField<String>(
-                    // ignore: deprecated_member_use
-                    value: _focus,
-                    decoration: const InputDecoration(
-                        labelText: 'Focus', border: OutlineInputBorder()),
-                    items: const [
-                      DropdownMenuItem(value: 'general',      child: Text('General')),
-                      DropdownMenuItem(value: 'security',     child: Text('Security')),
-                      DropdownMenuItem(value: 'performance',  child: Text('Performance')),
-                      DropdownMenuItem(value: 'architecture', child: Text('Architecture')),
-                      DropdownMenuItem(value: 'docs',         child: Text('Docs & Style')),
-                      DropdownMenuItem(value: 'custom',       child: Text('Custom')),
-                    ],
-                    onChanged: (v) => setState(() => _focus = v!),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: _nameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Name',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
                   ),
-                ),
-              ]),
+                  const SizedBox(width: 12),
+                  SizedBox(
+                    width: 200,
+                    child: DropdownButtonFormField<String>(
+                      // ignore: deprecated_member_use
+                      value: _focus,
+                      decoration: const InputDecoration(
+                        labelText: 'Focus',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'general',
+                          child: Text('General'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'security',
+                          child: Text('Security'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'performance',
+                          child: Text('Performance'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'architecture',
+                          child: Text('Architecture'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'docs',
+                          child: Text('Docs & Style'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'custom',
+                          child: Text('Custom'),
+                        ),
+                      ],
+                      onChanged: (v) => setState(() => _focus = v!),
+                    ),
+                  ),
+                ],
+              ),
               const SizedBox(height: 12),
 
               // Tabs: Instructions | Advanced
@@ -725,15 +949,13 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          fields.instrDescription,
-                          style: const TextStyle(fontSize: 12, color: Colors.grey),
-                        ),
+                        AppText.muted(fields.instrDescription),
                         const SizedBox(height: 8),
                         Expanded(
                           child: TextFormField(
                             controller: fields.instrCtrl,
-                            maxLines: null, expands: true,
+                            maxLines: null,
+                            expands: true,
                             decoration: InputDecoration(
                               hintText: fields.instrHint,
                               border: const OutlineInputBorder(),
@@ -762,34 +984,51 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          fields.templateDescription,
-                          style: const TextStyle(fontSize: 12, color: Colors.grey),
-                        ),
+                        AppText.muted(fields.templateDescription),
                         const SizedBox(height: 4),
                         Wrap(
-                          spacing: 6, runSpacing: 4,
-                          children: fields.placeholders.map((p) => ActionChip(
-                            label: Text(p, style: const TextStyle(
-                                fontSize: 11, fontFamily: 'monospace')),
-                            padding: EdgeInsets.zero,
-                            onPressed: () {
-                              final sel = fields.templateCtrl.selection;
-                              final text = fields.templateCtrl.text;
-                              final pos = sel.isValid ? sel.baseOffset : text.length;
-                              fields.templateCtrl.text =
-                                  text.substring(0, pos) + p + text.substring(pos);
-                              fields.templateCtrl.selection =
-                                  TextSelection.collapsed(offset: pos + p.length);
-                            },
-                          )).toList(),
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: fields.placeholders
+                              .map(
+                                (p) => ActionChip(
+                                  label: Text(
+                                    p,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                  padding: EdgeInsets.zero,
+                                  onPressed: () {
+                                    final sel = fields.templateCtrl.selection;
+                                    final text = fields.templateCtrl.text;
+                                    final pos = sel.isValid
+                                        ? sel.baseOffset
+                                        : text.length;
+                                    fields.templateCtrl.text =
+                                        text.substring(0, pos) +
+                                        p +
+                                        text.substring(pos);
+                                    fields.templateCtrl.selection =
+                                        TextSelection.collapsed(
+                                          offset: pos + p.length,
+                                        );
+                                  },
+                                ),
+                              )
+                              .toList(),
                         ),
                         const SizedBox(height: 6),
                         Expanded(
                           child: TextFormField(
                             controller: fields.templateCtrl,
-                            maxLines: null, expands: true,
-                            style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                            maxLines: null,
+                            expands: true,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontFamily: 'monospace',
+                            ),
                             decoration: const InputDecoration(
                               border: OutlineInputBorder(),
                               alignLabelWithHint: true,
@@ -805,64 +1044,85 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
               const SizedBox(height: 12),
               // Active toggles — one per category so a single save can
               // activate the prompt across any combination of pipelines.
-              _ActiveToggles(
-                prReview: _isDefaultPr,
-                issueTriage: _isDefaultIssue,
-                development: _isDefaultDev,
-                onChanged: (c, v) => setState(() {
-                  switch (c) {
-                    case PromptCategory.prReview: _isDefaultPr = v;
-                    case PromptCategory.issueTriage: _isDefaultIssue = v;
-                    case PromptCategory.development: _isDefaultDev = v;
-                  }
-                }),
+              AppSurface(
+                elevation: AppSurfaceElevation.canvas,
+                padding: const EdgeInsets.all(12),
+                child: _ActiveToggles(
+                  prReview: _isDefaultPr,
+                  issueTriage: _isDefaultIssue,
+                  development: _isDefaultDev,
+                  onChanged: (c, v) => setState(() {
+                    switch (c) {
+                      case PromptCategory.prReview:
+                        _isDefaultPr = v;
+                      case PromptCategory.issueTriage:
+                        _isDefaultIssue = v;
+                      case PromptCategory.development:
+                        _isDefaultDev = v;
+                    }
+                  }),
+                ),
               ),
               const SizedBox(height: 8),
-              Row(children: [
-                const Spacer(),
-                TextButton(onPressed: () => Navigator.pop(context),
-                    child: const Text('Cancel')),
-                const SizedBox(width: 8),
-                FilledButton(
-                  onPressed: () {
-                    final id = isNew
-                        ? _idCtrl.text.trim().isNotEmpty
-                            ? _idCtrl.text.trim()
-                            : 'prompt-${DateTime.now().millisecondsSinceEpoch}'
-                        : widget.prompt!.id;
-                    if (_nameCtrl.text.isEmpty) return;
-                    // Validate non-empty content for the active category
-                    final hasContent = switch (widget.category) {
-                      PromptCategory.prReview =>
-                        _instrCtrl.text.trim().isNotEmpty || _templateCtrl.text.trim().isNotEmpty,
-                      PromptCategory.issueTriage =>
-                        _issueInstrCtrl.text.trim().isNotEmpty || _issueTemplateCtrl.text.trim().isNotEmpty,
-                      PromptCategory.development =>
-                        _implInstrCtrl.text.trim().isNotEmpty || _implTemplateCtrl.text.trim().isNotEmpty,
-                    };
-                    if (!hasContent) {
-                      showToast(context, 'Please provide instructions or a template', isError: true);
-                      return;
-                    }
-                    Navigator.pop(context, ReviewPrompt(
-                      id: id,
-                      name: _nameCtrl.text.trim(),
-                      focus: _focus,
-                      instructions: _instrCtrl.text.trim(),
-                      prompt: _templateCtrl.text.trim(),
-                      cliFlags: _flagsCtrl.text.trim(),
-                      isDefaultPr: _isDefaultPr,
-                      isDefaultIssue: _isDefaultIssue,
-                      isDefaultDev: _isDefaultDev,
-                      issuePrompt: _issueTemplateCtrl.text.trim(),
-                      issueInstructions: _issueInstrCtrl.text.trim(),
-                      implementPrompt: _implTemplateCtrl.text.trim(),
-                      implementInstructions: _implInstrCtrl.text.trim(),
-                    ));
-                  },
-                  child: const Text('Save'),
-                ),
-              ]),
+              Row(
+                children: [
+                  const Spacer(),
+                  AppButton.secondary(
+                    label: 'Cancel',
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                  const SizedBox(width: 8),
+                  AppButton(
+                    label: 'Save',
+                    onPressed: () {
+                      final id = isNew
+                          ? _idCtrl.text.trim().isNotEmpty
+                                ? _idCtrl.text.trim()
+                                : 'prompt-${DateTime.now().millisecondsSinceEpoch}'
+                          : widget.prompt!.id;
+                      if (_nameCtrl.text.isEmpty) return;
+                      // Validate non-empty content for the active category
+                      final hasContent = switch (widget.category) {
+                        PromptCategory.prReview =>
+                          _instrCtrl.text.trim().isNotEmpty ||
+                              _templateCtrl.text.trim().isNotEmpty,
+                        PromptCategory.issueTriage =>
+                          _issueInstrCtrl.text.trim().isNotEmpty ||
+                              _issueTemplateCtrl.text.trim().isNotEmpty,
+                        PromptCategory.development =>
+                          _implInstrCtrl.text.trim().isNotEmpty ||
+                              _implTemplateCtrl.text.trim().isNotEmpty,
+                      };
+                      if (!hasContent) {
+                        showToast(
+                          context,
+                          'Please provide instructions or a template',
+                          isError: true,
+                        );
+                        return;
+                      }
+                      Navigator.pop(
+                        context,
+                        ReviewPrompt(
+                          id: id,
+                          name: _nameCtrl.text.trim(),
+                          focus: _focus,
+                          instructions: _instrCtrl.text.trim(),
+                          prompt: _templateCtrl.text.trim(),
+                          cliFlags: _flagsCtrl.text.trim(),
+                          isDefaultPr: _isDefaultPr,
+                          isDefaultIssue: _isDefaultIssue,
+                          isDefaultDev: _isDefaultDev,
+                          issuePrompt: _issueTemplateCtrl.text.trim(),
+                          issueInstructions: _issueInstrCtrl.text.trim(),
+                          implementPrompt: _implTemplateCtrl.text.trim(),
+                          implementInstructions: _implInstrCtrl.text.trim(),
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -889,39 +1149,101 @@ class _ActiveToggles extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Set as active for',
-            style: TextStyle(fontSize: 12, color: Colors.grey)),
+        const AppText.label('Set as active for'),
         const SizedBox(height: 4),
-        _toggle(PromptCategory.prReview,   'PR Review',     prReview),
-        _toggle(PromptCategory.issueTriage,'Issue Triage',  issueTriage),
-        _toggle(PromptCategory.development,'Development',   development),
+        _toggle(PromptCategory.prReview, 'PR Review', prReview),
+        _toggle(PromptCategory.issueTriage, 'Issue Triage', issueTriage),
+        _toggle(PromptCategory.development, 'Development', development),
       ],
     );
   }
 
-  Widget _toggle(PromptCategory c, String label, bool value) => Row(children: [
-        SizedBox(
-          height: 28,
-          child: Switch(
-            value: value,
-            onChanged: (v) => onChanged(c, v),
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
+  Widget _toggle(PromptCategory c, String label, bool value) => Row(
+    children: [
+      SizedBox(
+        height: 28,
+        child: Switch(
+          value: value,
+          onChanged: (v) => onChanged(c, v),
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
-        const SizedBox(width: 10),
-        Text(label, style: const TextStyle(fontSize: 13)),
-      ]);
+      ),
+      const SizedBox(width: 10),
+      AppText(label),
+    ],
+  );
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+PromptCategory _categoryForPreset(PresetDef preset) {
+  if (preset.issueInstructions.isNotEmpty) {
+    return PromptCategory.issueTriage;
+  }
+  if (preset.implementInstructions.isNotEmpty) {
+    return PromptCategory.development;
+  }
+  return PromptCategory.prReview;
+}
+
+Color _categoryColor(BuildContext context, PromptCategory category) {
+  switch (category) {
+    case PromptCategory.prReview:
+      return AppColors.featurePrReview.resolve(context);
+    case PromptCategory.issueTriage:
+      return AppColors.featureIssueTracking.resolve(context);
+    case PromptCategory.development:
+      return AppColors.featureDevelop.resolve(context);
+  }
+}
+
+Color _focusColor(BuildContext context, String focus) {
+  switch (focus) {
+    case 'security':
+      return AppColors.danger.resolve(context);
+    case 'performance':
+      return AppColors.info.resolve(context);
+    case 'architecture':
+      return AppColors.featureDevelop.resolve(context);
+    case 'docs':
+      return AppColors.warning.resolve(context);
+    case 'custom':
+      return AppColors.accent.resolve(context);
+    default:
+      return AppColors.textMuted.resolve(context);
+  }
+}
+
+String _focusLabel(String focus) {
+  switch (focus) {
+    case 'security':
+      return 'Security';
+    case 'performance':
+      return 'Performance';
+    case 'architecture':
+      return 'Architecture';
+    case 'docs':
+      return 'Documentation';
+    case 'custom':
+      return 'Custom';
+    default:
+      return 'General';
+  }
+}
+
 String _focusEmoji(String focus) {
   switch (focus) {
-    case 'security':     return '🔒';
-    case 'performance':  return '⚡';
-    case 'architecture': return '🏛️';
-    case 'docs':         return '📝';
-    case 'custom':       return '✨';
-    default:             return '🔍';
+    case 'security':
+      return '🔒';
+    case 'performance':
+      return '⚡';
+    case 'architecture':
+      return '🏛️';
+    case 'docs':
+      return '📝';
+    case 'custom':
+      return '✨';
+    default:
+      return '🔍';
   }
 }
