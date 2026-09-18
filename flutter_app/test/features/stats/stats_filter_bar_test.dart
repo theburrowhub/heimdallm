@@ -3,12 +3,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/features/stats/stats_filter_bar.dart';
 import 'package:heimdallm/features/stats/stats_filters.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 const _allRepos = {'acme/api', 'acme/web', 'globex/payments', 'solo'};
 
 Widget _host(ProviderContainer container) => UncontrolledProviderScope(
   container: container,
   child: const MaterialApp(
+    builder: _withMixScope,
     home: Scaffold(body: StatsFilterBar(allRepos: _allRepos)),
   ),
 );
@@ -144,3 +146,6 @@ void main() {
     expect(find.widgetWithText(ActionChip, 'Reset'), findsNothing);
   });
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());

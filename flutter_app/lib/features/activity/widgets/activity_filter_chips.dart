@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/models/activity.dart';
+import '../../../shared/design_system/components/components.dart';
 import '../activity_providers.dart';
 
 /// Three chips (Organization / Repository / Action) with multi-select popups,
@@ -198,11 +199,8 @@ class ActivityFilterChips extends ConsumerWidget {
               if (optionsLimited)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                  child: Text(
+                  child: AppText.muted(
                     'Options limited to visible activity',
-                    style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(ctx).colorScheme.onSurfaceVariant,
-                    ),
                   ),
                 ),
               ...options.map(

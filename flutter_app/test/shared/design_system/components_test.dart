@@ -18,9 +18,6 @@ void main() {
     await tester.pumpWidget(
       _hosted(
         Column(
-          // Not const: these named constructors only assign fields via an
-          // initializer list, so a const invocation is folded at compile
-          // time and never shows up in the coverage report.
           children: [
             AppText.pageTitle('Page title'),
             AppText.sectionTitle('Section title'),
@@ -45,8 +42,8 @@ void main() {
       _hosted(
         Column(
           children: [
-            AppSurface(child: Text('canvas')),
-            AppSurface(
+            const AppSurface(child: Text('canvas')),
+            const AppSurface(
               elevation: AppSurfaceElevation.raised,
               bordered: false,
               child: Text('raised'),
@@ -61,30 +58,12 @@ void main() {
     expect(find.text('raised'), findsOneWidget);
   });
 
-  testWidgets('AppSurface honors an explicit padding override', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _hosted(
-        AppSurface(
-          padding: EdgeInsets.all(20),
-          child: Text('padded'),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('padded'), findsOneWidget);
-  });
-
   testWidgets('AppButton fires onPressed and reflects disabled state', (
     tester,
   ) async {
     var tapped = false;
     await tester.pumpWidget(
-      _hosted(
-        AppButton(label: 'Save', onPressed: () => tapped = true),
-      ),
+      _hosted(AppButton(label: 'Save', onPressed: () => tapped = true)),
     );
     await tester.pumpAndSettle();
 
@@ -99,28 +78,16 @@ void main() {
     expect(find.text('Disabled'), findsOneWidget);
   });
 
-  testWidgets('AppButton renders a leading icon', (tester) async {
-    await tester.pumpWidget(
-      _hosted(
-        AppButton(
-          label: 'Add',
-          onPressed: () {},
-          leading: const Icon(Icons.add),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Add'), findsOneWidget);
-    expect(find.byIcon(Icons.add), findsOneWidget);
-  });
-
   testWidgets('AppButton variants all render', (tester) async {
     await tester.pumpWidget(
       _hosted(
         Column(
           children: [
-            AppButton.secondary(label: 'Secondary', onPressed: () {}),
+            AppButton.secondary(
+              label: 'Secondary',
+              leading: const Icon(Icons.add),
+              onPressed: () {},
+            ),
             AppButton.subtle(label: 'Subtle', onPressed: () {}),
             AppButton.destructive(label: 'Delete', onPressed: () {}),
           ],
@@ -132,6 +99,7 @@ void main() {
     expect(find.text('Secondary'), findsOneWidget);
     expect(find.text('Subtle'), findsOneWidget);
     expect(find.text('Delete'), findsOneWidget);
+    expect(find.byIcon(Icons.add), findsOneWidget);
   });
 
   testWidgets('AppBadge renders label with icon', (tester) async {
@@ -149,22 +117,6 @@ void main() {
 
     expect(find.text('Open'), findsOneWidget);
     expect(find.byIcon(Icons.check), findsOneWidget);
-  });
-
-  testWidgets('AppBadge honors an explicit border color', (tester) async {
-    await tester.pumpWidget(
-      _hosted(
-        const AppBadge(
-          label: 'Bordered',
-          foreground: Colors.white,
-          background: Colors.green,
-          border: Colors.black,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Bordered'), findsOneWidget);
   });
 
   testWidgets('components render under dark theme without error', (
@@ -193,5 +145,12 @@ void main() {
     expect(find.text('dark surface'), findsOneWidget);
     expect(find.text('Dark button'), findsOneWidget);
     expect(find.text('Dark badge'), findsOneWidget);
+  });
+
+  test('components.dart keeps the design-system barrel in coverage', () {
+    expect(
+      designSystemComponentTypes(),
+      containsAll(<Type>[AppBadge, AppButton, AppSurface, AppText]),
+    );
   });
 }

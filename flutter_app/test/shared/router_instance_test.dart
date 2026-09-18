@@ -3,18 +3,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
+import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/features/activity/activity_screen.dart';
 import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/cli_agents/cli_agents_screen.dart';
-import 'package:heimdallm/features/issues/issue_detail_screen.dart';
-import 'package:heimdallm/features/issues/issues_providers.dart';
+import 'package:heimdallm/features/config/config_providers.dart';
+import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_screen.dart';
 import 'package:heimdallm/features/organizations/orgs_screen.dart';
+import 'package:heimdallm/features/issues/issue_detail_screen.dart';
+import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_screen.dart';
 import 'package:heimdallm/features/repositories/repos_screen.dart';
-import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/stats/stats_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/router.dart';
 
 // Overrides are typed loosely because flutter_riverpod does not export the
@@ -23,6 +26,8 @@ Widget _routedApp(String location, List<dynamic> overrides) {
   return ProviderScope(
     overrides: overrides.cast(),
     child: MaterialApp.router(
+      builder: (context, child) =>
+          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
       routerConfig: createRouter(initialLocation: location),
     ),
   );
@@ -51,6 +56,51 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Routing'), findsWidgets);
+  });
+
+  testWidgets('each navigation-shell branch destination builds its screen', (
+    tester,
+  ) async {
+    final cases = <String, Type>{
+      '/activity': ActivityScreen,
+      '/merge': MergeTrackingScreen,
+      '/repos': ReposScreen,
+      '/orgs': OrgsScreen,
+      '/prompts': AgentsScreen,
+      '/cli-agents': CLIAgentsScreen,
+      '/stats': StatsScreen,
+    };
+
+    for (final entry in cases.entries) {
+      await tester.pumpWidget(
+        _routedApp(entry.key, [
+          sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+          daemonHealthProvider.overrideWith((ref) async => false),
+          daemonInstancesProvider.overrideWith(
+            (ref) async => ClusterRegistry.empty,
+          ),
+        ]),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(entry.value), findsOneWidget, reason: entry.key);
+    }
+  });
+
+  testWidgets('the legacy /agents path redirects to /prompts', (tester) async {
+    await tester.pumpWidget(
+      _routedApp('/agents', [
+        sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+        daemonHealthProvider.overrideWith((ref) async => false),
+        daemonInstancesProvider.overrideWith(
+          (ref) async => ClusterRegistry.empty,
+        ),
+      ]),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(AgentsScreen), findsOneWidget);
   });
 
   testWidgets('a PR route carries the instance into the provider key', (
@@ -112,36 +162,5 @@ void main() {
     expect(find.byType(IssueDetailScreen), findsOneWidget);
     expect(requested?.instanceId, 'srv-b');
     expect(requested?.issueId, 9);
-  });
-
-  testWidgets('each navigation-shell branch destination builds its screen', (
-    tester,
-  ) async {
-    const destinations = <String, Type>{
-      '/activity': ActivityScreen,
-      '/merge': MergeTrackingScreen,
-      '/repos': ReposScreen,
-      '/orgs': OrgsScreen,
-      '/prompts': AgentsScreen,
-      '/cli-agents': CLIAgentsScreen,
-      '/stats': StatsScreen,
-    };
-    for (final entry in destinations.entries) {
-      await tester.pumpWidget(_routedApp(entry.key, const []));
-      await tester.pump();
-      expect(
-        find.byType(entry.value),
-        findsOneWidget,
-        reason: '${entry.key} should build ${entry.value}',
-      );
-    }
-  });
-
-  testWidgets('the legacy /agents path redirects to /prompts', (
-    tester,
-  ) async {
-    await tester.pumpWidget(_routedApp('/agents', const []));
-    await tester.pump();
-    expect(find.byType(AgentsScreen), findsOneWidget);
   });
 }

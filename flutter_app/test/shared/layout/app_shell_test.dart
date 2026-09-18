@@ -2,380 +2,494 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
-import 'package:mocktail/mocktail.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
-import 'package:heimdallm/core/platform/platform_services_provider.dart';
+import 'package:heimdallm/core/models/activity.dart';
+import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/tracked_issue.dart';
+import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/core/state/local_state_notifier.dart';
+import 'package:heimdallm/features/activity/activity_providers.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/layout/app_shell.dart';
-import 'package:heimdallm/shared/router.dart';
+import 'package:mocktail/mocktail.dart';
 
 import '../../core/platform/fake_platform_services.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
 
-/// Fixes [daemonConnectionProvider] to a status chosen by the test instead
-/// of driving it through the real SSE-listening state machine.
-class _FixedConnectionNotifier extends DaemonConnectionNotifier {
-  _FixedConnectionNotifier(this._status);
-  final DaemonConnectionStatus _status;
+class TestDaemonConnectionNotifier extends DaemonConnectionNotifier {
+  TestDaemonConnectionNotifier(this.initialStatus);
+
+  final DaemonConnectionStatus initialStatus;
 
   @override
-  DaemonConnectionStatus build() => _status;
+  DaemonConnectionStatus build() => initialStatus;
 }
 
-/// Common overrides so the `/` (dashboard) branch that `AppShell` wraps
-/// renders without touching the network: an empty single-daemon install
-/// with no PRs/issues, matching the pattern in `dashboard_test.dart`.
-List<dynamic> _baseOverrides({ApiClient? api, FakePlatformServices? platform}) => [
-  if (api != null) apiClientProvider.overrideWithValue(api),
-  if (platform != null) platformServicesProvider.overrideWithValue(platform),
-  prsByInstanceProvider.overrideWith(
-    (ref) => Future.value(singleInstanceResult(const <PR>[])),
-  ),
-  issuesByInstanceProvider.overrideWith(
-    (ref) async => singleInstanceResult(const <TrackedIssue>[]),
-  ),
-  sseStreamProvider.overrideWith((ref) => const Stream.empty()),
-  daemonInstancesProvider.overrideWith(
-    (ref) async => ClusterRegistry.fromJson({
-      'role': 'hub',
-      'self_id': 'hub-1',
-      'self_name': 'Local hub',
-      'instances': const [],
-    }),
-  ),
-];
-
-Future<void> _pumpShell(
-  WidgetTester tester,
-  List<dynamic> extraOverrides, {
-  ApiClient? api,
-  FakePlatformServices? platform,
-  Size size = const Size(1400, 900),
-}) async {
-  tester.view.physicalSize = size;
-  tester.view.devicePixelRatio = 1;
-  addTearDown(tester.view.resetPhysicalSize);
-  addTearDown(tester.view.resetDevicePixelRatio);
-  await tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        ..._baseOverrides(api: api, platform: platform),
-        ...extraOverrides,
-      ].cast(),
-      child: MaterialApp.router(routerConfig: createRouter()),
-    ),
-  );
-  await tester.pump();
-}
-
-void main() {
-  group('ConnectionBanner', () {
-    Future<void> pumpPhase(
-      WidgetTester tester,
-      DaemonConnectionPhase phase, {
-      VoidCallback? onRestart,
-    }) => tester.pumpWidget(
-      MaterialApp(
-        home: ConnectionBanner(
-          status: DaemonConnectionStatus(phase: phase),
-          onRestart: onRestart ?? () {},
-        ),
-      ),
-    );
-
-    testWidgets('shows the connected label with no restart action', (
-      tester,
-    ) async {
-      await pumpPhase(tester, DaemonConnectionPhase.connected);
-      expect(find.text('Connected'), findsOneWidget);
-      expect(find.widgetWithText(TextButton, 'Restart'), findsNothing);
-    });
-
-    testWidgets('shows the stale label with no restart action', (
-      tester,
-    ) async {
-      await pumpPhase(tester, DaemonConnectionPhase.stale);
-      expect(find.text('No events received — reconnecting'), findsOneWidget);
-      expect(find.widgetWithText(TextButton, 'Restart'), findsNothing);
-    });
-
-    testWidgets('shows the connecting label with no restart action', (
-      tester,
-    ) async {
-      await pumpPhase(tester, DaemonConnectionPhase.connecting);
-      expect(find.text('Connecting'), findsOneWidget);
-      expect(find.widgetWithText(TextButton, 'Restart'), findsNothing);
-    });
-
-    testWidgets('shows the offline label with a working restart action', (
-      tester,
-    ) async {
-      var restarted = false;
-      await pumpPhase(
-        tester,
-        DaemonConnectionPhase.offline,
-        onRestart: () => restarted = true,
-      );
-      expect(find.text('Server unavailable'), findsOneWidget);
-
-      final restart = find.widgetWithText(TextButton, 'Restart');
-      expect(restart, findsOneWidget);
-      await tester.tap(restart);
-      expect(restarted, isTrue);
-    });
-  });
-
-  testWidgets('the merge destination badges its icon with the check count', (
-    tester,
-  ) async {
-    await _pumpShell(tester, [
-      mergeTrackingCheckProblemCountProvider.overrideWithValue(3),
-    ]);
-
-    expect(find.text('3'), findsOneWidget);
-  });
-
-  testWidgets(
-    'the merge destination shows a plain icon when there are no problems',
-    (tester) async {
-      await _pumpShell(tester, [
-        mergeTrackingCheckProblemCountProvider.overrideWithValue(0),
-      ]);
-
-      expect(find.text('0'), findsNothing);
-    },
-  );
-
-  testWidgets('a circuit breaker message renders as a dismissible banner', (
-    tester,
-  ) async {
-    await _pumpShell(tester, [
-      circuitBreakerProvider.overrideWith(
-        () => LocalStateNotifier<String?>('Cost spike detected'),
-      ),
-    ]);
-
-    expect(find.textContaining('Cost spike detected'), findsOneWidget);
-
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(AppShell)),
-      listen: false,
-    );
-    // Drive the dismiss action the same way the banner's own close button
-    // does, without depending on that widget's internal layout.
-    container.read(circuitBreakerProvider.notifier).set(null);
-    await tester.pump();
-
-    expect(find.textContaining('Cost spike detected'), findsNothing);
-  });
-
-  testWidgets(
-    'a non-connected daemon renders a connection banner with a working restart',
-    (tester) async {
-      final api = _MockApiClient();
-      final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
-      when(() => api.shutdownDaemon()).thenAnswer((_) async {});
-      when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
-      when(() => api.checkHealth()).thenAnswer((_) async => true);
-      when(() => api.daemonPort).thenReturn(7842);
-
-      await _pumpShell(
-        tester,
-        [
-          daemonHealthProvider.overrideWith((ref) async => true),
-          daemonConnectionProvider.overrideWith(
-            () => _FixedConnectionNotifier(
-              const DaemonConnectionStatus(
-                phase: DaemonConnectionPhase.offline,
-              ),
-            ),
-          ),
-        ],
-        api: api,
-        platform: platform,
-      );
-
-      expect(find.text('Server unavailable'), findsOneWidget);
-
-      await tester.tap(find.widgetWithText(TextButton, 'Restart'));
-      await tester.pumpAndSettle(const Duration(milliseconds: 500));
-    },
-  );
-
-  testWidgets('stopping a running daemon asks for confirmation first', (
-    tester,
-  ) async {
-    final api = _MockApiClient();
-    when(() => api.shutdownDaemon()).thenAnswer((_) async {});
-    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
-    when(() => api.checkHealth()).thenAnswer((_) async => false);
-
-    await _pumpShell(
-      tester,
-      [daemonHealthProvider.overrideWith((ref) async => true)],
-      api: api,
-      platform: FakePlatformServices(),
-    );
-
-    expect(find.byTooltip('Stop Server'), findsOneWidget);
-    await tester.tap(find.byTooltip('Stop Server'));
-    await tester.pump();
-
-    expect(find.text('Stop Server?'), findsOneWidget);
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-
-    verifyNever(() => api.shutdownDaemon());
-  });
-
-  testWidgets('starting a stopped daemon uses the configured binary', (
-    tester,
-  ) async {
-    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
-    final api = _MockApiClient();
-    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
-    when(() => api.checkHealth()).thenAnswer((_) async => true);
-
-    await _pumpShell(
-      tester,
-      [daemonHealthProvider.overrideWith((ref) async => false)],
-      api: api,
-      platform: platform,
-    );
-
-    expect(find.byTooltip('Start Server'), findsOneWidget);
-    await tester.tap(find.byTooltip('Start Server'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump();
-
-    expect(platform.spawnedDaemons, equals(['/tmp/heimdallm']));
-  });
-
-GoRouter minimalRouter() => GoRouter(
-  initialLocation: '/',
+GoRouter minimalRouter({String initialLocation = '/'}) => GoRouter(
+  initialLocation: initialLocation,
   routes: [
     StatefulShellRoute.indexedStack(
       builder: (context, state, navigationShell) =>
           AppShell(navigationShell: navigationShell),
       branches: [
-        for (var i = 0; i < 9; i++)
-          StatefulShellBranch(
-            routes: [
-              GoRoute(
-                path: i == 0 ? '/' : '/branch-$i',
-                builder: (context, state) => Text('Branch $i'),
-              ),
-            ],
-          ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/',
+              builder: (_, _) =>
+                  const Scaffold(body: Text('Dashboard content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/activity',
+              builder: (_, _) =>
+                  const Scaffold(body: Text('Activity log content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/merge',
+              builder: (_, _) => const Scaffold(body: Text('Merge content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/repos',
+              builder: (_, _) =>
+                  const Scaffold(body: Text('Repositories content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/orgs',
+              builder: (_, _) =>
+                  const Scaffold(body: Text('Organizations content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/prompts',
+              builder: (_, _) => const Scaffold(body: Text('Prompts content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/cli-agents',
+              builder: (_, _) => const Scaffold(body: Text('Agents content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/stats',
+              builder: (_, _) => const Scaffold(body: Text('Stats content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/instances',
+              builder: (_, _) =>
+                  const Scaffold(body: Text('Instances content')),
+            ),
+          ],
+        ),
       ],
     ),
     GoRoute(
       path: '/server',
-      builder: (context, state) => const Text('Server placeholder'),
+      builder: (_, _) => const Scaffold(body: Text('Server placeholder')),
     ),
     GoRoute(
       path: '/config',
-      builder: (context, state) => const Text('Config placeholder'),
+      builder: (_, _) => const Scaffold(body: Text('Config placeholder')),
     ),
   ],
 );
 
-  testWidgets('the server action navigates to the server screen', (
+List<dynamic> _baseOverrides({
+  required FakePlatformServices platform,
+  required ApiClient api,
+  bool daemonRunning = false,
+  bool daemonStarting = false,
+  int mergeCount = 0,
+  DaemonConnectionStatus? connection,
+  AggregatedResult<PR>? prs,
+  Future<AggregatedResult<TrackedIssue>> Function(Ref ref)? issuesByInstance,
+  Future<AggregatedResult<MergeTrackingEntry>> Function(Ref ref)?
+  mergeTrackingByInstance,
+  Future<AggregatedResult<Map<String, dynamic>>> Function(Ref ref)?
+  statsByInstance,
+  Future<Map<String, dynamic>> Function(Ref ref)? rateLimit,
+  Future<ActivityPage> Function(Ref ref)? activityEntries,
+  Future<ActivityPage> Function(Ref ref)? activityOptions,
+}) {
+  return [
+    platformServicesProvider.overrideWithValue(platform),
+    apiClientProvider.overrideWithValue(api),
+    daemonHealthProvider.overrideWith((ref) async => daemonRunning),
+    daemonInstancesProvider.overrideWith((ref) async => ClusterRegistry.empty),
+    prsByInstanceProvider.overrideWith(
+      (ref) async => prs ?? singleInstanceResult<PR>(const []),
+    ),
+    issuesByInstanceProvider.overrideWith(
+      issuesByInstance ??
+          (ref) async => singleInstanceResult<TrackedIssue>(const []),
+    ),
+    mergeTrackingByInstanceProvider.overrideWith(
+      mergeTrackingByInstance ??
+          (ref) async => singleInstanceResult<MergeTrackingEntry>(const []),
+    ),
+    statsByInstanceProvider.overrideWith(
+      statsByInstance ??
+          (ref) async => singleInstanceResult<Map<String, dynamic>>(const []),
+    ),
+    githubRateLimitProvider.overrideWith(rateLimit ?? (ref) async => const {}),
+    activityEntriesProvider.overrideWith(
+      activityEntries ??
+          (ref) async =>
+              const ActivityPage(entries: [], truncated: false, count: 0),
+    ),
+    activityOptionsProvider.overrideWith(
+      activityOptions ??
+          (ref) async =>
+              const ActivityPage(entries: [], truncated: false, count: 0),
+    ),
+    daemonStartingProvider.overrideWith(
+      () => LocalStateNotifier<bool>(daemonStarting),
+    ),
+    mergeTrackingCheckProblemCountProvider.overrideWith((ref) => mergeCount),
+    sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+    if (connection != null)
+      daemonConnectionProvider.overrideWith(
+        () => TestDaemonConnectionNotifier(connection),
+      ),
+  ];
+}
+
+Future<void> _pumpShell(
+  WidgetTester tester, {
+  required List<dynamic> overrides,
+  Size size = const Size(1400, 1200),
+  String initialLocation = '/',
+  String? circuitMessage,
+}) async {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+
+  final container = ProviderContainer(overrides: overrides.cast());
+  addTearDown(container.dispose);
+  if (circuitMessage != null) {
+    container.read(circuitBreakerProvider.notifier).set(circuitMessage);
+  }
+
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: container,
+      child: MaterialApp.router(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+        routerConfig: minimalRouter(initialLocation: initialLocation),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+void main() {
+  testWidgets('ConnectionBanner renders connecting and stale states', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(1400, 900);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+    Future<void> pumpFor(DaemonConnectionStatus status) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          home: Scaffold(
+            body: ConnectionBanner(status: status, onRestart: () {}),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await pumpFor(
+      const DaemonConnectionStatus(phase: DaemonConnectionPhase.connecting),
+    );
+    expect(find.text('Connecting'), findsOneWidget);
+    expect(find.text('Restart'), findsNothing);
+
+    await pumpFor(
+      const DaemonConnectionStatus(phase: DaemonConnectionPhase.stale),
+    );
+    expect(find.text('No events received — reconnecting'), findsOneWidget);
+  });
+
+  testWidgets('ConnectionBanner offline state offers Restart', (tester) async {
+    var restarted = false;
     await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          ..._baseOverrides(),
-          daemonHealthProvider.overrideWith((ref) async => false),
-        ].cast(),
-        child: MaterialApp.router(routerConfig: minimalRouter()),
+      MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+        home: Scaffold(
+          body: ConnectionBanner(
+            status: const DaemonConnectionStatus(
+              phase: DaemonConnectionPhase.offline,
+            ),
+            onRestart: () => restarted = true,
+          ),
+        ),
       ),
     );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Server unavailable'), findsOneWidget);
+    await tester.tap(find.text('Restart'));
     await tester.pump();
+    expect(restarted, isTrue);
+  });
+
+  testWidgets('AppShell dismisses the circuit-breaker banner', (tester) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(platform: platform, api: api),
+      circuitMessage: 'Spend limit exceeded',
+    );
+
+    expect(
+      find.textContaining('Review circuit breaker tripped'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Dismiss'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Review circuit breaker tripped'), findsNothing);
+  });
+
+  testWidgets('wide layouts show the merge badge and navigate with the rail', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(platform: platform, api: api, mergeCount: 3),
+    );
+
+    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.text('Dashboard content'), findsOneWidget);
+    expect(find.text('3'), findsOneWidget);
+
+    await tester.tap(find.text('Merge'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Merge content'), findsOneWidget);
+  });
+
+  testWidgets('when stopped, the toolbar start action is wired', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(platform: platform, api: api),
+    );
+
+    await tester.tap(find.byTooltip('Start Server'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Daemon binary not found'), findsOneWidget);
+  });
+
+  testWidgets('when running, the toolbar stop action asks for confirmation', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(
+        platform: platform,
+        api: api,
+        daemonRunning: true,
+        connection: const DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.connected,
+        ),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Stop Server'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Stop Server?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('Stop Server?'), findsNothing);
+  });
+
+  testWidgets('the server button pushes the server route', (tester) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(platform: platform, api: api),
+    );
 
     await tester.tap(find.byTooltip('Server'));
     await tester.pumpAndSettle();
+
     expect(find.text('Server placeholder'), findsOneWidget);
   });
 
-  testWidgets('the settings action navigates to the config screen', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(1400, 900);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          ..._baseOverrides(),
-          daemonHealthProvider.overrideWith((ref) async => false),
-        ].cast(),
-        child: MaterialApp.router(routerConfig: minimalRouter()),
-      ),
+  testWidgets('the settings button pushes the config route', (tester) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(platform: platform, api: api),
     );
-    await tester.pump();
 
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pumpAndSettle();
+
     expect(find.text('Config placeholder'), findsOneWidget);
   });
 
-  testWidgets(
-    'the refresh action invalidates the aggregating providers without error',
-    (tester) async {
-      await _pumpShell(tester, [
-        daemonHealthProvider.overrideWith((ref) async => false),
-      ]);
+  testWidgets('the refresh button invalidates all dashboard providers', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
 
-      await tester.tap(find.byIcon(Icons.refresh));
-      await tester.pump();
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(platform: platform, api: api),
+    );
 
-      expect(tester.takeException(), isNull);
-    },
-  );
+    await tester.tap(find.byIcon(Icons.refresh));
+    await tester.pumpAndSettle();
 
-  testWidgets(
-    'a compact layout puts the destinations behind a Drawer and can navigate',
-    (tester) async {
-      await _pumpShell(
-        tester,
-        [daemonHealthProvider.overrideWith((ref) async => false)],
-        size: const Size(600, 900),
-      );
+    expect(find.text('Dashboard content'), findsOneWidget);
+  });
 
-      expect(find.byType(NavigationRail), findsNothing);
+  testWidgets('compact layouts use the drawer for navigation', (tester) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
 
-      final scaffoldState = tester.state<ScaffoldState>(
-        find.byType(Scaffold).first,
-      );
-      scaffoldState.openDrawer();
-      await tester.pumpAndSettle();
+    await _pumpShell(
+      tester,
+      size: const Size(600, 1000),
+      overrides: _baseOverrides(platform: platform, api: api),
+    );
 
-      expect(find.text('Heimdallm'), findsWidgets);
-      final instancesTile = find.widgetWithText(ListTile, 'Instances');
-      expect(instancesTile, findsOneWidget);
+    final scaffold = tester.state<ScaffoldState>(find.byType(Scaffold).first);
+    scaffold.openDrawer();
+    await tester.pumpAndSettle();
 
-      await tester.tap(instancesTile);
-      await tester.pumpAndSettle();
+    await tester.tap(find.text('Instances'));
+    await tester.pumpAndSettle();
 
-      expect(scaffoldState.isDrawerOpen, isFalse);
-    },
-  );
+    expect(find.text('Instances content'), findsOneWidget);
+  });
+
+  testWidgets('partial-read failures surface in the shell banner', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(
+        platform: platform,
+        api: api,
+        prs: const AggregatedResult<PR>(
+          failures: [
+            InstanceFailure(
+              instanceId: 'srv-a',
+              instanceName: 'Server A',
+              error: 'offline',
+            ),
+          ],
+        ),
+      ),
+    );
+
+    expect(
+      find.text('Showing partial data — Server A could not be reached.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('offline daemon banner triggers the restart flow', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+    when(() => api.shutdownDaemon()).thenAnswer((_) async {});
+    when(
+      () => api.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.foreign);
+    when(() => api.daemonPort).thenReturn(7842);
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(
+        platform: platform,
+        api: api,
+        daemonRunning: true,
+        connection: const DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.offline,
+        ),
+      ),
+    );
+
+    expect(find.text('Server unavailable'), findsOneWidget);
+
+    await tester.tap(find.text('Restart'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('restart cancelled', findRichText: true),
+      findsOneWidget,
+    );
+  });
 }

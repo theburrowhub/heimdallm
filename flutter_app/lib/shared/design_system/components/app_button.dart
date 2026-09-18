@@ -46,42 +46,48 @@ class AppButton extends StatelessWidget {
     this.leading,
   }) : variant = AppButtonVariant.subtle;
 
-  ({ColorToken background, ColorToken foreground, bool bordered}) get _palette =>
-      switch (variant) {
-        AppButtonVariant.primary => (
-          background: AppColors.accent,
-          foreground: AppColors.onAccent,
-          bordered: false,
-        ),
-        AppButtonVariant.secondary => (
-          background: AppColors.surfaceRaised,
-          foreground: AppColors.text,
-          bordered: true,
-        ),
-        AppButtonVariant.subtle => (
-          background: AppColors.surface,
-          foreground: AppColors.accent,
-          bordered: false,
-        ),
-        AppButtonVariant.destructive => (
-          background: AppColors.danger,
-          foreground: AppColors.onAccent,
-          bordered: false,
-        ),
-      };
+  ({ColorToken background, ColorToken foreground, bool bordered})
+  get _palette => switch (variant) {
+    AppButtonVariant.primary => (
+      background: AppColors.accent,
+      foreground: AppColors.onAccent,
+      bordered: false,
+    ),
+    AppButtonVariant.secondary => (
+      background: AppColors.surfaceRaised,
+      foreground: AppColors.text,
+      bordered: true,
+    ),
+    AppButtonVariant.subtle => (
+      background: AppColors.surface,
+      foreground: AppColors.accent,
+      bordered: false,
+    ),
+    AppButtonVariant.destructive => (
+      background: AppColors.danger,
+      foreground: AppColors.onAccent,
+      bordered: false,
+    ),
+  };
 
   @override
   Widget build(BuildContext context) {
     final palette = _palette;
     final enabled = onPressed != null;
+    final foreground = palette.foreground.resolve(context);
+    final leadingGap = AppSpace.sm.resolve(context);
 
     var style = BoxStyler()
         .color(palette.background())
         .borderRadiusAll(AppRadius.md())
         .paddingX(AppSpace.lg())
         .paddingY(AppSpace.sm())
-        .onHovered(BoxStyler().color(palette.background().withValues(alpha: 0.9)))
-        .onDisabled(BoxStyler().color(palette.background().withValues(alpha: 0.4)));
+        .onHovered(
+          BoxStyler().color(palette.background().withValues(alpha: 0.9)),
+        )
+        .onDisabled(
+          BoxStyler().color(palette.background().withValues(alpha: 0.4)),
+        );
 
     if (palette.bordered) {
       style = style.borderAll(color: AppColors.border(), width: 1);
@@ -96,15 +102,12 @@ class AppButton extends StatelessWidget {
         children: [
           if (leading != null) ...[
             IconTheme.merge(
-              data: IconThemeData(
-                color: palette.foreground.resolve(context),
-                size: 18,
-              ),
+              data: IconThemeData(color: foreground, size: 18),
               child: leading!,
             ),
-            SizedBox(width: AppSpace.sm.resolve(context)),
+            SizedBox(width: leadingGap),
           ],
-          AppText.label(label, color: palette.foreground()),
+          AppText.label(label, color: foreground),
         ],
       ),
     );

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/features/merge_tracking/widgets/merge_phase_badge.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 Widget _host(String phase) => MaterialApp(
+  builder: _withMixScope,
   home: Scaffold(
     body: Center(child: MergePhaseBadge(phase: phase)),
   ),
@@ -27,7 +29,7 @@ void main() {
     };
     for (final entry in expected.entries) {
       await tester.pumpWidget(_host(entry.key));
-      expect(find.text(entry.value), findsOneWidget, reason: entry.key);
+      expect(_text(entry.value), findsOneWidget, reason: entry.key);
       expect(find.byType(Icon), findsOneWidget, reason: entry.key);
     }
   });
@@ -91,3 +93,8 @@ void main() {
     expect(humanBlockReason('some_new_reason'), 'some new reason');
   });
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());
+
+Finder _text(String value) => find.text(value, findRichText: true);

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/activity.dart';
 import 'package:heimdallm/features/activity/widgets/activity_entry_tile.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 ActivityEntry _mk({
   required ActivityAction action,
@@ -34,17 +35,18 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(
           body: ActivityEntryTile(entry: entry, onTap: () {}),
         ),
       ),
     );
 
-    expect(find.textContaining('acme/api'), findsOneWidget);
-    expect(find.textContaining('#42'), findsOneWidget);
-    expect(find.textContaining('Fix rate limiter race'), findsOneWidget);
-    expect(find.textContaining('09:34:12'), findsOneWidget);
-    expect(find.textContaining('major review by claude'), findsOneWidget);
+    expect(_textContaining('acme/api'), findsOneWidget);
+    expect(_textContaining('#42'), findsOneWidget);
+    expect(_textContaining('Fix rate limiter race'), findsOneWidget);
+    expect(_textContaining('09:34:12'), findsOneWidget);
+    expect(_textContaining('major review by claude'), findsOneWidget);
     expect(find.byIcon(Icons.rate_review), findsOneWidget);
   });
 
@@ -52,11 +54,12 @@ void main() {
     final entry = _mk(action: ActivityAction.error, outcome: 'cli_not_found');
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(find.byIcon(Icons.error_outline), findsOneWidget);
-    expect(find.textContaining('cli_not_found'), findsOneWidget);
+    expect(_textContaining('cli_not_found'), findsOneWidget);
   });
 
   testWidgets('implement with pr_number > 0 shows opened PR text', (
@@ -68,11 +71,12 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(find.byIcon(Icons.build), findsOneWidget);
-    expect(find.textContaining('Opened PR #99'), findsOneWidget);
+    expect(_textContaining('Opened PR #99'), findsOneWidget);
   });
 
   testWidgets('implement with pr_number 0 shows failed text', (tester) async {
@@ -82,10 +86,11 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
-    expect(find.textContaining('Implementation failed'), findsOneWidget);
+    expect(_textContaining('Implementation failed'), findsOneWidget);
   });
 
   testWidgets('promote shows from → to outcome', (tester) async {
@@ -95,11 +100,12 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(find.byIcon(Icons.swap_horiz), findsOneWidget);
-    expect(find.textContaining('Promoted: blocked → develop'), findsOneWidget);
+    expect(_textContaining('Promoted: blocked → develop'), findsOneWidget);
   });
 
   testWidgets('triage shows category', (tester) async {
@@ -110,12 +116,13 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(find.byIcon(Icons.label), findsOneWidget);
-    expect(find.textContaining('major'), findsOneWidget);
-    expect(find.textContaining('(develop)'), findsOneWidget);
+    expect(_textContaining('major'), findsOneWidget);
+    expect(_textContaining('(develop)'), findsOneWidget);
   });
 
   testWidgets('refinement shows completion state', (tester) async {
@@ -126,15 +133,13 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(find.byIcon(Icons.fact_check), findsOneWidget);
-    expect(find.text('Refinement'), findsOneWidget);
-    expect(
-      find.textContaining('Refinement completed (truncated)'),
-      findsOneWidget,
-    );
+    expect(_text('Refinement'), findsOneWidget);
+    expect(_textContaining('Refinement completed (truncated)'), findsOneWidget);
   });
 
   testWidgets('review_skipped shows skipped badge and draft reason', (
@@ -147,12 +152,13 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(find.byIcon(Icons.visibility_off_outlined), findsOneWidget);
-    expect(find.text('Skipped'), findsOneWidget);
-    expect(find.textContaining('Skipped because PR is draft'), findsOneWidget);
+    expect(_text('Skipped'), findsOneWidget);
+    expect(_textContaining('Skipped because PR is draft'), findsOneWidget);
   });
 
   // peer_published only happens in a cluster: another instance had already
@@ -170,11 +176,12 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(
-      find.textContaining(
+      _textContaining(
         'Skipped because another instance already reviewed this commit',
       ),
       findsOneWidget,
@@ -199,11 +206,12 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(
-      find.textContaining(
+      _textContaining(
         'Skipped because another instance running as @sergiotejon already reviewed this commit (APPROVED, review 5151568032)',
       ),
       findsOneWidget,
@@ -215,9 +223,7 @@ void main() {
   // branch" merge commit — so the pipeline treats the commit as already
   // covered instead of reporting no_rereview_request. The raw reason would
   // otherwise read as "head reanchored" through the fallback.
-  testWidgets('review_skipped explains a GitHub HEAD reanchor', (
-    tester,
-  ) async {
+  testWidgets('review_skipped explains a GitHub HEAD reanchor', (tester) async {
     final entry = _mk(
       action: ActivityAction.reviewSkipped,
       outcome: 'head_reanchored',
@@ -225,14 +231,44 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
+        builder: _withMixScope,
         home: Scaffold(body: ActivityEntryTile(entry: entry)),
       ),
     );
     expect(
-      find.textContaining(
+      _textContaining(
         'Skipped because GitHub retargeted our review onto the current HEAD',
       ),
       findsOneWidget,
     );
   });
+
+  testWidgets('a narrow width uses the compact activity row layout', (
+    tester,
+  ) async {
+    final entry = _mk(action: ActivityAction.review, outcome: 'major');
+
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: _withMixScope,
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(width: 320, child: ActivityEntryTile(entry: entry)),
+          ),
+        ),
+      ),
+    );
+
+    expect(_textContaining('09:34:12'), findsOneWidget);
+    expect(_textContaining('major review'), findsOneWidget);
+  });
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());
+
+Finder _text(String value) => find.text(value, findRichText: true);
+
+Finder _textContaining(String value) =>
+    find.textContaining(value, findRichText: true);

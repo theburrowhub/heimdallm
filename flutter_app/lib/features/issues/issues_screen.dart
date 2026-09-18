@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mix/mix.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../core/state/local_state_notifier.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/attention_badge.dart';
 import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
@@ -35,7 +38,7 @@ class IssuesScreen extends ConsumerWidget {
           children: [
             const Icon(Icons.error_outline, size: 48, color: Colors.grey),
             const SizedBox(height: 12),
-            Text('Error: $e'),
+            AppText('Error: $e', textAlign: TextAlign.center),
             const SizedBox(height: 16),
             FilledButton(
               onPressed: () => ref.invalidate(issuesProvider),
@@ -46,7 +49,7 @@ class IssuesScreen extends ConsumerWidget {
       ),
       data: (issues) {
         if (issues.isEmpty) {
-          return const Center(child: Text('No tracked issues'));
+          return const Center(child: AppText.muted('No tracked issues'));
         }
 
         final repos = issues.map((i) => i.repo).toSet().toList()..sort();
@@ -59,36 +62,36 @@ class IssuesScreen extends ConsumerWidget {
             // Filter bar
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Row(
-                children: [
-                  Text(
-                    'Repo:',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-                  ),
-                  const SizedBox(width: 8),
-                  DropdownButton<String?>(
-                    value: repoFilter,
-                    hint: const Text('All', style: TextStyle(fontSize: 13)),
-                    isDense: true,
-                    underline: const SizedBox.shrink(),
-                    items: [
-                      const DropdownMenuItem(value: null, child: Text('All')),
-                      ...repos.map(
-                        (r) => DropdownMenuItem(
-                          value: r,
-                          child: Text(r, style: const TextStyle(fontSize: 13)),
+              child: AppSurface(
+                elevation: AppSurfaceElevation.canvas,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(
+                  children: [
+                    const AppText.label('Repo:'),
+                    const SizedBox(width: 8),
+                    DropdownButton<String?>(
+                      value: repoFilter,
+                      hint: const Text('All', style: TextStyle(fontSize: 13)),
+                      isDense: true,
+                      underline: const SizedBox.shrink(),
+                      items: [
+                        const DropdownMenuItem(value: null, child: Text('All')),
+                        ...repos.map(
+                          (r) => DropdownMenuItem(
+                            value: r,
+                            child: Text(r, style: const TextStyle(fontSize: 13)),
+                          ),
                         ),
-                      ),
-                    ],
-                    onChanged: (v) =>
-                        ref.read(_repoFilterProvider.notifier).set(v),
-                  ),
-                  const Spacer(),
-                  Text(
-                    '${filtered.length} issue${filtered.length == 1 ? '' : 's'}',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-                  ),
-                ],
+                      ],
+                      onChanged: (v) =>
+                          ref.read(_repoFilterProvider.notifier).set(v),
+                    ),
+                    const Spacer(),
+                    AppText.muted(
+                      '${filtered.length} issue${filtered.length == 1 ? '' : 's'}',
+                    ),
+                  ],
+                ),
               ),
             ),
             // Issue list
@@ -189,154 +192,160 @@ class _IssueTileState extends ConsumerState<_IssueTile> {
         !isReviewing &&
         !isPromoting;
 
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => context.push('/issues/${issue.id}'),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: Row(
-            children: [
-              // Severity bar
-              Container(
-                width: 4,
-                height: 48,
-                margin: const EdgeInsets.only(right: 12),
-                decoration: BoxDecoration(
-                  color: isReviewing
-                      ? Theme.of(context).colorScheme.primary
-                      : needsAttention
-                      ? Colors.deepOrange.shade700
-                      : reviewed
-                      ? _severityColor(severity)
-                      : Colors.grey.shade600,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              // Title + subtitle
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      issue.title,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
+      child: AppSurface(
+        bordered: false,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => context.push('/issues/${issue.id}'),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  // Severity bar
+                  Container(
+                    width: 4,
+                    height: 48,
+                    margin: const EdgeInsets.only(right: 12),
+                    decoration: BoxDecoration(
+                      color: isReviewing
+                          ? Theme.of(context).colorScheme.primary
+                          : needsAttention
+                          ? Colors.deepOrange.shade700
+                          : reviewed
+                          ? _severityColor(severity)
+                          : Colors.grey.shade600,
+                      borderRadius: BorderRadius.circular(2),
                     ),
-                    const SizedBox(height: 4),
-                    Row(
+                  ),
+                  // Title + subtitle
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Flexible(
-                          child: Text(
-                            '${issue.repo} · #${issue.number} · ${issue.author}',
-                            style: Theme.of(context).textTheme.bodySmall,
-                            overflow: TextOverflow.ellipsis,
-                          ),
+                        StyledText(
+                          issue.title,
+                          style: TextStyler()
+                              .style(AppTextStyles.body.mix())
+                              .fontWeight(FontWeight.w600)
+                              .maxLines(1)
+                              .overflow(TextOverflow.ellipsis),
                         ),
-                        const SizedBox(width: 8),
-                        ...issue.labels
-                            .take(3)
-                            .map(
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: StyledText(
+                                '${issue.repo} · #${issue.number} · ${issue.author}',
+                                style: TextStyler()
+                                    .style(AppTextStyles.bodyMuted.mix())
+                                    .maxLines(1)
+                                    .overflow(TextOverflow.ellipsis),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            ...issue.labels.take(3).map(
                               (l) => Padding(
                                 padding: const EdgeInsets.only(right: 4),
-                                child: Container(
+                                child: AppBadge(
+                                  label: l.toString(),
+                                  foreground: Theme.of(context).colorScheme.onSurface,
+                                  background: Theme.of(
+                                    context,
+                                  ).colorScheme.surfaceContainerHighest,
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 6,
                                     vertical: 1,
                                   ),
-                                  decoration: BoxDecoration(
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.surfaceContainerHighest,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text(
-                                    l.toString(),
-                                    style: const TextStyle(fontSize: 10),
-                                  ),
+                                  radius: 4,
+                                  fontSize: 10,
+                                  letterSpacing: 0,
                                 ),
                               ),
                             ),
+                          ],
+                        ),
                       ],
                     ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              // Trailing actions
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (isReviewing || isPromoting)
-                    SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: isPromoting
-                            ? Theme.of(context).colorScheme.secondary
-                            : Theme.of(context).colorScheme.primary,
-                      ),
-                    )
-                  else if (issue.linkedPR != null &&
-                      issue.linkedPR!.externalReviewState.isNotEmpty)
-                    PRReviewStateBadge(
-                      state: issue.linkedPR!.externalReviewState,
-                    )
-                  else if (needsAttention)
-                    const AttentionBadge()
-                  else if (reviewed)
-                    SeverityBadge(severity: severity)
-                  else
-                    _chip('PENDING', Colors.grey.shade700),
-                  const SizedBox(width: 8),
-                  if (!isReviewing && !isPromoting) ...[
-                    SizedBox(
-                      height: 28,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          textStyle: const TextStyle(fontSize: 12),
-                        ),
-                        onPressed: _triggerReview,
-                        child: const Text('Review'),
-                      ),
-                    ),
-                    if (canPromote) ...[
-                      const SizedBox(width: 6),
-                      SizedBox(
-                        height: 28,
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
-                            textStyle: const TextStyle(fontSize: 12),
-                            backgroundColor: Theme.of(
-                              context,
-                            ).colorScheme.secondary,
-                            foregroundColor: Theme.of(
-                              context,
-                            ).colorScheme.onSecondary,
+                  ),
+                  const SizedBox(width: 12),
+                  // Trailing actions
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isReviewing || isPromoting)
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: isPromoting
+                                ? Theme.of(context).colorScheme.secondary
+                                : Theme.of(context).colorScheme.primary,
                           ),
-                          onPressed: _promote,
-                          child: Text(
-                            _promoteLabel(issue.latestReview!.actionTaken),
+                        )
+                      else if (issue.linkedPR != null &&
+                          issue.linkedPR!.externalReviewState.isNotEmpty)
+                        PRReviewStateBadge(
+                          state: issue.linkedPR!.externalReviewState,
+                        )
+                      else if (needsAttention)
+                        const AttentionBadge()
+                      else if (reviewed)
+                        SeverityBadge(severity: severity)
+                      else
+                        _chip('PENDING', Colors.grey.shade700),
+                      const SizedBox(width: 8),
+                      if (!isReviewing && !isPromoting) ...[
+                        SizedBox(
+                          height: 28,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 10),
+                              textStyle: const TextStyle(fontSize: 12),
+                            ),
+                            onPressed: _triggerReview,
+                            child: const Text('Review'),
                           ),
                         ),
+                        if (canPromote) ...[
+                          const SizedBox(width: 6),
+                          SizedBox(
+                            height: 28,
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 10),
+                                textStyle: const TextStyle(fontSize: 12),
+                                backgroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.secondary,
+                                foregroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.onSecondary,
+                              ),
+                              onPressed: _promote,
+                              child: Text(
+                                _promoteLabel(issue.latestReview!.actionTaken),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 14),
+                        tooltip: 'Dismiss issue',
+                        color: Colors.grey.shade600,
+                        visualDensity: VisualDensity.compact,
+                        onPressed: _dismiss,
                       ),
                     ],
-                  ],
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 14),
-                    tooltip: 'Dismiss issue',
-                    color: Colors.grey.shade600,
-                    visualDensity: VisualDensity.compact,
-                    onPressed: _dismiss,
                   ),
                 ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -349,20 +358,12 @@ class _IssueTileState extends ConsumerState<_IssueTile> {
   String _promoteLabel(String action) =>
       action == _actionRefinement ? 'Promote to Dev' : 'Promote';
 
-  Widget _chip(String label, Color color) => Container(
+  Widget _chip(String label, Color color) => AppBadge(
+    label: label,
+    foreground: Colors.white,
+    background: color,
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-    decoration: BoxDecoration(
-      color: color,
-      borderRadius: BorderRadius.circular(4),
-    ),
-    child: Text(
-      label,
-      style: const TextStyle(
-        color: Colors.white,
-        fontSize: 11,
-        fontWeight: FontWeight.w600,
-      ),
-    ),
+    radius: 4,
   );
 
   Color _severityColor(String s) {

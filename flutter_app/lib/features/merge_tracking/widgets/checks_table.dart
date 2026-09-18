@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:mix/mix.dart';
 
 import '../../../core/models/merge_tracking.dart';
+import '../../../shared/design_system/components/components.dart';
+import '../../../shared/design_system/tokens.dart';
 import 'check_visuals.dart';
 
 /// The per-check breakdown for one PR.
@@ -40,10 +43,7 @@ class _ChecksTableState extends State<ChecksTable> {
         if (decision.checksSummary?.missingRequired.isNotEmpty ?? false)
           _MissingRequired(names: decision.checksSummary!.missingRequired),
         if (required.isEmpty && optional.isEmpty)
-          Text(
-            'No checks reported for this commit.',
-            style: Theme.of(context).textTheme.bodySmall,
-          )
+          const AppText.muted('No checks reported for this commit.')
         else ...[
           for (final check in required)
             _CheckRow(check: check, onOpenUrl: widget.onOpenUrl),
@@ -65,11 +65,10 @@ class _ChecksTableState extends State<ChecksTable> {
                     // narrow column, where this sentence does not fit on one
                     // line and an unconstrained Text overflows the row.
                     Flexible(
-                      child: Text(
+                      child: AppText.muted(
                         '${optional.length} optional '
                         '${optional.length == 1 ? 'check' : 'checks'} '
                         '(do not block the merge)',
-                        style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ),
                   ],
@@ -165,12 +164,12 @@ class _Headline extends StatelessWidget {
         Icon(icon, size: 20, color: color),
         const SizedBox(width: 8),
         Expanded(
-          child: Text(
+          child: StyledText(
             text,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: color,
-              fontWeight: FontWeight.w600,
-            ),
+            style: TextStyler()
+                .style(AppTextStyles.body.mix())
+                .color(color)
+                .fontWeight(FontWeight.w600),
           ),
         ),
       ],
@@ -189,35 +188,34 @@ class _MissingRequired extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFF3CD),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Required checks that have not reported',
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF6B4300),
+      child: Box(
+        style: BoxStyler()
+            .color(const Color(0xFFFFF3CD))
+            .borderRadiusAll(AppRadius.md())
+            .padding(EdgeInsetsGeometryMix.value(const EdgeInsets.all(8))),
+        child: SizedBox(
+          width: double.infinity,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              StyledText(
+                'Required checks that have not reported',
+                style: TextStyler()
+                    .fontSize(12)
+                    .fontWeight(FontWeight.w700)
+                    .color(Color(0xFF6B4300)),
               ),
-            ),
-            const SizedBox(height: 4),
-            for (final name in names)
-              Text(
-                '• $name',
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF6B4300),
-                  fontFamily: 'monospace',
+              const SizedBox(height: 4),
+              for (final name in names)
+                StyledText(
+                  '• $name',
+                  style: TextStyler()
+                      .fontSize(12)
+                      .color(const Color(0xFF6B4300))
+                      .fontFamily('monospace'),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -275,19 +273,21 @@ class _CheckRow extends StatelessWidget {
               ),
             ),
             if (check.required)
-              Container(
-                margin: const EdgeInsets.only(left: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  'Required',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    color: theme.colorScheme.onSurfaceVariant,
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    'Required',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
               ),

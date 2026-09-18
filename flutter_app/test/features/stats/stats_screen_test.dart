@@ -9,6 +9,7 @@ import 'package:heimdallm/core/models/tracked_issue.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/stats/stats_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 typedef _MapLoader = Future<Map<String, dynamic>> Function();
 
@@ -24,7 +25,10 @@ Widget _host({
     prsProvider.overrideWith((ref) async => prs),
     issuesProvider.overrideWith((ref) async => issues),
   ],
-  child: const MaterialApp(home: Scaffold(body: StatsScreen())),
+  child: const MaterialApp(
+    builder: _withMixScope,
+    home: Scaffold(body: StatsScreen()),
+  ),
 );
 
 PR _pr({required int id, required String repo}) => PR(
@@ -63,9 +67,19 @@ Finder _refreshButton() => find.byWidgetPredicate(
 );
 
 void _expectStatCard(String label, String value) {
-  final card = find.ancestor(of: find.text(label), matching: find.byType(Card));
+  final labelFinder = find.text(label, findRichText: true);
+  final card = find.ancestor(
+    of: labelFinder,
+    matching: find.byWidgetPredicate((widget) => widget.runtimeType.toString() == 'AppSurface'),
+  );
   expect(card, findsOneWidget);
-  expect(find.descendant(of: card, matching: find.text(value)), findsOneWidget);
+  expect(
+    find.descendant(
+      of: card,
+      matching: find.text(value, findRichText: true),
+    ),
+    findsOneWidget,
+  );
 }
 
 Future<void> _useWideViewport(WidgetTester tester) async {
@@ -438,3 +452,6 @@ void main() {
     },
   );
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());

@@ -6,6 +6,7 @@ import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
@@ -59,7 +60,10 @@ Widget _host(
     if (detail != null)
       mergeTrackingDetailProvider.overrideWith((ref, id) async => detail),
   ],
-  child: const MaterialApp(home: Scaffold(body: MergeTrackingScreen())),
+  child: const MaterialApp(
+    builder: _withMixScope,
+    home: Scaffold(body: MergeTrackingScreen()),
+  ),
 );
 
 void main() {
@@ -82,16 +86,16 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Show checks'), findsOneWidget);
+    expect(_text('Show checks'), findsOneWidget);
     expect(find.text('build'), findsNothing);
 
-    await tester.tap(find.text('Show checks'));
+    await tester.tap(_text('Show checks'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Hide checks'), findsOneWidget);
+    expect(_text('Hide checks'), findsOneWidget);
     expect(find.text('build'), findsOneWidget);
 
-    await tester.tap(find.text('Hide checks'));
+    await tester.tap(_text('Hide checks'));
     await tester.pumpAndSettle();
     expect(find.text('build'), findsNothing);
   });
@@ -108,10 +112,10 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Show checks'));
+    await tester.tap(_text('Show checks'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('has not evaluated this PR yet'), findsOneWidget);
+    expect(_textContaining('has not evaluated this PR yet'), findsOneWidget);
   });
 
   // Re-check is a question, never an action: it must not authorise a merge the
@@ -198,7 +202,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('the head had moved'), findsOneWidget);
+    expect(_textContaining('the head had moved'), findsOneWidget);
   });
 
   testWidgets('a load failure explains itself', (tester) async {
@@ -210,11 +214,22 @@ void main() {
           ),
           mergeTrackingSseListenerProvider.overrideWithValue(null),
         ],
-        child: const MaterialApp(home: Scaffold(body: MergeTrackingScreen())),
+        child: const MaterialApp(
+          builder: _withMixScope,
+          home: Scaffold(body: MergeTrackingScreen()),
+        ),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('Error loading merge tracking'), findsOneWidget);
+    expect(_textContaining('Error loading merge tracking'), findsOneWidget);
   });
 }
+
+Widget _withMixScope(BuildContext context, Widget? child) =>
+    HeimdallmTheme.scope(child: child ?? const SizedBox.shrink());
+
+Finder _text(String value) => find.text(value, findRichText: true);
+
+Finder _textContaining(String value) =>
+    find.textContaining(value, findRichText: true);

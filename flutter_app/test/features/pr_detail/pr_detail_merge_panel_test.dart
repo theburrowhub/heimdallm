@@ -10,6 +10,7 @@ import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_screen.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 final _pr = PR(
   id: 1,
@@ -50,6 +51,8 @@ Widget _host({MergeTrackingEntry? tracked, Object? detailError}) => ProviderScop
     }),
   ],
   child: MaterialApp.router(
+    builder: (context, child) =>
+        HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
     routerConfig: GoRouter(
       initialLocation: '/prs/1',
       routes: [
@@ -110,8 +113,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Merge status'), findsOneWidget);
-    expect(find.text('Blocked'), findsOneWidget);
-    expect(find.textContaining('build (GitHub Actions)'), findsWidgets);
+    expect(find.text('Blocked', findRichText: true), findsOneWidget);
+    expect(
+      find.textContaining('build (GitHub Actions)', findRichText: true),
+      findsWidgets,
+    );
     expect(find.text('build'), findsOneWidget);
   });
 
@@ -130,7 +136,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Draft — Heimdallm never acts on drafts'), findsOneWidget);
+    expect(
+      find.text(
+        'Draft — Heimdallm never acts on drafts',
+        findRichText: true,
+      ),
+      findsOneWidget,
+    );
   });
 
   // A merged PR is not blocked by anything, whatever the last counts were.
@@ -148,7 +160,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Merged'), findsOneWidget);
+    expect(find.text('Merged', findRichText: true), findsOneWidget);
   });
 
   // A PR nobody tracks answers 404. Showing nothing is right — an error banner

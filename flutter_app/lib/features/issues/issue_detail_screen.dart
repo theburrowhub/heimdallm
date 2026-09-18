@@ -3,9 +3,12 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mix/mix.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../core/api/api_client.dart';
 import '../../core/models/tracked_issue.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/attention_badge.dart';
 import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
@@ -222,7 +225,9 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
           Expanded(
             child: detailAsync.when(
               loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, _) => Center(child: Text('Error: $e')),
+              error: (e, _) => Center(
+                child: AppText('Error: $e', textAlign: TextAlign.center),
+              ),
               data: (data) {
                 final issue = data['issue'] as TrackedIssue;
                 final reviews = data['reviews'] as List<TrackedIssueReview>;
@@ -263,10 +268,13 @@ class _ReviewPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(issue.title, style: Theme.of(context).textTheme.headlineSmall),
-          Text(
+          StyledText(
+            issue.title,
+            style: TextStyler().style(AppTextStyles.pageTitle.mix()),
+          ),
+          StyledText(
             '${issue.repo} #${issue.number} by ${issue.author}',
-            style: Theme.of(context).textTheme.bodySmall,
+            style: TextStyler().style(AppTextStyles.bodyMuted.mix()),
           ),
           if (issue.linkedPR != null &&
               issue.linkedPR!.externalReviewState.isNotEmpty) ...[
@@ -288,7 +296,7 @@ class _ReviewPanel extends StatelessWidget {
           ],
           const SizedBox(height: 16),
           if (reviews.isEmpty)
-            const Text('No reviews yet.')
+            const AppText.muted('No reviews yet.')
           else
             ...reviews.map((rev) => _IssueReviewCard(review: rev)),
         ],
@@ -303,35 +311,31 @@ class _IssueReviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: Padding(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: AppSurface(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Text(
+                StyledText(
                   'Reviewed by ${review.cliUsed}',
-                  style: Theme.of(context).textTheme.labelSmall,
+                  style: TextStyler().style(AppTextStyles.label.mix()),
                 ),
                 const SizedBox(width: 8),
-                Container(
+                AppBadge(
+                  label: review.actionTaken,
+                  foreground: Theme.of(context).colorScheme.onSurface,
+                  background: Theme.of(context).colorScheme.surfaceContainerHighest,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 6,
                     vertical: 2,
                   ),
-                  decoration: BoxDecoration(
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    review.actionTaken,
-                    style: const TextStyle(fontSize: 10),
-                  ),
+                  radius: 4,
+                  fontSize: 10,
+                  letterSpacing: 0,
                 ),
                 const Spacer(),
                 if (review.actionTaken == 'auto_implement_no_changes')
@@ -341,24 +345,18 @@ class _IssueReviewCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-            Text(review.summary),
+            AppText(review.summary),
             if (review.category.isNotEmpty) ...[
               const SizedBox(height: 8),
-              Text(
-                'Classification',
-                style: Theme.of(context).textTheme.labelMedium,
-              ),
+              const AppText.label('Classification'),
               Padding(
                 padding: const EdgeInsets.only(top: 4, left: 8),
-                child: Text('Category: ${review.category}'),
+                child: AppText('Category: ${review.category}'),
               ),
             ],
             if (review.nextSteps.isNotEmpty) ...[
               const SizedBox(height: 8),
-              Text(
-                'Next steps',
-                style: Theme.of(context).textTheme.labelMedium,
-              ),
+              const AppText.label('Next steps'),
               ...review.nextSteps.map(
                 (s) => Padding(
                   padding: const EdgeInsets.only(top: 4, left: 8),
@@ -367,7 +365,7 @@ class _IssueReviewCard extends StatelessWidget {
                     children: [
                       const Icon(Icons.lightbulb_outline, size: 14),
                       const SizedBox(width: 4),
-                      Expanded(child: Text(s.toString())),
+                      Expanded(child: AppText(s.toString())),
                     ],
                   ),
                 ),
@@ -391,7 +389,7 @@ class _IssueMetaPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Details', style: Theme.of(context).textTheme.titleMedium),
+          const AppText.sectionTitle('Details'),
           const SizedBox(height: 12),
           _row(context, 'Repo', issue.repo),
           _row(context, 'Number', '#${issue.number}'),
@@ -411,13 +409,14 @@ class _IssueMetaPanel extends StatelessWidget {
               runSpacing: 4,
               children: issue.labels
                   .map(
-                    (l) => Chip(
-                      label: Text(
-                        l.toString(),
-                        style: const TextStyle(fontSize: 11),
-                      ),
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      visualDensity: VisualDensity.compact,
+                    (l) => AppBadge(
+                      label: l.toString(),
+                      foreground: Theme.of(context).colorScheme.onSurface,
+                      background: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerHighest,
+                      fontSize: 11,
+                      letterSpacing: 0,
                     ),
                   )
                   .toList(),
@@ -446,12 +445,14 @@ class _IssueMetaPanel extends StatelessWidget {
         children: [
           SizedBox(
             width: 72,
-            child: Text(
+            child: StyledText(
               '$label:',
-              style: const TextStyle(fontWeight: FontWeight.w600),
+              style: TextStyler()
+                  .style(AppTextStyles.label.mix())
+                  .fontWeight(FontWeight.w600),
             ),
           ),
-          Expanded(child: Text(value)),
+          Expanded(child: AppText(value)),
         ],
       ),
     );

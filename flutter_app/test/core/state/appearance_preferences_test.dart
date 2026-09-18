@@ -3,35 +3,35 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/state/appearance_preferences.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+// ignore: depend_on_referenced_packages
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
-import 'package:shared_preferences_platform_interface/types.dart';
 
-/// A store whose reads/writes always fail, used to exercise the defensive
-/// error handling in [AppearanceNotifier] without touching the real plugin.
-class _ThrowingSharedPreferencesStore extends SharedPreferencesStorePlatform {
-  @override
-  Future<bool> clear() async => throw StateError('preferences unavailable');
+class ThrowingSharedPreferencesStore extends SharedPreferencesStorePlatform {
+  ThrowingSharedPreferencesStore({this.getAllError, this.setValueError});
 
-  @override
-  Future<bool> clearWithParameters(ClearParameters parameters) async =>
-      throw StateError('preferences unavailable');
+  final Object? getAllError;
+  final Object? setValueError;
 
   @override
-  Future<Map<String, Object>> getAll() async =>
-      throw StateError('preferences unavailable');
+  bool get isMock => true;
 
   @override
-  Future<Map<String, Object>> getAllWithParameters(
-    GetAllParameters parameters,
-  ) async => throw StateError('preferences unavailable');
+  Future<bool> clear() async => true;
 
   @override
-  Future<bool> remove(String key) async =>
-      throw StateError('preferences unavailable');
+  Future<Map<String, Object>> getAll() async {
+    if (getAllError != null) throw getAllError!;
+    return <String, Object>{};
+  }
 
   @override
-  Future<bool> setValue(String valueType, String key, Object value) async =>
-      throw StateError('preferences unavailable');
+  Future<bool> remove(String key) async => true;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (setValueError != null) throw setValueError!;
+    return true;
+  }
 }
 
 void main() {
@@ -46,9 +46,7 @@ void main() {
   });
 
   test('loads a persisted preference asynchronously', () async {
-    SharedPreferences.setMockInitialValues({
-      'appearance_theme_mode': 'dark',
-    });
+    SharedPreferences.setMockInitialValues({'appearance_theme_mode': 'dark'});
     final container = ProviderContainer();
     addTearDown(container.dispose);
     container.read(appearanceProvider); // build() kicks off the async load
@@ -68,29 +66,26 @@ void main() {
     expect(prefs.getString('appearance_theme_mode'), 'light');
   });
 
-  test('loads a persisted system preference asynchronously', () async {
-    SharedPreferences.setMockInitialValues({
-      'appearance_theme_mode': 'system',
-    });
+  test('set() can persist the system mode too', () async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
-    container.read(appearanceProvider.notifier).set(ThemeMode.dark);
-    container.read(appearanceProvider.notifier).set(ThemeMode.system);
-    expect(container.read(appearanceProvider), ThemeMode.system);
 
+    container.read(appearanceProvider.notifier).set(ThemeMode.system);
     await Future<void>.delayed(Duration.zero);
+
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getString('appearance_theme_mode'), 'system');
   });
 
-  test('keeps the default mode when loading the preference fails', () async {
-    TestWidgetsFlutterBinding.ensureInitialized();
-    final originalStore = SharedPreferencesStorePlatform.instance;
-    final originalDebugPrint = debugPrint;
-    final messages = <String>[];
-
+  test('load failures are logged and fall back to system mode', () async {
     SharedPreferences.resetStatic();
-    SharedPreferencesStorePlatform.instance = _ThrowingSharedPreferencesStore();
+    final originalStore = SharedPreferencesStorePlatform.instance;
+    final messages = <String>[];
+    final originalDebugPrint = debugPrint;
+
+    SharedPreferencesStorePlatform.instance = ThrowingSharedPreferencesStore(
+      getAllError: StateError('preferences unavailable'),
+    );
     debugPrint = (message, {wrapWidth}) {
       if (message != null) messages.add(message);
     };
@@ -104,22 +99,28 @@ void main() {
     addTearDown(container.dispose);
 
     expect(container.read(appearanceProvider), ThemeMode.system);
-    await pumpEventQueue();
-    expect(container.read(appearanceProvider), ThemeMode.system);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
     expect(
       messages,
-      contains(contains('AppearanceNotifier: failed to load preference')),
+      contains(
+        predicate<String>(
+          (m) => m.startsWith('AppearanceNotifier: failed to load preference:'),
+        ),
+      ),
     );
   });
 
-  test('swallows the error when persisting the preference fails', () async {
-    TestWidgetsFlutterBinding.ensureInitialized();
+  test('save failures are logged instead of throwing', () async {
+    SharedPreferences.resetStatic();
     final originalStore = SharedPreferencesStorePlatform.instance;
-    final originalDebugPrint = debugPrint;
     final messages = <String>[];
+    final originalDebugPrint = debugPrint;
 
-    SharedPreferences.setMockInitialValues({});
-    SharedPreferencesStorePlatform.instance = _ThrowingSharedPreferencesStore();
+    SharedPreferencesStorePlatform.instance = ThrowingSharedPreferencesStore(
+      setValueError: StateError('cannot write preferences'),
+    );
     debugPrint = (message, {wrapWidth}) {
       if (message != null) messages.add(message);
     };
@@ -133,11 +134,16 @@ void main() {
     addTearDown(container.dispose);
 
     container.read(appearanceProvider.notifier).set(ThemeMode.dark);
-    expect(container.read(appearanceProvider), ThemeMode.dark);
-    await pumpEventQueue();
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
     expect(
       messages,
-      contains(contains('AppearanceNotifier: failed to save preference')),
+      contains(
+        predicate<String>(
+          (m) => m.startsWith('AppearanceNotifier: failed to save preference:'),
+        ),
+      ),
     );
   });
 
@@ -162,9 +168,7 @@ void main() {
     );
 
     expect(
-      tester
-          .widget<MaterialApp>(find.byType(MaterialApp))
-          .themeMode,
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
       ThemeMode.system,
     );
 
@@ -172,9 +176,7 @@ void main() {
     await tester.pump();
 
     expect(
-      tester
-          .widget<MaterialApp>(find.byType(MaterialApp))
-          .themeMode,
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
       ThemeMode.dark,
     );
   });

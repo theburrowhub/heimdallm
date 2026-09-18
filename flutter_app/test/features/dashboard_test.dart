@@ -23,6 +23,7 @@ import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/core/models/tracked_issue.dart';
 import 'package:heimdallm/shared/router.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import '../core/platform/fake_platform_services.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -90,6 +91,8 @@ Future<void> _pumpOfflineDashboard(
         sseStreamProvider.overrideWith((ref) => const Stream.empty()),
       ],
       child: MaterialApp.router(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
         routerConfig: GoRouter(
           routes: [
             GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
@@ -665,13 +668,16 @@ void main() {
 
       await tester.tap(addControl);
       await tester.pumpAndSettle();
-      expect(find.text('Add a pull request'), findsOneWidget);
+      expect(find.text('Add a pull request', findRichText: true), findsOneWidget);
 
       final urlField = find.byKey(const Key('add-pr-url-field'));
       await tester.enterText(urlField, 'not a GitHub PR');
       await tester.tap(find.text('Add & review'));
       await tester.pump();
-      expect(find.textContaining('Enter a GitHub PR link'), findsOneWidget);
+      expect(
+        find.textContaining('Enter a GitHub PR link', findRichText: true),
+        findsOneWidget,
+      );
       verifyNever(() => api.addPRByUrl(any()));
 
       await tester.enterText(
@@ -685,7 +691,7 @@ void main() {
         () => api.addPRByUrl('https://github.com/acme/widgets/pull/73'),
       ).called(1);
       expect(prLoads, 2);
-      expect(find.text('Add a pull request'), findsNothing);
+      expect(find.text('Add a pull request', findRichText: true), findsNothing);
       expect(
         find.text('PR added — repository monitored and review started.'),
         findsOneWidget,
