@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../shared/design_system/components/components.dart';
 import 'stats_filters.dart';
 
 /// Compact filter bar for Stats: org and repo multi-select + reset.
@@ -27,57 +28,61 @@ class StatsFilterBar extends ConsumerWidget {
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          Text('Filter:', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+      child: AppSurface(
+        elevation: AppSurfaceElevation.canvas,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            const AppText.label('Filter:'),
 
-          // Org multi-select
-          if (orgs.isNotEmpty)
-            _filterChip(
-              context: context,
-              label: 'Org',
-              icon: Icons.business,
-              allItems: orgs.toList()..sort(),
-              selected: filters.orgs,
-              onChanged: (selectedOrgs) {
-                final validRepos = filters.repos.where((r) {
-                  final org = r.contains('/') ? r.split('/').first : r;
-                  return selectedOrgs.isEmpty || selectedOrgs.contains(org);
-                }).toSet();
-                ref.read(statsFiltersProvider.notifier).set(
-                    filters.copyWith(orgs: selectedOrgs, repos: validRepos));
-              },
-            ),
+            // Org multi-select
+            if (orgs.isNotEmpty)
+              _filterChip(
+                context: context,
+                label: 'Org',
+                icon: Icons.business,
+                allItems: orgs.toList()..sort(),
+                selected: filters.orgs,
+                onChanged: (selectedOrgs) {
+                  final validRepos = filters.repos.where((r) {
+                    final org = r.contains('/') ? r.split('/').first : r;
+                    return selectedOrgs.isEmpty || selectedOrgs.contains(org);
+                  }).toSet();
+                  ref.read(statsFiltersProvider.notifier).set(
+                      filters.copyWith(orgs: selectedOrgs, repos: validRepos));
+                },
+              ),
 
-          // Repo multi-select
-          if (visibleRepos.isNotEmpty)
-            _filterChip(
-              context: context,
-              label: 'Repo',
-              icon: Icons.folder_outlined,
-              allItems: visibleRepos.toList()..sort(),
-              selected: filters.repos,
-              onChanged: (repos) {
-                ref.read(statsFiltersProvider.notifier).set(
-                    filters.copyWith(repos: repos));
-              },
-            ),
+            // Repo multi-select
+            if (visibleRepos.isNotEmpty)
+              _filterChip(
+                context: context,
+                label: 'Repo',
+                icon: Icons.folder_outlined,
+                allItems: visibleRepos.toList()..sort(),
+                selected: filters.repos,
+                onChanged: (repos) {
+                  ref.read(statsFiltersProvider.notifier).set(
+                      filters.copyWith(repos: repos));
+                },
+              ),
 
-          // Reset
-          if (filters.hasFilters)
-            ActionChip(
-              avatar: const Icon(Icons.clear, size: 14),
-              label: const Text('Reset', style: TextStyle(fontSize: 12)),
-              visualDensity: VisualDensity.compact,
-              onPressed: () {
-                ref.read(statsFiltersProvider.notifier).set(
-                    const StatsFilters());
-              },
-            ),
-        ],
+            // Reset
+            if (filters.hasFilters)
+              ActionChip(
+                avatar: const Icon(Icons.clear, size: 14),
+                label: const Text('Reset', style: TextStyle(fontSize: 12)),
+                visualDensity: VisualDensity.compact,
+                onPressed: () {
+                  ref.read(statsFiltersProvider.notifier).set(
+                      const StatsFilters());
+                },
+              ),
+          ],
+        ),
       ),
     );
   }

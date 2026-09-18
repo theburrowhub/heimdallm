@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../shared/design_system/components/components.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -30,7 +31,9 @@ class StatsScreen extends ConsumerWidget {
         Expanded(
           child: statsAsync.when(
             loading: () => const Center(child: CircularProgressIndicator()),
-            error: (e, _) => Center(child: Text('Error loading stats: $e')),
+            error: (e, _) => Center(
+              child: AppText('Error loading stats: $e', textAlign: TextAlign.center),
+            ),
             data: (stats) => _StatsBody(stats: stats),
           ),
         ),
@@ -175,11 +178,7 @@ class _StatsBody extends StatelessWidget {
   }
 
   Widget _sectionTitle(BuildContext context, String title) {
-    return Text(title,
-        style: Theme.of(context)
-            .textTheme
-            .titleSmall
-            ?.copyWith(fontWeight: FontWeight.bold));
+    return AppText.sectionTitle(title);
   }
 }
 
@@ -251,16 +250,14 @@ class _TimeCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Expanded(
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Icon(icon, size: 16, color: color),
-            const SizedBox(height: 4),
-            Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
-            Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
-          ]),
-        ),
+      child: AppSurface(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(height: 4),
+          Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
+          Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+        ]),
       ),
     );
   }
@@ -311,24 +308,22 @@ class _StatCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Expanded(
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(icon, color: color, size: 22),
-              const SizedBox(height: 8),
-              Text(value,
-                  style: TextStyle(
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold,
-                      color: color)),
-              const SizedBox(height: 4),
-              Text(label,
-                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
-            ],
-          ),
+      child: AppSurface(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: color, size: 22),
+            const SizedBox(height: 8),
+            Text(value,
+                style: TextStyle(
+                    fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                    color: color)),
+            const SizedBox(height: 4),
+            Text(label,
+                style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          ],
         ),
       ),
     );
@@ -347,17 +342,16 @@ class _PillRow extends StatelessWidget {
       runSpacing: 8,
       children: data.entries.map((e) {
         final color = colorMap[e.key] ?? Colors.grey;
-        return Container(
+        return AppBadge(
+          label: '${e.key}  ${e.value}',
+          foreground: color,
+          background: color.withValues(alpha: 0.15),
+          border: color.withValues(alpha: 0.5),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.15),
-            border: Border.all(color: color.withValues(alpha: 0.5)),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(
-            '${e.key}  ${e.value}',
-            style: TextStyle(color: color, fontWeight: FontWeight.w600, fontSize: 13),
-          ),
+          radius: 20,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0,
         );
       }).toList(),
     );
@@ -444,9 +438,9 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
   @override
   Widget build(BuildContext context) {
     final async = ref.watch(githubRateLimitProvider);
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      child: Padding(
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: AppSurface(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
