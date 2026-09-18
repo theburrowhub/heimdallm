@@ -17,6 +17,7 @@ import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
 import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
+import 'package:heimdallm/shared/widgets/pr_review_state_badge.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../core/platform/fake_platform_services.dart';
@@ -53,6 +54,7 @@ TrackedIssue _issue(
   int number,
   String title, {
   TrackedIssueReview? latestReview,
+  TrackedIssueLinkedPR? linkedPR,
 }) => TrackedIssue(
   id: id,
   githubId: 2000 + id,
@@ -68,6 +70,7 @@ TrackedIssue _issue(
   fetchedAt: DateTime(2026, 9, 1),
   dismissed: false,
   latestReview: latestReview,
+  linkedPR: linkedPR,
 );
 
 TrackedIssueReview _issueReview(int id) => TrackedIssueReview(
@@ -80,6 +83,15 @@ TrackedIssueReview _issueReview(int id) => TrackedIssueReview(
   actionTaken: '',
   prCreated: 0,
   createdAt: DateTime(2026, 9, 1),
+);
+
+TrackedIssueLinkedPR _linkedPr() => TrackedIssueLinkedPR(
+  number: 17,
+  url: 'https://github.com/acme/tools/pull/17',
+  state: 'open',
+  externalReviewState: 'APPROVED',
+  externalReviewer: 'alice',
+  externalReviewAt: DateTime(2026, 9, 1),
 );
 
 ClusterRegistry _registry() => ClusterRegistry.fromJson({
@@ -195,6 +207,58 @@ void main() {
     // Every row would carry the same badge, which is pure noise.
     expect(find.byType(InstanceBadge), findsNothing);
     expect(find.text('All instances'), findsNothing);
+  });
+
+  testWidgets('an issue with a reviewed linked PR shows its review state', (
+    tester,
+  ) async {
+    await _pumpDashboard(
+      tester,
+      prs: singleInstanceResult(const <PR>[]),
+      issues: singleInstanceResult([
+        _issue(
+          1,
+          'acme/tools',
+          12,
+          'Needs follow-up',
+          latestReview: _issueReview(7),
+          linkedPR: _linkedPr(),
+        ),
+      ]),
+    );
+
+    expect(find.byType(PRReviewStateBadge), findsOneWidget);
+    expect(find.text('PR APPROVED'), findsOneWidget);
+  });
+
+  testWidgets('an auto-implement-without-changes issue shows attention', (
+    tester,
+  ) async {
+    await _pumpDashboard(
+      tester,
+      prs: singleInstanceResult(const <PR>[]),
+      issues: singleInstanceResult([
+        _issue(
+          1,
+          'acme/tools',
+          12,
+          'Needs follow-up',
+          latestReview: TrackedIssueReview(
+            id: 7,
+            issueId: 0,
+            cliUsed: 'claude',
+            summary: '',
+            triage: const {},
+            nextSteps: const [],
+            actionTaken: 'auto_implement_no_changes',
+            prCreated: 0,
+            createdAt: DateTime(2026, 9, 1),
+          ),
+        ),
+      ]),
+    );
+
+    expect(find.text('NEEDS ATTENTION'), findsOneWidget);
   });
 
   testWidgets('rows from several instances carry their origin', (tester) async {

@@ -223,9 +223,7 @@ void main() {
   // branch" merge commit — so the pipeline treats the commit as already
   // covered instead of reporting no_rereview_request. The raw reason would
   // otherwise read as "head reanchored" through the fallback.
-  testWidgets('review_skipped explains a GitHub HEAD reanchor', (
-    tester,
-  ) async {
+  testWidgets('review_skipped explains a GitHub HEAD reanchor', (tester) async {
     final entry = _mk(
       action: ActivityAction.reviewSkipped,
       outcome: 'head_reanchored',
@@ -243,6 +241,27 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('a narrow width uses the compact activity row layout', (
+    tester,
+  ) async {
+    final entry = _mk(action: ActivityAction.review, outcome: 'major');
+
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: _withMixScope,
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(width: 320, child: ActivityEntryTile(entry: entry)),
+          ),
+        ),
+      ),
+    );
+
+    expect(_textContaining('09:34:12'), findsOneWidget);
+    expect(_textContaining('major review'), findsOneWidget);
   });
 }
 
