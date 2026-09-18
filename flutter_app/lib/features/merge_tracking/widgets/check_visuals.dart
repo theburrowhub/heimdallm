@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/models/merge_tracking.dart';
+import '../../../shared/design_system/color_resolver.dart';
 import '../../../shared/design_system/components/components.dart';
+import '../../../shared/design_system/tokens.dart';
 
 /// The one place that maps a check state to an icon and a colour, so the
 /// listing warning, the badge and the detail table can never disagree about
@@ -18,30 +20,29 @@ class CheckVisuals {
   });
 
   static CheckVisuals forCheck(BuildContext context, MergeCheck check) {
-    final scheme = Theme.of(context).colorScheme;
     switch (check.state) {
       case 'failure':
         return CheckVisuals(
           icon: Icons.cancel,
-          color: scheme.error,
+          color: resolveAppColor(context, AppColors.danger),
           label: 'Failed',
         );
       case 'pending':
-        return const CheckVisuals(
+        return CheckVisuals(
           icon: Icons.hourglass_top,
-          color: Color(0xFFB26A00),
+          color: resolveAppColor(context, AppColors.warning),
           label: 'Running',
         );
       case 'neutral':
         return CheckVisuals(
           icon: Icons.remove_circle_outline,
-          color: scheme.onSurfaceVariant,
+          color: resolveAppColor(context, AppColors.textMuted),
           label: 'Skipped',
         );
       default:
-        return const CheckVisuals(
+        return CheckVisuals(
           icon: Icons.check_circle,
-          color: Color(0xFF2E7D32),
+          color: resolveAppColor(context, AppColors.success),
           label: 'Passed',
         );
     }
@@ -64,7 +65,8 @@ class CheckCountChips extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final danger = resolveAppColor(context, AppColors.danger);
+    final warning = resolveAppColor(context, AppColors.warning);
     if (failing == 0 && pending == 0) return const SizedBox.shrink();
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -74,7 +76,7 @@ class CheckCountChips extends StatelessWidget {
             context,
             icon: Icons.cancel,
             count: failing,
-            color: scheme.error,
+            color: danger,
             semantics: '$failing required checks failing',
           ),
         if (failing > 0 && pending > 0) const SizedBox(width: 4),
@@ -83,7 +85,7 @@ class CheckCountChips extends StatelessWidget {
             context,
             icon: Icons.hourglass_top,
             count: pending,
-            color: const Color(0xFFB26A00),
+            color: warning,
             semantics: '$pending required checks running',
           ),
       ],
@@ -163,12 +165,7 @@ class ChecksWarningBanner extends StatelessWidget {
           children: [
             Icon(icon, size: 18, color: fg),
             const SizedBox(width: 8),
-            Expanded(
-              child: AppText(
-                detail,
-                color: fg,
-              ),
-            ),
+            Expanded(child: AppText(detail, color: fg)),
           ],
         ),
       ),

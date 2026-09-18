@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/platform/platform_services.dart';
 import '../../core/platform/platform_services_provider.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 
 final appUpdateStatusProvider = StreamProvider<AppUpdateStatus>((ref) async* {
   final platform = ref.watch(platformServicesProvider);
@@ -121,10 +123,10 @@ class AppUpdateSettingsCard extends ConsumerWidget {
 
     return SizedBox(
       width: double.infinity,
-      child: Card(
-        key: const Key('app-update-settings'),
-        margin: const EdgeInsets.only(bottom: 12),
-        child: Padding(
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: AppSurface(
+          key: const Key('app-update-settings'),
           padding: const EdgeInsets.all(14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -132,28 +134,15 @@ class AppUpdateSettingsCard extends ConsumerWidget {
               Row(
                 children: [
                   const Expanded(
-                    child: Text(
-                      'Application updates',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 15,
-                      ),
-                    ),
+                    child: AppText.sectionTitle('Application updates'),
                   ),
                   version.when(
-                    data: (info) => Text(
+                    data: (info) => AppText.muted(
                       'Version ${info.displayVersion}',
                       key: const Key('current-app-version'),
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
                     ),
-                    loading: () =>
-                        Text('Version…', style: theme.textTheme.bodySmall),
-                    error: (_, _) => Text(
-                      'Version unavailable',
-                      style: theme.textTheme.bodySmall,
-                    ),
+                    loading: () => const AppText.muted('Version…'),
+                    error: (_, _) => const AppText.muted('Version unavailable'),
                   ),
                 ],
               ),
@@ -178,22 +167,14 @@ class AppUpdateSettingsCard extends ConsumerWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
+                        AppText(
                           presentation.title,
                           key: const Key('app-update-status'),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                          ),
+                          role: AppTextRole.label,
                         ),
                         if (presentation.detail != null) ...[
                           const SizedBox(height: 3),
-                          Text(
-                            presentation.detail!,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
+                          AppText.muted(presentation.detail!),
                         ],
                       ],
                     ),
@@ -345,13 +326,12 @@ class AppUpdateBanner extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    final theme = Theme.of(context);
     final busy =
         status.phase == AppUpdatePhase.installing ||
         status.phase == AppUpdatePhase.restarting;
     return Material(
       key: const Key('app-update-banner'),
-      color: theme.colorScheme.primaryContainer,
+      color: AppColors.accentMuted.resolve(context),
       child: SafeArea(
         bottom: false,
         child: Padding(
@@ -365,15 +345,13 @@ class AppUpdateBanner extends ConsumerWidget {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               else
-                Icon(Icons.system_update, color: theme.colorScheme.primary),
+                Icon(Icons.system_update, color: AppColors.accent.resolve(context)),
               const SizedBox(width: 10),
               Expanded(
-                child: Text(
+                child: AppText(
                   status.message ??
                       'Heimdallm ${status.version ?? ''} is available.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+                  role: AppTextRole.label,
                 ),
               ),
               if (!busy)

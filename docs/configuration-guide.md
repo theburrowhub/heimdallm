@@ -38,7 +38,7 @@ Environment variables  >  config.toml  >  Built-in defaults
 
 **Environment variables** (`HEIMDALLM_*`) are the primary configuration mechanism for Docker deployments. Set them in `docker/.env`.
 
-**config.toml** is an optional TOML file mounted at `/config/config.toml` inside the container. It supports richer structures (per-repo overrides, per-org PR metadata) that cannot be expressed as flat env vars. The web UI's Configuration screen edits this file live.
+**config.toml** is an optional TOML file mounted at `/config/config.toml` inside the container. It supports richer structures (per-repo overrides, per-org PR metadata) that cannot be expressed as flat env vars. The web UI's Settings screen (`/config`, reachable from the app-shell settings action) edits this file live.
 
 **HTTP API** — any field in `config.toml` can also be updated at runtime via `PUT /config`. Changes take effect on the next poll cycle without a container restart.
 
@@ -50,7 +50,7 @@ Environment variables  >  config.toml  >  Built-in defaults
 | Simple daemon settings | `docker/.env` (env vars) |
 | Per-repo AI overrides | `config.toml` or web UI |
 | Per-org PR metadata | `config.toml` or web UI |
-| Agent/prompt profiles | Web UI at `/agents` |
+| Agent/prompt profiles | Web UI Prompts screen at `/prompts` (`/agents` still redirects) |
 
 ---
 
@@ -608,7 +608,7 @@ Each repo can use different agent profiles for different pipeline stages:
 | `issue_prompt` | Issue Triage | The agent profile used for issue classification and analysis |
 | `implement_prompt` | Development | The agent profile used for auto-implement code generation |
 
-Prompt profiles are managed in the web UI at `/agents`. Assign them per-repo:
+Prompt profiles are managed in the web UI Prompts screen at `/prompts` (`/agents` remains a compatibility alias). Assign them per-repo:
 
 ```toml
 [ai.repos."myorg/api"]
@@ -1218,7 +1218,7 @@ It is deliberately separate from [§15 Autonomous Mode](#15-autonomous-mode). Au
 
 ### What it reports
 
-For every tracked PR, Heimdallm records an explainable decision and shows it in the Merge tab, on the PR detail view, in `heimdallm-cli merges`, and in the TUI:
+For every tracked PR, Heimdallm records an explainable decision and shows it in the Merge screen in the app shell, on the PR detail view, in `heimdallm-cli merges`, and in the TUI:
 
 - whether the PR is ready to merge, and if not, **why** — named specifically, not as a code;
 - the full list of CI checks with state, whether each one gates the merge, the app that ran it and a link to its log;
@@ -1337,7 +1337,7 @@ require_approval  = true   # never merge this one without a human approval
 
 ### What blocks a merge
 
-The Merge tab and `heimdallm-cli merges` report one of these reasons. They are stable identifiers, and the UI renders each as a sentence.
+The Merge screen in the app shell and `heimdallm-cli merges` report one of these reasons. They are stable identifiers, and the UI renders each as a sentence.
 
 | Reason | Meaning | What to do |
 |---|---|---|
@@ -1364,7 +1364,7 @@ The Merge tab and `heimdallm-cli merges` report one of these reasons. They are s
 
 ### Adding your own PR
 
-The **Merge** tab has its own **Track a PR** button. Use that one, not the Add PR
+The **Merge** screen in the sidebar/rail/drawer has its own **Track a PR** button. Use that one, not the Add PR
 action in Activity: that action routes through the review pipeline, which
 refuses any pull request the authenticated account authored — and Heimdallm
 authenticates as *you*, so that is every PR you open. Pasting your own PR there
@@ -1779,7 +1779,7 @@ Off by default. Turn it on per daemon:
 discovery = "mdns"    # off (default) | mdns
 ```
 
-Environment equivalent: `HEIMDALLM_CLUSTER_DISCOVERY`. The Instances tab also
+Environment equivalent: `HEIMDALLM_CLUSTER_DISCOVERY`. The Instances screen in the app shell also
 offers a one-click switch on the hub.
 
 Only the address the listener actually bound is advertised. With

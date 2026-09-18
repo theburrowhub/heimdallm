@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
+
 /// Banner shown when the daemon's review circuit breaker has tripped.
 /// Dismiss is explicit — the user must acknowledge seeing the warning so
 /// they can't miss a cost event. The message is sourced from the SSE
@@ -15,14 +18,17 @@ class CircuitBreakerBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final danger = AppColors.danger.resolve(context);
     return MaterialBanner(
-      backgroundColor: Colors.red.shade50,
-      leading: const Icon(Icons.warning_amber_rounded, color: Colors.red),
-      content: Text(
-        'Review circuit breaker tripped — $message',
-        style: const TextStyle(color: Colors.black87),
-      ),
-      actions: [TextButton(onPressed: onDismiss, child: const Text('Dismiss'))],
+      backgroundColor: danger.withValues(alpha: 0.08),
+      leading: Icon(Icons.warning_amber_rounded, color: danger),
+      content: AppText('Review circuit breaker tripped — $message'),
+      actions: [
+        TextButton(
+          onPressed: onDismiss,
+          child: const AppText.label('Dismiss'),
+        ),
+      ],
     );
   }
 }

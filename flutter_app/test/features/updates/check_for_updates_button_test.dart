@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/updates/check_for_updates_button.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 import '../../core/platform/fake_platform_services.dart';
 
@@ -282,7 +283,9 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [platformServicesProvider.overrideWithValue(platform)],
-        child: const MaterialApp(
+        child: MaterialApp(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           home: Scaffold(
             body: Column(
               children: [AppUpdateBanner(), CheckForUpdatesButton()],
@@ -321,23 +324,37 @@ void main() {
 
 Widget _app(FakePlatformServices platform) => ProviderScope(
   overrides: [platformServicesProvider.overrideWithValue(platform)],
-  child: const MaterialApp(home: Scaffold(body: CheckForUpdatesButton())),
+  child: MaterialApp(
+    builder: (context, child) =>
+        HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+    home: const Scaffold(body: CheckForUpdatesButton()),
+  ),
 );
 
 Widget _bannerApp(FakePlatformServices platform) => ProviderScope(
   overrides: [platformServicesProvider.overrideWithValue(platform)],
-  child: const MaterialApp(home: Scaffold(body: AppUpdateBanner())),
+  child: MaterialApp(
+    builder: (context, child) =>
+        HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+    home: const Scaffold(body: AppUpdateBanner()),
+  ),
 );
 
 Widget _settingsApp(FakePlatformServices platform) => ProviderScope(
   overrides: [platformServicesProvider.overrideWithValue(platform)],
-  child: const MaterialApp(home: Scaffold(body: AppUpdateSettingsCard())),
+  child: MaterialApp(
+    builder: (context, child) =>
+        HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+    home: const Scaffold(body: AppUpdateSettingsCard()),
+  ),
 );
 
 Widget _settingsAndBannerApp(FakePlatformServices platform) => ProviderScope(
   overrides: [platformServicesProvider.overrideWithValue(platform)],
-  child: const MaterialApp(
-    home: Scaffold(
+  child: MaterialApp(
+    builder: (context, child) =>
+        HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+    home: const Scaffold(
       body: Column(children: [AppUpdateSettingsCard(), AppUpdateBanner()]),
     ),
   ),

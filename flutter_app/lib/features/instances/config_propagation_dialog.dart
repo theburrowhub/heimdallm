@@ -179,50 +179,66 @@ class _DriftTile extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 8),
       child: AppSurface(
         elevation: AppSurfaceElevation.raised,
-        child: ExpansionTile(
-          tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-          leading: Icon(
-            Icons.sync_problem_outlined,
-            color: AppColors.warning.resolve(context),
-          ),
-          title: AppText.label(drift.displayName),
-          subtitle: AppText.muted(
-            drift.drifts.length == 1
-                ? '1 setting differs'
-                : '${drift.drifts.length} settings differ',
-          ),
-          trailing: AppBadge(
-            label: drift.drifts.length == 1
-                ? '1 diff'
-                : '${drift.drifts.length} diffs',
-            foreground: AppColors.warning.resolve(context),
-            background: AppColors.warning
-                .resolve(context)
-                .withValues(alpha: 0.12),
-            border: AppColors.warning.resolve(context).withValues(alpha: 0.24),
-          ),
-          children: [
-            for (final d in drift.drifts)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 2),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(flex: 2, child: AppText.mono(d.key, maxLines: 2)),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      flex: 3,
-                      child: AppText.muted(
-                        d.missing
-                            ? 'not set → ${_render(d.hubValue)}'
-                            : '${_render(d.remoteValue)} → ${_render(d.hubValue)}',
+        // ExpansionTile builds a ListTile internally; without its own
+        // Material ancestor here, the ink/background paint on AppSurface's
+        // colored DecoratedBox instead and Flutter throws a "ListTile
+        // background color or ink splashes may be invisible" assertion,
+        // fatal in widget tests (see theburrowhub/heimdallm c1eb4e7).
+        child: Material(
+          type: MaterialType.transparency,
+          child: ExpansionTile(
+            tilePadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 2,
+            ),
+            childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            leading: Icon(
+              Icons.sync_problem_outlined,
+              color: AppColors.warning.resolve(context),
+            ),
+            title: AppText.label(drift.displayName),
+            subtitle: AppText.muted(
+              drift.drifts.length == 1
+                  ? '1 setting differs'
+                  : '${drift.drifts.length} settings differ',
+            ),
+            trailing: AppBadge(
+              label: drift.drifts.length == 1
+                  ? '1 diff'
+                  : '${drift.drifts.length} diffs',
+              foreground: AppColors.warning.resolve(context),
+              background: AppColors.warning
+                  .resolve(context)
+                  .withValues(alpha: 0.12),
+              border: AppColors.warning
+                  .resolve(context)
+                  .withValues(alpha: 0.24),
+            ),
+            children: [
+              for (final d in drift.drifts)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        flex: 2,
+                        child: AppText.mono(d.key, maxLines: 2),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 12),
+                      Expanded(
+                        flex: 3,
+                        child: AppText.muted(
+                          d.missing
+                              ? 'not set → ${_render(d.hubValue)}'
+                              : '${_render(d.remoteValue)} → ${_render(d.hubValue)}',
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );

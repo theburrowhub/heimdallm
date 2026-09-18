@@ -7,6 +7,7 @@ import 'core/models/config_model.dart';
 import 'core/platform/platform_services.dart';
 import 'core/platform/platform_services_provider.dart';
 import 'core/state/appearance_preferences.dart';
+import 'shared/design_system/components/components.dart';
 import 'shared/design_system/theme.dart';
 import 'shared/router.dart';
 
@@ -501,10 +502,7 @@ class _SplashApp extends ConsumerWidget {
                 errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 96),
               ),
               const SizedBox(height: 24),
-              const Text(
-                'Heimdallm',
-                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-              ),
+              const AppText.pageTitle('Heimdallm'),
               const SizedBox(height: 20),
               const SizedBox(
                 width: 24,
@@ -512,7 +510,7 @@ class _SplashApp extends ConsumerWidget {
                 child: CircularProgressIndicator(strokeWidth: 2.5),
               ),
               const SizedBox(height: 12),
-              Text(status, style: const TextStyle(color: Colors.grey)),
+              AppText.muted(status),
             ],
           ),
         ),
@@ -556,39 +554,21 @@ class _ErrorApp extends ConsumerWidget {
                 children: [
                   const Icon(Icons.error_outline, size: 56, color: Colors.red),
                   const SizedBox(height: 20),
-                  Text(
+                  AppText(
                     title,
-                    style: const TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    role: AppTextRole.sectionTitle,
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 12),
-                  Text(
-                    details,
-                    style: const TextStyle(color: Colors.grey, fontSize: 13),
-                    textAlign: TextAlign.center,
-                  ),
+                  AppText.muted(details, textAlign: TextAlign.center),
                   if (hint != null) ...[
                     const SizedBox(height: 20),
-                    Container(
-                      width: double.infinity,
+                    AppSurface(
+                      elevation: AppSurfaceElevation.surface,
                       padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.orange.withValues(alpha: 0.1),
-                        border: Border.all(
-                          color: Colors.orange.withValues(alpha: 0.4),
-                        ),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        hint!,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontFamily: 'monospace',
-                        ),
-                        textAlign: TextAlign.left,
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: AppText.mono(hint!),
                       ),
                     ),
                   ],

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/features/circuit_breaker/circuit_breaker_banner.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 
 void main() {
   testWidgets('CircuitBreakerBanner shows the message and dismisses', (
@@ -9,6 +10,8 @@ void main() {
     var dismissed = false;
     await tester.pumpWidget(
       MaterialApp(
+        builder: (context, child) =>
+            HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
         home: Scaffold(
           body: CircuitBreakerBanner(
             message: 'org/r #42 — per-PR cap reached',
