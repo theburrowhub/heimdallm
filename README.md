@@ -2,7 +2,7 @@
 
 > AI-powered GitHub automation for macOS and Linux — reviews your pull requests, triages your issues, and can even open implementation PRs for you. Uses Claude, Gemini, Codex, or OpenCode under the hood, posts everything back as your GitHub account, and keeps you informed via a native menu-bar app or a Flutter Web UI.
 
-![Heimdallm dashboard](assets/icon.png)
+![Heimdallm icon](assets/icon.png)
 
 ---
 
@@ -20,7 +20,7 @@ Fetches issues from monitored repos, classifies them by label (`review_only` tri
 Watches the PRs **you** authored or are assigned to and works out exactly what is stopping each one from merging — which check is failing, which reviewer is waiting, which conversation is unresolved — and says so where you cannot miss it. Optionally moves them along too: arm GitHub's auto-merge, update branches that fall behind, have the agent resolve conflicts, and merge when everything is green. Every automation is off by default.
 
 ### 4. Self-monitoring UI
-A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Merge tab, Issue list, prompt/agent editor, live config editor, and a live log stream. Opens alongside the daemon in Docker mode.
+A Flutter Web UI (`:3000`) with responsive sidebar/rail/drawer navigation for Activity, Merge, Repositories, Organizations, Prompts, Agents, Stats, and Instances, plus live Settings and Server/Logs screens. Opens alongside the daemon in Docker mode.
 
 ### Headline features
 
@@ -28,13 +28,13 @@ A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Merge tab, Issue list
 - **Merge tracking** — tells you which check is blocking each of your own PRs, and can arm auto-merge, update stale branches, resolve conflicts and merge, each behind its own switch
 - **Issue pipeline** — label-driven triage, refinement planning, and optional auto-implement with branch/commit/PR cycle
 - **Issue dependencies** — mark downstream work with a `blocked` label; declare deps via a `## Depends on` body section *or* GitHub's native sub-issues; Heimdallm auto-promotes when all blockers close
-- **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/agents`
+- **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/prompts` (`/agents` remains a compatibility alias)
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
 - **Per-repo overrides** — different AI agent, prompt, and feedback mode per repository
 - **Topic-based auto-discovery** — tag repos with a GitHub topic and Heimdallm monitors them without editing config
 - **Severity gating** — only `high` severity triggers `REQUEST_CHANGES`; everything else approves with informational notes
 - **Native desktop** — macOS menu-bar app, system notifications, dark mode, no Electron
-- **Web UI** — Flutter Web dashboard served by Nginx with system / light / dark theme toggle, live SSE updates
+- **Web UI** — Flutter Web app shell served by Nginx with responsive sidebar/rail/drawer navigation, system / light / dark theme toggle, and live SSE updates
 - **Docker mode** — single `make up` spins up daemon + web UI for server/team deployments
 
 ---
@@ -418,8 +418,8 @@ The **Go daemon** (`heimdalld`, port `7842`) is the engine. It polls GitHub for 
 
 Three first-party UIs talk to it over HTTP:
 
-- **Flutter desktop app** — macOS menu-bar + dashboard, system notifications. Ships inside the `.dmg` / Linux packages.
-- **Flutter Web UI** — browser dashboard on port `3000`, served by Nginx, ships as a second Docker container alongside the daemon.
+- **Flutter desktop app** — macOS/Linux desktop app with the responsive app shell, menu-bar integration on macOS, and system notifications. Ships inside the `.dmg` / Linux packages.
+- **Flutter Web UI** — browser app shell on port `3000`, served by Nginx, ships as a second Docker container alongside the daemon.
 - **Terminal CLI/TUI** — Cobra commands plus a Bubble Tea + Lipgloss dashboard. Ships as `heimdallm-cli` via Homebrew and GitHub Releases.
 
 ```
@@ -433,7 +433,7 @@ CLI / TUI   ─┘                       │
                                       claude / gemini / codex / opencode CLI
 ```
 
-In **Docker mode** the daemon runs standalone with the web UI container as an optional-but-recommended companion (brought up by default with `make up`). Configuration is via environment variables (`HEIMDALLM_*`) or a mounted `config.toml`, and can be edited live from the web UI at `/config`.
+In **Docker mode** the daemon runs standalone with the web UI container as an optional-but-recommended companion (brought up by default with `make up`). Configuration is via environment variables (`HEIMDALLM_*`) or a mounted `config.toml`, and can be edited live from the web UI Settings screen at `/config`.
 
 ### Multiple instances
 
