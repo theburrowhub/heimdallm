@@ -21,8 +21,19 @@ void main() {
     expect(designSystemComponentTypes(), [
       AppBadge,
       AppButton,
+      AppFieldGrid,
+      AppFilterChip,
+      AppGridCard,
+      AppIconButton,
+      AppListRow,
+      AppMultiSelectChip,
+      AppPageBody,
+      AppSearchField,
+      AppSegmentedFilter,
       AppSurface,
       AppText,
+      AppToolbar,
+      AppViewToggle,
     ]);
   });
 }

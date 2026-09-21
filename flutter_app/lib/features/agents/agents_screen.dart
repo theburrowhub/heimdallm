@@ -502,66 +502,69 @@ class _PromptTile extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: AppSurface(
-        child: ListTile(
-          leading: Text(
-            _focusEmoji(prompt.focus),
-            style: const TextStyle(fontSize: 22),
-          ),
-          title: Row(
-            children: [
-              Expanded(
-                child: StyledText(
-                  prompt.name,
-                  style: TextStyler()
-                      .style(AppTextStyles.body.mix())
-                      .fontWeight(FontWeight.w600)
-                      .maxLines(1)
-                      .overflow(TextOverflow.ellipsis),
+        child: Material(
+          type: MaterialType.transparency,
+          child: ListTile(
+            leading: Text(
+              _focusEmoji(prompt.focus),
+              style: const TextStyle(fontSize: 22),
+            ),
+            title: Row(
+              children: [
+                Expanded(
+                  child: StyledText(
+                    prompt.name,
+                    style: TextStyler()
+                        .style(AppTextStyles.body.mix())
+                        .fontWeight(FontWeight.w600)
+                        .maxLines(1)
+                        .overflow(TextOverflow.ellipsis),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              AppBadge(
-                label: isActive ? 'ACTIVE' : _focusLabel(prompt.focus),
-                foreground: isActive
-                    ? AppColors.onAccent.resolve(context)
-                    : focusColor,
-                background: isActive
-                    ? _categoryColor(context, category)
-                    : focusColor.withValues(alpha: 0.14),
-                border: isActive
-                    ? _categoryColor(context, category)
-                    : focusColor.withValues(alpha: 0.35),
-              ),
-            ],
-          ),
-          subtitle: AppText.muted(
-            subtitleOverride ??
-                (prompt.instructions.isNotEmpty
-                    ? prompt.instructions
-                    : 'Custom template'),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (!isActive)
-                TextButton(
-                  onPressed: onActivate,
-                  child: const Text('Activate'),
+                const SizedBox(width: 8),
+                AppBadge(
+                  label: isActive ? 'ACTIVE' : _focusLabel(prompt.focus),
+                  foreground: isActive
+                      ? AppColors.onAccent.resolve(context)
+                      : focusColor,
+                  background: isActive
+                      ? _categoryColor(context, category)
+                      : focusColor.withValues(alpha: 0.14),
+                  border: isActive
+                      ? _categoryColor(context, category)
+                      : focusColor.withValues(alpha: 0.35),
                 ),
-              IconButton(
-                icon: const Icon(Icons.edit, size: 18),
-                onPressed: onEdit,
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete, size: 18),
-                color: AppColors.danger.resolve(context),
-                onPressed: onDelete,
-              ),
-            ],
+              ],
+            ),
+            subtitle: AppText.muted(
+              subtitleOverride ??
+                  (prompt.instructions.isNotEmpty
+                      ? prompt.instructions
+                      : 'Custom template'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!isActive)
+                  TextButton(
+                    onPressed: onActivate,
+                    child: const Text('Activate'),
+                  ),
+                IconButton(
+                  icon: const Icon(Icons.edit, size: 18),
+                  onPressed: onEdit,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete, size: 18),
+                  color: AppColors.danger.resolve(context),
+                  onPressed: onDelete,
+                ),
+              ],
+            ),
+            onTap: onEdit,
           ),
-          onTap: onEdit,
         ),
       ),
     );

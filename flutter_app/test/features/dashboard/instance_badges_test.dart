@@ -16,6 +16,7 @@ import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
 import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
+import 'package:heimdallm/shared/design_system/components/app_list_row.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/widgets/pr_review_state_badge.dart';
 import 'package:mocktail/mocktail.dart';
@@ -348,7 +349,7 @@ void main() {
       );
 
       // One row, not two: this is the bug itself, reproduced.
-      expect(find.byType(Card), findsOneWidget);
+      expect(find.byType(AppListRow), findsOneWidget);
       expect(find.text('Same PR'), findsOneWidget);
       expect(find.byType(InstanceBadge), findsNWidgets(2));
       expect(find.text('Server A'), findsWidgets);
@@ -486,7 +487,7 @@ void main() {
       ),
     );
 
-    expect(find.byType(Card), findsOneWidget);
+    expect(find.byType(AppListRow), findsOneWidget);
     expect(find.text('Same issue'), findsOneWidget);
   });
 

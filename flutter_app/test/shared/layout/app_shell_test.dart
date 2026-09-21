@@ -20,6 +20,7 @@ import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart'
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/layout/app_shell.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/platform/fake_platform_services.dart';
 
@@ -491,5 +492,90 @@ void main() {
       find.textContaining('restart cancelled', findRichText: true),
       findsOneWidget,
     );
+  });
+
+  group('sidebar toggle', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    testWidgets(
+      'cycles extended -> hidden -> icons -> extended at a wide width',
+      (tester) async {
+        final platform = FakePlatformServices();
+        final api = _MockApiClient();
+
+        await _pumpShell(
+          tester,
+          overrides: _baseOverrides(platform: platform, api: api),
+        );
+
+        // auto at 1400px starts extended, matching the shell's pre-toggle
+        // width-derived behavior.
+        expect(find.byType(NavigationRail), findsOneWidget);
+        expect(find.text('Dashboard content'), findsOneWidget);
+        expect(find.byTooltip('Collapse sidebar'), findsOneWidget);
+
+        await tester.tap(find.byKey(const Key('sidebar-toggle')));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(NavigationRail), findsNothing);
+        expect(find.text('Dashboard content'), findsOneWidget);
+        expect(find.byTooltip('Show sidebar'), findsOneWidget);
+
+        await tester.tap(find.byKey(const Key('sidebar-toggle')));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(NavigationRail), findsOneWidget);
+        expect(
+          tester.widget<NavigationRail>(find.byType(NavigationRail)).extended,
+          isFalse,
+        );
+        expect(find.byTooltip('Expand sidebar'), findsOneWidget);
+
+        await tester.tap(find.byKey(const Key('sidebar-toggle')));
+        await tester.pumpAndSettle();
+
+        expect(
+          tester.widget<NavigationRail>(find.byType(NavigationRail)).extended,
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets('a persisted hidden preference starts with no rail', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({'sidebar_mode': 'hidden'});
+      final platform = FakePlatformServices();
+      final api = _MockApiClient();
+
+      await _pumpShell(
+        tester,
+        overrides: _baseOverrides(platform: platform, api: api),
+      );
+
+      expect(find.byType(NavigationRail), findsNothing);
+      expect(find.byKey(const Key('sidebar-toggle')), findsOneWidget);
+      expect(find.text('Dashboard content'), findsOneWidget);
+    });
+
+    testWidgets('the toggle is not shown at a compact width', (tester) async {
+      final platform = FakePlatformServices();
+      final api = _MockApiClient();
+
+      await _pumpShell(
+        tester,
+        size: const Size(600, 1000),
+        overrides: _baseOverrides(platform: platform, api: api),
+      );
+
+      expect(find.byKey(const Key('sidebar-toggle')), findsNothing);
+
+      final scaffold = tester.state<ScaffoldState>(find.byType(Scaffold).first);
+      scaffold.openDrawer();
+      await tester.pumpAndSettle();
+      expect(find.text('Instances'), findsOneWidget);
+    });
   });
 }

@@ -43,10 +43,16 @@ class HeimdallmTheme {
           colors: {
             AppColors.canvas: scheme.surface,
             AppColors.surface: isDark
-                ? Color.alphaBlend(Colors.white.withValues(alpha: 0.04), scheme.surface)
+                ? Color.alphaBlend(
+                    Colors.white.withValues(alpha: 0.04),
+                    scheme.surface,
+                  )
                 : scheme.surface,
             AppColors.surfaceRaised: isDark
-                ? Color.alphaBlend(Colors.white.withValues(alpha: 0.08), scheme.surface)
+                ? Color.alphaBlend(
+                    Colors.white.withValues(alpha: 0.08),
+                    scheme.surface,
+                  )
                 : Colors.white,
             AppColors.border: scheme.outlineVariant,
             AppColors.text: scheme.onSurface,
@@ -86,6 +92,7 @@ class HeimdallmTheme {
             AppRadius.sm: const Radius.circular(4),
             AppRadius.md: const Radius.circular(8),
             AppRadius.lg: const Radius.circular(12),
+            AppRadius.pill: const Radius.circular(999),
           },
           textStyles: {
             AppTextStyles.pageTitle:
@@ -94,14 +101,14 @@ class HeimdallmTheme {
                 theme.textTheme.titleSmall ?? const TextStyle(fontSize: 14),
             AppTextStyles.body:
                 theme.textTheme.bodyMedium ?? const TextStyle(fontSize: 13),
-            AppTextStyles.bodyMuted: (theme.textTheme.bodyMedium ??
-                    const TextStyle(fontSize: 13))
-                .copyWith(color: scheme.onSurfaceVariant),
+            AppTextStyles.bodyMuted:
+                (theme.textTheme.bodyMedium ?? const TextStyle(fontSize: 13))
+                    .copyWith(color: scheme.onSurfaceVariant),
             AppTextStyles.label:
                 theme.textTheme.labelMedium ?? const TextStyle(fontSize: 11),
-            AppTextStyles.mono: (theme.textTheme.bodySmall ??
-                    const TextStyle(fontSize: 12))
-                .copyWith(fontFamily: 'monospace'),
+            AppTextStyles.mono:
+                (theme.textTheme.bodySmall ?? const TextStyle(fontSize: 12))
+                    .copyWith(fontFamily: 'monospace'),
           },
           child: child,
         );

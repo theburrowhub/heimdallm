@@ -8,7 +8,9 @@ The design system lives in `lib/shared/design_system/`:
 
 - `tokens.dart` — semantic tokens for `AppColors`, `AppSpace`, `AppRadius`, `AppTextStyles`, and shared layout breakpoints in `AppBreakpoints`
 - `theme.dart` — `HeimdallmTheme.light()`, `HeimdallmTheme.dark()`, and `HeimdallmTheme.scope(...)`, which bridge Material `ThemeData` into a `MixScope`
-- `components/` — reusable themed primitives such as `AppSurface`, `AppButton`, `AppText`, and `AppBadge`
+- `components/` — reusable themed widgets, split into two layers:
+  - primitives: `AppSurface`, `AppButton`, `AppText`, `AppBadge`, `AppIconButton`
+  - composition components, extracted so every screen's toolbar/list/grid share one look instead of each rebuilding its own: `AppToolbar` (the filter/action bar — leading chips + filters + a right-pinned trailing zone, no decorated container, matching Activity's reference style), `AppFilterChip` (a selectable pill, with an optional accent `ColorToken` and count badge), `AppSearchField` (owns its controller/focus and resyncs safely on external resets), `AppSegmentedFilter`/`AppSegment` (a bordered, connected multi-option control with per-segment counts), `AppMultiSelectChip`/`showAppMultiSelect` (the one shared multi-select dialog), `AppViewToggle`/`AppViewMode` (the list/grid switch), `AppListRow` (a list row — accent bar, leading badges, title/subtitle, and a *tight*-`Flexible` trailing zone that always reaches the row's right edge — see the "trailing alignment" note below), `AppGridCard`/`AppGridDelegate` (the matching mosaic tile and shared grid metrics), `AppPageBody` (the full-width `Column[toolbar, header, Expanded(child)]` wrapper — no screen should wrap its body in a `ConstrainedBox`), and `AppFieldGrid` (lays a form's short fields into as many columns as fit, instead of stretching them to the full window width)
 - `color_resolver.dart` — helper for resolving color tokens safely in tests or minimal hosts that may not have a full `MixScope`
 
 ### Token inventory
@@ -22,7 +24,7 @@ Authoritative token definitions are in `lib/shared/design_system/tokens.dart`:
   - status: `success`, `warning`, `danger`, `info`
   - feature palette roles: `featurePrReview`, `featureIssueTracking`, `featureDevelop`, `featureMergeTracking`, `featureMixed`, `featureOffFill`, `featureOffOutline`
 - **Spacing (`AppSpace`)**: `xs`, `sm`, `md`, `lg`, `xl`, `xxl`
-- **Radii (`AppRadius`)**: `sm`, `md`, `lg`
+- **Radii (`AppRadius`)**: `sm`, `md`, `lg`, `pill` (999 — fully rounded chips/pills)
 - **Typography (`AppTextStyles`)**: `pageTitle`, `sectionTitle`, `body`, `bodyMuted`, `label`, `mono`
 - **Breakpoints (`AppBreakpoints`)**: `compact = 768`, `medium = 1200`
 
@@ -76,15 +78,22 @@ AppSurface(
 
 This is not optional. Missing the wrapper triggers Flutter's “ListTile background color or ink splashes may be invisible” assertion. It was caught in Linux verification (`make verify-linux`) even though it did not reproduce reliably in macOS `flutter test`.
 
+### Important gotcha: pinning `AppListRow`/toolbar trailing content to the right edge
+
+A `Row` with an `Expanded` title and a `Flexible` trailing zone sharing the same flex looks reasonable but leaves a dead gap: a *loose* `Flexible` (the default `fit`) shrinks to its content instead of claiming its share of the row, so `WrapAlignment.end` inside it never reaches the row's actual right edge. `AppListRow` and `AppToolbar` avoid this with `Flexible(fit: FlexFit.tight, child: Align(alignment: Alignment.centerRight, child: Wrap(...)))` — the tight fit forces the trailing slot to claim its full share of the row, and `Align` pins the (still-reflowing) `Wrap` against that slot's own right edge. Reach for this pattern instead of a loose `Flexible` any time trailing content (badges, buttons, an icon button) needs to sit flush against a row's edge while still being allowed to wrap onto a second line at narrow widths.
+
 ## Navigation
 
-The app now uses `StatefulShellRoute.indexedStack` in `lib/shared/router.dart` with a responsive shell from `lib/shared/layout/app_shell.dart`. The shell preserves branch state while adapting navigation chrome by width:
+The app now uses `StatefulShellRoute.indexedStack` in `lib/shared/router.dart` with a responsive shell from `lib/shared/layout/app_shell.dart`. The shell preserves branch state while adapting navigation chrome by width and by the user's own sidebar preference:
 
-- `< 768px` (`AppBreakpoints.compact`): drawer navigation
-- `768px .. < 1200px`: collapsed `NavigationRail`
-- `>= 1200px`: extended `NavigationRail`
+- `< 768px` (`AppBreakpoints.compact`): drawer navigation, regardless of preference — there's no room for a rail
+- `>= 768px`: a `sidebarModeProvider` (`lib/core/state/sidebar_preferences.dart`) preference of `hidden` / `icons` / `extended`, persisted like `appearanceProvider`. Its default, `AppSidebarMode.auto`, keeps the shell's original width-derived behavior (extended at/above `AppBreakpoints.medium`, icons-only below it) until the user cycles the `Key('sidebar-toggle')` button in the app bar, at which point an explicit choice always wins over width. `effectiveSidebarMode(preference, width)` and `nextSidebarMode(effective)` are the two pure functions this resolves through — cycling always starts from what's currently on screen, not from the raw stored preference.
 
-Global chrome is shared across every destination: instance selector, update banner, circuit-breaker banner, connection banner, instance-failure banner, daemon start/stop control, Server shortcut, Settings shortcut, and refresh action.
+Global chrome is shared across every destination: the sidebar toggle, instance selector, update banner, circuit-breaker banner, connection banner, instance-failure banner, daemon start/stop control, Server shortcut, Settings shortcut, and refresh action.
+
+### List/grid view-mode preferences
+
+Activity and Repositories each persist their view-mode choice inside their own pre-existing state (`ActivityFilters.viewMode`, `repos_screen.dart`'s `repos_view` key) and keep doing so. Every other screen that offers an `AppViewToggle` (Merge, Instances, Prompts, CLI Agents) uses the shared `viewModeProvider(prefsKey)` family in `lib/core/state/view_mode_preferences.dart` instead — one `ViewModeNotifier` per screen-specific `prefsKey`, so each screen remembers its own choice independently.
 
 ### Routes and aliases
 
@@ -115,6 +124,10 @@ Preserved deep-link/query-param contracts from the pre-migration UI:
 - `/server?tab=status|events|logs` remains the server/logs deep-link contract
 - `/logs` still redirects to `/server?tab=logs`
 - `/agents` still works as a compatibility alias for `/prompts`
+
+## Layout width
+
+Every screen uses the full available width — no screen wraps its body in a `ConstrainedBox` to cap it. `AppPageBody` is the one place that rule lives (`Column[toolbar, header, Expanded(child)]`, unconstrained). Where a form has several short fields (a poll interval, a retention count, a timeout) that would otherwise stretch to the full window width, lay them out with `AppFieldGrid` instead, which puts as many equal-width columns as fit `minFieldWidth` (capped at 3) rather than one full-width field per row.
 
 ## Testing
 
