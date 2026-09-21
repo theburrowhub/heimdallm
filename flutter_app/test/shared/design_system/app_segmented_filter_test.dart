@@ -69,33 +69,74 @@ void main() {
     expect(find.text('B'), findsOneWidget);
   });
 
-  testWidgets('AppSegmentedFilter announces the current segment as selected', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
+  testWidgets(
+    'AppSegmentedFilter announces selection and stays activatable via the '
+    'accessibility tap action',
+    (tester) async {
+      // Regression test for two review rounds: swapping Material's
+      // SegmentedButton for InkWell first dropped the "selected"
+      // announcement (fixed with an outer Semantics(selected:)), and that
+      // fix then dropped the tap action entirely, because
+      // InkWell(excludeFromSemantics: true) removes its own
+      // SemanticsAction.tap along with its default semantics — the outer
+      // Semantics must declare its own onTap or a screen reader's
+      // activation gesture stops reaching a segment at all.
+      final handle = tester.ensureSemantics();
+      String? changedTo;
 
-    await tester.pumpWidget(
-      _hosted(
-        AppSegmentedFilter<String>(
-          segments: const [
-            AppSegment(value: 'all', label: 'All'),
-            AppSegment(value: 'monitored', label: 'Monitored'),
-          ],
-          current: 'all',
-          onChanged: (_) {},
+      await tester.pumpWidget(
+        _hosted(
+          AppSegmentedFilter<String>(
+            segments: const [
+              AppSegment(value: 'all', label: 'All'),
+              AppSegment(value: 'monitored', label: 'Monitored'),
+            ],
+            current: 'all',
+            onChanged: (v) => changedTo = v,
+          ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
+      );
+      await tester.pumpAndSettle();
 
-    final selectedNode = tester.getSemantics(find.text('All'));
-    final unselectedNode = tester.getSemantics(find.text('Monitored'));
+      expect(
+        tester.getSemantics(find.text('All')),
+        matchesSemantics(
+          label: 'All',
+          isButton: true,
+          isSelected: true,
+          hasSelectedState: true,
+          hasTapAction: true,
+          hasFocusAction: true,
+          isFocusable: true,
+        ),
+      );
+      expect(
+        tester.getSemantics(find.text('Monitored')),
+        matchesSemantics(
+          label: 'Monitored',
+          isButton: true,
+          isSelected: false,
+          hasSelectedState: true,
+          hasTapAction: true,
+          hasFocusAction: true,
+          isFocusable: true,
+        ),
+      );
 
-    // ignore: deprecated_member_use
-    expect(selectedNode.hasFlag(SemanticsFlag.isSelected), isTrue);
-    // ignore: deprecated_member_use
-    expect(unselectedNode.hasFlag(SemanticsFlag.isSelected), isFalse);
+      // Activate via the accessibility action, not a raw touch — this is
+      // exactly the path that silently stopped working when
+      // excludeFromSemantics dropped InkWell's own SemanticsAction.tap.
+      final monitoredNode = tester.getSemantics(find.text('Monitored'));
+      // ignore: deprecated_member_use
+      tester.binding.pipelineOwner.semanticsOwner!.performAction(
+        monitoredNode.id,
+        SemanticsAction.tap,
+      );
+      await tester.pump();
 
-    handle.dispose();
-  });
+      expect(changedTo, 'monitored');
+
+      handle.dispose();
+    },
+  );
 }

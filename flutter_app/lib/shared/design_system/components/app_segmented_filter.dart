@@ -72,14 +72,16 @@ class AppSegmentedFilter<T> extends StatelessWidget {
     Color raised,
   ) {
     final selected = segment.value == current;
-    // Same selection-semantics gap as AppFilterChip: a plain InkWell drops
-    // Material SegmentedButton's built-in "selected" announcement.
+    // Same selection-semantics gap as AppFilterChip, and the same two
+    // fixes: `selected`/`button` explicit (no `label` — the descendant
+    // AppText/AppBadge already contribute one, avoiding a duplicated
+    // "All\nAll"), and `onTap` repeated here because
+    // `excludeFromSemantics` on the InkWell below removes its own
+    // SemanticsAction.tap along with its default semantics.
     return Semantics(
       button: true,
       selected: selected,
-      label: segment.count != null
-          ? '${segment.label}, ${segment.count}'
-          : segment.label,
+      onTap: () => onChanged(segment.value),
       child: InkWell(
         onTap: () => onChanged(segment.value),
         excludeFromSemantics: true,

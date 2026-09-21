@@ -43,13 +43,20 @@ class AppFilterChip extends StatelessWidget {
 
     // Swapping Material's FilterChip for a plain InkWell dropped its
     // built-in "selected" semantics — a screen reader could no longer tell
-    // which filters are active. Declare it explicitly here instead of
-    // relying on InkWell's default (unselected) button semantics, and
-    // exclude InkWell's own node so the two don't announce twice.
+    // which filters are active. Declare `selected`/`button` explicitly
+    // instead of relying on InkWell's default (unselected) button
+    // semantics. No explicit `label` here: the descendant AppText (and the
+    // count AppBadge, when present) already contribute their own text as
+    // semantics labels, and merging those with a duplicate label declared
+    // here produced "Open\nOpen" instead of "Open". `onTap` must be
+    // repeated on this outer node — `excludeFromSemantics` on the InkWell
+    // below removes its default semantics *and* its own SemanticsAction.tap,
+    // so without this the chip would announce "selected" correctly but
+    // stop being activatable via an accessibility gesture entirely.
     return Semantics(
       button: true,
       selected: selected,
-      label: count != null ? '$label, $count' : label,
+      onTap: onTap,
       child: InkWell(
         onTap: onTap,
         borderRadius: pillRadius,
