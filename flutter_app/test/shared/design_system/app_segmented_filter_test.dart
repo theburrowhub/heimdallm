@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/shared/design_system/components/components.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
@@ -66,5 +67,35 @@ void main() {
 
     expect(find.text('A'), findsOneWidget);
     expect(find.text('B'), findsOneWidget);
+  });
+
+  testWidgets('AppSegmentedFilter announces the current segment as selected', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+
+    await tester.pumpWidget(
+      _hosted(
+        AppSegmentedFilter<String>(
+          segments: const [
+            AppSegment(value: 'all', label: 'All'),
+            AppSegment(value: 'monitored', label: 'Monitored'),
+          ],
+          current: 'all',
+          onChanged: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final selectedNode = tester.getSemantics(find.text('All'));
+    final unselectedNode = tester.getSemantics(find.text('Monitored'));
+
+    // ignore: deprecated_member_use
+    expect(selectedNode.hasFlag(SemanticsFlag.isSelected), isTrue);
+    // ignore: deprecated_member_use
+    expect(unselectedNode.hasFlag(SemanticsFlag.isSelected), isFalse);
+
+    handle.dispose();
   });
 }

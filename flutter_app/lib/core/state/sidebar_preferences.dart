@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -63,6 +65,13 @@ AppSidebarMode nextSidebarMode(AppSidebarMode effective) => switch (effective) {
 /// default synchronously and loads asynchronously so the first frame is
 /// never blocked, and a failed read/write is logged, never thrown.
 class SidebarModeNotifier extends Notifier<AppSidebarMode> {
+  // Guards a narrow but real race: build() fires _loadAsync() and returns
+  // immediately, so set()/cycleFrom() can run — and win — before that load
+  // resolves. Without this flag, the pending load would then land *after*
+  // set() and silently overwrite the user's explicit choice with whatever
+  // was last on disk.
+  bool _explicitlySet = false;
+
   @override
   AppSidebarMode build() {
     _loadAsync();
@@ -72,6 +81,7 @@ class SidebarModeNotifier extends Notifier<AppSidebarMode> {
   Future<void> _loadAsync() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (_explicitlySet) return;
       state = _decode(prefs.getString(_sidebarModeKey));
     } catch (e) {
       debugPrint('SidebarModeNotifier: failed to load preference: $e');
@@ -79,13 +89,18 @@ class SidebarModeNotifier extends Notifier<AppSidebarMode> {
   }
 
   void set(AppSidebarMode mode) {
+    _explicitlySet = true;
     state = mode;
-    SharedPreferences.getInstance()
-        .then((prefs) => prefs.setString(_sidebarModeKey, _encode(mode)))
-        .catchError((e) {
-          debugPrint('SidebarModeNotifier: failed to save preference: $e');
-          return false;
-        });
+    unawaited(_persist(mode));
+  }
+
+  Future<void> _persist(AppSidebarMode mode) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_sidebarModeKey, _encode(mode));
+    } catch (e) {
+      debugPrint('SidebarModeNotifier: failed to save preference: $e');
+    }
   }
 
   /// Cycles from the currently [effective] mode (see [effectiveSidebarMode])

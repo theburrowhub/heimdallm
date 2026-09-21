@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/shared/design_system/components/components.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
@@ -64,5 +65,35 @@ void main() {
     expect(find.text('PR'), findsOneWidget);
     expect(find.text('IT'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('AppFilterChip announces its selected state to assistive tech', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+
+    await tester.pumpWidget(
+      _hosted(
+        Column(
+          children: [
+            AppFilterChip(label: 'Open', selected: true, onTap: () {}),
+            AppFilterChip(label: 'Closed', selected: false, onTap: () {}),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final selectedNode = tester.getSemantics(find.text('Open'));
+    final unselectedNode = tester.getSemantics(find.text('Closed'));
+
+    // ignore: deprecated_member_use
+    expect(selectedNode.hasFlag(SemanticsFlag.isSelected), isTrue);
+    // ignore: deprecated_member_use
+    expect(unselectedNode.hasFlag(SemanticsFlag.isSelected), isFalse);
+    // ignore: deprecated_member_use
+    expect(selectedNode.hasFlag(SemanticsFlag.isButton), isTrue);
+
+    handle.dispose();
   });
 }

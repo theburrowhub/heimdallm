@@ -41,47 +41,63 @@ class AppFilterChip extends StatelessWidget {
     final color = selected ? accentColor : mutedColor;
     final pillRadius = BorderRadius.all(AppRadius.pill.resolve(context));
 
-    return InkWell(
-      onTap: onTap,
-      borderRadius: pillRadius,
-      child: Box(
-        style: BoxStyler()
-            .color(
-              selected ? accent().withValues(alpha: 0.15) : Colors.transparent,
-            )
-            .borderAll(
-              color: accent().withValues(alpha: selected ? 0.6 : 0.4),
-              width: 1,
-            )
-            .borderRadiusAll(AppRadius.pill())
-            .padding(
-              EdgeInsetsGeometryMix.value(
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              ),
-            ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (icon != null) ...[
-              Icon(icon, size: 13, color: color),
-              const SizedBox(width: 4),
-            ],
-            AppText.label(label, color: color),
-            if (count != null) ...[
-              const SizedBox(width: 6),
-              AppBadge(
-                label: '$count',
-                foreground: color,
-                background: (selected ? accentColor : mutedColor).withValues(
-                  alpha: 0.15,
+    // Swapping Material's FilterChip for a plain InkWell dropped its
+    // built-in "selected" semantics — a screen reader could no longer tell
+    // which filters are active. Declare it explicitly here instead of
+    // relying on InkWell's default (unselected) button semantics, and
+    // exclude InkWell's own node so the two don't announce twice.
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: count != null ? '$label, $count' : label,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: pillRadius,
+        excludeFromSemantics: true,
+        child: Box(
+          style: BoxStyler()
+              .color(
+                selected
+                    ? accent().withValues(alpha: 0.15)
+                    : Colors.transparent,
+              )
+              .borderAll(
+                color: accent().withValues(alpha: selected ? 0.6 : 0.4),
+                width: 1,
+              )
+              .borderRadiusAll(AppRadius.pill())
+              .padding(
+                EdgeInsetsGeometryMix.value(
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 ),
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                radius: 10,
-                fontSize: 10,
-                letterSpacing: 0,
               ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (icon != null) ...[
+                Icon(icon, size: 13, color: color),
+                const SizedBox(width: 4),
+              ],
+              AppText.label(label, color: color),
+              if (count != null) ...[
+                const SizedBox(width: 6),
+                AppBadge(
+                  label: '$count',
+                  foreground: color,
+                  background: (selected ? accentColor : mutedColor).withValues(
+                    alpha: 0.15,
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 1,
+                  ),
+                  radius: 10,
+                  fontSize: 10,
+                  letterSpacing: 0,
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );

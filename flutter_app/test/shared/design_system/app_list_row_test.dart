@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/shared/design_system/components/components.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
+import 'package:heimdallm/shared/widgets/severity_badge.dart';
+import 'package:heimdallm/shared/widgets/state_badge.dart';
+import 'package:heimdallm/shared/widgets/type_badge.dart';
 
 Widget _hosted(Widget child) {
   return MaterialApp(
@@ -112,6 +115,53 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('Review'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'AppListRow does not overflow with realistic Activity content at a narrow width',
+    (tester) async {
+      // Regression test for a real overflow the fixed-flex-ratio trailing
+      // zone produced: at 375px, two leading badges plus a full
+      // single-line severity badge + Review button + dismiss icon exceeded
+      // the row's own available width by 46px (`RenderFlex overflowed`).
+      await tester.binding.setSurfaceSize(const Size(375, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        _hosted(
+          AppListRow(
+            title: const Text('Fix critical bug in payment flow handler'),
+            subtitle: const Text('org/repo · #42 · alice'),
+            leading: const [
+              TypeBadge(type: 'pr'),
+              StateBadge(state: 'open'),
+            ],
+            trailing: [
+              const SeverityBadge(severity: 'medium'),
+              SizedBox(
+                height: 28,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    textStyle: const TextStyle(fontSize: 12),
+                  ),
+                  onPressed: () {},
+                  child: const Text('Review'),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, size: 14),
+                visualDensity: VisualDensity.compact,
+                onPressed: () {},
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
     },
   );
 }

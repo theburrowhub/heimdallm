@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -28,6 +30,11 @@ class ViewModeNotifier extends Notifier<AppViewMode> {
 
   final String prefsKey;
 
+  // Same race as SidebarModeNotifier: without this, set() called before
+  // the in-flight _loadAsync() resolves would be silently overwritten by
+  // that late-arriving load.
+  bool _explicitlySet = false;
+
   @override
   AppViewMode build() {
     _loadAsync();
@@ -37,6 +44,7 @@ class ViewModeNotifier extends Notifier<AppViewMode> {
   Future<void> _loadAsync() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (_explicitlySet) return;
       state = _decode(prefs.getString(prefsKey));
     } catch (e) {
       debugPrint('ViewModeNotifier($prefsKey): failed to load preference: $e');
@@ -44,15 +52,18 @@ class ViewModeNotifier extends Notifier<AppViewMode> {
   }
 
   void set(AppViewMode mode) {
+    _explicitlySet = true;
     state = mode;
-    SharedPreferences.getInstance()
-        .then((prefs) => prefs.setString(prefsKey, _encode(mode)))
-        .catchError((e) {
-          debugPrint(
-            'ViewModeNotifier($prefsKey): failed to save preference: $e',
-          );
-          return false;
-        });
+    unawaited(_persist(mode));
+  }
+
+  Future<void> _persist(AppViewMode mode) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(prefsKey, _encode(mode));
+    } catch (e) {
+      debugPrint('ViewModeNotifier($prefsKey): failed to save preference: $e');
+    }
   }
 }
 

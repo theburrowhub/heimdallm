@@ -72,38 +72,53 @@ class AppSegmentedFilter<T> extends StatelessWidget {
     Color raised,
   ) {
     final selected = segment.value == current;
-    return InkWell(
-      onTap: () => onChanged(segment.value),
-      child: Box(
-        style: BoxStyler()
-            .color(
-              selected ? primary.withValues(alpha: 0.22) : Colors.transparent,
-            )
-            .padding(
-              EdgeInsetsGeometryMix.value(
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+    // Same selection-semantics gap as AppFilterChip: a plain InkWell drops
+    // Material SegmentedButton's built-in "selected" announcement.
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: segment.count != null
+          ? '${segment.label}, ${segment.count}'
+          : segment.label,
+      child: InkWell(
+        onTap: () => onChanged(segment.value),
+        excludeFromSemantics: true,
+        child: Box(
+          style: BoxStyler()
+              .color(
+                selected ? primary.withValues(alpha: 0.22) : Colors.transparent,
+              )
+              .padding(
+                EdgeInsetsGeometryMix.value(
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                ),
               ),
-            ),
-        child: Row(
-          children: [
-            AppText(
-              segment.label,
-              role: AppTextRole.label,
-              color: selected ? primary : null,
-            ),
-            if (segment.count != null) ...[
-              const SizedBox(width: 6),
-              AppBadge(
-                label: '${segment.count}',
-                foreground: selected ? primary : muted,
-                background: selected ? primary.withValues(alpha: 0.18) : raised,
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                radius: 10,
-                fontSize: 10,
-                letterSpacing: 0,
+          child: Row(
+            children: [
+              AppText(
+                segment.label,
+                role: AppTextRole.label,
+                color: selected ? primary : null,
               ),
+              if (segment.count != null) ...[
+                const SizedBox(width: 6),
+                AppBadge(
+                  label: '${segment.count}',
+                  foreground: selected ? primary : muted,
+                  background: selected
+                      ? primary.withValues(alpha: 0.18)
+                      : raised,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 1,
+                  ),
+                  radius: 10,
+                  fontSize: 10,
+                  letterSpacing: 0,
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );

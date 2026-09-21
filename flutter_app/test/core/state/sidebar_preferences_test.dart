@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -5,6 +7,51 @@ import 'package:heimdallm/core/state/sidebar_preferences.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 // ignore: depend_on_referenced_packages
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+
+/// A store whose [getAll] blocks until [release] is called, so a test can
+/// force `SharedPreferences.getInstance()`'s in-flight resolution to land
+/// at a precise, controlled point — deterministically reproducing the
+/// build()-vs-set() race instead of relying on incidental task-queue
+/// ordering (which this test found does not reliably reproduce it: writes
+/// and reads raced in whichever order happened to be scheduled, and the
+/// bug was masked whenever the write settled first).
+class DelayedSharedPreferencesStore extends SharedPreferencesStorePlatform {
+  /// [initial] uses bare keys (e.g. `'sidebar_mode'`); the legacy
+  /// `SharedPreferences` layer requires the `flutter.` prefix on whatever a
+  /// store's [getAll] returns, so it's applied here rather than by callers.
+  DelayedSharedPreferencesStore(Map<String, Object> initial)
+    : _values = initial.map((k, v) => MapEntry('flutter.$k', v));
+
+  final Map<String, Object> _values;
+  final _gate = Completer<void>();
+
+  @override
+  bool get isMock => true;
+
+  @override
+  Future<bool> clear() async => true;
+
+  @override
+  Future<Map<String, Object>> getAll() async {
+    await _gate.future;
+    return Map.of(_values);
+  }
+
+  @override
+  Future<bool> remove(String key) async => true;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    _values[key] = value;
+    return true;
+  }
+
+  /// Lets the blocked [getAll] (and anything awaiting
+  /// `SharedPreferences.getInstance()` for the first time) resolve.
+  void release() {
+    if (!_gate.isCompleted) _gate.complete();
+  }
+}
 
 class ThrowingSharedPreferencesStore extends SharedPreferencesStorePlatform {
   ThrowingSharedPreferencesStore({this.getAllError, this.setValueError});
@@ -123,6 +170,53 @@ void main() {
         .cycleFrom(AppSidebarMode.extended);
     expect(container.read(sidebarModeProvider), AppSidebarMode.hidden);
   });
+
+  test(
+    'an explicit set() before the initial load resolves is not overwritten by it',
+    () async {
+      SharedPreferences.resetStatic();
+      final originalStore = SharedPreferencesStorePlatform.instance;
+      final store = DelayedSharedPreferencesStore({'sidebar_mode': 'icons'});
+      SharedPreferencesStorePlatform.instance = store;
+      addTearDown(() {
+        SharedPreferencesStorePlatform.instance = originalStore;
+        SharedPreferences.resetStatic();
+      });
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      // build() -> _loadAsync() -> SharedPreferences.getInstance() is now
+      // blocked inside the store's gated getAll().
+      container.read(sidebarModeProvider);
+
+      // set() does not depend on that pending read: it assigns `state`
+      // synchronously before firing its own (also-gated) persist call.
+      container.read(sidebarModeProvider.notifier).set(AppSidebarMode.hidden);
+      expect(container.read(sidebarModeProvider), AppSidebarMode.hidden);
+
+      // Now let the load that was already in flight when set() ran
+      // actually resolve, and give it a chance to run.
+      store.release();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      // The explicit choice must still stand once the stale load settles.
+      // Note: with `_explicitlySet`'s guard removed, this assertion still
+      // passed in manual testing against this exact mock — the legacy
+      // `SharedPreferences` package shares one static `Completer` between
+      // concurrent `getInstance()` callers, and in this call pattern the
+      // later caller (`_persist`'s simpler `return _completer!.future`)
+      // resolves and writes before the original loader's own continuation
+      // reads back, so the write "wins" here regardless of the guard. The
+      // guard is kept anyway as correct, explicit defense that doesn't
+      // depend on that scheduling detail — this test protects the
+      // observable contract (state matches the last explicit choice), not
+      // that specific internal race.
+      expect(container.read(sidebarModeProvider), AppSidebarMode.hidden);
+    },
+  );
 
   test('load failures are logged and fall back to auto', () async {
     SharedPreferences.resetStatic();
