@@ -44,9 +44,7 @@ class AppColors {
   );
   static const featureMixed = ColorToken('app.color.feature.mixed');
   static const featureOffFill = ColorToken('app.color.feature.offFill');
-  static const featureOffOutline = ColorToken(
-    'app.color.feature.offOutline',
-  );
+  static const featureOffOutline = ColorToken('app.color.feature.offOutline');
 }
 
 /// Spacing scale. Values are in logical pixels.
@@ -68,6 +66,9 @@ class AppRadius {
   static const sm = RadiusToken('app.radius.sm'); // 4
   static const md = RadiusToken('app.radius.md'); // 8
   static const lg = RadiusToken('app.radius.lg'); // 12
+  static const pill = RadiusToken(
+    'app.radius.pill',
+  ); // 999 — fully rounded chips/pills
 }
 
 /// Text style roles, bridged from Material's `TextTheme` in `theme.dart`.

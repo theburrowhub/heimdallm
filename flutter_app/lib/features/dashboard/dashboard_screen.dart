@@ -10,6 +10,8 @@ import '../instances/widgets/instance_badge.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review_status.dart';
 import '../../core/models/tracked_issue.dart';
+import '../../shared/design_system/components/components.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/attention_badge.dart';
 import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
@@ -376,9 +378,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       if (filters.hasFilters)
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-          child: Text(
+          child: AppText.muted(
             '${filtered.length} item${filtered.length == 1 ? '' : 's'}',
-            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
           ),
         ),
     ];
@@ -410,12 +411,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
           Expanded(
             child: GridView.builder(
               padding: const EdgeInsets.all(8),
-              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                maxCrossAxisExtent: 300,
-                childAspectRatio: 1.6,
-                crossAxisSpacing: 8,
-                mainAxisSpacing: 8,
-              ),
+              gridDelegate: AppGridDelegate.entities(),
               itemCount: filtered.length,
               itemBuilder: (ctx, i) => _ActivityGridTile(item: filtered[i]),
             ),
@@ -635,178 +631,130 @@ class _PRTileState extends ConsumerState<_PRTile> {
         (status?.active ?? false) ||
         ref.watch(reviewingPRsProvider).containsKey(_reviewKey);
 
-    return Opacity(
-      opacity: pr.state == 'open' ? 1.0 : 0.6,
-      child: Card(
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => context.push(prDetailRoute(pr.id, _instanceId)),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                // Severity bar on the left
-                Container(
-                  width: 4,
-                  height: failure == null ? 48 : 62,
-                  margin: const EdgeInsets.only(right: 12),
-                  decoration: BoxDecoration(
-                    color: isReviewing
-                        ? Theme.of(context).colorScheme.primary
-                        : failure != null
-                        ? Theme.of(context).colorScheme.error
-                        : reviewed
-                        ? _severityColor(pr.latestReview!.severity)
-                        : Colors.grey.shade600,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
+    return AppListRow(
+      dimmed: pr.state != 'open',
+      onTap: () => context.push(prDetailRoute(pr.id, _instanceId)),
+      accentColor: isReviewing
+          ? Theme.of(context).colorScheme.primary
+          : failure != null
+          ? Theme.of(context).colorScheme.error
+          : reviewed
+          ? _severityColor(pr.latestReview!.severity)
+          : Colors.grey.shade600,
+      accentHeight: failure == null ? 48 : 62,
+      leading: [
+        const TypeBadge(type: 'pr'),
+        StateBadge(state: pr.state),
+      ],
+      title: Text(
+        pr.title,
+        style: const TextStyle(fontWeight: FontWeight.w600),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  '${pr.repo} · #${pr.number} · ${pr.author}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                // Type badge + state badge
-                const Padding(
-                  padding: EdgeInsets.only(right: 6),
-                  child: TypeBadge(type: 'pr'),
-                ),
-                const SizedBox(width: 4),
-                StateBadge(state: pr.state),
-                const SizedBox(width: 4),
-                // Title + subtitle
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        pr.title,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Flexible(
-                            child: Text(
-                              '${pr.repo} · #${pr.number} · ${pr.author}',
-                              style: Theme.of(context).textTheme.bodySmall,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          if (widget.group.members.isNotEmpty) ...[
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: InstanceBadges(
-                                instances: [
-                                  for (final m in widget.group.orderedMembers)
-                                    (id: m.instanceId, name: m.instanceName),
-                                ],
-                                compact: true,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                      if (failure != null && !isReviewing) ...[
-                        const SizedBox(height: 3),
-                        Tooltip(
-                          message: failure.error,
-                          child: Text(
-                            reviewFailureSummary(failure),
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(
-                                  color: Theme.of(context).colorScheme.error,
-                                ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                // Trailing: badge/spinner + Review + dismiss. Wrapped in a
-                // Wrap (not a plain Row) so it reflows onto a second line
-                // instead of overflowing at narrow (mobile) widths.
+              ),
+              if (widget.group.members.isNotEmpty) ...[
+                const SizedBox(width: 6),
                 Flexible(
-                  child: Wrap(
-                    alignment: WrapAlignment.end,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: [
-                      // Status indicator
-                      if (isReviewing)
-                        SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                        )
-                      else if (failure != null)
-                        Tooltip(
-                          message: failure.error,
-                          child: _chip(
-                            failure.isCancelled ? 'CANCELLED' : 'FAILED',
-                            Theme.of(context).colorScheme.error,
-                          ),
-                        )
-                      else if (reviewed)
-                        SeverityBadge(severity: pr.latestReview!.severity)
-                      else
-                        _chip('PENDING', Colors.grey.shade700),
-                      if (isReviewing)
-                        SizedBox(
-                          height: 28,
-                          child: OutlinedButton.icon(
-                            icon: _cancelling
-                                ? const SizedBox(
-                                    width: 12,
-                                    height: 12,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.stop_circle_outlined,
-                                    size: 15,
-                                  ),
-                            label: Text(_cancelling ? 'Cancelling…' : 'Cancel'),
-                            onPressed: _cancelling ? null : _cancelReview,
-                          ),
-                        )
-                      else
-                        SizedBox(
-                          height: 28,
-                          child: ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                              ),
-                              textStyle: const TextStyle(fontSize: 12),
-                            ),
-                            onPressed: _triggerReview,
-                            child: Text(failure == null ? 'Review' : 'Retry'),
-                          ),
-                        ),
-                      // Dismiss
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 14),
-                        tooltip: 'Dismiss PR',
-                        color: Colors.grey.shade600,
-                        visualDensity: VisualDensity.compact,
-                        onPressed: _dismiss,
-                      ),
+                  child: InstanceBadges(
+                    instances: [
+                      for (final m in widget.group.orderedMembers)
+                        (id: m.instanceId, name: m.instanceName),
                     ],
+                    compact: true,
                   ),
                 ),
               ],
+            ],
+          ),
+          if (failure != null && !isReviewing) ...[
+            const SizedBox(height: 3),
+            Tooltip(
+              message: failure.error,
+              child: Text(
+                reviewFailureSummary(failure),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ],
+      ),
+      trailing: [
+        // Status indicator
+        if (isReviewing)
+          SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+          )
+        else if (failure != null)
+          Tooltip(
+            message: failure.error,
+            child: _chip(
+              failure.isCancelled ? 'CANCELLED' : 'FAILED',
+              Theme.of(context).colorScheme.error,
+            ),
+          )
+        else if (reviewed)
+          SeverityBadge(severity: pr.latestReview!.severity)
+        else
+          _chip('PENDING', Colors.grey.shade700),
+        if (isReviewing)
+          SizedBox(
+            height: 28,
+            child: OutlinedButton.icon(
+              icon: _cancelling
+                  ? const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.stop_circle_outlined, size: 15),
+              label: Text(_cancelling ? 'Cancelling…' : 'Cancel'),
+              onPressed: _cancelling ? null : _cancelReview,
+            ),
+          )
+        else
+          SizedBox(
+            height: 28,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                textStyle: const TextStyle(fontSize: 12),
+              ),
+              onPressed: _triggerReview,
+              child: Text(failure == null ? 'Review' : 'Retry'),
             ),
           ),
+        // Dismiss
+        IconButton(
+          icon: const Icon(Icons.close, size: 14),
+          tooltip: 'Dismiss PR',
+          color: Colors.grey.shade600,
+          visualDensity: VisualDensity.compact,
+          onPressed: _dismiss,
         ),
-      ),
+      ],
     );
   }
 
@@ -909,129 +857,80 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
     final needsAttention =
         issue.latestReview?.actionTaken == 'auto_implement_no_changes';
 
-    return Opacity(
-      opacity: issue.state == 'open' ? 1.0 : 0.6,
-      child: Card(
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => context.push(issueDetailRoute(issue.id, _instanceId)),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                Container(
-                  width: 4,
-                  height: 48,
-                  margin: const EdgeInsets.only(right: 12),
-                  decoration: BoxDecoration(
-                    color: needsAttention
-                        ? Colors.deepOrange.shade700
-                        : reviewed
-                        ? _severityColor(severity)
-                        : Colors.grey.shade600,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                // Type badge + state badge
-                Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: TypeBadge(type: _type),
-                ),
-                const SizedBox(width: 4),
-                StateBadge(state: issue.state),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        issue.title,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Flexible(
-                            child: Text(
-                              '${issue.repo} · #${issue.number} · ${issue.author}',
-                              style: Theme.of(context).textTheme.bodySmall,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          if (widget.group.members.isNotEmpty) ...[
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: InstanceBadges(
-                                instances: [
-                                  for (final m in widget.group.orderedMembers)
-                                    (id: m.instanceId, name: m.instanceName),
-                                ],
-                                compact: true,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                // Trailing: severity/PENDING badge + dismiss — mirrors
-                // _PRTile's Wrap-based reflow to avoid narrow-width overflow.
-                Flexible(
-                  child: Wrap(
-                    alignment: WrapAlignment.end,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 6,
-                    runSpacing: 4,
-                    children: [
-                      if (issue.linkedPR != null &&
-                          issue.linkedPR!.externalReviewState.isNotEmpty)
-                        PRReviewStateBadge(
-                          state: issue.linkedPR!.externalReviewState,
-                        ),
-                      if (needsAttention)
-                        const AttentionBadge()
-                      else if (reviewed)
-                        SeverityBadge(severity: severity)
-                      else
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade700,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text(
-                            'PENDING',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 14),
-                        tooltip: 'Dismiss issue',
-                        color: Colors.grey.shade600,
-                        visualDensity: VisualDensity.compact,
-                        onPressed: _dismiss,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+    return AppListRow(
+      dimmed: issue.state != 'open',
+      onTap: () => context.push(issueDetailRoute(issue.id, _instanceId)),
+      accentColor: needsAttention
+          ? Colors.deepOrange.shade700
+          : reviewed
+          ? _severityColor(severity)
+          : Colors.grey.shade600,
+      leading: [
+        TypeBadge(type: _type),
+        StateBadge(state: issue.state),
+      ],
+      title: Text(
+        issue.title,
+        style: const TextStyle(fontWeight: FontWeight.w600),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Row(
+        children: [
+          Flexible(
+            child: Text(
+              '${issue.repo} · #${issue.number} · ${issue.author}',
+              style: Theme.of(context).textTheme.bodySmall,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
-        ),
+          if (widget.group.members.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            Flexible(
+              child: InstanceBadges(
+                instances: [
+                  for (final m in widget.group.orderedMembers)
+                    (id: m.instanceId, name: m.instanceName),
+                ],
+                compact: true,
+              ),
+            ),
+          ],
+        ],
       ),
+      trailing: [
+        if (issue.linkedPR != null &&
+            issue.linkedPR!.externalReviewState.isNotEmpty)
+          PRReviewStateBadge(state: issue.linkedPR!.externalReviewState),
+        if (needsAttention)
+          const AttentionBadge()
+        else if (reviewed)
+          SeverityBadge(severity: severity)
+        else
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade700,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: const Text(
+              'PENDING',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        IconButton(
+          icon: const Icon(Icons.close, size: 14),
+          tooltip: 'Dismiss issue',
+          color: Colors.grey.shade600,
+          visualDensity: VisualDensity.compact,
+          onPressed: _dismiss,
+        ),
+      ],
     );
   }
 
@@ -1069,7 +968,7 @@ class _ActivityGridTile extends StatelessWidget {
     switch (item) {
       case _PRItem(:final pr):
         type = 'PR';
-        color = Colors.blue;
+        color = AppColors.featurePrReview.resolve(context);
         state = pr.state;
         title = pr.title;
         subtitle = '${pr.repo} #${pr.number} · ${pr.author}';
@@ -1079,7 +978,9 @@ class _ActivityGridTile extends StatelessWidget {
       case _IssueItem(:final issue):
         final isDev = issue.latestReview?.actionTaken == 'auto_implement';
         type = isDev ? 'DEV' : 'IT';
-        color = isDev ? Colors.green : Colors.orange;
+        color =
+            (isDev ? AppColors.featureDevelop : AppColors.featureIssueTracking)
+                .resolve(context);
         state = issue.state;
         title = issue.title;
         subtitle = '${issue.repo} #${issue.number} · ${issue.author}';
@@ -1092,72 +993,49 @@ class _ActivityGridTile extends StatelessWidget {
         timestamp = issue.fetchedAt;
     }
 
-    return Opacity(
-      opacity: state == 'open' ? 1.0 : 0.6,
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 5,
-                      vertical: 1,
-                    ),
-                    decoration: BoxDecoration(
-                      color: color,
-                      borderRadius: BorderRadius.circular(3),
-                    ),
-                    child: Text(
-                      type,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 9,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  const Spacer(),
-                  StateBadge(state: state),
-                ],
+    return AppGridCard(
+      dimmed: state != 'open',
+      header: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Text(
+              type,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 9,
+                fontWeight: FontWeight.bold,
               ),
-              const SizedBox(height: 6),
-              Text(
-                title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                subtitle,
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              const Spacer(),
-              Row(
-                children: [
-                  if (needsAttention)
-                    const AttentionBadge()
-                  else if (severity != null)
-                    SeverityBadge(severity: severity),
-                  const Spacer(),
-                  Text(
-                    _timeAgo(timestamp),
-                    style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-                  ),
-                ],
-              ),
-            ],
+            ),
           ),
-        ),
+          const Spacer(),
+          StateBadge(state: state),
+        ],
+      ),
+      title: Text(
+        title,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+      ),
+      subtitle: AppText.muted(
+        subtitle,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      footer: Row(
+        children: [
+          if (needsAttention)
+            const AttentionBadge()
+          else if (severity != null)
+            SeverityBadge(severity: severity),
+          const Spacer(),
+          AppText.muted(_timeAgo(timestamp)),
+        ],
       ),
     );
   }

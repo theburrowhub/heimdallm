@@ -525,6 +525,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(
             routes: [
               GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
@@ -653,6 +655,8 @@ void main() {
             sseStreamProvider.overrideWith((ref) => const Stream.empty()),
           ],
           child: MaterialApp.router(
+            builder: (context, child) =>
+                HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
             routerConfig: GoRouter(
               routes: [
                 GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
@@ -727,6 +731,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(
             routes: [
               GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
@@ -773,6 +779,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(
             routes: [
               GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
@@ -809,6 +817,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(
             routes: [
               GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),

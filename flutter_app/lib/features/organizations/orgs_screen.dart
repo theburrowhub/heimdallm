@@ -44,19 +44,23 @@ class OrgsScreen extends ConsumerWidget {
             final org = orgs[i];
             final overridden = config.orgConfigs[org]?.hasOverride ?? false;
             return AppSurface(
-              child: ListTile(
-                leading: const Icon(Icons.business_outlined),
-                title: AppText.sectionTitle(org),
-                subtitle: AppText.muted(
-                  overridden
-                      ? 'Custom overrides on global defaults'
-                      : 'Inherits global defaults',
+              child: Material(
+                type: MaterialType.transparency,
+                child: ListTile(
+                  leading: const Icon(Icons.business_outlined),
+                  title: AppText.sectionTitle(org),
+                  subtitle: AppText.muted(
+                    overridden
+                        ? 'Custom overrides on global defaults'
+                        : 'Inherits global defaults',
+                  ),
+                  trailing: Icon(
+                    Icons.chevron_right,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                  onTap: () =>
+                      context.push('/orgs/${Uri.encodeComponent(org)}'),
                 ),
-                trailing: Icon(
-                  Icons.chevron_right,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-                onTap: () => context.push('/orgs/${Uri.encodeComponent(org)}'),
               ),
             );
           },

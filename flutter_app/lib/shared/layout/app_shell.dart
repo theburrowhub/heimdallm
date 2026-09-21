@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/instances/instances_providers.dart';
+import '../../core/state/sidebar_preferences.dart';
 import '../../features/activity/activity_providers.dart';
 import '../../features/circuit_breaker/circuit_breaker_banner.dart';
 import '../../features/config/config_providers.dart';
@@ -12,6 +13,7 @@ import '../../features/issues/issues_providers.dart';
 import '../../features/merge_tracking/merge_tracking_providers.dart';
 import '../../features/server/server_actions.dart' as server_actions;
 import '../../features/updates/check_for_updates_button.dart';
+import '../design_system/components/app_icon_button.dart';
 import '../design_system/tokens.dart';
 
 /// One destination in the primary navigation (sidebar/rail/drawer).
@@ -72,16 +74,8 @@ final appDestinations = <AppDestination>[
     label: 'Prompts',
     icon: Icons.auto_awesome,
   ),
-  const AppDestination(
-    branchIndex: 6,
-    label: 'Agents',
-    icon: Icons.smart_toy,
-  ),
-  const AppDestination(
-    branchIndex: 7,
-    label: 'Stats',
-    icon: Icons.bar_chart,
-  ),
+  const AppDestination(branchIndex: 6, label: 'Agents', icon: Icons.smart_toy),
+  const AppDestination(branchIndex: 7, label: 'Stats', icon: Icons.bar_chart),
   const AppDestination(
     branchIndex: 8,
     label: 'Instances',
@@ -124,7 +118,10 @@ class AppShell extends ConsumerWidget {
 
     final width = MediaQuery.sizeOf(context).width;
     final isCompact = width < AppBreakpoints.compact;
-    final isWide = width >= AppBreakpoints.medium;
+    final sidebarPreference = ref.watch(sidebarModeProvider);
+    final effectiveSidebar = effectiveSidebarMode(sidebarPreference, width);
+    final showRail = !isCompact && effectiveSidebar != AppSidebarMode.hidden;
+    final isRailExtended = effectiveSidebar == AppSidebarMode.extended;
 
     final body = Column(
       children: [
@@ -132,7 +129,8 @@ class AppShell extends ConsumerWidget {
         if (cbMessage != null)
           CircuitBreakerBanner(
             message: cbMessage,
-            onDismiss: () => ref.read(circuitBreakerProvider.notifier).set(null),
+            onDismiss: () =>
+                ref.read(circuitBreakerProvider.notifier).set(null),
           ),
         if (connection != null &&
             connection.phase != DaemonConnectionPhase.connected)
@@ -154,6 +152,22 @@ class AppShell extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Heimdallm'),
         actions: [
+          if (!isCompact)
+            AppIconButton(
+              key: const Key('sidebar-toggle'),
+              icon: effectiveSidebar == AppSidebarMode.hidden
+                  ? Icons.menu
+                  : Icons.menu_open,
+              tooltip: switch (effectiveSidebar) {
+                AppSidebarMode.hidden => 'Show sidebar',
+                AppSidebarMode.icons => 'Expand sidebar',
+                AppSidebarMode.extended => 'Collapse sidebar',
+                AppSidebarMode.auto => 'Toggle sidebar',
+              },
+              onPressed: () => ref
+                  .read(sidebarModeProvider.notifier)
+                  .cycleFrom(effectiveSidebar),
+            ),
           const InstanceSelector(),
           const CheckForUpdatesButton(),
           IconButton(
@@ -164,9 +178,7 @@ class AppShell extends ConsumerWidget {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : Icon(
-                    daemonRunning
-                        ? Icons.power_settings_new
-                        : Icons.play_arrow,
+                    daemonRunning ? Icons.power_settings_new : Icons.play_arrow,
                   ),
             tooltip: daemonRunning ? 'Stop Server' : 'Start Server',
             onPressed: daemonStarting
@@ -205,10 +217,11 @@ class AppShell extends ConsumerWidget {
       drawer: isCompact ? _NavDrawer(navigationShell: navigationShell) : null,
       body: isCompact
           ? body
-          : Row(
+          : showRail
+          ? Row(
               children: [
                 NavigationRail(
-                  extended: isWide,
+                  extended: isRailExtended,
                   selectedIndex: navigationShell.currentIndex,
                   onDestinationSelected: _onDestinationSelected,
                   destinations: [
@@ -222,7 +235,8 @@ class AppShell extends ConsumerWidget {
                 const VerticalDivider(width: 1),
                 Expanded(child: body),
               ],
-            ),
+            )
+          : body,
     );
   }
 }
@@ -264,7 +278,11 @@ class _NavDrawer extends ConsumerWidget {
 /// Shows the daemon connection health (connecting/stale/offline/connected)
 /// as a dismissible-by-recovery banner above the active branch content.
 class ConnectionBanner extends StatelessWidget {
-  const ConnectionBanner({super.key, required this.status, required this.onRestart});
+  const ConnectionBanner({
+    super.key,
+    required this.status,
+    required this.onRestart,
+  });
 
   final DaemonConnectionStatus status;
   final VoidCallback onRestart;
