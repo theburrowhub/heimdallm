@@ -10,6 +10,18 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.8.26](https://github.com/theburrowhub/heimdallm/compare/v0.8.25...v0.8.26) (2026-09-18)
+
+
+### Features
+
+* **gui:** add Mix design system foundation and migrate shared components ([#802](https://github.com/theburrowhub/heimdallm/issues/802)) ([38e0c07](https://github.com/theburrowhub/heimdallm/commit/38e0c0735fd037e8d3f5ce89a6433a492bbce834))
+* **gui:** migrate Activity, Issues, Merge tracking and Stats to Mix ([#804](https://github.com/theburrowhub/heimdallm/issues/804)) ([8787540](https://github.com/theburrowhub/heimdallm/commit/8787540327c45b618abbeda643e860650ba7c64e))
+* **gui:** migrate Prompts and CLI Agents screens to Mix ([#806](https://github.com/theburrowhub/heimdallm/issues/806)) ([f6aaa77](https://github.com/theburrowhub/heimdallm/commit/f6aaa77172867c5e5c740b88e4d8c2d957513fd5))
+* **gui:** migrate Repositories and Organizations to Mix ([#805](https://github.com/theburrowhub/heimdallm/issues/805)) ([b362d78](https://github.com/theburrowhub/heimdallm/commit/b362d780840f5c4bf4837409db43dc0952dc8083))
+* **gui:** replace 9-tab dashboard with responsive navigation shell ([#803](https://github.com/theburrowhub/heimdallm/issues/803)) ([2f1e3d6](https://github.com/theburrowhub/heimdallm/commit/2f1e3d63ec7816a6a9ad66568fbf01d9991733ce))
+* **gui:** restructure Settings screen with Mix design system ([#807](https://github.com/theburrowhub/heimdallm/issues/807)) ([37968cb](https://github.com/theburrowhub/heimdallm/commit/37968cb9c32bc76957509b6275be33509909e612))
+
 ## [0.8.25](https://github.com/theburrowhub/heimdallm/compare/v0.8.24...v0.8.25) (2026-09-15)
 
 
