@@ -291,36 +291,6 @@ func TestValidateCanonicalConfigPatchKeys(t *testing.T) {
 			},
 			wantErr: true,
 		},
-		{
-			name: "autonomous repo agents rejected",
-			patch: map[string]any{
-				"autonomous": map[string]any{
-					"repos": map[string]any{
-						"org/repo": map[string]any{
-							"agents": map[string]any{
-								"codex": map[string]any{
-									"extra_flags": "--sandbox danger-full-access",
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "autonomous agents alias rejected",
-			patch: map[string]any{
-				"autonomous": map[string]any{
-					"orgs": map[string]any{
-						"org": map[string]any{
-							"Agents": map[string]any{},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
 	}
 
 	for _, tc := range tests {

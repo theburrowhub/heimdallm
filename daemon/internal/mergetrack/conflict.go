@@ -9,16 +9,16 @@ import (
 	"strings"
 
 	"github.com/heimdallm/daemon/internal/executor"
-	"github.com/heimdallm/daemon/internal/issues"
+	"github.com/heimdallm/daemon/internal/gitops"
 )
 
 // GitOps is the git plumbing the conflict resolver needs, declared here in the
 // consumer so the resolver can be tested with a hand-written fake. Backed by
-// issues.GitExec in production.
+// gitops.GitExec in production.
 type GitOps interface {
 	CheckoutRemoteBranch(ctx context.Context, dir, repo, branch, token string) (string, error)
 	FetchRef(ctx context.Context, dir, repo, ref, token string) (string, error)
-	RebaseOnto(ctx context.Context, dir, ontoSHA string) (issues.RebaseOutcome, error)
+	RebaseOnto(ctx context.Context, dir, ontoSHA string) (gitops.RebaseOutcome, error)
 	ConflictedFiles(ctx context.Context, dir string) ([]string, error)
 	HasUnmergedPaths(ctx context.Context, dir string) (bool, error)
 	WorktreeDigest(ctx context.Context, dir string) (map[string]string, error)
@@ -177,7 +177,7 @@ func (r *ConflictResolver) Resolve(ctx context.Context, req ConflictRequest) (Co
 	}
 
 	execOpts := executor.OptionsForSelectedCLI(req.CLIPrimary, cli, req.ExecOpts)
-	execOpts = issues.EnsureWritePerms(cli, execOpts)
+	execOpts = ensureWritePerms(cli, execOpts)
 
 	prompt := buildConflictPrompt(req, conflicts)
 	if _, err := r.exec.ExecuteRaw(cli, prompt, execOpts); err != nil {

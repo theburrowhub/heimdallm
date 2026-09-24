@@ -10,7 +10,7 @@ import (
 
 // opAssign is the internal round-robin counter used when handing an
 // as-yet-unrouted repo to a pool member. It is separate from the per-operation
-// counters so assigning repos does not skew the review/merge/issue rotation.
+// counters so assigning repos does not skew the review/merge rotation.
 const opAssign = "assign"
 
 // Router answers the two questions the cluster needs: "does this daemon own
@@ -228,7 +228,7 @@ func (r *Router) OwnerFor(repo string) string {
 
 // Owns reports whether this daemon should poll, review and merge repo.
 //
-// This is the single guard that partitions autonomous work. Off a worker it
+// This is the single guard that partitions unattended work. Off a worker it
 // is deliberately permissive in every ambiguous case: with routing disabled,
 // with no identity of our own, or with no owner resolvable, it returns true.
 // Acting twice is recoverable (the in-flight claims and dedup catch it);

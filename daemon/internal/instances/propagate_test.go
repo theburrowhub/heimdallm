@@ -32,7 +32,7 @@ func TestIsLocalOnly(t *testing.T) {
 	shared := []string{
 		"", "ai", "ai.primary", "ai.review_mode", "ai.repos", "ai.repos.acme/tools",
 		"polling", "polling.tier2_interval", "merge_tracking", "merge_tracking.enabled",
-		"merge_tracking.repos", "circuit_breaker.enabled", "autonomous.enabled",
+		"merge_tracking.repos", "circuit_breaker.enabled", "activity_log.enabled",
 		"retention.max_days", "github.poll_interval", "github.discovery_orgs",
 		// Not a prefix match: "servers" must not be caught by "server".
 		"servers.something", "clusters.foo",

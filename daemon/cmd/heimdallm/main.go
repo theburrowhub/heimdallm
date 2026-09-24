@@ -25,14 +25,13 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/activity"
-	"github.com/heimdallm/daemon/internal/autonomous"
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
 	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/gitops"
 	"github.com/heimdallm/daemon/internal/instances"
-	issuepipeline "github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/keychain"
 	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/notify"
@@ -513,13 +512,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		slog.Info("startup: cleared inflight rows", "count", n)
 	}
 
-	// Mirror of the PR-side sweep above for issue-triage claims (#292).
-	if n, err := s.ClearAllIssueTriageInFlight(); err != nil {
-		slog.Warn("startup: clear all issue triage inflight failed", "err", err)
-	} else if n > 0 {
-		slog.Info("startup: cleared issue triage inflight rows", "count", n)
-	}
-
 	// ── NATS event bus (core only, no JetStream) ───────────────────────
 	eventBus := bus.New(bus.Config{
 		MaxConcurrentWorkers: cfg.Server.MaxConcurrentWorkers,
@@ -672,38 +664,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// firing phantom desktop notifications. See #322 Bugs 3+4.
 	p.SetPublisher(broker)
 
-	// Issue-side circuit-breaker caps (theburrowhub/heimdallm#292) — mirrors
-	// the PR-side defenses against runaway triage loops.
-	issueCBLimits := store.IssueCircuitBreakerLimits{
-		PerIssue24h: cfg.CircuitBreaker.PerIssue24h,
-		PerRepoHr:   cfg.CircuitBreaker.PerIssueRepoHr,
-	}
-
-	// GitExec drives the auto_implement flow (#27): branch, commit, push, PR.
-	// Wired unconditionally — the pipeline guards against running git ops on
-	// an issue that is classified as review_only, so this dep is harmless
-	// when auto_implement is not in use.
-	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
-	issuePipe.SetWorkGate(updateWorkGate)
-	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
-	// Wire the Tier 3 watch enroller so auto_implement-created PRs are
-	// picked up by the new review-state checker (#482). watchStore
-	// implements the WatchEnroller interface via its Enroll method.
-	issuePipe.SetWatchEnroller(watchStore)
-
-	// Resolve bot login for re-review / re-triage context filtering.
+	// Resolve bot login for re-review context filtering.
 	var resolvedBotLogin string
 	if login, err := ghClient.AuthenticatedUser(); err == nil {
 		resolvedBotLogin = login
 		p.SetBotLogin(login)
-		issuePipe.SetBotLogin(login)
 		slog.Info("bot login resolved", "login", login)
 	} else {
 		slog.Warn("could not resolve bot login; re-review context filtering and the cross-instance duplicate-review guard stay off until the login is resolved lazily", "err", err)
 	}
-	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
-	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
-	issueFetcher.SetSearcher(ghClient)         // enable aggregated Search API prefetch (separate rate budget)
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	repoCurrentlyMonitored := func(repo string) bool {
@@ -1024,9 +993,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	conn := eventBus.Conn()
 	maxWorkers := eventBus.MaxConcurrentWorkers()
 	publishPub := bus.NewPRPublishPublisher(conn)
-	issuePublisher := bus.NewIssuePublisher(conn)
-	issueFetcher.SetPublisher(issuePublisher)
-	issueFetcher.SetStageTransitioner(ghClient, broker)
 
 	// Shared rate limiter (was Pipeline.limiter).
 	limiter := scheduler.NewRateLimiter(4500)
@@ -1041,8 +1007,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		ghClient:             ghClient,
 		ghToken:              token,
 		pipeline:             p,
-		issuePipe:            issuePipe,
-		fetcher:              issueFetcher,
 		repoCtx:              repoCtx,
 		store:                s,
 		broker:               broker,
@@ -1061,19 +1025,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		dispatchPR: func(repo string, ref instances.PRDispatchRef) bool {
 			return clusterSt.DispatchPRReview(runtimeCtx, repo, ref)
 		},
-		ownerCanHandleIssues: clusterSt.OwnerCanHandle,
 	}
 
-	// Phase 2/3 of #482: build the Responder and FixRunner with real
-	// dependencies and wire them into the adapter. Both modules check
-	// their own Enabled flag on every Run so a cold-start with the
-	// feature disabled costs nothing; flipping the flag in TOML and
-	// reloading is enough to opt in.
-	// botLoginAccessor is the single source for the bot's login the
-	// Responder and FixRunner consume — wraps the same loginMu /
-	// cachedLogin pair the adapter's cachedAuthenticatedUser uses, so
-	// locking discipline lives in one closure rather than being
-	// duplicated at each callsite.
+	// botLoginAccessor wraps the same loginMu / cachedLogin pair the
+	// adapter's cachedAuthenticatedUser uses, so locking discipline lives in
+	// one closure rather than being duplicated at each callsite.
 	botLoginAccessor := func() string {
 		loginMu.Lock()
 		defer loginMu.Unlock()
@@ -1084,40 +1040,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// above, means a failed AuthenticatedUser at boot disables the guard only
 	// until cachedLogin is repaired, not until the daemon restarts.
 	p.SetBotLoginFunc(botLoginAccessor)
-	responder := issuepipeline.NewResponder(
-		s, ghClient,
-		&prReviewExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
-		broker,
-		func() config.ReviewResponseConfig {
-			cfgMu.Lock()
-			defer cfgMu.Unlock()
-			return cfg.AI.ReviewResponse
-		},
-		botLoginAccessor,
-	)
-	responder.SetWorkGate(updateWorkGate)
-	adapter.responder = responder
-	fixRunner := issuepipeline.NewFixRunner(
-		s, ghClient,
-		&prFixExecutor{
-			pipeline: issuePipe,
-			repoCtx:  repoCtx,
-			ghClient: ghClient,
-			ghToken:  token,
-			cfg:      &cfg,
-			cfgMu:    &cfgMu,
-		},
-		broker,
-		func() config.ReviewFixConfig {
-			cfgMu.Lock()
-			defer cfgMu.Unlock()
-			return cfg.AI.ReviewFix
-		},
-		botLoginAccessor,
-	)
-	fixRunner.SetWorkGate(updateWorkGate)
-	adapter.fixRunner = fixRunner
-
 	repoPublisher := bus.NewRepoPublisher(conn)
 	prReviewPublisher := bus.NewPRReviewPublisher(conn)
 
@@ -1126,28 +1048,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// consumes from NATS and forwards repo lists through this channel.
 	reposChan := make(chan []string, 1)
 
-	// adaptiveSched is the per-repo adaptive interval engine (C5). It is
-	// constructed once at daemon start and intentionally outlives config
-	// reloads — accumulated backoff state must not be lost when the operator
-	// tweaks an unrelated setting. Bound changes are applied in place by
-	// applyClientRuntimeConfig instead of by recreating it. It is passed to
-	// runTier2 which uses it when cfg.Polling.Adaptive is true; when Adaptive
-	// is false the scheduler is allocated but never consulted, so the overhead
-	// is negligible.
-	cfgMu.Lock()
-	adaptiveSched := scheduler.NewAdaptiveScheduler(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
-	cfgMu.Unlock()
-
-	// Push the [polling] runtime knobs into the client, limiter and scheduler.
-	// Deferred to here rather than at client construction because it needs
-	// adaptiveSched; nothing issues requests before the pollers start.
-	// Under cfgMu like every other cfg read: a reload can already be in flight
-	// by this point, and the adaptiveSched construction above locks for the
-	// same reason.
+	// Push the [polling] runtime knobs into the client and limiter. No
+	// request goes out before the pollers start. Under cfgMu like every other
+	// cfg read: a reload can already be in flight by this point.
 	cfgMu.Lock()
 	startupCfg := cfg
 	cfgMu.Unlock()
-	applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, startupCfg)
+	applyClientRuntimeConfig(ghClient, limiter, startupCfg)
 
 	// startPollers launches all polling goroutines under the given context.
 	// Returns a cancel function and a WaitGroup that completes when all
@@ -1205,8 +1112,8 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			}
 		}()
 
-		// In-flight claim sweep (#544). Catches reviews_in_flight and
-		// issue_triage_in_flight claims that were leaked at runtime (panic,
+		// In-flight claim sweep (#544). Catches reviews_in_flight claims
+		// that were leaked at runtime (panic,
 		// SIGKILL between claim and the deferred release, etc.). Worst-case
 		// reap latency is sweepInterval + inflightSweepMaxAge ≈ 35 min, well
 		// under the previous "forever" failure mode. The 30-min maxAge gives
@@ -1232,11 +1139,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 						slog.Warn("sweep: clear stale inflight failed", "err", err)
 					} else if n > 0 {
 						slog.Info("sweep: cleared stale inflight rows", "count", n)
-					}
-					if n, err := s.ClearStaleIssueTriageInFlight(inflightSweepMaxAge); err != nil {
-						slog.Warn("sweep: clear stale issue triage inflight failed", "err", err)
-					} else if n > 0 {
-						slog.Info("sweep: cleared stale issue triage inflight rows", "count", n)
 					}
 					if n, err := s.PruneReviewRetryBackoffs(time.Now().Add(-reviewRetryMaxAge)); err != nil {
 						slog.Warn("sweep: prune review retry cooldowns failed", "err", err)
@@ -1325,7 +1227,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			clusterSt.RunDiscoverer(ctx)
 		}()
 
-		// Tier 2: PR / issue polling — use the resolved interval which honours
+		// Tier 2: PR polling — use the resolved interval which honours
 		// [polling].poll_interval > [github].poll_interval > 5m default.
 		cfgMu.Lock()
 		pollInterval := cfg.ResolvedPollInterval()
@@ -1343,17 +1245,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				// auto-enable is off.
 				return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), nil, cfg.GitHub.NonMonitored)
 			}
-			tier2RepoConcurrencyFn := func() int {
-				cfgMu.Lock()
-				defer cfgMu.Unlock()
-				return cfg.AI.Tier2RepoConcurrency
-			}
-			tier2AdaptiveFn := func() bool {
-				cfgMu.Lock()
-				defer cfgMu.Unlock()
-				return cfg.Polling.Adaptive
-			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, tier2AdaptiveFn, adaptiveSched, reposChan, pollInterval, coldStart, recordPollCompleted)
+			runTier2(ctx, adapter, prReviewPublisher, broker, tier2ConfigFn, reposChan, pollInterval, coldStart, recordPollCompleted)
 		}()
 
 		// Repo/org rename probe (#489). Detects when GitHub has
@@ -1380,15 +1272,8 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			slog.Info("rename probe: disabled (ai.repo_rename_check_interval=0)")
 		}
 
-		// Autonomous end-to-end poller. Selects an issue (bot-assigned >
-		// unassigned > others), drives it through triage→refinement→development
-		// single-flight, and lets Tier 3 react to reviews. Reuses the same
-		// repo enumeration as Tier 2. The whole tick is a cheap no-op when no
-		// monitored repo has autonomous enabled, so it is always started; the
-		// per-repo Enabled flag (resolved under cfgMu each tick) is the gate.
-		// Shared by the autonomous poller and merge tracking: both need the
-		// same "which repos are we monitoring right now" answer, resolved under
-		// cfgMu so a reload takes effect on the next tick.
+		// The repos merge tracking acts on, resolved under cfgMu so a reload
+		// takes effect on the next tick.
 		monitoredReposFn := func() []string {
 			cfgMu.Lock()
 			repos := discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), nil, cfg.GitHub.NonMonitored)
@@ -1396,65 +1281,18 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			// Partition the work: with instances configured, each daemon acts
 			// only on the repos routed to it. Discovery deliberately stays
 			// global (every instance still learns about every repo, so the GUI
-			// sees the whole picture) — it is acting that is narrowed. Feeds
-			// both the autonomous poller and the merge-tracking reconciler, so
-			// one filter partitions both.
+			// sees the whole picture) — it is acting that is narrowed.
 			return clusterSt.FilterOwned(repos)
 		}
-		autonomousStageR := &autonomousStageRunner{
-			ghClient:  ghClient,
-			issuePipe: issuePipe,
-			store:     s,
-			repoCtx:   repoCtx,
-			broker:    broker,
-			token:     token,
-			cfg:       &cfg,
-			cfgMu:     &cfgMu,
-			authUser:  botLoginAccessor,
-		}
-		autonomousPoller := &AutonomousPoller{
-			ghClient: ghClient,
-			store:    s,
-			broker:   broker,
-			orch:     autonomous.NewOrchestrator(autonomousStageR, autonomous.NewPhaseGuard()),
-			runner:   exec,
-			workGate: updateWorkGate,
-			cfg:      &cfg,
-			cfgMu:    &cfgMu,
-			botLogin: botLoginAccessor,
-			reposFn:  monitoredReposFn,
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(pollInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					// Run drives repos SEQUENTIALLY within a tick: at most one
-					// issue per repo per tick, and each Drive blocks (up to
-					// DevTimeout, ~45 min) before the next repo is considered.
-					// For multi-repo setups the next repo therefore waits for
-					// the current Drive to finish. This is intentional single-
-					// flight behavior (bounded concurrency, no agent stampede),
-					// not a bug.
-					autonomousPoller.Run(ctx)
-				}
-			}
-		}()
-
 		// Merge tracking: reconciles the PRs the operator authored or is
-		// assigned to towards merge. Like the autonomous poller it is always
-		// started and gates itself per repo, so a cycle with the feature off
+		// assigned to towards merge. It is always started and gates itself per
+		// repo, so a cycle with the feature off
 		// everywhere costs nothing — AnyEnabled short-circuits before the first
 		// GitHub call.
-		// *issues.GitExec, *executor.Executor and *gh.Client satisfy the
+		// *gitops.GitExec, *executor.Executor and *gh.Client satisfy the
 		// mergetrack interfaces directly — no adapters, so there is no
 		// untestable delegation layer sitting in main.
-		mergeTrackGit := issuepipeline.NewGitExec()
+		mergeTrackGit := gitops.NewGitExec()
 		mergeTrackRunner := mergetrack.NewWorktreeOps(
 			&mergeTrackRepoContexts{manager: repoCtx, token: token, cfg: &cfg, cfgMu: &cfgMu},
 			mergeTrackGit,
@@ -1560,7 +1398,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		slog.Error("daemon: aborting startup after HTTP serve failure", "err", err)
 		return 1
 	}
-	const coreWorkerCount = 6
+	const coreWorkerCount = 3 // review, publish, state check
 	workerReady := make(chan error, coreWorkerCount)
 
 	// ── NATS PR review worker ───────────────────────────────────────────
@@ -1892,334 +1730,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 	}()
 
-	// ── NATS issue triage worker ────────────────────────────────────────
-	// Consumes triage requests published by the Fetcher when it classifies
-	// an issue as review_only. Fetches the issue from GitHub for fresh data,
-	// resolves per-repo config, and runs the issue pipeline.
-	triageHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
-		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
-		if err != nil {
-			slog.Error("triage-worker: fetch issue from GitHub",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-			return
-		}
-
-		cfgMu.Lock()
-		c := *cfg
-		aiCfg := c.AIForRepo(msg.Repo)
-		if aiCfg.Primary == "" {
-			aiCfg.Primary = c.AI.Primary
-		}
-		repoIT := c.IssueTrackingForRepo(msg.Repo)
-		agentCfg := c.AgentConfigFor(aiCfg.Primary)
-		localDirBase := c.GitHub.LocalDirBase
-		globalTimeout := c.AI.ExecutionTimeout
-		cfgMu.Unlock()
-		loginMu.Lock()
-		authUser := cachedLogin
-		loginMu.Unlock()
-		var ok bool
-		repoIT, ok = issueTrackingWithAssigneeScope("triage-worker", msg.Repo, repoIT, authUser)
-		if !ok {
-			return
-		}
-		if !issueStageStillCurrent("triage-worker", ghIssue, repoIT, config.IssueModeReviewOnly) {
-			return
-		}
-		ghIssue.Mode = config.IssueModeReviewOnly
-
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("triage", msg.Number), "", "")
-		if err != nil {
-			logRepoContextFallback("triage-worker", msg.Repo, err)
-			aiCfg.LocalDir = ""
-		}
-		if repoHandle != nil {
-			defer repoHandle.Release()
-			ensureRepoContextFullHistory(ctx, repoCtx, repoHandle, token, "triage-worker", msg.Repo)
-		}
-
-		extraFlags := agentCfg.ExtraFlags
-		if extraFlags != "" {
-			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
-				slog.Warn("triage-worker: extra_flags rejected", "err", err)
-				extraFlags = ""
-			}
-		}
-
-		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
-		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
-
-		opts := issuepipeline.RunOptions{
-			GitHubToken: token,
-			Primary:     aiCfg.Primary,
-			Fallback:    aiCfg.Fallback,
-			ExecOpts: executor.ExecOptions{
-				Model:                agentCfg.Model,
-				MaxTurns:             agentCfg.MaxTurns,
-				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           extraFlags,
-				WorkDir:              aiCfg.LocalDir,
-				Effort:               agentCfg.Effort,
-				PermissionMode:       agentCfg.PermissionMode,
-				Bare:                 agentCfg.Bare,
-				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
-			},
-			IssuePromptOverride:     issuePrompt,
-			IssueInstructions:       issueInstructions,
-			TriageOwner:             aiCfg.TriageOwner,
-			ImplementPromptOverride: implPrompt,
-			ImplementInstructions:   implInstructions,
-			PRReviewers:             aiCfg.PRReviewers,
-			PRAssignee:              defaultAutoImplementPRAssignee(aiCfg.PRAssignee, authUser),
-			PRLabels:                aiCfg.PRLabels,
-			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-			AuthUser:                authUser,
-			WorkPermit:              workgate.PermitFromContext(ctx),
-		}
-
-		rev, err := issuePipe.Run(ctx, ghIssue, opts)
-		if err != nil {
-			slog.Error("triage-worker: pipeline run failed",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-		} else if rev != nil && rev.ActionTaken == string(config.IssueModeReviewOnly) {
-			autoPromoteAfterStage(ctx, ghClient, broker, ghIssue, rev.IssueID, repoIT, aiCfg, issuepipeline.IssueStageTriage, "triage-worker")
-		}
-
-		// Enroll for state watching so closed/resolved issues update in the UI.
-		// Runs even after pipeline failure — state tracking is independent of
-		// pipeline success, and we want the UI to reflect closures regardless.
-		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
-			slog.Warn("triage-worker: failed to enroll watch",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-		}
-	}
-
-	triageHandler := guardUpdateVoidHandler(
-		updateWorkGate,
-		workgate.KindIssue,
-		"triage-worker: deferred while application update drains",
-		triageHandlerCore,
-	)
-	triageW := worker.NewTriageWorker(conn, maxWorkers, triageHandler)
-	triageWCtx, triageWCancel := context.WithCancel(runtimeCtx)
-	defer triageWCancel()
-	go func() {
-		if err := triageW.Start(triageWCtx, workerReady); err != nil {
-			slog.Error("triage worker stopped", "err", err)
-		}
-	}()
-
-	// ── NATS issue refinement worker ────────────────────────────────────
-	// Consumes refinement requests published by the Fetcher when it classifies
-	// an issue as refinement. Refinement is read-only but requires a full local
-	// checkout so the agent can inspect code and git history.
-	refinementHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
-		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
-		if err != nil {
-			slog.Error("refinement-worker: fetch issue from GitHub",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-			return
-		}
-
-		cfgMu.Lock()
-		c := *cfg
-		aiCfg := c.AIForRepo(msg.Repo)
-		if aiCfg.Primary == "" {
-			aiCfg.Primary = c.AI.Primary
-		}
-		repoIT := c.IssueTrackingForRepo(msg.Repo)
-		agentCfg := c.AgentConfigFor(aiCfg.Primary)
-		localDirBase := c.GitHub.LocalDirBase
-		globalTimeout := c.AI.ExecutionTimeout
-		cfgMu.Unlock()
-		loginMu.Lock()
-		authUser := cachedLogin
-		loginMu.Unlock()
-		var ok bool
-		repoIT, ok = issueTrackingWithAssigneeScope("refinement-worker", msg.Repo, repoIT, authUser)
-		if !ok {
-			return
-		}
-		if !issueStageStillCurrent("refinement-worker", ghIssue, repoIT, config.IssueModeRefinement) {
-			return
-		}
-		ghIssue.Mode = config.IssueModeRefinement
-
-		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, msg.Repo, msg.Number, token, aiCfg, agentCfg, localDirBase, globalTimeout, false, "refinement-worker")
-		if err != nil {
-			slog.Error("refinement-worker: prepare repo context failed",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-			broker.Publish(sse.Event{
-				Type: sse.EventIssueReviewError,
-				Data: sseData(map[string]any{
-					"repo": msg.Repo, "number": msg.Number, "error": err.Error(),
-				}),
-			})
-			return
-		}
-		if releaseRepoContext != nil {
-			defer releaseRepoContext()
-		}
-		opts.WorkPermit = workgate.PermitFromContext(ctx)
-
-		rev, err := issuePipe.Run(ctx, ghIssue, opts)
-		if err != nil {
-			slog.Error("refinement-worker: pipeline run failed",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-		} else if rev != nil && rev.ActionTaken == string(config.IssueModeRefinement) {
-			autoPromoteAfterStage(ctx, ghClient, broker, ghIssue, rev.IssueID, repoIT, aiCfg, issuepipeline.IssueStageRefinement, "refinement-worker")
-		}
-
-		// Enroll for state watching so closed/resolved issues update in the UI.
-		// Runs even after pipeline failure, matching triage/implement: state
-		// tracking is independent of whether the refinement artifact completed.
-		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
-			slog.Warn("refinement-worker: failed to enroll watch",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-		}
-	}
-
-	refinementHandler := guardUpdateVoidHandler(
-		updateWorkGate,
-		workgate.KindIssue,
-		"refinement-worker: deferred while application update drains",
-		refinementHandlerCore,
-	)
-	refinementW := worker.NewRefinementWorker(conn, maxWorkers, refinementHandler)
-	refinementWCtx, refinementWCancel := context.WithCancel(runtimeCtx)
-	defer refinementWCancel()
-	go func() {
-		if err := refinementW.Start(refinementWCtx, workerReady); err != nil {
-			slog.Error("refinement worker stopped", "err", err)
-		}
-	}()
-
-	// ── NATS issue implement worker ─────────────────────────────────────
-	// Consumes implement requests published by the Fetcher when it classifies
-	// an issue as develop. Same config resolution as triage, different mode.
-	implementHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
-		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
-		if err != nil {
-			slog.Error("implement-worker: fetch issue from GitHub",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-			return
-		}
-
-		cfgMu.Lock()
-		c := *cfg
-		aiCfg := c.AIForRepo(msg.Repo)
-		if aiCfg.Primary == "" {
-			aiCfg.Primary = c.AI.Primary
-		}
-		repoIT := c.IssueTrackingForRepo(msg.Repo)
-		agentCfg := c.AgentConfigFor(aiCfg.Primary)
-		localDirBase := c.GitHub.LocalDirBase
-		globalTimeout := c.AI.ExecutionTimeout
-		cfgMu.Unlock()
-		loginMu.Lock()
-		authUser := cachedLogin
-		loginMu.Unlock()
-		var ok bool
-		repoIT, ok = issueTrackingWithAssigneeScope("implement-worker", msg.Repo, repoIT, authUser)
-		if !ok {
-			return
-		}
-		if !issueStageStillCurrent("implement-worker", ghIssue, repoIT, config.IssueModeDevelop) {
-			return
-		}
-		ghIssue.Mode = config.IssueModeDevelop
-
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeWrite, wtTokenFor("develop", msg.Number), "", "")
-		if err != nil {
-			slog.Error("implement-worker: prepare repo context failed",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-			broker.Publish(sse.Event{
-				Type: sse.EventIssueReviewError,
-				Data: sseData(map[string]any{
-					"repo": msg.Repo, "number": msg.Number, "error": err.Error(),
-				}),
-			})
-			return
-		}
-		if repoHandle != nil {
-			defer repoHandle.Release()
-		}
-
-		extraFlags := agentCfg.ExtraFlags
-		if extraFlags != "" {
-			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
-				slog.Warn("implement-worker: extra_flags rejected", "err", err)
-				extraFlags = ""
-			}
-		}
-
-		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
-		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
-
-		opts := issuepipeline.RunOptions{
-			GitHubToken: token,
-			Primary:     aiCfg.Primary,
-			Fallback:    aiCfg.Fallback,
-			ExecOpts: executor.ExecOptions{
-				Model:                agentCfg.Model,
-				MaxTurns:             agentCfg.MaxTurns,
-				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           extraFlags,
-				WorkDir:              aiCfg.LocalDir,
-				Effort:               agentCfg.Effort,
-				PermissionMode:       agentCfg.PermissionMode,
-				Bare:                 agentCfg.Bare,
-				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
-			},
-			IssuePromptOverride:      issuePrompt,
-			IssueInstructions:        issueInstructions,
-			TriageOwner:              aiCfg.TriageOwner,
-			ImplementPromptOverride:  implPrompt,
-			ImplementInstructions:    implInstructions,
-			PRReviewers:              aiCfg.PRReviewers,
-			PRAssignee:               defaultAutoImplementPRAssignee(aiCfg.PRAssignee, authUser),
-			PRLabels:                 aiCfg.PRLabels,
-			PRDraft:                  aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:    aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-			AuthUser:                 authUser,
-			RequireWorkDirForDevelop: true,
-			WorkPermit:               workgate.PermitFromContext(ctx),
-		}
-
-		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
-			slog.Error("implement-worker: pipeline run failed",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-		}
-
-		// Enroll for state watching so closed/resolved issues update in the UI.
-		// Runs even after pipeline failure — state tracking is independent of
-		// pipeline success, and we want the UI to reflect closures regardless.
-		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
-			slog.Warn("implement-worker: failed to enroll watch",
-				"repo", msg.Repo, "number", msg.Number, "err", err)
-		}
-	}
-
-	implementHandler := guardUpdateVoidHandler(
-		updateWorkGate,
-		workgate.KindImplementation,
-		"implement-worker: deferred while application update drains",
-		implementHandlerCore,
-	)
-	implementW := worker.NewImplementWorker(conn, maxWorkers, implementHandler)
-	implementWCtx, implementWCancel := context.WithCancel(runtimeCtx)
-	defer implementWCancel()
-	go func() {
-		if err := implementW.Start(implementWCtx, workerReady); err != nil {
-			slog.Error("implement worker stopped", "err", err)
-		}
-	}()
-
 	// ── State check poller ──────────────────────────────────────────────
 	// Scans the NATS KV watch bucket on the configured Tier 3 interval and
 	// publishes StateCheckMsg for items due for a state check. Replaces the
@@ -2360,9 +1870,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 	}()
 
-	// All six work subjects use Core NATS. Confirm their subscriptions have
+	// All three work subjects use Core NATS. Confirm their subscriptions have
 	// reached the server before a cold poll can publish; otherwise startup can
-	// lose review/issue messages until the next poll just as discovery could.
+	// lose review messages until the next poll just as discovery could.
 	if err := waitForWorkerReadiness(runtimeCtx, workerReady, coreWorkerCount, 5*time.Second); err != nil {
 		slog.Error("workers: subscriptions not ready", "err", err)
 		return 1
@@ -2397,7 +1907,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	}()
 
 	// Expose live config for GET /config
-	srv.SetRepoMetaFns(ghClient.FetchLabels, ghClient.FetchCollaborators)
 
 	// Live GitHub API rate-limit lookup for GET /github/rate_limit. Served from
 	// the scheduler's tracker (real X-RateLimit-* headers observed on every
@@ -2421,10 +1930,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		reposList, nonMonList := effectiveRepoLists(c)
 		localDirBaseList := append([]string(nil), c.GitHub.LocalDirBase...)
 		cfgMu.Unlock()
-		loginMu.Lock()
-		authUser := cachedLogin
-		loginMu.Unlock()
-		issueTracking := c.GitHub.IssueTracking.WithDefaultAssignee(authUser)
 		orgOverrides := make(map[string]map[string]any)
 		for org, ai := range c.AI.Orgs {
 			orgOverrides[org] = orgAIOverrideMap(ai)
@@ -2505,66 +2010,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"ai_fallback":                 c.AI.Fallback,
 			"review_mode":                 c.AI.ReviewMode,
 			"retention_days":              c.Retention.MaxDays,
-			"issue_tracking":              issueTracking,
 			"repo_overrides":              repoOverrides,
 			"org_overrides":               orgOverrides,
 			"agent_configs":               agentConfigs,
 			"local_dirs_detected":         localDirsDetected,
 			"activity_log_enabled":        ptrBoolOrTrue(c.ActivityLog.Enabled),
 			"activity_log_retention_days": ptrIntOr(c.ActivityLog.RetentionDays, 90),
-			"issue_prompt":                c.AI.IssuePrompt,
-			"implement_prompt":            c.AI.ImplementPrompt,
-			"refinement_timeout":          c.AI.RefinementTimeout,
-			"triage_owner":                c.AI.TriageOwner,
 			"clone_dir":                   c.AI.CloneDir,
-			"generate_pr_description":     c.AI.GeneratePRDescription,
 			"never_approve_with_issues":   c.AI.NeverApproveWithIssues,
 			"never_approve_min_severity":  c.AI.NeverApproveMinSeverity,
-		}
-		if c.AI.AutoPromoteTriage != nil {
-			result["auto_promote_triage"] = *c.AI.AutoPromoteTriage
-		}
-		if c.AI.AutoPromoteRefinement != nil {
-			result["auto_promote_refinement"] = *c.AI.AutoPromoteRefinement
-		}
-		reviewers, labels, assignee, draft := c.ResolvedPRMetadata()
-		pm := map[string]any{}
-		if len(reviewers) > 0 {
-			pm["reviewers"] = reviewers
-		}
-		if len(labels) > 0 {
-			pm["labels"] = labels
-		}
-		if assignee != "" {
-			pm["pr_assignee"] = assignee
-		}
-		if draft != nil {
-			pm["pr_draft"] = *draft
-		}
-		if len(pm) > 0 {
-			result["pr_metadata"] = pm
-		}
-		// Autonomous end-to-end mode config.
-		autonomousOrgs := make(map[string]any)
-		for org, o := range c.Autonomous.Orgs {
-			autonomousOrgs[org] = autonomousOverrideMap(o)
-		}
-		autonomousRepos := make(map[string]any)
-		for repo, o := range c.Autonomous.Repos {
-			autonomousRepos[repo] = autonomousOverrideMap(o)
-		}
-		result["autonomous"] = map[string]any{
-			"enabled":           c.Autonomous.Enabled,
-			"auto_merge":        c.Autonomous.AutoMerge,
-			"merge_method":      c.Autonomous.MergeMethod,
-			"take_others_tasks": c.Autonomous.TakeOthersTasks,
-			"reassign_on_take":  c.Autonomous.ReassignOnTake,
-			"dev_max_turns":     c.Autonomous.DevMaxTurns,
-			"dev_effort":        c.Autonomous.DevEffort,
-			"dev_timeout":       c.Autonomous.DevTimeout,
-			"claim_lease":       c.Autonomous.ClaimLease,
-			"orgs":              autonomousOrgs,
-			"repos":             autonomousRepos,
 		}
 		// Merge tracking. Without this projection the app PATCHes the section
 		// successfully, the daemon honours it, and the settings screen still
@@ -2575,20 +2029,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"per_pr_24h":                 c.CircuitBreaker.PerPR24h,
 			"per_repo_hr":                c.CircuitBreaker.PerRepoHr,
 			"per_review_failure_repo_hr": c.CircuitBreaker.PerReviewFailureRepoHr,
-			"per_issue_24h":              c.CircuitBreaker.PerIssue24h,
-			"per_issue_repo_hr":          c.CircuitBreaker.PerIssueRepoHr,
-			"per_impl_repo_hr":           c.CircuitBreaker.PerImplRepoHr,
 		}
 		result["polling"] = map[string]any{
 			"poll_interval":               c.Polling.PollInterval,
-			"min_interval":                c.Polling.MinInterval,
-			"max_interval":                c.Polling.MaxInterval,
-			"adaptive":                    c.Polling.Adaptive,
 			"discovery_interval":          c.Polling.DiscoveryInterval,
 			"tier3_interval":              c.Polling.Tier3Interval,
 			"rate_limit_safety_threshold": c.Polling.RateLimitSafetyThreshold,
 			"use_etag":                    c.ETagEnabled(),
-			"use_graphql":                 c.GraphQLEnabled(),
 		}
 		// Cluster. Without this projection the app can PATCH cluster.role but
 		// the Settings screen reads back "standalone" forever, looking like
@@ -2703,7 +2150,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			cfgMu.Unlock()
 			// The kill-switches live on the client and limiter, not the
 			// pollers, so they need applying even when nothing restarts.
-			applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, newCfg)
+			applyClientRuntimeConfig(ghClient, limiter, newCfg)
 			slog.Info("config reload: applied without poller restart")
 			return nil
 		}
@@ -2714,7 +2161,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		cfgMu.Lock()
 		cfg = newCfg
 		cfgMu.Unlock()
-		applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, newCfg)
+		applyClientRuntimeConfig(ghClient, limiter, newCfg)
 
 		// Restart the pollers in the BACKGROUND. oldWg.Wait() can block for
 		// tens of seconds (an in-flight poll cycle or agent review must finish
@@ -2996,219 +2443,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		return storePR, nil
 	})
 
-	// Wire the issue-review trigger callback: re-run the issue at its
-	// CURRENT stage. Triggered by POST /issues/{id}/review (the GUI's
-	// "Re-review" button). The endpoint path is historical — when it was
-	// added only review_only existed; today it dispatches to whichever
-	// stage the issue is in (triage / refinement / develop) based on the
-	// fresh GitHub labels. See #462.
-	//
-	// We refetch the issue from GitHub before classifying so an auto-
-	// promote that happened since the last poll is reflected in the
-	// dispatched mode; the previously stored ActionTaken lagged behind
-	// and re-review always fell back to triage. Dispatch via NATS reuses
-	// the existing triage / refinement / implement workers end-to-end
-	// (repo context, opts, single-flight claim, auto-promote) instead of
-	// duplicating that wiring in-process here.
-	srv.SetTriggerIssueReviewFn(func(issueID int64) error {
-		// The HTTP handler queues this work in a goroutine and returns 202,
-		// so r.Context() would be cancelled as soon as the response is
-		// written. Use an explicit operation timeout instead so the
-		// GitHub refetch and NATS publish remain bounded.
-		ctx, cancel := context.WithTimeout(runtimeCtx, 1*time.Minute)
-		defer cancel()
-		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
-		if err != nil {
-			slog.Debug("trigger issue review deferred while application update drains", "issue_id", issueID)
-			return nil
-		}
-		defer releaseUpdateWork()
-
-		publishIssueErr := func(msg string) {
-			broker.Publish(sse.Event{
-				Type: sse.EventIssueReviewError,
-				Data: sseData(map[string]any{"issue_id": issueID, "error": msg}),
-			})
-		}
-
-		iss, err := s.GetIssue(issueID)
-		if err != nil {
-			publishIssueErr(fmt.Sprintf("Issue not found: %v", err))
-			return fmt.Errorf("trigger issue review: get issue %d: %w", issueID, err)
-		}
-
-		ghIssue, err := ghClient.GetIssue(iss.Repo, iss.Number)
-		if err != nil {
-			publishIssueErr(fmt.Sprintf("Failed to fetch issue from GitHub: %v", err))
-			return fmt.Errorf("trigger issue review: fetch %s#%d: %w", iss.Repo, iss.Number, err)
-		}
-
-		cfgMu.Lock()
-		repoIT := cfg.IssueTrackingForRepo(iss.Repo)
-		cfgMu.Unlock()
-		loginMu.Lock()
-		authUser := cachedLogin
-		loginMu.Unlock()
-		// Default the scope to the daemon's own login when the config
-		// leaves Assignees empty, mirroring the worker entries. Without
-		// this, MatchesAssignees would pass vacuously and a manual
-		// trigger from one operator could be dispatched against an
-		// issue assigned to a completely different operator.
-		repoIT = repoIT.WithDefaultAssignee(authUser)
-
-		slog.Info("trigger issue review: dispatching by current stage",
-			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number,
-			"labels", ghIssue.LabelNames(), "scope", repoIT.Assignees)
-
-		if err := dispatchIssueRunByCurrentMode(ctx, issuePublisher, repoIT, ghIssue); err != nil {
-			publishIssueErr(err.Error())
-			return err
-		}
-		return nil
-	})
-
-	// Wire the issue-refinement trigger callback: run deep repo investigation on a stored issue.
-	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
-		ctx, cancel := context.WithCancel(runtimeCtx)
-		defer cancel()
-		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
-		if err != nil {
-			slog.Debug("trigger issue refinement deferred while application update drains", "issue_id", issueID)
-			return nil
-		}
-		defer releaseUpdateWork()
-
-		publishIssueErr := func(msg string) {
-			broker.Publish(sse.Event{
-				Type: sse.EventIssueReviewError,
-				Data: sseData(map[string]any{"issue_id": issueID, "error": msg}),
-			})
-		}
-
-		iss, err := s.GetIssue(issueID)
-		if err != nil {
-			publishIssueErr(fmt.Sprintf("Issue not found: %v", err))
-			return fmt.Errorf("trigger issue refinement: get issue %d: %w", issueID, err)
-		}
-
-		ghIssue, err := ghClient.GetIssue(iss.Repo, iss.Number)
-		if err != nil {
-			publishIssueErr(fmt.Sprintf("Failed to fetch issue from GitHub: %v", err))
-			return fmt.Errorf("trigger issue refinement: fetch GitHub issue %s #%d: %w", iss.Repo, iss.Number, err)
-		}
-		ghIssue.Mode = config.IssueModeRefinement
-
-		cfgMu.Lock()
-		c := *cfg
-		aiCfg := c.AIForRepo(iss.Repo)
-		if aiCfg.Primary == "" {
-			aiCfg.Primary = c.AI.Primary
-		}
-		agentCfg := c.AgentConfigFor(aiCfg.Primary)
-		localDirBase := c.GitHub.LocalDirBase
-		globalTimeout := c.AI.ExecutionTimeout
-		cfgMu.Unlock()
-		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, iss.Repo, iss.Number, token, aiCfg, agentCfg, localDirBase, globalTimeout, force, "trigger issue refinement")
-		if err != nil {
-			publishIssueErr(fmt.Sprintf("Failed to prepare repo context: %v", err))
-			return fmt.Errorf("trigger issue refinement: prepare repo context: %w", err)
-		}
-		if releaseRepoContext != nil {
-			defer releaseRepoContext()
-		}
-		opts.WorkPermit = workgate.PermitFromContext(ctx)
-
-		slog.Info("trigger issue refinement: running pipeline",
-			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number, "force", force)
-
-		_, err = issuePipe.Run(ctx, ghIssue, opts)
-		if err != nil {
-			broker.Publish(sse.Event{Type: sse.EventIssueReviewError, Data: sseData(map[string]any{
-				"issue_id": issueID, "repo": iss.Repo, "error": err.Error(),
-			})})
-			return err
-		}
-		return nil
-	})
-
-	// Wire the promote callback. Promotion only changes GitHub stage labels and
-	// records an audit comment; the next poll executes the newly-visible stage.
-	srv.SetTriggerPromoteFn(func(issueID int64) error {
-		ctx, cancel := context.WithTimeout(runtimeCtx, 30*time.Second)
-		defer cancel()
-		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
-		if err != nil {
-			return err
-		}
-		defer releaseUpdateWork()
-
-		publishIssueErr := func(msg string) {
-			broker.Publish(sse.Event{
-				Type: sse.EventIssueReviewError,
-				Data: sseData(map[string]any{"issue_id": issueID, "error": msg}),
-			})
-		}
-
-		iss, err := s.GetIssue(issueID)
-		if err != nil {
-			publishIssueErr(fmt.Sprintf("Issue not found: %v", err))
-			return fmt.Errorf("promote issue: get issue %d: %w", issueID, err)
-		}
-
-		ghIssue, err := ghClient.GetIssue(iss.Repo, iss.Number)
-		if err != nil {
-			publishIssueErr(fmt.Sprintf("Failed to fetch issue from GitHub: %v", err))
-			return fmt.Errorf("promote issue: fetch GitHub issue %s #%d: %w", iss.Repo, iss.Number, err)
-		}
-
-		cfgMu.Lock()
-		it := cfg.IssueTrackingForRepo(iss.Repo)
-		cfgMu.Unlock()
-
-		mode := it.Classify(ghIssue.LabelNames())
-		from, ok := issuepipeline.StageFromMode(mode)
-		if !ok {
-			msg := fmt.Sprintf("Issue is in %q mode and cannot be promoted", mode)
-			publishIssueErr(msg)
-			return fmt.Errorf("%w: %s", server.ErrPromoteConflict, msg)
-		}
-		to, err := issuepipeline.NextStage(from, it, true)
-		if err != nil {
-			publishIssueErr(fmt.Sprintf("Cannot promote issue: %v", err))
-			if errors.Is(err, issuepipeline.ErrStageTargetLabelMissing) || errors.Is(err, issuepipeline.ErrNoNextStage) {
-				return fmt.Errorf("%w: %v", server.ErrPromoteConflict, err)
-			}
-			return fmt.Errorf("promote issue: resolve next stage: %w", err)
-		}
-
-		comments, commentErr := ghClient.FetchIssueCommentsOnly(iss.Repo, iss.Number)
-		if commentErr != nil {
-			slog.Warn("promote issue: comment fetch failed, continuing without audit dedup context",
-				"repo", iss.Repo, "number", iss.Number, "err", commentErr)
-		}
-
-		slog.Info("promote issue: moving issue stage labels",
-			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number, "from", from, "to", to)
-		if err := issuepipeline.TransitionIssueStage(ctx, ghClient, issuepipeline.StageTransition{
-			Issue:          ghIssue,
-			StoreIssueID:   issueID,
-			Config:         it,
-			From:           from,
-			To:             to,
-			Trigger:        issuepipeline.StagePromotionManualAPI,
-			Time:           time.Now().UTC(),
-			RecentComments: comments,
-			Broker:         broker,
-		}); err != nil {
-			publishIssueErr(fmt.Sprintf("Failed to promote issue: %v", err))
-			return fmt.Errorf("promote issue: transition stage: %w", err)
-		}
-
-		slog.Info("promote issue: labels updated; poll will execute the next stage",
-			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number, "from", from, "to", to)
-		return nil
-	})
-
 	serveDied := false
 	if err := takeServeFailure(); err != nil {
 		// Workers now exist, so do not return directly: the common shutdown path
@@ -3267,8 +2501,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			cfgMu.Unlock()
 			cancel()
 		},
-		workerCancel, publishWCancel, triageWCancel, refinementWCancel,
-		implementWCancel, statePollerCancel, stateWCancel,
+		workerCancel, publishWCancel, statePollerCancel, stateWCancel,
 	}, exec.TerminateAll, producerSettleDelay)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -3448,7 +2681,6 @@ func configReloadRestartSnapshot(c *config.Config) config.Config {
 	snap.GitHub.LocalDirBase = nil
 	snap.GitHub.AutoEnablePROnDiscovery = nil
 	snap.GitHub.WatchInterval = ""
-	snap.GitHub.IssueTracking = config.IssueTrackingConfig{}
 	snap.GitHub.ReviewGuards = config.ReviewGuardsConfig{}
 
 	snap.AI.Primary = ""
@@ -3458,24 +2690,9 @@ func configReloadRestartSnapshot(c *config.Config) config.Config {
 	snap.AI.Agents = nil
 	snap.AI.Repos = nil
 	snap.AI.Orgs = nil
-	snap.AI.PRMetadata = config.PRMetadataConfig{}
-	snap.AI.PRReviewers = nil
-	snap.AI.PRLabels = nil
-	snap.AI.PRAssignee = ""
-	snap.AI.PRDraft = nil
-	snap.AI.IssuePrompt = ""
-	snap.AI.ImplementPrompt = ""
-	snap.AI.RefinementTimeout = ""
-	snap.AI.TriageOwner = ""
 	snap.AI.CloneDir = ""
-	snap.AI.AutoPromoteTriage = nil
-	snap.AI.AutoPromoteRefinement = nil
-	snap.AI.Tier2RepoConcurrency = 0
-	snap.AI.GeneratePRDescription = false
 	snap.AI.NeverApproveWithIssues = false
 	snap.AI.NeverApproveMinSeverity = ""
-	snap.AI.ReviewResponse = config.ReviewResponseConfig{}
-	snap.AI.ReviewFix = config.ReviewFixConfig{}
 
 	snap.Retention = config.RetentionConfig{}
 	snap.ActivityLog = config.ActivityLogConfig{}
@@ -3507,24 +2724,6 @@ func resolveExecutionTimeout(globalTimeout, agentTimeout string) time.Duration {
 		}
 	}
 	return executor.DefaultExecutionTimeout
-}
-
-// resolveRefinementTimeout lets the stage-specific cap win over generic
-// per-agent/global execution timeouts. Refinement is expected to inspect the
-// repo and git history, so the default intentionally runs longer than normal
-// review/develop executor calls.
-func resolveRefinementTimeout(refinementTimeout, globalTimeout, agentTimeout string) time.Duration {
-	if refinementTimeout != "" {
-		if d, err := time.ParseDuration(refinementTimeout); err == nil && d > 0 {
-			return d
-		}
-	}
-	if agentTimeout != "" {
-		if d, err := time.ParseDuration(agentTimeout); err == nil && d > 0 {
-			return d
-		}
-	}
-	return resolveExecutionTimeout(globalTimeout, "")
 }
 
 // ── Standalone poller functions (replaced Pipeline goroutines) ───────────
@@ -3681,66 +2880,6 @@ func waitForWorkerReadiness(ctx context.Context, ready <-chan error, count int, 
 	return nil
 }
 
-// processReposInParallel runs workFn for every repo in repos with at
-// most `concurrency` calls in flight at once. Returns the sum of the
-// integer return values from the workers. workFn errors are silently
-// counted as zero — the helper has no domain context to log them
-// usefully; callers wrap workFn to log per-repo failures in the
-// vocabulary that fits their tier. (#481)
-//
-// A non-positive concurrency falls back to
-// config.DefaultTier2RepoConcurrency so a misconfiguration cannot
-// deadlock the daemon. Nil or empty repo list is a no-op.
-//
-// Cancellation: both the per-repo scheduling loop and the semaphore
-// acquire observe ctx.Done so a daemon shutdown does not get stuck
-// waiting for the last free slot when workers are still draining.
-// Already-running workers receive ctx through workFn and are
-// responsible for their own short-circuit.
-func processReposInParallel(
-	ctx context.Context,
-	repos []string,
-	concurrency int,
-	workFn func(ctx context.Context, repo string) (int, error),
-) int {
-	if len(repos) == 0 {
-		return 0
-	}
-	if concurrency <= 0 {
-		concurrency = config.DefaultTier2RepoConcurrency
-	}
-	if concurrency > len(repos) {
-		concurrency = len(repos)
-	}
-
-	sem := make(chan struct{}, concurrency)
-	var total int64
-	var wg sync.WaitGroup
-schedule:
-	for _, repo := range repos {
-		select {
-		case <-ctx.Done():
-			// Stop dispatching new work; a plain `break` here would
-			// only exit the select, leaving the loop to keep queuing.
-			break schedule
-		case sem <- struct{}{}:
-			// Acquired a slot. Fall through to spawn the worker.
-		}
-		wg.Add(1)
-		go func(repo string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			n, err := workFn(ctx, repo)
-			if err != nil {
-				return
-			}
-			atomic.AddInt64(&total, int64(n))
-		}(repo)
-	}
-	wg.Wait()
-	return int(total)
-}
-
 // applyClientRuntimeConfig pushes the [polling] kill-switches and safety knobs
 // into the live GitHub client, rate limiter and adaptive scheduler.
 //
@@ -3752,44 +2891,26 @@ schedule:
 //
 // Safe to call from any goroutine: the client flags are atomics and the
 // limiter guards its threshold with its own mutex.
-func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, adaptiveSched *scheduler.AdaptiveScheduler, cfg *config.Config) {
+func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, cfg *config.Config) {
 	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
 	ghClient.SetCacheEnabled(cfg.ETagEnabled())
-	// GraphQL issue search (C4): disabled by default; operator enables via
-	// use_graphql=true. When enabled, SearchIssues dispatches to GraphQL first
-	// and falls back to REST /search/issues — zero behaviour change when false.
-	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
 	// Rate-limit safety threshold: drives how eagerly each tier backs off.
 	// Default 100 matches the hardcoded tierSafetyThreshold[TierDiscovery].
 	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
-	// Adaptive bounds: updated in place rather than by recreating the
-	// scheduler, so per-repo back-off state survives the reload.
-	if adaptiveSched != nil {
-		adaptiveSched.SetBounds(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
-	}
 }
 
 type tier2PRCandidatePublisher interface {
 	PublishPRReviewCandidate(ctx context.Context, repo string, number int, githubID int64) error
 }
 
-// runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
+// runTier2 runs the PR polling loop. Replaces the old RunTier2 from
 // the scheduler package.
-//
-// repoConcurrencyFn returns the live per-tick cap on parallel
-// per-repo issue processing (`ai.tier2_repo_concurrency`). It is
-// evaluated on every tick so a config reload takes effect without
-// restarting the daemon.
 func runTier2(
 	ctx context.Context,
 	adapter *tier2Adapter,
-	limiter *scheduler.RateLimiter,
 	prPublisher tier2PRCandidatePublisher,
 	ssePub sse.Publisher,
 	configFn func() []string,
-	repoConcurrencyFn func() int,
-	adaptiveFn func() bool,
-	adaptiveSched *scheduler.AdaptiveScheduler,
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
@@ -3842,8 +2963,6 @@ func runTier2(
 	}
 
 	// runPRTier publishes review requests for every reviewable PR.
-	// Independent of the issue tier so a slow GitHub Search call does
-	// not block per-repo issue work.
 	runPRTier := func(currentRepos []string) {
 		sse.EmitPollingStarted(ssePub, "prs", currentRepos)
 		prStart := time.Now()
@@ -3886,160 +3005,8 @@ func runTier2(
 		}
 	}
 
-	// runIssueTier promotes ready issues and processes every repo's
-	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
-	//
-	// When polling.adaptive is true (opt-in), only repos whose next
-	// scheduled poll is due are processed this tick. After each repo
-	// finishes, MarkActive (count>0) or MarkIdle (count==0) adjusts
-	// its interval so active repos stay at min_interval while idle
-	// repos back off toward max_interval.
-	//
-	// The Search API prefetch is scoped to the repos this tick will
-	// actually process: adaptive gating runs first, and a tick with
-	// nothing due skips the prefetch entirely rather than warming a
-	// cache no one reads. On search error the per-repo REST fallback
-	// inside ProcessRepo is unaffected.
-	//
-	// When polling.adaptive is false (default) the behaviour is EXACTLY
-	// unchanged: all currentRepos are processed every tick.
-	//
-	// NOTE: if NATS publishes are ever added to this tier, also call
-	// adapter.PublishPending() at the end — it is intentionally bound
-	// to the PR tick today (see prTick) because pending publishes
-	// originate exclusively from runPRTier.
-	runIssueTier := func(currentRepos []string) {
-		sse.EmitPollingStarted(ssePub, "issues", currentRepos)
-		issueStart := time.Now()
-		// issueCount is intentionally captured by the deferred
-		// EmitPollingCompleted closure so the final value (assigned
-		// after processReposInParallel returns) is what the SSE event
-		// reports. Reassigning it later via `=` keeps the capture
-		// valid; a future refactor that switches to a fresh local
-		// would silently emit 0.
-		issueCount := 0
-		defer func() {
-			completedAt := time.Now()
-			if pollCompletedFn != nil {
-				pollCompletedFn("issues", completedAt)
-			}
-			sse.EmitPollingCompleted(ssePub, "issues", issueCount, completedAt.Sub(issueStart))
-		}()
-		concurrency := config.DefaultTier2RepoConcurrency
-		if repoConcurrencyFn != nil {
-			if v := repoConcurrencyFn(); v > 0 {
-				concurrency = v
-			}
-		}
-
-		// Aggregated Search API prefetch: one query per assignee group covers
-		// the repos this tick will process, spending the separate search
-		// budget (30/min) instead of the core REST one (5000/hr). On search
-		// error the per-repo REST fallback inside ProcessRepo is unaffected.
-		// Adaptive gating runs BEFORE the prefetch so a tick with nothing due
-		// spends no search query at all. The scheduler must be non-nil to be
-		// consulted: adaptiveFn and adaptiveSched are separate parameters and
-		// callers can pass them apart, so guard rather than assume the pair.
-		adaptive := adaptiveFn != nil && adaptiveFn() && adaptiveSched != nil
-		reposToProcess := currentRepos
-		if adaptive {
-			reposToProcess = adaptiveSched.Due(time.Now(), currentRepos)
-			if len(reposToProcess) < len(currentRepos) {
-				slog.Debug("tier2: adaptive mode — skipping idle repos",
-					"total", len(currentRepos), "due", len(reposToProcess))
-			}
-			// Prune repos that have been removed from monitoring so the
-			// scheduler's memory stays bounded.
-			adaptiveSched.PruneAbsent(currentRepos)
-		}
-
-		// Warm one raw Search snapshot for normal processing and promotion.
-		// Promotion may need repos which adaptive polling would otherwise skip,
-		// so add only those with an enabled blocked-label rule. Successful
-		// chunks are then classified locally by ProcessRepo and reused by
-		// PromoteReady; failed/truncated chunks retain their exact REST fallback.
-		// Budget metering happens per request inside the client (see
-		// SetSearchGate) rather than once here: one prefetch issues a query per
-		// bounded assignee/repo chunk and page.
-		prefetchRepos, promotionConfigured := adapter.IssuePrefetchPlan(currentRepos, reposToProcess)
-		if len(prefetchRepos) > 0 {
-			adapter.PrefetchIssuesForCycle(prefetchRepos)
-			defer adapter.ClearIssuePrefetch()
-		}
-
-		// Promotion still performs dependency reads and label/comment writes,
-		// so retain one core permit when it is configured. The expensive open-
-		// issue listing itself is served from the shared snapshot above whenever
-		// that chunk succeeded.
-		if promotionConfigured {
-			if limiter != nil {
-				if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-					return
-				}
-			}
-			if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
-				if errors.Is(err, workgate.ErrDraining) {
-					slog.Debug("tier2: promotion deferred while application update drains")
-				} else {
-					slog.Error("tier2: promotion", "err", err)
-				}
-			} else if n > 0 {
-				slog.Info("tier2: promoted issues", "count", n)
-			}
-		}
-
-		issueCount = processReposInParallel(ctx, reposToProcess, concurrency, func(ctx context.Context, repo string) (int, error) {
-			// A successful prefetch makes ProcessRepo entirely local until it
-			// publishes work. Charge a core token only for the per-repo REST
-			// fallback, eliminating the 4500-token/hour phantom cliff at 75 repos.
-			if adapter.IssueRepoNeedsCoreFetch(repo) && limiter != nil {
-				if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-					return 0, err
-				}
-			}
-			n, err := adapter.ProcessRepo(ctx, repo)
-			if err != nil {
-				// Demote to debug during graceful shutdown — a
-				// cancelled ctx is expected behaviour, not a fault
-				// worth paging an operator.
-				if ctx.Err() != nil {
-					slog.Debug("tier2: issue processing cancelled", "repo", repo, "err", err)
-				} else {
-					slog.Error("tier2: issue processing", "repo", repo, "err", err)
-				}
-				// On error we don't advance the adaptive schedule for
-				// this repo; it will be re-evaluated as due on the next
-				// tick (nextDue is not updated because MarkActive/MarkIdle
-				// are not called).
-				return 0, err
-			}
-			if n > 0 {
-				slog.Info("tier2: processed issues", "repo", repo, "count", n)
-			}
-			// Update adaptive cadence based on observed activity. Stamped with
-			// the time this repo FINISHED, not the cycle's start: with many
-			// repos and bounded concurrency a fan-out can outlast
-			// min_interval, and marking from a stale base put nextDue in the
-			// past — every repo came back due on the next tick and the
-			// back-off never accumulated, disabling adaptive mode in exactly
-			// the loaded scenario that justifies turning it on.
-			if adaptive {
-				done := time.Now()
-				if n > 0 {
-					adaptiveSched.MarkActive(repo, done)
-				} else {
-					adaptiveSched.MarkIdle(repo, done)
-				}
-			}
-			return n, nil
-		})
-	}
-
-	// PR and issue tiers run on independent tickers so a slow issue
-	// cycle (taking longer than `interval`) cannot delay the next PR
-	// poll. Each tier serialises against itself: a Ticker drops
-	// extra ticks when its previous run is still in flight, so we
-	// never spawn two concurrent issue cycles.
+	// A time.Ticker drops extra ticks when its previous run is still in
+	// flight, so the PR tier never runs concurrently against itself.
 	prTick := func() {
 		currentRepos := intersectMonitoredRepos(snapshotRepos(), configFn)
 		if len(currentRepos) > 0 {
@@ -4051,48 +3018,25 @@ func runTier2(
 		// when the live repo set is empty so the adapter can re-evaluate
 		// pending rows immediately after a config reload re-enables their
 		// repositories. Disabled repos remain pending and are not enqueued.
-		// If we ever
-		// route issue-side NATS publishes through the same queue,
-		// add a sibling call inside issueTick rather than removing
-		// this one.
 		adapter.PublishPending()
 	}
-	issueTick := func() {
-		currentRepos := intersectMonitoredRepos(snapshotRepos(), configFn)
-		if len(currentRepos) == 0 {
+	// time.Ticker's channel is buffered to size 1, so a tick that fires
+	// while the previous prTick is still running is silently dropped —
+	// the invariant that prevents the tier from running concurrently
+	// against itself without needing a mutex.
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	if coldStart {
+		prTick()
+	}
+	for {
+		select {
+		case <-ctx.Done():
 			return
-		}
-		runIssueTier(currentRepos)
-	}
-
-	// runTickerLoop is the per-tier event loop. time.Ticker's channel
-	// is buffered to size 1, so a tick that fires while the previous
-	// `tick()` is still running is silently dropped — this is the
-	// invariant that prevents a tier from running concurrently against
-	// itself without needing a mutex. PR and issue tiers each get
-	// their own goroutine + ticker so a slow run on one tier never
-	// stalls the other.
-	runTickerLoop := func(tick func()) {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		if coldStart {
-			tick()
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				tick()
-			}
+		case <-ticker.C:
+			prTick()
 		}
 	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); runTickerLoop(prTick) }()
-	go func() { defer wg.Done(); runTickerLoop(issueTick) }()
-	wg.Wait()
 }
 
 // intersectMonitoredRepos applies the live config as a final eligibility gate
@@ -4135,7 +3079,7 @@ func intersectMonitoredRepos(current []string, configFn func() []string) []strin
 
 // aiRepoKeys returns the sorted list of repos with an explicit [ai.repos.*]
 // entry. Used to seed MergeRepos with the operator's TOML opt-ins so a repo
-// that is wired up but has no active PRs still receives issue polling.
+// that is wired up but has no active PRs still stays monitored.
 // See theburrowhub/heimdallm#281.
 //
 // Sorted output keeps the published repo list deterministic between ticks
@@ -4408,14 +3352,12 @@ func (a *rateLimitAdapter) ObserveResponse(resp *http.Response) {
 // ── tier2Adapter bridges main.go's concrete types to Pipeline interfaces ──
 
 type tier2Adapter struct {
-	ghClient  *gh.Client
-	ghToken   string
-	pipeline  *pipeline.Pipeline
-	issuePipe *issuepipeline.Pipeline
-	fetcher   *issuepipeline.Fetcher
-	repoCtx   *repoctx.Manager
-	store     *store.Store
-	broker    *sse.Broker
+	ghClient *gh.Client
+	ghToken  string
+	pipeline *pipeline.Pipeline
+	repoCtx  *repoctx.Manager
+	store    *store.Store
+	broker   *sse.Broker
 	// Synchronous NATS handoff for discovery ordering. Optional in tests.
 	publishOrderedEvents func([]sse.Event) error
 	cfgMu                *sync.Mutex
@@ -4426,11 +3368,6 @@ type tier2Adapter struct {
 	workGate             *workgate.Gate
 	publishPub           *bus.PRPublishPublisher
 	watchStore           *bus.WatchStore
-	// Review-state vigilance dispatch (#482). Optional — nil-safe so a
-	// daemon configured without the opt-in feature flags simply skips
-	// the dispatch and the new CheckItem branch remains observational.
-	responder reviewResponderDispatcher
-	fixRunner reviewFixDispatcher
 
 	// owns reports whether this daemon should act on a repo. Nil means "yes",
 	// which is the single-daemon behaviour and what every test that does not
@@ -4448,14 +3385,6 @@ type tier2Adapter struct {
 	// daemon's rowid for the PR has no meaning on the instance it is routed
 	// to (theburrowhub/heimdallm#799).
 	dispatchPR func(repo string, ref instances.PRDispatchRef) bool
-
-	// ownerCanHandleIssues reports whether repo's routed owner is healthy
-	// enough to be trusted with its own issue processing. Unlike PR review,
-	// issue triage has no single id to dispatch at this decision point (the
-	// individual issues are not known yet), so this only answers "is it safe
-	// to skip", not "hand this specific item off". false (including nil)
-	// means process the repo locally rather than leave it unattended.
-	ownerCanHandleIssues func(repo string) bool
 
 	// skipMu protects the lightweight SSE dedup caches below.
 	skipMu               sync.Mutex
@@ -4943,398 +3872,6 @@ func (a *tier2Adapter) reviewReadyForPublishRetry(rev *store.Review) (bool, erro
 	return !inFlight, nil
 }
 
-// PrefetchIssuesForCycle runs the aggregated Search API query for all eligible
-// repos, populating the Fetcher's per-cycle prefetch map. Must be called BEFORE
-// the parallel ProcessRepo fan-out. On search error it logs and returns so
-// per-repo FetchIssues fallback still applies inside ProcessRepo.
-//
-// The method iterates repos to build the eligible list (skipping repos with
-// issue_tracking disabled or autonomous mode enabled — the same gating
-// ProcessRepo applies — so the search scope matches what would actually be
-// processed). That exclusion happens inside PrefetchIssues, which reads the
-// resolved config and autonomous flag eligibleFn returns; eligibleFn's own
-// third result is the "repo is known" flag and is always true here.
-func (a *tier2Adapter) PrefetchIssuesForCycle(repos []string) {
-	if a.fetcher == nil {
-		return
-	}
-	var c *config.Config
-	if a.cfgMu == nil {
-		c = *a.cfg
-	} else {
-		a.cfgMu.Lock()
-		c = *a.cfg
-		a.cfgMu.Unlock()
-	}
-	authUser := a.resolveAuthenticatedUser()
-
-	// eligibleFn resolves the effective IssueTrackingConfig and autonomous flag
-	// for each repo. PrefetchIssues uses this to group repos by their resolved
-	// assignee set, running one search query per group. This ensures repos with
-	// per-repo assignee overrides are fetched with their own assignee scope
-	// rather than the global one, preventing silent issue drops.
-	eligibleFn := func(repo string) (config.IssueTrackingConfig, bool, bool) {
-		repoIT := c.IssueTrackingForRepo(repo)
-		autonomousEnabled := c.AutonomousForRepo(repo).Enabled
-		return repoIT, autonomousEnabled, true
-	}
-	if _, err := a.fetcher.PrefetchIssues(eligibleFn, authUser, repos); err != nil {
-		// Error already logged by PrefetchIssues; fallback is automatic.
-		return
-	}
-}
-
-// IssuePrefetchPlan returns the deterministic union of repos due for normal
-// issue processing and repos whose dependency-promotion rules must run even
-// when adaptive polling has backed them off. The bool reports whether any
-// promotion pass is configured, allowing runTier2 to avoid both the pass and
-// its core limiter permit on the common no-blocked-label path.
-func (a *tier2Adapter) IssuePrefetchPlan(currentRepos, reposToProcess []string) ([]string, bool) {
-	if a == nil || a.cfg == nil {
-		return append([]string(nil), reposToProcess...), false
-	}
-	var c *config.Config
-	if a.cfgMu == nil {
-		c = *a.cfg
-	} else {
-		a.cfgMu.Lock()
-		c = *a.cfg
-		a.cfgMu.Unlock()
-	}
-
-	seen := make(map[string]struct{}, len(currentRepos)+len(reposToProcess))
-	out := make([]string, 0, len(reposToProcess))
-	for _, repo := range reposToProcess {
-		if repo == "" {
-			continue
-		}
-		if _, ok := seen[repo]; ok {
-			continue
-		}
-		seen[repo] = struct{}{}
-		out = append(out, repo)
-	}
-
-	promotionConfigured := false
-	for _, repo := range currentRepos {
-		if repo == "" || c.AutonomousForRepo(repo).Enabled {
-			continue
-		}
-		it := c.IssueTrackingForRepo(repo)
-		if !it.Enabled || len(it.BlockedLabels) == 0 {
-			continue
-		}
-		promotionConfigured = true
-		if _, ok := seen[repo]; ok {
-			continue
-		}
-		seen[repo] = struct{}{}
-		out = append(out, repo)
-	}
-	return out, promotionConfigured
-}
-
-// IssueRepoNeedsCoreFetch distinguishes a genuine per-repo REST fallback from
-// local classification of the cycle snapshot. Disabled/autonomous repos are
-// no-ops and therefore need no permit either.
-func (a *tier2Adapter) IssueRepoNeedsCoreFetch(repo string) bool {
-	if a == nil || a.cfg == nil {
-		return false
-	}
-	var c *config.Config
-	if a.cfgMu == nil {
-		c = *a.cfg
-	} else {
-		a.cfgMu.Lock()
-		c = *a.cfg
-		a.cfgMu.Unlock()
-	}
-	if !c.IssueTrackingForRepo(repo).Enabled || c.AutonomousForRepo(repo).Enabled {
-		return false
-	}
-	return a.fetcher == nil || !a.fetcher.HasPrefetchedIssues(repo)
-}
-
-// ClearIssuePrefetch discards the cycle-scoped prefetch map so stale results
-// cannot leak into the next cycle.
-func (a *tier2Adapter) ClearIssuePrefetch() {
-	if a.fetcher != nil {
-		a.fetcher.ClearPrefetch()
-	}
-}
-
-// tier2ShouldProcessLocally decides, given ownership and dispatch-capability
-// signals, whether this daemon must process repo's issues itself rather than
-// trusting a routed-away owner to do it. Extracted as a pure function so the
-// decision is directly unit-testable without ProcessRepo's full issue
-// pipeline (repo context acquisition, agent execution, etc.).
-//
-// Issue work is partitioned the same way PR review is: normally only the
-// instance repo is routed to acts on it (owns==nil or owns(repo)==true means
-// "yes, process here" — the single-daemon default every non-clustered test
-// gets for free). But unlike PR review, there is no single issue id to
-// dispatch at this point, so when the repo IS routed away this only decides
-// whether it is safe to skip — trusting the owner — or not. It is safe to
-// skip only when ownerCanHandle reports the routed owner is healthy; a nil
-// ownerCanHandle or an unhealthy owner means process locally instead of
-// leaving the repo's issues completely unattended.
-func tier2ShouldProcessLocally(owns func(string) bool, ownerCanHandle func(string) bool, repo string) bool {
-	if owns == nil || owns(repo) {
-		return true
-	}
-	return ownerCanHandle == nil || !ownerCanHandle(repo)
-}
-
-// ProcessRepo implements scheduler.Tier2IssueProcessor.
-func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error) {
-	if !tier2ShouldProcessLocally(a.owns, a.ownerCanHandleIssues, repo) {
-		return 0, nil
-	}
-	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindIssue)
-	if err != nil {
-		slog.Debug("tier2 issue scan deferred while application update drains", "repo", repo)
-		return 0, nil
-	}
-	defer releaseUpdateWork()
-	a.cfgMu.Lock()
-	c := *a.cfg
-	repoIT := c.IssueTrackingForRepo(repo)
-	autonomousEnabled := c.AutonomousForRepo(repo).Enabled
-	a.cfgMu.Unlock()
-
-	// When autonomous mode is enabled for a repo, the autonomous poller owns
-	// the issue lifecycle (selection + triage→refinement→development single-
-	// flight) for that repo. The legacy label-driven issue pipeline must NOT
-	// run in parallel: otherwise a Tier 2 tick could re-pick an issue the
-	// autonomous Drive is already working (which has no IssueReview/PR yet, so
-	// alreadyProcessed misses), enqueue a second NATS implement job, and run a
-	// duplicate agent → duplicate PRs / failed git push / wasted compute. This
-	// guard is scoped to ISSUE processing only — PR review (ProcessPR + the
-	// Tier 3 Responder/FixRunner) is unaffected and remains the autonomous
-	// review loop.
-	if !repoIT.Enabled || autonomousEnabled {
-		return 0, nil
-	}
-
-	// Resolve authenticated user before applying issue tracking defaults: an
-	// empty assignee list means "this daemon's user", not a shared queue.
-	authUser := a.resolveAuthenticatedUser()
-
-	var ok bool
-	repoIT, ok = issueTrackingWithAssigneeScope("tier2 issue processing", repo, repoIT, authUser)
-	if !ok {
-		return 0, nil
-	}
-
-	optsFor := func(issue *gh.Issue) (issuepipeline.RunOptions, bool) {
-		a.cfgMu.Lock()
-		c := *a.cfg
-		aiCfg := c.AIForRepo(issue.Repo)
-		if aiCfg.Primary == "" {
-			aiCfg.Primary = c.AI.Primary
-		}
-		agentCfg := c.AgentConfigFor(aiCfg.Primary)
-		localDirBase := c.GitHub.LocalDirBase
-		globalTimeout := c.AI.ExecutionTimeout
-		a.cfgMu.Unlock()
-		mode := repoctx.ModeRead
-		requireWorkDir := false
-		requireRefinementWorkDir := false
-		if issue.Mode == config.IssueModeDevelop {
-			mode = repoctx.ModeWrite
-			requireWorkDir = true
-		} else if issue.Mode == config.IssueModeRefinement {
-			requireRefinementWorkDir = true
-		}
-		var releaseRepoContext func()
-		releaseOnReturn := true
-		wtPrefix := "stage"
-		switch issue.Mode {
-		case config.IssueModeDevelop:
-			wtPrefix = "develop"
-		case config.IssueModeRefinement:
-			wtPrefix = "refinement"
-		case config.IssueModeReviewOnly:
-			wtPrefix = "triage"
-		}
-		repoHandle, err := acquireRepoContext(ctx, a.repoCtx, issue.Repo, &aiCfg, localDirBase, a.ghToken, mode, wtTokenFor(wtPrefix, issue.Number), "", "")
-		defer func() {
-			if releaseOnReturn && repoHandle != nil {
-				repoHandle.Release()
-			}
-		}()
-		if err != nil {
-			if issue.Mode == config.IssueModeDevelop || issue.Mode == config.IssueModeRefinement {
-				slog.Error("issue poll: prepare repo context failed",
-					"repo", issue.Repo, "number", issue.Number, "err", err)
-				if a.broker != nil {
-					a.broker.Publish(sse.Event{
-						Type: sse.EventIssueReviewError,
-						Data: sseData(map[string]any{
-							"repo": issue.Repo, "number": issue.Number, "error": err.Error(),
-						}),
-					})
-				}
-				return issuepipeline.RunOptions{}, false
-			} else {
-				logRepoContextFallback("issue poll", issue.Repo, err)
-			}
-			aiCfg.LocalDir = ""
-		} else if repoHandle != nil {
-			if issue.Mode == config.IssueModeReviewOnly || issue.Mode == config.IssueModeRefinement {
-				ensureRepoContextFullHistory(ctx, a.repoCtx, repoHandle, a.ghToken, "issue poll", issue.Repo)
-			}
-			releaseRepoContext = repoHandle.Release
-		}
-
-		extraFlags := agentCfg.ExtraFlags
-		if extraFlags != "" {
-			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
-				slog.Warn("issue poll: extra_flags rejected", "err", err)
-				extraFlags = ""
-			}
-		}
-
-		issuePrompt, issueInstructions := resolveIssuePrompt(a.store, aiCfg.IssuePrompt, agentCfg.PromptID)
-		implPrompt, implInstructions := resolveImplementPrompt(a.store, aiCfg.ImplementPrompt, agentCfg.PromptID)
-		execTimeout := resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout)
-		if issue.Mode == config.IssueModeRefinement {
-			execTimeout = resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout)
-		}
-
-		opts := issuepipeline.RunOptions{
-			GitHubToken: a.ghToken,
-			Primary:     aiCfg.Primary,
-			Fallback:    aiCfg.Fallback,
-			ExecOpts: executor.ExecOptions{
-				Model:                agentCfg.Model,
-				MaxTurns:             agentCfg.MaxTurns,
-				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           extraFlags,
-				WorkDir:              aiCfg.LocalDir,
-				Effort:               agentCfg.Effort,
-				PermissionMode:       agentCfg.PermissionMode,
-				Bare:                 agentCfg.Bare,
-				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              execTimeout,
-			},
-			IssuePromptOverride:         issuePrompt,
-			IssueInstructions:           issueInstructions,
-			TriageOwner:                 aiCfg.TriageOwner,
-			ImplementPromptOverride:     implPrompt,
-			ImplementInstructions:       implInstructions,
-			PRReviewers:                 aiCfg.PRReviewers,
-			PRAssignee:                  defaultAutoImplementPRAssignee(aiCfg.PRAssignee, authUser),
-			PRLabels:                    aiCfg.PRLabels,
-			PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-			AuthUser:                    authUser,
-			RequireWorkDirForDevelop:    requireWorkDir,
-			RequireWorkDirForRefinement: requireRefinementWorkDir,
-			ReleaseRepoContext:          releaseRepoContext,
-			WorkPermit:                  workgate.PermitFromContext(ctx),
-		}
-		releaseOnReturn = false
-		return opts, true
-	}
-
-	return a.fetcher.ProcessRepo(ctx, repo, repoIT, authUser, optsFor)
-}
-
-// PromoteReady implements scheduler.Tier2Promoter.
-func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, error) {
-	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindMaintenance)
-	if err != nil {
-		return 0, err
-	}
-	defer releaseUpdateWork()
-
-	type promoteGroup struct {
-		it    config.IssueTrackingConfig
-		repos []string
-	}
-
-	authUser := a.cachedAuthenticatedUser()
-
-	a.cfgMu.Lock()
-	c := *a.cfg
-	groupOrder := make([]string, 0, len(repos))
-	groups := make(map[string]*promoteGroup)
-	for _, repo := range repos {
-		// Skip autonomous-owned repos: the autonomous poller owns the issue
-		// lifecycle (including stage advancement, which it records as a best-
-		// effort audit trail). Letting Tier 2 also auto-promote stage labels
-		// here would race the poller and cause spurious label advances on
-		// issues the autonomous pipeline is driving. PR review is unaffected.
-		if c.AutonomousForRepo(repo).Enabled {
-			continue
-		}
-		it := c.IssueTrackingForRepo(repo)
-		if it.Enabled && len(it.BlockedLabels) > 0 && len(it.Assignees) == 0 && authUser == "" {
-			authUser = a.resolveAuthenticatedUser()
-		}
-		it, ok := issueTrackingWithAssigneeScope("tier2 issue promotion", repo, it, authUser)
-		if !ok {
-			continue
-		}
-		if it.Enabled && len(it.BlockedLabels) > 0 {
-			key := promoteIssueTrackingKey(it)
-			group := groups[key]
-			if group == nil {
-				group = &promoteGroup{it: it}
-				groups[key] = group
-				groupOrder = append(groupOrder, key)
-			}
-			group.repos = append(group.repos, repo)
-		}
-	}
-	a.cfgMu.Unlock()
-
-	total := 0
-	var promoteErr error
-	var prefetched map[string][]*gh.Issue
-	if a.fetcher != nil {
-		prefetched = a.fetcher.PrefetchedIssues()
-	}
-	for _, key := range groupOrder {
-		item := groups[key]
-		n, err := issuepipeline.PromoteReadyWithPrefetch(ctx, a.ghClient, item.it, item.repos, prefetched, a.broker)
-		total += n
-		if err != nil {
-			promoteErr = errors.Join(promoteErr, fmt.Errorf("issues promote for %s: %w", strings.Join(item.repos, ","), err))
-		}
-	}
-	return total, promoteErr
-}
-
-func promoteIssueTrackingKey(it config.IssueTrackingConfig) string {
-	b, _ := json.Marshal(struct {
-		Enabled          bool              `json:"enabled"`
-		FilterMode       config.FilterMode `json:"filter_mode"`
-		Organizations    []string          `json:"organizations"`
-		Assignees        []string          `json:"assignees"`
-		DevelopLabels    []string          `json:"develop_labels"`
-		ReviewOnlyLabels []string          `json:"review_only_labels"`
-		SkipLabels       []string          `json:"skip_labels"`
-		BlockedLabels    []string          `json:"blocked_labels"`
-		PromoteToLabel   string            `json:"promote_to_label"`
-		DefaultAction    string            `json:"default_action"`
-	}{
-		Enabled:          it.Enabled,
-		FilterMode:       it.FilterMode,
-		Organizations:    it.Organizations,
-		Assignees:        it.Assignees,
-		DevelopLabels:    it.DevelopLabels,
-		ReviewOnlyLabels: it.ReviewOnlyLabels,
-		SkipLabels:       it.SkipLabels,
-		BlockedLabels:    it.BlockedLabels,
-		PromoteToLabel:   it.PromoteToLabel,
-		DefaultAction:    it.DefaultAction,
-	})
-	return string(b)
-}
-
 // PRAlreadyReviewed implements scheduler.Tier2Store.
 func (a *tier2Adapter) PRAlreadyReviewed(githubID int64, repo string, number int, updatedAt time.Time, headSHA string) bool {
 	existing, _ := a.store.GetPRByGithubID(githubID)
@@ -5463,8 +4000,7 @@ func (a *tier2Adapter) pruneBreakerTripDedup(now time.Time) {
 //
 // For PRs we fetch a full snapshot (state/draft/author/updated_at) via the
 // Pulls API, which lets HandleChange apply the draft and self-author guards
-// against fresh data without a second round-trip. For issues we still call
-// the Issues API (no draft concept).
+// against fresh data without a second round-trip.
 //
 // When an item has transitioned to not-open (closed/merged), persist the new
 // state to the store and emit a state-changed SSE event once (only if the
@@ -5492,49 +4028,6 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		if !snap.UpdatedAt.After(item.LastSeen) {
 			return false, nil, nil
 		}
-		// Review-state vigilance branch (#482): for PRs that
-		// auto_implement created, the snapshot's updated_at advance is
-		// almost always a reviewer submitting feedback. Fetch the
-		// reviews list, aggregate, and short-circuit out of the
-		// standard review codepath — the daemon's own PRs would be
-		// rejected by SkipReasonSelfAuthored anyway, but routing them
-		// here keeps the observation layer's intent explicit.
-		stored, storeErr := a.store.GetPRByGithubID(item.GithubID)
-		if storeErr != nil {
-			// A non-ErrNoRows failure means SQLite is unhappy
-			// (corruption, FS error). Logging it makes operational
-			// debugging tractable; CheckItem still falls through to
-			// the standard review codepath rather than swallowing
-			// silently so the daemon keeps watching the PR — at
-			// worst the standard path applies its own guards.
-			slog.Warn("tier3: GetPRByGithubID failed, falling through to standard review path",
-				"repo", item.Repo, "number", item.Number, "err", storeErr)
-		}
-		if stored != nil && stored.AutoImplementIssueID != 0 {
-			if err := a.refreshAutoImplementPRReviewState(ctx, item, stored); err != nil {
-				// Propagate the error so the state-handler can apply
-				// its 404 cleanup + the StateWorker increases backoff
-				// (no LastSeen advance) rather than burning the API
-				// on every tick.
-				//
-				// Two error shapes flow through here. A GetPRReviews
-				// failure surfaces before any persist, so the store
-				// row is untouched and the next refresh re-observes
-				// from scratch. A runner failure (Responder /
-				// FixRunner) surfaces AFTER the new aggregate state
-				// was persisted + SSE-emitted on this tick — the
-				// stateMoved gate in refresh then sees
-				// stateMoved=false on the retry tick and re-dispatches
-				// without re-emitting the event.
-				return false, nil, err
-			}
-			// Success: signal `changed=true` so the StateWorker resets
-			// backoff and advances LastSeen. A nil snap means
-			// HandleChange's first guard short-circuits — we already
-			// handled dispatch inline inside refresh, the standard
-			// review codepath has nothing to do here.
-			return true, nil, nil
-		}
 		// Forward HeadSHA so HandleChange can feed it into runReview's
 		// persistent in-flight claim (#258, theburrowhub/heimdallm#264).
 		// GetPRSnapshot already fetches head.sha in the same /pulls/N call —
@@ -5547,33 +4040,10 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 			HeadSHA:   snap.HeadSHA,
 		}, nil
 	}
-	// Issues: GetIssue returns state + updated_at in one call. Draft is always
-	// false for issues.
-	issue, err := a.ghClient.GetIssue(item.Repo, item.Number)
-	if err != nil {
-		return false, nil, err
-	}
-	if issue.State != "open" {
-		existing, _ := a.store.GetIssueByGithubID(item.GithubID)
-		wasOpen := existing != nil && existing.State == "open"
-		a.store.UpdateIssueStateByGithubID(item.GithubID, "closed")
-		if wasOpen {
-			a.broker.Publish(sse.Event{
-				Type: sse.EventIssueStateChanged,
-				Data: fmt.Sprintf(`{"issue_id":%d,"state":"closed"}`, item.GithubID),
-			})
-			slog.Info("tier3: issue closed", "repo", item.Repo, "number", item.Number)
-		}
-		return false, nil, nil
-	}
-	if !issue.UpdatedAt.After(item.LastSeen) {
-		return false, nil, nil
-	}
-	return true, &scheduler.ItemSnapshot{
-		State:     issue.State,
-		Author:    issue.User.Login,
-		UpdatedAt: issue.UpdatedAt,
-	}, nil
+	// PRs are the only watched item type. Anything else is a leftover row
+	// from before the issue pipelines were removed; report no change and let
+	// the watch store evict it.
+	return false, nil, nil
 }
 
 // HandleChange implements scheduler.Tier3ItemChecker.
@@ -5719,10 +4189,6 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 		}
 		return nil
 	}
-	if item.Type == "issue" {
-		slog.Info("tier3: issue change detected, backoff will reset",
-			"repo", item.Repo, "number", item.Number)
-	}
 	return nil
 }
 
@@ -5830,159 +4296,6 @@ func loadOrCreateAPIToken(dir string) (string, error) {
 	return tok, nil
 }
 
-// resolveAgentByPriority returns the Agent selected by the 3-level priority
-// that every prompt-customisation feature in this daemon uses:
-//
-//  1. repoPromptID — repo-level override (from [ai.repos."org/repo"] *_prompt)
-//  2. agentPromptID — agent-level override (from [ai.agents.<cli>] prompt)
-//  3. global default agent for `category` (is_default_<category> = true)
-//
-// The category parameter selects which of the three per-category global-
-// default flags to filter on. Returns nil when nothing matches (or when
-// ListAgents errors — the caller should treat this as "use the built-in
-// default template"). Each resolver above this function then reads its
-// own field pair from the returned Agent, so adding a third prompt type
-// is a 4-line wrapper rather than a copied 30-line loop.
-func resolveAgentByPriority(s *store.Store, category store.AgentCategory, repoPromptID, agentPromptID string) *store.Agent {
-	agents, err := s.ListAgents()
-	if err != nil || len(agents) == 0 {
-		return nil
-	}
-
-	// 1. Repo-level override
-	if repoPromptID != "" {
-		for _, ag := range agents {
-			if ag.ID == repoPromptID {
-				return ag
-			}
-		}
-	}
-	// 2. Agent-level override
-	if agentPromptID != "" {
-		for _, ag := range agents {
-			if ag.ID == agentPromptID {
-				return ag
-			}
-		}
-	}
-	// 3. Global default for the requested category
-	for _, ag := range agents {
-		switch category {
-		case store.AgentCategoryPR:
-			if ag.IsDefaultPR {
-				return ag
-			}
-		case store.AgentCategoryIssue:
-			if ag.IsDefaultIssue {
-				return ag
-			}
-		case store.AgentCategoryDev:
-			if ag.IsDefaultDev {
-				return ag
-			}
-		}
-	}
-	return nil
-}
-
-// resolveIssuePrompt returns (customTemplate, customInstructions) for the
-// issue-triage prompt. Agent selection follows resolveAgentByPriority;
-// IssuePrompt takes precedence over IssueInstructions (same as Prompt vs
-// Instructions for PR reviews). Both empty = use built-in default template.
-func resolveIssuePrompt(s *store.Store, repoPromptID, agentPromptID string) (string, string) {
-	a := resolveAgentByPriority(s, store.AgentCategoryIssue, repoPromptID, agentPromptID)
-	if a == nil {
-		return "", ""
-	}
-	if a.IssuePrompt != "" {
-		return a.IssuePrompt, ""
-	}
-	return "", a.IssueInstructions
-}
-
-// resolveImplementPrompt returns (customTemplate, customInstructions) for the
-// auto_implement code-generation prompt. Same selection rules as
-// resolveIssuePrompt; ImplementPrompt takes precedence over
-// ImplementInstructions. Both empty = use built-in default template.
-func resolveImplementPrompt(s *store.Store, repoPromptID, agentPromptID string) (string, string) {
-	a := resolveAgentByPriority(s, store.AgentCategoryDev, repoPromptID, agentPromptID)
-	if a == nil {
-		return "", ""
-	}
-	if a.ImplementPrompt != "" {
-		return a.ImplementPrompt, ""
-	}
-	return "", a.ImplementInstructions
-}
-
-func buildRefinementRunOptions(
-	ctx context.Context,
-	s *store.Store,
-	manager *repoctx.Manager,
-	repo string,
-	issueNumber int,
-	token string,
-	aiCfg config.RepoAI,
-	agentCfg config.CLIAgentConfig,
-	localDirBase []string,
-	globalTimeout string,
-	force bool,
-	scope string,
-) (issuepipeline.RunOptions, func(), error) {
-	repoHandle, err := acquireRepoContext(ctx, manager, repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("refinement", issueNumber), "", "")
-	if err != nil {
-		return issuepipeline.RunOptions{}, nil, err
-	}
-	var releaseRepoContext func()
-	if repoHandle != nil {
-		releaseRepoContext = repoHandle.Release
-		ensureRepoContextFullHistory(ctx, manager, repoHandle, token, scope, repo)
-	}
-
-	extraFlags := agentCfg.ExtraFlags
-	if extraFlags != "" {
-		if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
-			slog.Warn(scope+": extra_flags rejected", "err", err)
-			extraFlags = ""
-		}
-	}
-
-	issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
-	implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
-
-	opts := issuepipeline.RunOptions{
-		GitHubToken: token,
-		Primary:     aiCfg.Primary,
-		Fallback:    aiCfg.Fallback,
-		ExecOpts: executor.ExecOptions{
-			Model:                agentCfg.Model,
-			MaxTurns:             agentCfg.MaxTurns,
-			ApprovalMode:         agentCfg.ApprovalMode,
-			ExtraFlags:           extraFlags,
-			WorkDir:              aiCfg.LocalDir,
-			Effort:               agentCfg.Effort,
-			PermissionMode:       agentCfg.PermissionMode,
-			Bare:                 agentCfg.Bare,
-			DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-			NoSessionPersistence: agentCfg.NoSessionPersistence,
-			Timeout:              resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout),
-		},
-		IssuePromptOverride:         issuePrompt,
-		IssueInstructions:           issueInstructions,
-		TriageOwner:                 aiCfg.TriageOwner,
-		ImplementPromptOverride:     implPrompt,
-		ImplementInstructions:       implInstructions,
-		PRReviewers:                 aiCfg.PRReviewers,
-		PRAssignee:                  aiCfg.PRAssignee,
-		PRLabels:                    aiCfg.PRLabels,
-		PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-		GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-		Force:                       force,
-		RequireWorkDirForRefinement: true,
-	}
-	return opts, releaseRepoContext, nil
-}
-
 func reviewErrorEventData(
 	s *store.Store,
 	prID int64,
@@ -6036,204 +4349,6 @@ func sseData(v map[string]any) string {
 	return string(b)
 }
 
-func issueStageStillCurrent(scope string, issue *gh.Issue, it config.IssueTrackingConfig, want config.IssueMode) bool {
-	if issue == nil {
-		return false
-	}
-	if !it.Enabled {
-		slog.Info(scope+": issue tracking disabled before worker run, skipping stale job",
-			"repo", issue.Repo, "number", issue.Number)
-		return false
-	}
-	if !it.MatchesAssignees(issue.AssigneeLogins()) {
-		slog.Info(scope+": issue assigned outside this daemon scope, skipping stale job",
-			"repo", issue.Repo, "number", issue.Number,
-			"assignees", issue.AssigneeLogins(), "allowed_assignees", it.Assignees)
-		return false
-	}
-	// Best-effort stale-job guard: workers fetch the issue immediately before
-	// this check, so queued jobs whose labels changed since dispatch skip
-	// before running AI. A label edit after this fetch is handled by the next
-	// poll rather than adding another GitHub round-trip here.
-	got := it.Classify(issue.LabelNames())
-	if got == want {
-		return true
-	}
-	slog.Info(scope+": issue stage changed before worker run, skipping stale job",
-		"repo", issue.Repo, "number", issue.Number, "want", want, "got", got, "labels", issue.LabelNames())
-	return false
-}
-
-func issueTrackingWithAssigneeScope(scope, repo string, it config.IssueTrackingConfig, defaultAssignee string) (config.IssueTrackingConfig, bool) {
-	it = it.WithDefaultAssignee(defaultAssignee)
-	if it.Enabled && len(it.Assignees) == 0 {
-		slog.Warn(scope+": issue tracking has no assignee scope; skipping issues for this repo",
-			"repo", repo)
-		return it, false
-	}
-	return it, true
-}
-
-func defaultAutoImplementPRAssignee(configured, authUser string) string {
-	if assignee := strings.TrimSpace(configured); assignee != "" {
-		return assignee
-	}
-	return strings.TrimSpace(strings.TrimLeft(authUser, "@"))
-}
-
-// issueRunPublisher is the narrow NATS surface dispatchIssueRunByCurrentMode
-// needs. Defined here as a local seam so unit tests can fake it without
-// standing up a NATS server; *bus.NATSIssuePublisher satisfies it.
-type issueRunPublisher interface {
-	PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error
-	PublishIssueRefinement(ctx context.Context, repo string, number int, githubID int64) error
-	PublishIssueImplement(ctx context.Context, repo string, number int, githubID int64) error
-}
-
-// dispatchIssueRunByCurrentMode publishes the issue to the NATS subject
-// matching its label-derived stage. Used by the manual re-review endpoint
-// (POST /issues/{id}/review) so an operator who clicked "Re-review" after
-// an auto-promote runs the *current* stage instead of falling back to a
-// stored classification that lagged behind the labels — see #462.
-//
-// The label-driven classification mirrors the fetcher's path
-// (IssueTrackingConfig.Classify); keeping a single source of truth means
-// future stage additions only need a new publisher + a switch case here.
-//
-// Two gates produce a clear error instead of publishing:
-//   - Out-of-scope assignees: the worker entries silently drop work whose
-//     assignees fall outside the daemon's scope (see
-//     issueTrackingWithAssigneeScope + issueStageStillCurrent). For a
-//     fetcher tick that is fine — log spam at most. For a manual click it
-//     looks like the GUI is broken (spinner + silence), so reject here
-//     with the assignees + scope spelled out in the error message.
-//   - Blocked / Ignore classifications: nothing to re-run; surface a
-//     reason instead of queuing work the worker would discard.
-//
-// Callers are expected to populate cfg.Assignees (e.g., via
-// WithDefaultAssignee) before invoking — an empty scope means
-// MatchesAssignees is vacuously true and the gate is a no-op.
-func dispatchIssueRunByCurrentMode(
-	ctx context.Context,
-	pub issueRunPublisher,
-	cfg config.IssueTrackingConfig,
-	issue *gh.Issue,
-) error {
-	if issue == nil {
-		return fmt.Errorf("dispatch issue run: nil issue")
-	}
-	if !cfg.MatchesAssignees(issue.AssigneeLogins()) {
-		return fmt.Errorf("dispatch issue run: %s#%d assignees %v are outside this daemon's scope %v; re-run from the assignee's operator",
-			issue.Repo, issue.Number, issue.AssigneeLogins(), cfg.Assignees)
-	}
-	mode := cfg.Classify(issue.LabelNames())
-	switch mode {
-	case config.IssueModeReviewOnly:
-		return pub.PublishIssueTriage(ctx, issue.Repo, issue.Number, issue.ID)
-	case config.IssueModeRefinement:
-		return pub.PublishIssueRefinement(ctx, issue.Repo, issue.Number, issue.ID)
-	case config.IssueModeDevelop:
-		return pub.PublishIssueImplement(ctx, issue.Repo, issue.Number, issue.ID)
-	case config.IssueModeBlocked:
-		return fmt.Errorf("dispatch issue run: %s#%d is blocked by current labels; cannot re-run",
-			issue.Repo, issue.Number)
-	case config.IssueModeIgnore:
-		return fmt.Errorf("dispatch issue run: %s#%d is ignored by current label configuration; cannot re-run",
-			issue.Repo, issue.Number)
-	default:
-		return fmt.Errorf("dispatch issue run: unsupported mode %q for %s#%d",
-			mode, issue.Repo, issue.Number)
-	}
-}
-
-func autoPromoteAfterStage(
-	ctx context.Context,
-	client *gh.Client,
-	broker issuepipeline.Publisher,
-	issue *gh.Issue,
-	storeIssueID int64,
-	it config.IssueTrackingConfig,
-	aiCfg config.RepoAI,
-	from issuepipeline.IssueStage,
-	scope string,
-) {
-	if !autoPromoteStageEnabled(aiCfg, it, from) {
-		return
-	}
-	// Auto-promote moves the stage label unconditionally when enabled.
-	// The handoff to a different operator (issue reassigned during
-	// triage / refinement) is enforced by the *next* stage's worker
-	// entry — `issueTrackingWithAssigneeScope` + `issueStageStillCurrent`
-	// already skip work whose assignees fall outside the daemon's
-	// scope. Gating the label transition here too (as #457 did) double-
-	// gated the flow and left issues stuck at the current stage so the
-	// new assignee's daemon never picked them up at the next stage. See
-	// #458 for the regression report.
-	to, err := issuepipeline.NextStage(from, it, false)
-	if err != nil {
-		if errors.Is(err, issuepipeline.ErrStageTargetLabelMissing) {
-			slog.Warn(scope+": auto-promote target label missing; leaving issue in current stage",
-				"repo", issue.Repo, "number", issue.Number, "from", from, "err", err)
-			return
-		}
-		slog.Warn(scope+": auto-promote skipped",
-			"repo", issue.Repo, "number", issue.Number, "from", from, "err", err)
-		return
-	}
-
-	comments, err := client.FetchIssueCommentsOnly(issue.Repo, issue.Number)
-	if err != nil {
-		slog.Warn(scope+": auto-promote comment fetch failed, continuing without audit dedup context",
-			"repo", issue.Repo, "number", issue.Number, "err", err)
-	}
-	if err := issuepipeline.TransitionIssueStage(ctx, client, issuepipeline.StageTransition{
-		Issue:          issue,
-		StoreIssueID:   storeIssueID,
-		Config:         it,
-		From:           from,
-		To:             to,
-		Trigger:        issuepipeline.StagePromotionAuto,
-		Time:           time.Now().UTC(),
-		RecentComments: comments,
-		Broker:         broker,
-	}); err != nil {
-		slog.Warn(scope+": auto-promote failed",
-			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to, "err", err)
-	}
-}
-
-func autoPromoteStageEnabled(aiCfg config.RepoAI, it config.IssueTrackingConfig, stage issuepipeline.IssueStage) bool {
-	switch stage {
-	case issuepipeline.IssueStageTriage:
-		if aiCfg.AutoPromoteTriage == nil {
-			// Default-on only after the operator has configured a refinement
-			// target. Legacy review_only-only deployments keep their prior
-			// behavior instead of gaining autonomous label transitions.
-			return hasConfiguredLabel(it.RefinementLabels)
-		}
-		return *aiCfg.AutoPromoteTriage
-	case issuepipeline.IssueStageRefinement:
-		if aiCfg.AutoPromoteRefinement == nil {
-			// Same staged-default rule as triage: once a development target
-			// label exists, refinement can safely advance to develop unless the
-			// operator explicitly disables it.
-			return hasConfiguredLabel(it.DevelopLabels)
-		}
-		return *aiCfg.AutoPromoteRefinement
-	default:
-		return false
-	}
-}
-
-func hasConfiguredLabel(labels []string) bool {
-	for _, label := range labels {
-		if strings.TrimSpace(label) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func acquireRepoContext(
 	ctx context.Context,
 	manager *repoctx.Manager,
@@ -6271,8 +4386,8 @@ func acquireRepoContext(
 }
 
 // wtTokenFor produces a sanitisation-safe worktree token for a
-// pipeline stage. The prefix names the stage (`pr-review`, `pr-tier3`, `triage`,
-// `develop`, `refinement`, `pr-tier2`) so operators can correlate
+// pipeline stage. The prefix names the stage (`pr-review`, `pr-tier2`,
+// `pr-tier3`; merge tracking mints its own `merge-*` tokens) so operators can correlate
 // `<clone>/.worktrees/<token>/` with the running execution.
 func wtTokenFor(prefix string, n int) string {
 	return fmt.Sprintf("%s-%d", prefix, n)
@@ -6283,7 +4398,7 @@ func ensureRepoContextFullHistory(ctx context.Context, manager *repoctx.Manager,
 		return
 	}
 	if err := manager.EnsureFullHistory(ctx, h, token); err != nil {
-		slog.Warn(scope+": full git history unavailable; triage owner verification may fall back",
+		slog.Warn(scope+": full git history unavailable; history-dependent steps may fall back",
 			"repo", repo, "err", err)
 	}
 }
@@ -6421,42 +4536,6 @@ func mergeTrackingOverrideMap(o config.MergeTrackingOverride) map[string]any {
 	return out
 }
 
-// autonomousOverrideMap serialises an AutonomousOverride into a map[string]any
-// for the GET /config DTO. Only fields that are explicitly set (non-nil pointer
-// or non-empty string) are included so the caller can distinguish "inherit" from
-// an explicit false/zero value.
-func autonomousOverrideMap(o config.AutonomousOverride) map[string]any {
-	out := map[string]any{}
-	if o.Enabled != nil {
-		out["enabled"] = *o.Enabled
-	}
-	if o.AutoMerge != nil {
-		out["auto_merge"] = *o.AutoMerge
-	}
-	if o.MergeMethod != "" {
-		out["merge_method"] = o.MergeMethod
-	}
-	if o.TakeOthersTasks != nil {
-		out["take_others_tasks"] = *o.TakeOthersTasks
-	}
-	if o.ReassignOnTake != nil {
-		out["reassign_on_take"] = *o.ReassignOnTake
-	}
-	if o.DevMaxTurns != nil {
-		out["dev_max_turns"] = *o.DevMaxTurns
-	}
-	if o.DevEffort != "" {
-		out["dev_effort"] = o.DevEffort
-	}
-	if o.DevTimeout != "" {
-		out["dev_timeout"] = o.DevTimeout
-	}
-	if o.ClaimLease != "" {
-		out["claim_lease"] = o.ClaimLease
-	}
-	return out
-}
-
 // ptrBoolOrTrue returns the dereferenced value of p, or true if p is nil.
 // Used to serialize *bool config fields where nil means "default enabled".
 func ptrBoolOrTrue(p *bool) bool {
@@ -6484,24 +4563,10 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 	}
 	addCommonAIOverrideFields(out, aiOverrideFields{
 		Prompt:                  ai.Prompt,
-		IssuePrompt:             ai.IssuePrompt,
-		ImplementPrompt:         ai.ImplementPrompt,
-		RefinementTimeout:       ai.RefinementTimeout,
-		TriageOwner:             ai.TriageOwner,
 		CloneDir:                ai.CloneDir,
-		AutoPromoteTriage:       ai.AutoPromoteTriage,
-		AutoPromoteRefinement:   ai.AutoPromoteRefinement,
-		PRReviewers:             ai.PRReviewers,
-		PRAssignee:              ai.PRAssignee,
-		PRLabels:                ai.PRLabels,
-		PRDraft:                 ai.PRDraft,
-		GeneratePRDescription:   ai.GeneratePRDescription,
 		NeverApproveWithIssues:  ai.NeverApproveWithIssues,
 		NeverApproveMinSeverity: ai.NeverApproveMinSeverity,
 	})
-	if ai.IssueTracking != nil {
-		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
-	}
 	return out
 }
 
@@ -6521,41 +4586,16 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 	}
 	addCommonAIOverrideFields(out, aiOverrideFields{
 		Prompt:                  ai.Prompt,
-		IssuePrompt:             ai.IssuePrompt,
-		ImplementPrompt:         ai.ImplementPrompt,
-		RefinementTimeout:       ai.RefinementTimeout,
-		TriageOwner:             ai.TriageOwner,
 		CloneDir:                ai.CloneDir,
-		AutoPromoteTriage:       ai.AutoPromoteTriage,
-		AutoPromoteRefinement:   ai.AutoPromoteRefinement,
-		PRReviewers:             ai.PRReviewers,
-		PRAssignee:              ai.PRAssignee,
-		PRLabels:                ai.PRLabels,
-		PRDraft:                 ai.PRDraft,
-		GeneratePRDescription:   ai.GeneratePRDescription,
 		NeverApproveWithIssues:  ai.NeverApproveWithIssues,
 		NeverApproveMinSeverity: ai.NeverApproveMinSeverity,
 	})
-	if ai.IssueTracking != nil {
-		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
-	}
 	return out
 }
 
 type aiOverrideFields struct {
 	Prompt                  string
-	IssuePrompt             string
-	ImplementPrompt         string
-	RefinementTimeout       string
-	TriageOwner             string
 	CloneDir                string
-	AutoPromoteTriage       *bool
-	AutoPromoteRefinement   *bool
-	PRReviewers             []string
-	PRAssignee              string
-	PRLabels                []string
-	PRDraft                 *bool
-	GeneratePRDescription   *bool
 	NeverApproveWithIssues  *bool
 	NeverApproveMinSeverity string
 }
@@ -6564,41 +4604,8 @@ func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
 	if fields.Prompt != "" {
 		out["prompt"] = fields.Prompt
 	}
-	if fields.IssuePrompt != "" {
-		out["issue_prompt"] = fields.IssuePrompt
-	}
-	if fields.ImplementPrompt != "" {
-		out["implement_prompt"] = fields.ImplementPrompt
-	}
-	if fields.RefinementTimeout != "" {
-		out["refinement_timeout"] = fields.RefinementTimeout
-	}
-	if fields.TriageOwner != "" {
-		out["triage_owner"] = fields.TriageOwner
-	}
 	if fields.CloneDir != "" {
 		out["clone_dir"] = fields.CloneDir
-	}
-	if fields.AutoPromoteTriage != nil {
-		out["auto_promote_triage"] = *fields.AutoPromoteTriage
-	}
-	if fields.AutoPromoteRefinement != nil {
-		out["auto_promote_refinement"] = *fields.AutoPromoteRefinement
-	}
-	if fields.PRReviewers != nil {
-		out["pr_reviewers"] = fields.PRReviewers
-	}
-	if fields.PRAssignee != "" {
-		out["pr_assignee"] = fields.PRAssignee
-	}
-	if fields.PRLabels != nil {
-		out["pr_labels"] = fields.PRLabels
-	}
-	if fields.PRDraft != nil {
-		out["pr_draft"] = *fields.PRDraft
-	}
-	if fields.GeneratePRDescription != nil {
-		out["generate_pr_description"] = *fields.GeneratePRDescription
 	}
 	if fields.NeverApproveWithIssues != nil {
 		out["never_approve_with_issues"] = *fields.NeverApproveWithIssues
@@ -6606,47 +4613,6 @@ func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
 	if fields.NeverApproveMinSeverity != "" {
 		out["never_approve_min_severity"] = fields.NeverApproveMinSeverity
 	}
-}
-
-func issueTrackingOverrideMap(ov *config.IssueTrackingOverride) map[string]any {
-	out := map[string]any{}
-	if ov.Enabled != nil {
-		out["enabled"] = *ov.Enabled
-	}
-	if ov.DevelopEnabled != nil {
-		out["develop_enabled"] = *ov.DevelopEnabled
-	}
-	if ov.FilterMode != "" {
-		out["filter_mode"] = ov.FilterMode
-	}
-	if ov.DefaultAction != "" {
-		out["default_action"] = ov.DefaultAction
-	}
-	if ov.DevelopLabels != nil {
-		out["develop_labels"] = ov.DevelopLabels
-	}
-	if ov.RefinementLabels != nil {
-		out["refinement_labels"] = ov.RefinementLabels
-	}
-	if ov.ReviewOnlyLabels != nil {
-		out["review_only_labels"] = ov.ReviewOnlyLabels
-	}
-	if ov.SkipLabels != nil {
-		out["skip_labels"] = ov.SkipLabels
-	}
-	if ov.BlockedLabels != nil {
-		out["blocked_labels"] = ov.BlockedLabels
-	}
-	if ov.PromoteToLabel != "" {
-		out["promote_to_label"] = ov.PromoteToLabel
-	}
-	if ov.Organizations != nil {
-		out["organizations"] = ov.Organizations
-	}
-	if ov.Assignees != nil {
-		out["assignees"] = ov.Assignees
-	}
-	return out
 }
 
 func purgeAllManagedClones(ctx context.Context, manager *repoctx.Manager, cfg *config.Config) (int, error) {
@@ -6780,7 +4746,7 @@ func pendingReviewInvalidReason(rev *store.Review, snapshot *gh.PRSnapshot) pipe
 	return pipeline.SkipReasonNone
 }
 
-// enrollOpenItems enrolls up to 10 open PRs/issues not yet in watch_state.
+// enrollOpenItems enrolls up to 10 open PRs not yet in watch_state.
 // Called once per state-poller tick (every 30s) to gradually backfill items
 // from before the NATS migration. The monitored set is snapshotted before the
 // query and pushed into SQL, so disabled rows cannot consume the LIMIT and the
@@ -6817,11 +4783,6 @@ func enrollOpenItems(
 			WHERE p.state='open' AND p.repo != '' AND w.key IS NULL
 			AND p.repo IN (%s)
 			ORDER BY p.id LIMIT 10`},
-		{"issue", `SELECT i.github_id, i.repo, i.number FROM issues i
-			LEFT JOIN watch_state w ON w.key = 'issue.' || i.github_id
-			WHERE i.state='open' AND i.repo != '' AND w.key IS NULL
-			AND i.repo IN (%s)
-			ORDER BY i.id LIMIT 10`},
 	} {
 		type item struct {
 			ghID   int64

@@ -7,7 +7,7 @@ import (
 	"github.com/heimdallm/daemon/internal/store"
 )
 
-// seedForRename inserts one PR, one issue, one activity row, and one
+// seedForRename inserts one PR, one activity row, and one
 // watch_state row under `repo`. Returns the store ready for a rename
 // invocation. Used by every test in this file.
 func seedForRename(t *testing.T, repo string, githubBase int64) *store.Store {
@@ -30,19 +30,6 @@ func seedForRename(t *testing.T, repo string, githubBase int64) *store.Store {
 		FetchedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed pr: %v", err)
-	}
-
-	if _, err := s.UpsertIssue(&store.Issue{
-		GithubID:  githubBase + 100,
-		Repo:      repo,
-		Number:    7,
-		Title:     "issue",
-		Author:    "bob",
-		State:     "open",
-		CreatedAt: time.Now().UTC(),
-		FetchedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("seed issue: %v", err)
 	}
 
 	if _, err := s.InsertActivity(
@@ -101,7 +88,7 @@ func TestStore_RenameRepo_UpdatesAllTables(t *testing.T) {
 		t.Fatalf("rename: %v", err)
 	}
 
-	for _, table := range []string{"prs", "issues", "activity_log", "watch_state"} {
+	for _, table := range []string{"prs", "activity_log", "watch_state"} {
 		if got := countWithRepo(t, s, table, "acme/new"); got != 1 {
 			t.Errorf("%s: want 1 row with new slug, got %d", table, got)
 		}
@@ -178,7 +165,7 @@ func TestStore_RenameRepo_IsAtomic_OnError(t *testing.T) {
 
 	// Force the UPDATE on activity_log to fail mid-TX by dropping the
 	// table before the call. With RenameRepo running everything inside
-	// a single SQLite transaction, the prs / issues UPDATEs that come
+	// a single SQLite transaction, the prs / watch_state UPDATEs that come
 	// before activity_log must roll back when the missing-table error
 	// fires.
 	if _, err := s.DB().Exec("DROP TABLE activity_log"); err != nil {
@@ -190,8 +177,8 @@ func TestStore_RenameRepo_IsAtomic_OnError(t *testing.T) {
 		t.Fatal("expected error from RenameRepo when activity_log is missing")
 	}
 
-	// prs and issues must NOT have been advanced to acme/new.
-	for _, table := range []string{"prs", "issues", "watch_state"} {
+	// prs and watch_state must NOT have been advanced to acme/new.
+	for _, table := range []string{"prs", "watch_state"} {
 		if got := countWithRepo(t, s, table, "acme/new"); got != 0 {
 			t.Errorf("%s: TX leaked — want 0 new-slug rows after rollback, got %d", table, got)
 		}
@@ -232,7 +219,6 @@ func TestStore_RenameRepo_HandlesRenameBackChain(t *testing.T) {
 	stateAt := func(repo string) int {
 		t.Helper()
 		return countWithRepo(t, s, "prs", repo) +
-			countWithRepo(t, s, "issues", repo) +
 			countWithRepo(t, s, "activity_log", repo) +
 			countWithRepo(t, s, "watch_state", repo)
 	}
@@ -348,7 +334,7 @@ func TestStore_RenameRepo_PreservesActivityOrgOnSameOrgRename(t *testing.T) {
 
 // TestStore_RenameRepo_AuditsRenameOnEmptyState pins the edge case
 // flagged in review: a repo configured on the daemon may be renamed
-// on GitHub BEFORE any PRs/issues/activity rows have accumulated
+// on GitHub BEFORE any PRs/activity rows have accumulated
 // under it. The UPDATEs match zero rows in that case, but the
 // rename still happened from the reconciler's point of view and the
 // issue/PR contract requires the mapping to land in repo_renames so

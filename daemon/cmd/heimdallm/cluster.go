@@ -74,7 +74,7 @@ type clusterState struct {
 	notes instanceNotes
 }
 
-// ownerVerdict is what this daemon must do with one repo's autonomous work.
+// ownerVerdict is what this daemon must do with one repo's routed work.
 //
 // The type exists because the previous boolean ("is the owner healthy?")
 // collapsed two very different situations into one answer. An owner that has
@@ -426,7 +426,7 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 	return proberBuilt
 }
 
-// ownerVerdictFor resolves what this daemon must do with repo's autonomous
+// ownerVerdictFor resolves what this daemon must do with repo's unattended
 // work, and is the single place the "unreachable vs not working" distinction
 // is made.
 //
@@ -765,39 +765,6 @@ func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instanc
 	})
 }
 
-// OwnerCanHandle reports whether repo is routed to another instance this daemon
-// should leave alone with work it cannot dispatch as a single RPC call — issue
-// triage, whose individual items are not known until deep inside per-repo
-// processing, unlike a PR review which has one PR id to hand off.
-//
-// false means either there is no routing away from this daemon, or its owner is
-// unregistered or confirmed down — in all of those cases the caller must act
-// locally instead of leaving the repo's issues unattended. An owner that is
-// merely unreachable returns true, for the reason spelled out on
-// ownerVerdictFor: it is still triaging its own repos.
-func (cs *clusterState) OwnerCanHandle(repo string) bool {
-	inst, verdict := cs.ownerVerdictFor(repo)
-	switch verdict {
-	case verdictTakeOver:
-		cs.announceTakeover(repo, "issue_triage", inst, takeoverProbesFailed)
-		return false
-	case verdictDeferToOwner:
-		// Recorded through the same deduped channel dispatch uses. Leaving
-		// work to an unreachable peer is a state an operator needs to see, and
-		// issue triage was taking that decision with no record at all while
-		// the PR path logged it.
-		cs.noteDeferral(repo, "issue_triage", inst)
-		return true
-	case verdictNotAssigned:
-		// Same reasoning as dispatch's case: this worker is not the one to
-		// triage repo's issues, whether or not anyone else currently is.
-		cs.noteNotAssigned(repo, "issue_triage")
-		return true
-	default:
-		return verdict == verdictDispatch
-	}
-}
-
 // DispatchPRReview hands a PR review to the instance repo is routed to.
 // true means the caller must not review the PR locally — see dispatch for the
 // two ways that happens.
@@ -808,14 +775,6 @@ func (cs *clusterState) OwnerCanHandle(repo string) bool {
 func (cs *clusterState) DispatchPRReview(ctx context.Context, repo string, ref instances.PRDispatchRef) bool {
 	return cs.dispatch(ctx, repo, "review", func(client *instances.Client) error {
 		return client.DispatchPRReview(ctx, ref)
-	})
-}
-
-// DispatchIssueReview hands issue-triage work to the instance repo is routed
-// to. true means the caller must not process it locally.
-func (cs *clusterState) DispatchIssueReview(ctx context.Context, repo string, issueID int64) bool {
-	return cs.dispatch(ctx, repo, "issue_review", func(client *instances.Client) error {
-		return client.TriggerIssueReview(ctx, issueID)
 	})
 }
 
@@ -975,7 +934,7 @@ func (cs *clusterState) Router() *instances.Router {
 }
 
 // Owns reports whether this daemon should act on repo. This is the single guard
-// that partitions autonomous work between instances.
+// that partitions unattended work between instances.
 func (cs *clusterState) Owns(repo string) bool {
 	if cs == nil {
 		return true

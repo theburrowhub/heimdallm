@@ -20,12 +20,6 @@ func TestApplyPollingDefaults_FillsDocumentedDefaults(t *testing.T) {
 	c.applyPollingDefaults()
 
 	p := c.Polling
-	if p.MinInterval != DefaultPollingMinInterval {
-		t.Errorf("MinInterval: got %q, want %q", p.MinInterval, DefaultPollingMinInterval)
-	}
-	if p.MaxInterval != DefaultPollingMaxInterval {
-		t.Errorf("MaxInterval: got %q, want %q", p.MaxInterval, DefaultPollingMaxInterval)
-	}
 	if p.DiscoveryInterval != DefaultPollingDiscoveryInterval {
 		t.Errorf("DiscoveryInterval: got %q, want %q", p.DiscoveryInterval, DefaultPollingDiscoveryInterval)
 	}
@@ -42,17 +36,8 @@ func TestApplyPollingDefaults_FillsDocumentedDefaults(t *testing.T) {
 	if !*p.UseETag {
 		t.Errorf("UseETag: got false, want true (default enabled)")
 	}
-	if p.UseGraphQL == nil {
-		t.Fatal("UseGraphQL: got nil, want non-nil")
-	}
-	if *p.UseGraphQL {
-		t.Errorf("UseGraphQL: got true, want false (default disabled)")
-	}
 	if p.PollInterval != "" {
 		t.Errorf("PollInterval: got %q, want empty string (inherits from [github])", p.PollInterval)
-	}
-	if p.Adaptive {
-		t.Errorf("Adaptive: got true, want false (opt-in)")
 	}
 }
 
@@ -60,18 +45,13 @@ func TestApplyPollingDefaults_FillsDocumentedDefaults(t *testing.T) {
 // explicitly-set values survive the defaults pass untouched.
 func TestApplyPollingDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 	useETag := false
-	useGraphQL := true
 	c := Config{
 		Polling: PollingConfig{
 			PollInterval:             "2m",
-			MinInterval:              "30s",
-			MaxInterval:              "10m",
-			Adaptive:                 true,
 			DiscoveryInterval:        "3m",
 			Tier3Interval:            "1m",
 			RateLimitSafetyThreshold: 200,
 			UseETag:                  &useETag,
-			UseGraphQL:               &useGraphQL,
 		},
 	}
 	c.applyPollingDefaults()
@@ -79,15 +59,6 @@ func TestApplyPollingDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 	p := c.Polling
 	if p.PollInterval != "2m" {
 		t.Errorf("PollInterval overwritten: got %q", p.PollInterval)
-	}
-	if p.MinInterval != "30s" {
-		t.Errorf("MinInterval overwritten: got %q", p.MinInterval)
-	}
-	if p.MaxInterval != "10m" {
-		t.Errorf("MaxInterval overwritten: got %q", p.MaxInterval)
-	}
-	if !p.Adaptive {
-		t.Errorf("Adaptive overwritten")
 	}
 	if p.DiscoveryInterval != "3m" {
 		t.Errorf("DiscoveryInterval overwritten: got %q", p.DiscoveryInterval)
@@ -100,9 +71,6 @@ func TestApplyPollingDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 	}
 	if p.UseETag == nil || *p.UseETag {
 		t.Errorf("UseETag overwritten: got %v", p.UseETag)
-	}
-	if p.UseGraphQL == nil || !*p.UseGraphQL {
-		t.Errorf("UseGraphQL overwritten: got %v", p.UseGraphQL)
 	}
 }
 
@@ -189,37 +157,6 @@ func TestParseDurationWithFallback_WarnsOncePerInvalidValue(t *testing.T) {
 	}
 }
 
-// TestResolvedMinMaxIntervals verifies parse-with-fallback behaviour.
-func TestResolvedMinMaxIntervals(t *testing.T) {
-	t.Run("valid values parse correctly", func(t *testing.T) {
-		c := Config{Polling: PollingConfig{MinInterval: "30s", MaxInterval: "20m"}}
-		if got := c.ResolvedMinInterval(); got != 30*time.Second {
-			t.Errorf("ResolvedMinInterval() = %v, want 30s", got)
-		}
-		if got := c.ResolvedMaxInterval(); got != 20*time.Minute {
-			t.Errorf("ResolvedMaxInterval() = %v, want 20m", got)
-		}
-	})
-	t.Run("empty falls back to defaults", func(t *testing.T) {
-		var c Config
-		if got := c.ResolvedMinInterval(); got != time.Minute {
-			t.Errorf("ResolvedMinInterval() empty = %v, want 1m", got)
-		}
-		if got := c.ResolvedMaxInterval(); got != 15*time.Minute {
-			t.Errorf("ResolvedMaxInterval() empty = %v, want 15m", got)
-		}
-	})
-	t.Run("invalid falls back to defaults", func(t *testing.T) {
-		c := Config{Polling: PollingConfig{MinInterval: "xyz", MaxInterval: "abc"}}
-		if got := c.ResolvedMinInterval(); got != time.Minute {
-			t.Errorf("ResolvedMinInterval() invalid = %v, want 1m", got)
-		}
-		if got := c.ResolvedMaxInterval(); got != 15*time.Minute {
-			t.Errorf("ResolvedMaxInterval() invalid = %v, want 15m", got)
-		}
-	})
-}
-
 // TestResolvedDiscoveryInterval confirms the discovery interval fallback and
 // that the default matches the current hardcoded value in startPollers (5m).
 func TestResolvedDiscoveryInterval(t *testing.T) {
@@ -290,28 +227,6 @@ func TestETagEnabled(t *testing.T) {
 	}
 }
 
-// TestGraphQLEnabled verifies reserved-feature semantics (default false).
-func TestGraphQLEnabled(t *testing.T) {
-	tests := []struct {
-		name       string
-		useGraphQL *bool
-		want       bool
-	}{
-		{"nil (default) → false", nil, false},
-		{"explicit false → false", boolPtr(false), false},
-		{"explicit true → true", boolPtr(true), true},
-	}
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			c := Config{Polling: PollingConfig{UseGraphQL: tc.useGraphQL}}
-			if got := c.GraphQLEnabled(); got != tc.want {
-				t.Errorf("GraphQLEnabled() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestPollingDefaultsMatchCurrentBehaviour is a regression test that confirms
 // the defaults reproduce the behaviour existing BEFORE this config section was
 // introduced. If this test breaks, we've changed a default that could affect
@@ -339,11 +254,6 @@ func TestPollingDefaultsMatchCurrentBehaviour(t *testing.T) {
 	// ETag: previously always enabled.
 	if !c.ETagEnabled() {
 		t.Errorf("ETag default changed to disabled — behaviour regression")
-	}
-
-	// GraphQL: previously not implemented, effectively false.
-	if c.GraphQLEnabled() {
-		t.Errorf("GraphQL default changed to enabled — behaviour regression")
 	}
 }
 

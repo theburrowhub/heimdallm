@@ -1,4 +1,4 @@
-package issues_test
+package gitops_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/heimdallm/daemon/internal/issues"
+	"github.com/heimdallm/daemon/internal/gitops"
 )
 
 // requireGit skips when the git binary is absent, matching the convention in
@@ -93,7 +93,7 @@ func TestRebaseOnto_CleanRebaseReportsClean(t *testing.T) {
 	mainSHA := git(t, dir, "rev-parse", "HEAD")
 	git(t, dir, "checkout", "-q", "feature")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	out, err := g.RebaseOnto(context.Background(), dir, mainSHA)
 	if err != nil {
 		t.Fatalf("RebaseOnto: %v", err)
@@ -110,7 +110,7 @@ func TestRebaseOnto_CleanRebaseReportsClean(t *testing.T) {
 func TestRebaseOnto_ConflictIsReportedNotRaised(t *testing.T) {
 	requireGit(t)
 	dir, mainSHA := diverged(t)
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 
 	out, err := g.RebaseOnto(context.Background(), dir, mainSHA)
 	// A conflict is the expected outcome, not a failure: the caller wants the
@@ -139,7 +139,7 @@ func TestRebaseOnto_ConflictIsReportedNotRaised(t *testing.T) {
 func TestFilesWithConflictMarkers_DetectsAndClearsCorrectly(t *testing.T) {
 	requireGit(t)
 	dir, mainSHA := diverged(t)
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	out, err := g.RebaseOnto(context.Background(), dir, mainSHA)
 	if err != nil || out.Clean {
 		t.Fatalf("expected a conflict: %+v %v", out, err)
@@ -168,7 +168,7 @@ func TestFilesWithConflictMarkers_DetectsAndClearsCorrectly(t *testing.T) {
 func TestStageAllAndContinueRebase_FinishesTheRebase(t *testing.T) {
 	requireGit(t)
 	dir, mainSHA := diverged(t)
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	ctx := context.Background()
 
 	out, err := g.RebaseOnto(ctx, dir, mainSHA)
@@ -196,15 +196,15 @@ func TestStageAllAndContinueRebase_FinishesTheRebase(t *testing.T) {
 	}
 	// A rebase preserves the original author and re-commits under the
 	// committer identity, so it is the committer that must be the daemon.
-	if committer := git(t, dir, "log", "-1", "--format=%cn"); committer != issues.CommitAuthorName {
-		t.Errorf("committer = %q, want %q", committer, issues.CommitAuthorName)
+	if committer := git(t, dir, "log", "-1", "--format=%cn"); committer != gitops.CommitAuthorName {
+		t.Errorf("committer = %q, want %q", committer, gitops.CommitAuthorName)
 	}
 }
 
 func TestAbortRebase_RestoresTheBranch(t *testing.T) {
 	requireGit(t)
 	dir, mainSHA := diverged(t)
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	ctx := context.Background()
 
 	before := git(t, dir, "rev-parse", "HEAD")
@@ -240,7 +240,7 @@ func TestChangedFiles_IncludesEditsAndUntrackedFiles(t *testing.T) {
 	write(t, dir, "a.txt", "changed\n")
 	write(t, dir, "sneaky.txt", "new file\n")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	changed, err := g.ChangedFiles(context.Background(), dir, baseSHA)
 	if err != nil {
 		t.Fatalf("ChangedFiles: %v", err)
@@ -268,7 +268,7 @@ func TestChangedFiles_IgnoresTheManagedCloneMarker(t *testing.T) {
 
 	write(t, dir, ".heimdallm-managed", "repoctx metadata\n")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	changed, err := g.ChangedFiles(context.Background(), dir, baseSHA)
 	if err != nil {
 		t.Fatalf("ChangedFiles: %v", err)
@@ -326,7 +326,7 @@ func TestPushForceWithLease_RefusesWhenTheRemoteMoved(t *testing.T) {
 	write(t, local, "a.txt", "ours\n")
 	git(t, local, "commit", "-qam", "ours")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	err := g.PushForceWithLease(context.Background(), local, slug, "main", observed, "token")
 	if err == nil {
 		t.Fatal("the force-push must be refused: the remote moved since we looked")
@@ -348,7 +348,7 @@ func TestPushForceWithLease_SucceedsWhenTheRemoteIsWhereWeLeftIt(t *testing.T) {
 	write(t, local, "a.txt", "rewritten\n")
 	git(t, local, "commit", "-qam", "rewritten", "--amend")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	if err := g.PushForceWithLease(context.Background(), local, slug, "main", observed, "token"); err != nil {
 		t.Fatalf("PushForceWithLease: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestPushForceWithLease_SucceedsWhenTheRemoteIsWhereWeLeftIt(t *testing.T) {
 
 func TestPushForceWithLease_RequiresTokenAndLease(t *testing.T) {
 	requireGit(t)
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	ctx := context.Background()
 	if err := g.PushForceWithLease(ctx, t.TempDir(), "acme/widgets", "main", "sha", ""); err == nil {
 		t.Error("an empty token must be rejected")
@@ -377,7 +377,7 @@ func TestHeadSHA_ReturnsTheCurrentCommit(t *testing.T) {
 	git(t, dir, "add", ".")
 	git(t, dir, "commit", "-q", "-m", "base")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	got, err := g.HeadSHA(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("HeadSHA: %v", err)
@@ -399,7 +399,7 @@ func TestStageAll_RefusesSensitivePaths(t *testing.T) {
 
 	write(t, dir, "id_rsa", "-----BEGIN PRIVATE KEY-----\n")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	err := g.StageAll(context.Background(), dir)
 	if err == nil {
 		t.Fatal("staging a private key must be refused")
@@ -422,7 +422,7 @@ func TestFetchRefAndCheckoutRemoteBranch(t *testing.T) {
 	git(t, other, "push", "-q", "origin", "feature")
 	want := git(t, other, "rev-parse", "HEAD")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	ctx := context.Background()
 
 	sha, err := g.FetchRef(ctx, local, slug, "feature", "token")
@@ -452,7 +452,7 @@ func TestFetchRefAndCheckoutRemoteBranch(t *testing.T) {
 
 func TestFetchRefAndCheckoutRemoteBranch_RequireAToken(t *testing.T) {
 	requireGit(t)
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	ctx := context.Background()
 	if _, err := g.FetchRef(ctx, t.TempDir(), "acme/widgets", "main", ""); err == nil {
 		t.Error("an empty token must be rejected")
@@ -465,85 +465,9 @@ func TestFetchRefAndCheckoutRemoteBranch_RequireAToken(t *testing.T) {
 func TestFetchRef_UnknownRefIsReported(t *testing.T) {
 	requireGit(t)
 	_, local, slug := leaseRepos(t)
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	if _, err := g.FetchRef(context.Background(), local, slug, "no-such-branch", "token"); err == nil {
 		t.Fatal("fetching an unknown ref must be reported")
-	}
-}
-
-func TestMergeRef_CleanAndConflicting(t *testing.T) {
-	requireGit(t)
-	g := issues.NewGitExec()
-	ctx := context.Background()
-
-	t.Run("clean", func(t *testing.T) {
-		dir := t.TempDir()
-		git(t, dir, "init", "-q", "-b", "main")
-		write(t, dir, "a.txt", "base\n")
-		git(t, dir, "add", ".")
-		git(t, dir, "commit", "-q", "-m", "base")
-		git(t, dir, "checkout", "-q", "-b", "feature")
-		write(t, dir, "feature.txt", "new\n")
-		git(t, dir, "add", ".")
-		git(t, dir, "commit", "-q", "-m", "feature")
-		git(t, dir, "checkout", "-q", "main")
-		write(t, dir, "main.txt", "new\n")
-		git(t, dir, "add", ".")
-		git(t, dir, "commit", "-q", "-m", "main")
-		mainSHA := git(t, dir, "rev-parse", "HEAD")
-		git(t, dir, "checkout", "-q", "feature")
-
-		out, err := g.MergeRef(ctx, dir, mainSHA, "merge main")
-		if err != nil {
-			t.Fatalf("MergeRef: %v", err)
-		}
-		if !out.Clean {
-			t.Fatalf("expected a clean merge, got %+v", out)
-		}
-	})
-
-	t.Run("conflicting", func(t *testing.T) {
-		dir, mainSHA := diverged(t)
-		out, err := g.MergeRef(ctx, dir, mainSHA, "merge main")
-		if err != nil {
-			t.Fatalf("a conflicting merge must not return an error: %v", err)
-		}
-		if out.Clean || len(out.Conflicts) != 1 || out.Conflicts[0] != "shared.txt" {
-			t.Fatalf("outcome = %+v, want a conflict on shared.txt", out)
-		}
-
-		// Resolve and finish, the path the resolver takes for a merge strategy.
-		write(t, dir, "shared.txt", "both\n")
-		if err := g.StageAll(ctx, dir); err != nil {
-			t.Fatalf("StageAll: %v", err)
-		}
-		if err := g.CommitMerge(ctx, dir, "resolve"); err != nil {
-			t.Fatalf("CommitMerge: %v", err)
-		}
-		if unmerged, err := g.HasUnmergedPaths(ctx, dir); err != nil || unmerged {
-			t.Errorf("unmerged=%v err=%v after committing the merge", unmerged, err)
-		}
-		if committer := git(t, dir, "log", "-1", "--format=%cn"); committer != issues.CommitAuthorName {
-			t.Errorf("committer = %q, want %q", committer, issues.CommitAuthorName)
-		}
-	})
-}
-
-func TestAbortMerge_RestoresTheBranch(t *testing.T) {
-	requireGit(t)
-	dir, mainSHA := diverged(t)
-	g := issues.NewGitExec()
-	ctx := context.Background()
-
-	before := git(t, dir, "rev-parse", "HEAD")
-	if _, err := g.MergeRef(ctx, dir, mainSHA, "merge main"); err != nil {
-		t.Fatalf("MergeRef: %v", err)
-	}
-	if err := g.AbortMerge(ctx, dir); err != nil {
-		t.Fatalf("AbortMerge: %v", err)
-	}
-	if after := git(t, dir, "rev-parse", "HEAD"); after != before {
-		t.Errorf("HEAD = %s after abort, want %s", after, before)
 	}
 }
 
@@ -557,7 +481,7 @@ func TestFilesWithConflictMarkers_ToleratesMissingFiles(t *testing.T) {
 	git(t, dir, "add", ".")
 	git(t, dir, "commit", "-q", "-m", "base")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	got, err := g.FilesWithConflictMarkers(context.Background(), dir, []string{"gone.txt", "a.txt"})
 	if err != nil {
 		t.Fatalf("FilesWithConflictMarkers: %v", err)
@@ -575,7 +499,7 @@ func TestConflictedFiles_EmptyOnACleanTree(t *testing.T) {
 	git(t, dir, "add", ".")
 	git(t, dir, "commit", "-q", "-m", "base")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	files, err := g.ConflictedFiles(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("ConflictedFiles: %v", err)
@@ -595,7 +519,7 @@ func TestRebaseOnto_UnknownBaseFailsAndLeavesNoRebaseInProgress(t *testing.T) {
 	git(t, dir, "add", ".")
 	git(t, dir, "commit", "-q", "-m", "base")
 
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	out, err := g.RebaseOnto(context.Background(), dir, "0000000000000000000000000000000000000000")
 	if err == nil {
 		t.Fatal("rebasing onto a nonexistent commit must fail")
@@ -641,7 +565,7 @@ func TestWorktreeDigest_ExcludesCommitsAlreadyReplayedByTheRebase(t *testing.T) 
 	git(t, dir, "checkout", "-q", "feature")
 
 	ctx := context.Background()
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	out, err := g.RebaseOnto(ctx, dir, mainSHA)
 	if err != nil {
 		t.Fatalf("RebaseOnto: %v", err)
@@ -699,7 +623,7 @@ func TestWorktreeDigest_NoticesAnEditThatChangesNoPathNames(t *testing.T) {
 	write(t, dir, "a.txt", "edited\n")
 
 	ctx := context.Background()
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	before, err := g.WorktreeDigest(ctx, dir)
 	if err != nil {
 		t.Fatalf("WorktreeDigest: %v", err)
@@ -727,7 +651,7 @@ func TestWorktreeDigest_RecordsDeletionsAsAValue(t *testing.T) {
 		t.Fatalf("remove: %v", err)
 	}
 
-	digest, err := issues.NewGitExec().WorktreeDigest(context.Background(), dir)
+	digest, err := gitops.NewGitExec().WorktreeDigest(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("WorktreeDigest: %v", err)
 	}
@@ -764,7 +688,7 @@ func TestWorktreeDigest_SeesNonASCIIPaths(t *testing.T) {
 	write(t, dir, "café.txt", "edited\n")
 
 	ctx := context.Background()
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	before, err := g.WorktreeDigest(ctx, dir)
 	if err != nil {
 		t.Fatalf("WorktreeDigest: %v", err)
@@ -808,7 +732,7 @@ func TestConflictedFiles_ReportsNonASCIIPathsVerbatim(t *testing.T) {
 	git(t, dir, "checkout", "-q", "feature")
 
 	ctx := context.Background()
-	g := issues.NewGitExec()
+	g := gitops.NewGitExec()
 	if _, err := g.RebaseOnto(ctx, dir, mainSHA); err != nil {
 		t.Fatalf("RebaseOnto: %v", err)
 	}

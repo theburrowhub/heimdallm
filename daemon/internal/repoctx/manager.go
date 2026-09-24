@@ -45,7 +45,8 @@ const (
 	// local_dir_base checkouts are accepted because the manager never mutates
 	// them.
 	ModeRead Mode = iota
-	// ModeWrite is for auto_implement. Only an explicit local_dir or a
+	// ModeWrite is for merge-tracking conflict resolution and branch
+	// updates, which commit and push. Only an explicit local_dir or a
 	// Heimdallm-managed clone is returned, because local_dir_base mounts are
 	// treated as read-only shared context.
 	ModeWrite
@@ -62,7 +63,7 @@ type Request struct {
 
 	// WorktreeToken identifies the execution and becomes the subdirectory
 	// name under `<clone>/.worktrees/<WorktreeToken>/`. Callers are
-	// expected to derive a deterministic value (e.g. `triage-42`,
+	// expected to derive a deterministic value (e.g. `merge-update-42`,
 	// `pr-review-1234`) so that retries land on the same path and
 	// concurrent operations on different keys never collide. Sanitised
 	// against path traversal and unsafe characters.

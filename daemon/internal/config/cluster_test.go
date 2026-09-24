@@ -398,7 +398,7 @@ func TestValidateClusterAcceptsCompleteConfig(t *testing.T) {
 	c.Cluster.Routing = RoutingConfig{
 		Mode:           ModeDispatch,
 		RoundRobinPool: []string{"hub-1", "srv-a"},
-		RoundRobinOps:  []string{OpReview, OpMerge, OpIssue},
+		RoundRobinOps:  []string{OpReview, OpMerge},
 		Orgs:           map[string]string{"theburrowhub": "srv-a"},
 		Repos:          map[string]string{"theburrowhub/heimdallm": "hub-1"},
 	}
@@ -435,15 +435,12 @@ func TestRoundRobinsOp(t *testing.T) {
 	if !(RoutingConfig{}).RoundRobinsOp(OpReview) {
 		t.Error("empty RoundRobinOps should include every op")
 	}
-	r := RoutingConfig{RoundRobinOps: []string{"Review", OpMerge}}
+	r := RoutingConfig{RoundRobinOps: []string{"Review"}}
 	if !r.RoundRobinsOp(OpReview) {
 		t.Error("case-insensitive match failed for review")
 	}
-	if !r.RoundRobinsOp(OpMerge) {
-		t.Error("merge should be included")
-	}
-	if r.RoundRobinsOp(OpIssue) {
-		t.Error("issue should not be included")
+	if r.RoundRobinsOp(OpMerge) {
+		t.Error("merge should not be included")
 	}
 }
 

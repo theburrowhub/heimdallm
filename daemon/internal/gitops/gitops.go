@@ -1,4 +1,10 @@
-package issues
+// Package gitops is the git plumbing Heimdallm runs against its own managed
+// checkouts: fetching and checking out PR branches, rebasing them, detecting
+// and staging conflict resolutions, and force-pushing with an explicit lease.
+//
+// Every network operation authenticates through GIT_ASKPASS so the GitHub
+// token never reaches argv, the remote URL or git config on disk.
+package gitops
 
 import (
 	"bytes"
@@ -21,7 +27,7 @@ import (
 const gitTimeout = 3 * time.Minute
 
 // CommitAuthorName / CommitAuthorEmail identify the daemon in the commits it
-// makes on behalf of the auto_implement pipeline. Using a clearly-synthetic
+// makes on its own behalf (conflict-resolution rebases). Using a clearly-synthetic
 // email avoids collisions with real humans' accounts.
 const (
 	CommitAuthorName  = "Heimdallm"
@@ -35,94 +41,23 @@ const (
 const maxGitStderrBytes = 16 * 1024 // 16 KiB
 
 // managedCloneMarkerFile is written by repoctx into Heimdallm-managed clones.
-// It is operational metadata, not implementation output, so auto_implement
-// must ignore it when deciding whether the agent changed code and when
-// staging commits.
+// It is operational metadata, not repository content, so it is never staged
+// and never counted as a change.
 const managedCloneMarkerFile = ".heimdallm-managed"
 
-// GitOps is the subset of `git` plumbing the auto_implement pipeline needs.
-// Every method takes a context so the daemon can propagate cancellation at
-// shutdown (or per-request) through long-running network operations —
-// `git fetch` and `git push` in particular.
-type GitOps interface {
-	// CheckoutNewBranch fetches baseBranch and checks out branch from that
-	// tip, overwriting any previous attempt so a re-run starts clean.
-	// Uses HTTPS with token for fetch (avoids SSH dependency in Docker).
-	CheckoutNewBranch(ctx context.Context, dir, repo, branch, baseBranch, token string) error
-	// HasChanges reports whether the working tree has modified or untracked
-	// files — both are in scope for the commit because the agent may create
-	// new files as well as edit existing ones.
-	HasChanges(ctx context.Context, dir string) (bool, error)
-	// CommitAll stages every change and commits with the daemon's identity.
-	// The caller is expected to have checked HasChanges first; committing an
-	// empty tree is an error here, not a no-op.
-	CommitAll(ctx context.Context, dir, message string) error
-	// Push uploads the branch to origin using GIT_ASKPASS so the token never
-	// touches argv, the URL, or git config on disk.
-	Push(ctx context.Context, dir, repo, branch, token string) error
-	// DeleteRemoteBranch removes a branch from the origin remote. Used by
-	// the pipeline to clean up an orphaned branch when the last step
-	// (CreatePR) fails after Push succeeded.
-	DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error
-	// Diff returns the unified diff between `base` ref and HEAD.
-	// Used by the pipeline to capture what the agent implemented for
-	// LLM-generated PR descriptions (#158).
-	Diff(ctx context.Context, dir, base string) (string, error)
-}
-
-// GitExec is the default GitOps implementation — shells out to the `git`
-// binary. The daemon assumes git is available in PATH; the first command
-// that runs returns a descriptive error if it is not.
+// GitExec shells out to the `git` binary. The daemon assumes git is available
+// in PATH; the first command that runs returns a descriptive error if it is
+// not.
 type GitExec struct{}
 
 // NewGitExec returns a ready-to-use GitExec. Zero configuration required.
 func NewGitExec() *GitExec { return &GitExec{} }
 
-// CheckoutNewBranch fetches the base branch via HTTPS (using the same
-// GIT_ASKPASS mechanism as Push) and creates (or resets) the work branch
-// from it. `-B` is deliberate: on a re-run we want the branch to match
-// the latest base rather than pick up stale state from a previous attempt.
-//
-// Using an explicit HTTPS URL instead of `git fetch origin` avoids relying
-// on the clone's remote configuration, which may point at an SSH URL that
-// requires keys/agent not available inside the Docker container.
-func (g *GitExec) CheckoutNewBranch(ctx context.Context, dir, repo, branch, baseBranch, token string) error {
-	if token == "" {
-		return fmt.Errorf("gitops: checkout requires a non-empty token")
-	}
-	env, cleanup, err := buildAskPassEnv(token)
-	if err != nil {
-		return fmt.Errorf("gitops: setup askpass for fetch: %w", err)
-	}
-	defer cleanup()
-
-	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
-	if err := runGit(ctx, dir, env, "fetch", url, baseBranch); err != nil {
-		return fmt.Errorf("gitops: fetch %s/%s: %w", repo, baseBranch, err)
-	}
-	// FETCH_HEAD points to the tip of what we just fetched.
-	if err := runGit(ctx, dir, nil, "checkout", "-B", branch, "FETCH_HEAD"); err != nil {
-		return fmt.Errorf("gitops: checkout -B %s: %w", branch, err)
-	}
-	return nil
-}
-
-// HasChanges reports whether `git status --porcelain` shows anything — any
-// non-empty line means there is a modified, added, deleted, or untracked
-// file to commit.
-func (g *GitExec) HasChanges(ctx context.Context, dir string) (bool, error) {
-	out, err := captureGit(ctx, dir, nil, "status", "--porcelain", "--", ".", ":(exclude)"+managedCloneMarkerFile)
-	if err != nil {
-		return false, fmt.Errorf("gitops: status: %w", err)
-	}
-	return strings.TrimSpace(string(out)) != "", nil
-}
-
-// sensitivePathPatterns lists basename globs that the auto_implement
-// pipeline refuses to commit. Prompt-injection on the issue body
-// could otherwise coerce the AI into writing exfiltration files
-// (credentials, private keys) which would then be pushed to GitHub
-// via the PR. The patterns target common secret shapes; legitimate
+// sensitivePathPatterns lists basename globs that StageAll refuses to
+// stage. Prompt-injection through repository content (conflict hunks,
+// file names) could otherwise coerce the agent into writing exfiltration
+// files (credentials, private keys) which would then be force-pushed to
+// GitHub. The patterns target common secret shapes; legitimate
 // repository content rarely matches.
 //
 // Match is performed against the lowercased basename of the staged
@@ -132,7 +67,7 @@ func (g *GitExec) HasChanges(ctx context.Context, dir string) (bool, error) {
 //
 // Notes on intentional exclusions:
 //   - `.heimdallm-managed` is already excluded from staging by the
-//     `:(exclude)` pathspec in CommitAll, so it does not need to
+//     `:(exclude)` pathspec in StageAll, so it does not need to
 //     appear here.
 //   - SSH public keys (id_*.pub) are not secrets — projects
 //     legitimately ship example/deploy public keys, so they stay
@@ -192,35 +127,11 @@ func matchesSensitivePattern(path string) (string, bool) {
 	return "", false
 }
 
-// CommitAll stages every change and commits with the Heimdallm identity.
-// Uses `-c` flags so the repo-level and global git config are never touched.
-//
-// Before committing, the staged file list is scanned against
-// sensitivePathPatterns: if a prompt-injected AI run tried to write
-// secrets (private keys, .env, the daemon's config.toml) into the
-// worktree to exfiltrate them via the PR, the commit is refused and
-// the index is reset so a retry from scratch is not poisoned.
-func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
-	if err := g.StageAll(ctx, dir); err != nil {
-		return err
-	}
-	if err := runGit(ctx, dir, nil,
-		"-c", "user.name="+CommitAuthorName,
-		"-c", "user.email="+CommitAuthorEmail,
-		"commit", "-m", message,
-	); err != nil {
-		return fmt.Errorf("gitops: commit: %w", err)
-	}
-	return nil
-}
-
 // enforceSensitivePathDenylist scans the already-staged file list and refuses
 // the whole operation when any path looks like a secret or is a symlink.
 //
-// Extracted from CommitAll so every path that stages files — the auto-implement
-// commit and the merge-conflict resolution alike — goes through the same
-// prompt-injection defense. A second, subtly different copy of this scan is
-// exactly the kind of drift that turns a defense into a false sense of one.
+// Every path that stages files goes through this one scan, so there is no
+// second, subtly different copy of the prompt-injection defense to drift.
 func enforceSensitivePathDenylist(ctx context.Context, dir string) error {
 	// `-z` + NUL split: defeats core.quotepath=on (the git default)
 	// which would escape non-ASCII paths like `weird\303\251.pem` and
@@ -274,67 +185,6 @@ func enforceSensitivePathDenylist(ctx context.Context, dir string) error {
 			len(refused), refused[0])
 	}
 	return nil
-}
-
-// Push uploads the branch to origin. The token is handed to git via
-// GIT_ASKPASS: we write a tiny executable that echoes the token, set the
-// env var, and let git call it when it needs the password.
-//
-// This keeps the token out of:
-//   - argv (no token in `git push https://…@github.com/…` → invisible to
-//     `ps aux` / `/proc/<pid>/cmdline`),
-//   - the remote URL (the URL uses `x-access-token` as username only),
-//   - the error message path (git's stderr only ever sees an opaque
-//     "Password for 'https://x-access-token@github.com'" prompt).
-//
-// The helper file is written with 0700 perms in an owner-only temp dir and
-// removed on function exit.
-func (g *GitExec) Push(ctx context.Context, dir, repo, branch, token string) error {
-	if token == "" {
-		return fmt.Errorf("gitops: push requires a non-empty token")
-	}
-	env, cleanup, err := buildAskPassEnv(token)
-	if err != nil {
-		return fmt.Errorf("gitops: setup askpass: %w", err)
-	}
-	defer cleanup()
-
-	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
-	refspec := branch + ":" + branch
-	if err := runGit(ctx, dir, env, "push", url, refspec); err != nil {
-		return fmt.Errorf("gitops: push %s:%s: %w", repo, branch, err)
-	}
-	return nil
-}
-
-// DeleteRemoteBranch drops the named branch from origin. Runs through the
-// same GIT_ASKPASS path as Push so the token stays off argv.
-func (g *GitExec) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error {
-	if token == "" {
-		return fmt.Errorf("gitops: delete remote requires a non-empty token")
-	}
-	env, cleanup, err := buildAskPassEnv(token)
-	if err != nil {
-		return fmt.Errorf("gitops: setup askpass: %w", err)
-	}
-	defer cleanup()
-
-	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
-	// `:<branch>` is the standard "delete the remote branch" refspec.
-	refspec := ":" + branch
-	if err := runGit(ctx, dir, env, "push", url, refspec); err != nil {
-		return fmt.Errorf("gitops: delete remote %s:%s: %w", repo, branch, err)
-	}
-	return nil
-}
-
-// Diff returns the unified diff between base and HEAD.
-func (g *GitExec) Diff(ctx context.Context, dir, base string) (string, error) {
-	out, err := captureGit(ctx, dir, nil, "diff", base+"..HEAD")
-	if err != nil {
-		return "", fmt.Errorf("gitops: diff %s..HEAD: %w", base, err)
-	}
-	return string(out), nil
 }
 
 // buildAskPassEnv writes a small helper script that echoes the token, and
@@ -396,7 +246,7 @@ func captureGit(ctx context.Context, dir string, env []string, args ...string) (
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	// procgroup.Run rather than cmd.Run: this helper backs every git call in
-	// GitExec, including CheckoutNewBranch / Push / DeleteRemoteBranch, which
+	// GitExec, including FetchRef / PushForceWithLease, which
 	// fork `ssh` for SSH remotes. exec.CommandContext's cancellation reaches
 	// only git, leaving that ssh child orphaned onto PID 1 as a zombie
 	// (theburrowhub/heimdallm#665).

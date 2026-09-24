@@ -1245,502 +1245,42 @@ func TestHandlerTriggerReviewStoreErrorIs500(t *testing.T) {
 	}
 }
 
-func TestHandlerListIssues(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, err := s.UpsertIssue(&store.Issue{
-		GithubID: 100, Repo: "org/repo", Number: 7, Title: "bug: crash",
-		Body: "details", Author: "alice", Assignees: `["bob"]`, Labels: `["bug"]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-	if err != nil {
-		t.Fatalf("upsert issue: %v", err)
-	}
-	s.InsertIssueReview(&store.IssueReview{
-		IssueID: id, CLIUsed: "claude", Summary: "triage summary",
-		Triage: `{"severity":"high","category":"bug"}`, NextSteps: `["fix it"]`,
-		ActionTaken: "review_only", CreatedAt: now,
-	})
-
-	req := httptest.NewRequest("GET", "/issues", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("list issues: status %d, body: %s", w.Code, w.Body.String())
-	}
-	var issues []map[string]any
-	json.NewDecoder(w.Body).Decode(&issues)
-	if len(issues) != 1 {
-		t.Fatalf("expected 1 issue, got %d", len(issues))
-	}
-	iss := issues[0]
-	if iss["title"] != "bug: crash" {
-		t.Errorf("title = %v", iss["title"])
-	}
-	// Verify assignees/labels are arrays, not strings
-	if assignees, ok := iss["assignees"].([]any); !ok || len(assignees) != 1 {
-		t.Errorf("assignees should be parsed array, got %T: %v", iss["assignees"], iss["assignees"])
-	}
-	if labels, ok := iss["labels"].([]any); !ok || len(labels) != 1 {
-		t.Errorf("labels should be parsed array, got %T: %v", iss["labels"], iss["labels"])
-	}
-	// Verify latest_review is attached
-	rev, ok := iss["latest_review"].(map[string]any)
-	if !ok || rev == nil {
-		t.Fatalf("expected latest_review, got %v", iss["latest_review"])
-	}
-	if rev["summary"] != "triage summary" {
-		t.Errorf("review summary = %v", rev["summary"])
-	}
-	// Verify triage is parsed object, not string
-	if _, ok := rev["triage"].(map[string]any); !ok {
-		t.Errorf("triage should be parsed object, got %T: %v", rev["triage"], rev["triage"])
-	}
-}
-
-func TestHandlerGetIssue(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 200, Repo: "org/repo", Number: 8, Title: "feat request",
-		Body: "details", Author: "bob", Assignees: `[]`, Labels: `["enhancement"]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-	s.InsertIssueReview(&store.IssueReview{
-		IssueID: id, CLIUsed: "gemini", Summary: "looks good",
-		Triage: `{"severity":"low","category":"feature"}`, NextSteps: `[]`,
-		ActionTaken: "review_only", CreatedAt: now,
-	})
-
-	req := httptest.NewRequest("GET", "/issues/"+itoa(id), nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("get issue: status %d, body: %s", w.Code, w.Body.String())
-	}
-	var body map[string]any
-	json.NewDecoder(w.Body).Decode(&body)
-	iss, ok := body["issue"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected issue key")
-	}
-	if iss["title"] != "feat request" {
-		t.Errorf("title = %v", iss["title"])
-	}
-	reviews, ok := body["reviews"].([]any)
-	if !ok || len(reviews) != 1 {
-		t.Fatalf("expected 1 review, got %v", body["reviews"])
-	}
-}
-
-func TestHandlerGetIssue_NotFound(t *testing.T) {
+// The issue pipelines are gone, so their store-backed keys are no longer part
+// of the PUT /config allowlist and must be rejected like any unknown key.
+func TestHandlerPutConfig_RemovedIssueKeysRejected(t *testing.T) {
 	srv, _ := setupServer(t)
-	req := httptest.NewRequest("GET", "/issues/9999", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
-	}
-}
-
-func TestHandlerDismissIssue(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 300, Repo: "org/r", Number: 10, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/dismiss", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("dismiss issue: status %d, body: %s", w.Code, w.Body.String())
-	}
-
-	issues, _ := s.ListIssues()
-	if len(issues) != 0 {
-		t.Errorf("expected 0 issues after dismiss, got %d", len(issues))
-	}
-}
-
-func TestHandlerUndismissIssue(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 400, Repo: "org/r", Number: 11, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-	s.DismissIssue(id)
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/undismiss", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("undismiss issue: status %d, body: %s", w.Code, w.Body.String())
-	}
-
-	issues, _ := s.ListIssues()
-	if len(issues) != 1 {
-		t.Errorf("expected 1 issue after undismiss, got %d", len(issues))
-	}
-}
-
-func TestHandlerTriggerIssueReview(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 500, Repo: "org/r", Number: 12, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-
-	triggered := make(chan int64, 1)
-	srv.SetTriggerIssueReviewFn(func(issueID int64) error {
-		triggered <- issueID
-		return nil
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/review", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("trigger issue review: status %d, body: %s", w.Code, w.Body.String())
-	}
-
-	select {
-	case got := <-triggered:
-		if got != id {
-			t.Errorf("triggered with issue_id %d, expected %d", got, id)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("trigger callback not called within 2s")
-	}
-}
-
-func TestHandlerTriggerIssueReview_NotConfigured(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 600, Repo: "org/r", Number: 13, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/review", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 when trigger not configured, got %d", w.Code)
-	}
-}
-
-func TestHandlerTriggerIssueRefine(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 610, Repo: "org/r", Number: 15, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-
-	type call struct {
-		id    int64
-		force bool
-	}
-	triggered := make(chan call, 1)
-	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
-		triggered <- call{id: issueID, force: force}
-		return nil
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/refine?force=true", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("trigger issue refine: status %d, body: %s", w.Code, w.Body.String())
-	}
-
-	select {
-	case got := <-triggered:
-		if got.id != id || !got.force {
-			t.Errorf("triggered with %+v, expected id=%d force=true", got, id)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("refine callback not called within 2s")
-	}
-}
-
-func TestHandlerTriggerIssueRefine_NotConfigured(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 611, Repo: "org/r", Number: 16, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/refine", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 when refine not configured, got %d", w.Code)
-	}
-}
-
-func TestHandlerTriggerIssueRefine_NotFound(t *testing.T) {
-	srv, _ := setupServer(t)
-	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
-		t.Fatalf("callback should not be called for unknown issue")
-		return nil
-	})
-
-	req := httptest.NewRequest("POST", "/issues/999/refine", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404 for unknown issue, got %d", w.Code)
-	}
-}
-
-func TestHandlerPromoteIssue(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 800, Repo: "org/r", Number: 20, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-
-	promoted := make(chan int64, 1)
-	srv.SetTriggerPromoteFn(func(issueID int64) error {
-		promoted <- issueID
-		return nil
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/promote", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("promote issue: status %d, body: %s", w.Code, w.Body.String())
-	}
-	var body map[string]string
-	json.NewDecoder(w.Body).Decode(&body)
-	if body["status"] != "promotion applied" {
-		t.Errorf("promote issue: unexpected body %v", body)
-	}
-
-	select {
-	case got := <-promoted:
-		if got != id {
-			t.Errorf("promoted with issue_id %d, expected %d", got, id)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("promote callback not called within 2s")
-	}
-}
-
-func TestHandlerPromoteIssue_Conflict(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 802, Repo: "org/r", Number: 22, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-
-	srv.SetTriggerPromoteFn(func(issueID int64) error {
-		return fmt.Errorf("%w: already in development", server.ErrPromoteConflict)
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/promote", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("promote issue: status %d, want 409; body: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestHandlerPromoteIssue_UpdateDrainIsRetryableConflict(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 803, Repo: "org/r", Number: 23, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-	srv.SetTriggerPromoteFn(func(int64) error {
-		return workgate.ErrDraining
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/promote", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("promote during update: status %d, want 409; body: %s", w.Code, w.Body.String())
-	}
-	if got := w.Header().Get("Retry-After"); got != "5" {
-		t.Fatalf("Retry-After = %q, want 5", got)
-	}
-}
-
-func TestHandlerPromoteIssue_NotConfigured(t *testing.T) {
-	srv, s := setupServer(t)
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 801, Repo: "org/r", Number: 21, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-
-	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/promote", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 when promote not configured, got %d", w.Code)
-	}
-}
-
-func TestIssueEndpointsRequireAuthWhenTokenSet(t *testing.T) {
-	s, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer s.Close()
-	broker := sse.NewBroker()
-	broker.Start()
-	defer broker.Stop()
-	srv := server.New(s, broker, nil, "secret-token")
-
-	now := time.Now()
-	id, _ := s.UpsertIssue(&store.Issue{
-		GithubID: 700, Repo: "org/r", Number: 14, Title: "t",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-	issueID := fmt.Sprintf("%d", id)
-
-	// GET endpoints — protected via sensitiveGETPaths
-	getPaths := []string{"/issues", "/issues/" + issueID}
-	for _, path := range getPaths {
-		req := httptest.NewRequest("GET", path, nil)
+	for _, body := range []string{
+		`{"issue_tracking":{"enabled":true}}`,
+		`{"refinement_timeout":"30m"}`,
+	} {
+		req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Router().ServeHTTP(w, req)
-		if w.Code != http.StatusUnauthorized {
-			t.Errorf("GET %s without token: expected 401, got %d", path, w.Code)
-		}
-
-		req2 := httptest.NewRequest("GET", path, nil)
-		req2.Header.Set("X-Heimdallm-Token", "secret-token")
-		w2 := httptest.NewRecorder()
-		srv.Router().ServeHTTP(w2, req2)
-		if w2.Code == http.StatusUnauthorized {
-			t.Errorf("GET %s with valid token: unexpected 401", path)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("PUT %s: expected 400, got %d (body: %s)", body, w.Code, w.Body.String())
 		}
 	}
+}
 
-	// POST endpoints — protected via method-based auth (all POST requires token)
-	postPaths := []string{
-		"/issues/" + issueID + "/review",
-		"/issues/" + issueID + "/refine",
-		"/issues/" + issueID + "/promote",
-		"/issues/" + issueID + "/dismiss",
-		"/issues/" + issueID + "/undismiss",
-	}
-	for _, path := range postPaths {
-		req := httptest.NewRequest("POST", path, nil)
+// The issue and autonomous endpoints were removed with their pipelines.
+func TestRemovedIssueEndpointsAreGone(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/issues"},
+		{"GET", "/issues/1"},
+		{"POST", "/issues/1/review"},
+		{"POST", "/issues/1/promote"},
+		{"GET", "/repos/org%2Frepo/labels"},
+		{"PATCH", "/config/autonomous/repos/org%2Frepo"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+		req.Header.Set("X-Heimdallm-Token", "test-token")
 		w := httptest.NewRecorder()
 		srv.Router().ServeHTTP(w, req)
-		if w.Code != http.StatusUnauthorized {
-			t.Errorf("POST %s without token: expected 401, got %d", path, w.Code)
+		if w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s: status = %d, want 404/405", tc.method, tc.path, w.Code)
 		}
-
-		req2 := httptest.NewRequest("POST", path, nil)
-		req2.Header.Set("X-Heimdallm-Token", "secret-token")
-		w2 := httptest.NewRecorder()
-		srv.Router().ServeHTTP(w2, req2)
-		if w2.Code == http.StatusUnauthorized {
-			t.Errorf("POST %s with valid token: unexpected 401", path)
-		}
-	}
-}
-
-func TestHandlerPutConfig_IssueTracking_Accepted(t *testing.T) {
-	srv, _ := setupServer(t)
-	body := `{"issue_tracking":{"enabled":true,"filter_mode":"exclusive","default_action":"ignore","develop_labels":["feature","bug"],"review_only_labels":["question"],"skip_labels":["wontfix"],"organizations":[],"assignees":[]}}`
-	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
-	}
-}
-
-func TestHandlerPutConfig_IssueTracking_InvalidFilterMode(t *testing.T) {
-	srv, _ := setupServer(t)
-	// filter_mode "weird" with enabled=true should trip validateIssueTracking.
-	body := `{"issue_tracking":{"enabled":true,"filter_mode":"weird","default_action":"ignore"}}`
-	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
-	}
-}
-
-func TestHandlerPutConfig_IssueTracking_InvalidDefaultAction(t *testing.T) {
-	srv, _ := setupServer(t)
-	body := `{"issue_tracking":{"enabled":true,"filter_mode":"exclusive","default_action":"delete_the_repo"}}`
-	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
-	}
-}
-
-func TestHandlerPutConfig_IssueTracking_PersistsAndIsReadable(t *testing.T) {
-	// End-to-end: PUT → ListConfigs → ApplyStore → cfg reflects the change.
-	// This is the scenario that is broken on main today and the reason the
-	// web UI's "Save & reload" silently loses values on refresh.
-	srv, s := setupServer(t)
-	body := `{"issue_tracking":{"enabled":true,"filter_mode":"inclusive","default_action":"review_only","develop_labels":["feature"]}}`
-	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("PUT: expected 200, got %d (body: %s)", w.Code, w.Body.String())
-	}
-
-	rows, err := s.ListConfigs()
-	if err != nil {
-		t.Fatalf("ListConfigs: %v", err)
-	}
-	raw, ok := rows["issue_tracking"]
-	if !ok {
-		t.Fatalf("store: expected issue_tracking row, got keys %v", rows)
-	}
-
-	cfg := newCfgWithPrimary()
-	cfg.GitHub.PollInterval = "5m"
-	if err := cfg.ApplyStore(map[string]string{"issue_tracking": raw}); err != nil {
-		t.Fatalf("ApplyStore: %v", err)
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate after ApplyStore: %v", err)
-	}
-	it := cfg.GitHub.IssueTracking
-	if !it.Enabled || it.FilterMode != config.FilterModeInclusive || it.DefaultAction != "review_only" {
-		t.Errorf("round-trip: got %+v", it)
-	}
-	if len(it.DevelopLabels) != 1 || it.DevelopLabels[0] != "feature" {
-		t.Errorf("DevelopLabels = %v, want [feature]", it.DevelopLabels)
 	}
 }
 
@@ -2264,7 +1804,7 @@ func TestHandleActivity_FilterByRepoAndAction(t *testing.T) {
 	srv, s := setupServer(t)
 	now := time.Now()
 	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 1, "t", "review", "minor", nil)
-	_, _ = s.InsertActivity(now, "acme", "acme/api", "issue", 2, "t", "triage", "major", nil)
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 2, "t", "error", "major", nil)
 	_, _ = s.InsertActivity(now, "globex", "globex/w", "pr", 3, "t", "review", "minor", nil)
 
 	req := httptest.NewRequest("GET", "/activity?repo=acme/api&action=review", nil)
@@ -2291,7 +1831,7 @@ func TestHandleActivity_FilterByItemTypeAndOutcome(t *testing.T) {
 	now := time.Now()
 	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 1, "t", "review_skipped", "draft", nil)
 	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 2, "t", "review_skipped", "not_open", nil)
-	_, _ = s.InsertActivity(now, "acme", "acme/api", "issue", 3, "t", "triage", "draft", nil)
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 3, "t", "error", "draft", nil)
 
 	req := httptest.NewRequest("GET", "/activity?item_type=pr&action=review_skipped&outcome=draft", nil)
 	w := httptest.NewRecorder()
@@ -3206,7 +2746,7 @@ func TestHandlePatchOrgConfig(t *testing.T) {
 	srv := setupServerWithToken(t, "test-token")
 	srv.SetConfigPath(tomlPath)
 
-	body := `{"primary":"codex","issue_tracking":{"enabled":true,"develop_labels":["ready"]}}`
+	body := `{"primary":"codex","circuit_breaker":{"per_pr_24h":5}}`
 	req := httptest.NewRequest("PATCH", "/config/orgs/"+url.PathEscape("org"), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Heimdallm-Token", "test-token")
@@ -3239,13 +2779,12 @@ func TestHandlePatchOrgConfig(t *testing.T) {
 	if org["fallback"] != "openai" {
 		t.Errorf("fallback = %v, want openai (should be preserved)", org["fallback"])
 	}
-	it, ok := org["issue_tracking"].(map[string]any)
+	cb, ok := org["circuit_breaker"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected issue_tracking section, got %v", org)
+		t.Fatalf("expected circuit_breaker section, got %v", org)
 	}
-	labels, ok := it["develop_labels"].([]any)
-	if !ok || len(labels) != 1 || labels[0] != "ready" {
-		t.Fatalf("develop_labels = %v, want [ready]", it["develop_labels"])
+	if cb["per_pr_24h"] != int64(5) {
+		t.Fatalf("per_pr_24h = %v (%T), want 5", cb["per_pr_24h"], cb["per_pr_24h"])
 	}
 }
 
@@ -3338,13 +2877,13 @@ func TestHandleDeleteRepoField_TopLevel(t *testing.T) {
 }
 
 func TestHandleDeleteRepoField_NestedPath(t *testing.T) {
-	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.repos.\"org/repo1\".issue_tracking]\ndevelop_labels = [\"ready\"]\nfilter_mode = \"exclusive\"\n"
+	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.repos.\"org/repo1\".circuit_breaker]\nper_pr_24h = 5\nper_repo_hr = 30\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
 	srv := setupServerWithToken(t, "test-token")
 	srv.SetConfigPath(tomlPath)
 
-	req := httptest.NewRequest("DELETE", "/config/repos/"+url.PathEscape("org/repo1")+"/issue_tracking/develop_labels", nil)
+	req := httptest.NewRequest("DELETE", "/config/repos/"+url.PathEscape("org/repo1")+"/circuit_breaker/per_pr_24h", nil)
 	req.Header.Set("X-Heimdallm-Token", "test-token")
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
@@ -3369,26 +2908,26 @@ func TestHandleDeleteRepoField_NestedPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected [ai.repos.\"org/repo1\"] section, got %v", repos)
 	}
-	issueTracking, ok := repo1["issue_tracking"].(map[string]any)
+	cb, ok := repo1["circuit_breaker"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected issue_tracking section, got %v", repo1)
+		t.Fatalf("expected circuit_breaker section, got %v", repo1)
 	}
-	if _, found := issueTracking["develop_labels"]; found {
-		t.Errorf("develop_labels should have been deleted, still present: %v", issueTracking)
+	if _, found := cb["per_pr_24h"]; found {
+		t.Errorf("per_pr_24h should have been deleted, still present: %v", cb)
 	}
-	if issueTracking["filter_mode"] != "exclusive" {
-		t.Errorf("filter_mode = %v, want exclusive (should be preserved)", issueTracking["filter_mode"])
+	if cb["per_repo_hr"] != int64(30) {
+		t.Errorf("per_repo_hr = %v, want 30 (should be preserved)", cb["per_repo_hr"])
 	}
 }
 
 func TestHandleDeleteOrgField_NestedPath(t *testing.T) {
-	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.orgs.\"org\".issue_tracking]\ndevelop_labels = [\"ready\"]\nfilter_mode = \"exclusive\"\n"
+	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.orgs.\"org\".circuit_breaker]\nper_pr_24h = 5\nper_repo_hr = 30\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
 	srv := setupServerWithToken(t, "test-token")
 	srv.SetConfigPath(tomlPath)
 
-	req := httptest.NewRequest("DELETE", "/config/orgs/"+url.PathEscape("org")+"/issue_tracking/develop_labels", nil)
+	req := httptest.NewRequest("DELETE", "/config/orgs/"+url.PathEscape("org")+"/circuit_breaker/per_pr_24h", nil)
 	req.Header.Set("X-Heimdallm-Token", "test-token")
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
@@ -3413,15 +2952,15 @@ func TestHandleDeleteOrgField_NestedPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected [ai.orgs.org] section, got %v", orgs)
 	}
-	issueTracking, ok := org["issue_tracking"].(map[string]any)
+	cb, ok := org["circuit_breaker"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected issue_tracking section, got %v", org)
+		t.Fatalf("expected circuit_breaker section, got %v", org)
 	}
-	if _, found := issueTracking["develop_labels"]; found {
-		t.Errorf("develop_labels should have been deleted, still present: %v", issueTracking)
+	if _, found := cb["per_pr_24h"]; found {
+		t.Errorf("per_pr_24h should have been deleted, still present: %v", cb)
 	}
-	if issueTracking["filter_mode"] != "exclusive" {
-		t.Errorf("filter_mode = %v, want exclusive (should be preserved)", issueTracking["filter_mode"])
+	if cb["per_repo_hr"] != int64(30) {
+		t.Errorf("per_repo_hr = %v, want 30 (should be preserved)", cb["per_repo_hr"])
 	}
 }
 
@@ -3588,99 +3127,18 @@ func TestHandleListPRs_StateFilter(t *testing.T) {
 	}
 }
 
-func TestHandleListIssues_StateFilter(t *testing.T) {
-	s, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-	broker := sse.NewBroker()
-	broker.Start()
-	t.Cleanup(broker.Stop)
-	srv := server.New(s, broker, nil, "test-token")
-
-	now := time.Now()
-	s.UpsertIssue(&store.Issue{
-		GithubID: 20, Repo: "org/r", Number: 20, Title: "open issue",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "open", CreatedAt: now, FetchedAt: now,
-	})
-	s.UpsertIssue(&store.Issue{
-		GithubID: 21, Repo: "org/r", Number: 21, Title: "closed issue",
-		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
-		State: "closed", CreatedAt: now, FetchedAt: now,
-	})
-
-	doReq := func(path string) []map[string]any {
-		t.Helper()
-		req := httptest.NewRequest("GET", path, nil)
-		req.Header.Set("X-Heimdallm-Token", "test-token")
-		w := httptest.NewRecorder()
-		srv.Router().ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("GET %s: status %d, body: %s", path, w.Code, w.Body.String())
-		}
-		var issues []map[string]any
-		if err := json.NewDecoder(w.Body).Decode(&issues); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		return issues
-	}
-
-	// No filter → both issues returned
-	if got := doReq("/issues"); len(got) != 2 {
-		t.Errorf("GET /issues: expected 2, got %d", len(got))
-	}
-
-	// state=open → only the open issue
-	if got := doReq("/issues?state=open"); len(got) != 1 {
-		t.Errorf("GET /issues?state=open: expected 1, got %d", len(got))
-	} else if got[0]["state"] != "open" {
-		t.Errorf("GET /issues?state=open: got state %v", got[0]["state"])
-	}
-
-	// state=closed → only the closed issue
-	if got := doReq("/issues?state=closed"); len(got) != 1 {
-		t.Errorf("GET /issues?state=closed: expected 1, got %d", len(got))
-	} else if got[0]["state"] != "closed" {
-		t.Errorf("GET /issues?state=closed: got state %v", got[0]["state"])
-	}
-
-	// state=open,closed → both issues
-	if got := doReq("/issues?state=open,closed"); len(got) != 2 {
-		t.Errorf("GET /issues?state=open,closed: expected 2, got %d", len(got))
-	}
-}
-
-// TestHandlerGetConfig_ExposesAutonomousAndCircuitBreaker guards that GET
-// /config always includes the autonomous and circuit_breaker top-level keys
-// with the correct snake_case field names. The Flutter UI reads these keys to
-// render the autonomous-mode panel — a silent rename or re-nesting would break
-// the UI without a test failure.
-func TestHandlerGetConfig_ExposesAutonomousAndCircuitBreaker(t *testing.T) {
+// TestHandlerGetConfig_ExposesCircuitBreaker guards that GET /config always
+// includes the circuit_breaker top-level key with the correct snake_case field
+// names. The Flutter UI reads these keys — a silent rename or re-nesting would
+// break the UI without a test failure.
+func TestHandlerGetConfig_ExposesCircuitBreaker(t *testing.T) {
 	srv, _ := setupServer(t)
 	srv.SetConfigFn(func() map[string]any {
 		return map[string]any{
-			"autonomous": map[string]any{
-				"enabled":           true,
-				"auto_merge":        false,
-				"merge_method":      "squash",
-				"take_others_tasks": false,
-				"reassign_on_take":  false,
-				"dev_max_turns":     0,
-				"dev_effort":        "high",
-				"dev_timeout":       "45m",
-				"claim_lease":       "2h",
-				"orgs":              map[string]any{},
-				"repos":             map[string]any{},
-			},
 			"circuit_breaker": map[string]any{
 				"per_pr_24h":                 3,
 				"per_repo_hr":                20,
 				"per_review_failure_repo_hr": 20,
-				"per_issue_24h":              3,
-				"per_issue_repo_hr":          10,
-				"per_impl_repo_hr":           5,
 			},
 		}
 	})
@@ -3695,30 +3153,6 @@ func TestHandlerGetConfig_ExposesAutonomousAndCircuitBreaker(t *testing.T) {
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v (body: %s)", err, w.Body.String())
-	}
-
-	// Verify autonomous section.
-	autonomous, ok := body["autonomous"].(map[string]any)
-	if !ok {
-		t.Fatalf("autonomous missing or wrong type: %T: %v", body["autonomous"], body["autonomous"])
-	}
-	if autonomous["enabled"] != true {
-		t.Errorf("autonomous.enabled = %v, want true", autonomous["enabled"])
-	}
-	if autonomous["merge_method"] != "squash" {
-		t.Errorf("autonomous.merge_method = %v, want squash", autonomous["merge_method"])
-	}
-	if autonomous["dev_effort"] != "high" {
-		t.Errorf("autonomous.dev_effort = %v, want high", autonomous["dev_effort"])
-	}
-	if autonomous["claim_lease"] != "2h" {
-		t.Errorf("autonomous.claim_lease = %v, want 2h", autonomous["claim_lease"])
-	}
-	if _, ok := autonomous["orgs"]; !ok {
-		t.Errorf("autonomous.orgs missing")
-	}
-	if _, ok := autonomous["repos"]; !ok {
-		t.Errorf("autonomous.repos missing")
 	}
 
 	// Verify circuit_breaker section.
@@ -3736,45 +3170,6 @@ func TestHandlerGetConfig_ExposesAutonomousAndCircuitBreaker(t *testing.T) {
 	if cb["per_review_failure_repo_hr"].(float64) != 20 {
 		t.Errorf("circuit_breaker.per_review_failure_repo_hr = %v, want 20", cb["per_review_failure_repo_hr"])
 	}
-	if cb["per_impl_repo_hr"].(float64) != 5 {
-		t.Errorf("circuit_breaker.per_impl_repo_hr = %v, want 5", cb["per_impl_repo_hr"])
-	}
-}
-
-// TestHandlePatchConfig_AutonomousGlobalPersists verifies that a global PATCH
-// containing an autonomous section is accepted and written to TOML.
-func TestHandlePatchConfig_AutonomousGlobalPersists(t *testing.T) {
-	tomlContent := "[ai]\nprimary = \"claude\"\n"
-	tomlPath := writeTempTOML(t, tomlContent)
-
-	srv := setupServerWithToken(t, "test-token")
-	srv.SetConfigPath(tomlPath)
-
-	body := `{"autonomous":{"enabled":true,"dev_max_turns":20}}`
-	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Heimdallm-Token", "test-token")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
-	}
-
-	m, err := config.ReadTOMLMap(tomlPath)
-	if err != nil {
-		t.Fatalf("read TOML after PATCH: %v", err)
-	}
-	autonomous, ok := m["autonomous"].(map[string]any)
-	if !ok {
-		t.Fatalf("autonomous section missing in TOML after PATCH: %v", m)
-	}
-	if autonomous["enabled"] != true {
-		t.Errorf("autonomous.enabled = %v, want true", autonomous["enabled"])
-	}
-	if autonomous["dev_max_turns"] != int64(20) {
-		t.Errorf("autonomous.dev_max_turns = %v (%T), want 20", autonomous["dev_max_turns"], autonomous["dev_max_turns"])
-	}
 }
 
 // TestHandlePatchConfig_CircuitBreakerGlobalPersists verifies that a global PATCH
@@ -3786,7 +3181,7 @@ func TestHandlePatchConfig_CircuitBreakerGlobalPersists(t *testing.T) {
 	srv := setupServerWithToken(t, "test-token")
 	srv.SetConfigPath(tomlPath)
 
-	body := `{"circuit_breaker":{"per_impl_repo_hr":9,"per_review_failure_repo_hr":27}}`
+	body := `{"circuit_breaker":{"per_pr_24h":9,"per_review_failure_repo_hr":27}}`
 	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Heimdallm-Token", "test-token")
@@ -3805,149 +3200,11 @@ func TestHandlePatchConfig_CircuitBreakerGlobalPersists(t *testing.T) {
 	if !ok {
 		t.Fatalf("circuit_breaker section missing in TOML after PATCH: %v", m)
 	}
-	if cb["per_impl_repo_hr"] != int64(9) {
-		t.Errorf("circuit_breaker.per_impl_repo_hr = %v (%T), want 9", cb["per_impl_repo_hr"], cb["per_impl_repo_hr"])
+	if cb["per_pr_24h"] != int64(9) {
+		t.Errorf("circuit_breaker.per_pr_24h = %v (%T), want 9", cb["per_pr_24h"], cb["per_pr_24h"])
 	}
 	if cb["per_review_failure_repo_hr"] != int64(27) {
 		t.Errorf("circuit_breaker.per_review_failure_repo_hr = %v (%T), want 27", cb["per_review_failure_repo_hr"], cb["per_review_failure_repo_hr"])
-	}
-}
-
-// TestHandlePatchAutonomousRepoConfig verifies that PATCH
-// /config/autonomous/repos/{repo} writes autonomous.repos.<repo> into TOML.
-func TestHandlePatchAutonomousRepoConfig(t *testing.T) {
-	tomlContent := "[ai]\nprimary = \"claude\"\n"
-	tomlPath := writeTempTOML(t, tomlContent)
-
-	srv := setupServerWithToken(t, "test-token")
-	srv.SetConfigPath(tomlPath)
-
-	body := `{"enabled":true,"auto_merge":false}`
-	req := httptest.NewRequest("PATCH", "/config/autonomous/repos/"+url.PathEscape("org/myrepo"), strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Heimdallm-Token", "test-token")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
-	}
-
-	m, err := config.ReadTOMLMap(tomlPath)
-	if err != nil {
-		t.Fatalf("read TOML after PATCH: %v", err)
-	}
-	autonomous, ok := m["autonomous"].(map[string]any)
-	if !ok {
-		t.Fatalf("autonomous section missing in TOML: %v", m)
-	}
-	repos, ok := autonomous["repos"].(map[string]any)
-	if !ok {
-		t.Fatalf("autonomous.repos section missing in TOML: %v", autonomous)
-	}
-	myrepo, ok := repos["org/myrepo"].(map[string]any)
-	if !ok {
-		t.Fatalf("autonomous.repos[\"org/myrepo\"] missing in TOML: %v", repos)
-	}
-	if myrepo["enabled"] != true {
-		t.Errorf("autonomous.repos[org/myrepo].enabled = %v, want true", myrepo["enabled"])
-	}
-	if myrepo["auto_merge"] != false {
-		t.Errorf("autonomous.repos[org/myrepo].auto_merge = %v, want false", myrepo["auto_merge"])
-	}
-}
-
-// TestHandlePatchAutonomousOrgConfig verifies that PATCH
-// /config/autonomous/orgs/{org} writes autonomous.orgs.<org> into TOML.
-func TestHandlePatchAutonomousOrgConfig(t *testing.T) {
-	tomlContent := "[ai]\nprimary = \"claude\"\n"
-	tomlPath := writeTempTOML(t, tomlContent)
-
-	srv := setupServerWithToken(t, "test-token")
-	srv.SetConfigPath(tomlPath)
-
-	body := `{"enabled":false,"dev_max_turns":10}`
-	req := httptest.NewRequest("PATCH", "/config/autonomous/orgs/myorg", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Heimdallm-Token", "test-token")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
-	}
-
-	m, err := config.ReadTOMLMap(tomlPath)
-	if err != nil {
-		t.Fatalf("read TOML after PATCH: %v", err)
-	}
-	autonomous, ok := m["autonomous"].(map[string]any)
-	if !ok {
-		t.Fatalf("autonomous section missing in TOML: %v", m)
-	}
-	orgs, ok := autonomous["orgs"].(map[string]any)
-	if !ok {
-		t.Fatalf("autonomous.orgs section missing in TOML: %v", autonomous)
-	}
-	myorg, ok := orgs["myorg"].(map[string]any)
-	if !ok {
-		t.Fatalf("autonomous.orgs[\"myorg\"] missing in TOML: %v", orgs)
-	}
-	if myorg["enabled"] != false {
-		t.Errorf("autonomous.orgs[myorg].enabled = %v, want false", myorg["enabled"])
-	}
-	if myorg["dev_max_turns"] != int64(10) {
-		t.Errorf("autonomous.orgs[myorg].dev_max_turns = %v (%T), want 10", myorg["dev_max_turns"], myorg["dev_max_turns"])
-	}
-}
-
-func TestHandlePatchAutonomousConfigRejectsAgentsWithoutPersisting(t *testing.T) {
-	tests := []struct {
-		name string
-		path string
-		body string
-	}{
-		{
-			name: "global config repo override",
-			path: "/config",
-			body: `{"autonomous":{"repos":{"org/repo":{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}}}}`,
-		},
-		{
-			name: "repo endpoint",
-			path: "/config/autonomous/repos/" + url.PathEscape("org/repo"),
-			body: `{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
-		},
-		{
-			name: "org endpoint",
-			path: "/config/autonomous/orgs/org",
-			body: `{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			const tomlContent = "[ai]\nprimary = \"claude\"\n\n[autonomous]\nenabled = true\n"
-			tomlPath := writeTempTOML(t, tomlContent)
-			srv := setupServerWithToken(t, "test-token")
-			srv.SetConfigPath(tomlPath)
-
-			req := httptest.NewRequest(http.MethodPatch, tc.path, strings.NewReader(tc.body))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Heimdallm-Token", "test-token")
-			w := httptest.NewRecorder()
-			srv.Router().ServeHTTP(w, req)
-
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d (body: %s)", w.Code, http.StatusBadRequest, w.Body.String())
-			}
-			got, err := os.ReadFile(tomlPath)
-			if err != nil {
-				t.Fatalf("read TOML after rejected PATCH: %v", err)
-			}
-			if string(got) != tomlContent {
-				t.Fatalf("rejected PATCH changed TOML:\n%s", got)
-			}
-		})
 	}
 }
 

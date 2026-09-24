@@ -3,78 +3,10 @@ package github
 import (
 	"strings"
 	"time"
-
-	"github.com/heimdallm/daemon/internal/config"
 )
 
 type User struct {
 	Login string `json:"login"`
-}
-
-// Label is a GitHub label stripped down to the field the pipeline needs.
-type Label struct {
-	Name string `json:"name"`
-}
-
-// Issue mirrors a GitHub issue filtered and classified by FetchIssues.
-//
-// The JSON field `pull_request` on the wire distinguishes issues from PRs
-// when using the `GET /repos/{owner}/{repo}/issues` endpoint (which returns
-// both). `PullRequest` is a probe field — when non-nil the record is a PR
-// and FetchIssues drops it. We do not unmarshal its contents.
-//
-// `Mode` is populated client-side by FetchIssues after running the
-// config-driven label classifier so downstream consumers (the pipeline in
-// #26 / #27) don't need to re-apply the precedence rules.
-type Issue struct {
-	ID          int64     `json:"id"`
-	Number      int       `json:"number"`
-	Title       string    `json:"title"`
-	Body        string    `json:"body"`
-	HTMLURL     string    `json:"html_url"`
-	User        User      `json:"user"`
-	Assignees   []User    `json:"assignees"`
-	Labels      []Label   `json:"labels"`
-	State       string    `json:"state"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	PullRequest *struct{} `json:"pull_request,omitempty"`
-	// Repository is populated by GitHub on endpoints that can return issues
-	// from more than one repo in a single response (e.g. the sub-issues
-	// endpoint — same-owner, possibly cross-repo children). Kept as a
-	// pointer so the extra field is zero-cost when the endpoint doesn't
-	// include it. Consumers normally read Repo (below) — that's set by
-	// the client from this field when present, else from the parent
-	// context.
-	Repository *Repo            `json:"repository,omitempty"`
-	Repo       string           `json:"-"`
-	Mode       config.IssueMode `json:"-"`
-}
-
-// IsPullRequest reports whether the record returned by the issues endpoint is
-// actually a pull request. The issues API returns both; the pipeline only
-// wants plain issues.
-func (i *Issue) IsPullRequest() bool {
-	return i.PullRequest != nil
-}
-
-// LabelNames extracts label names as a plain string slice for use with
-// IssueTrackingConfig.Classify and for logging / storage.
-func (i *Issue) LabelNames() []string {
-	out := make([]string, len(i.Labels))
-	for idx, l := range i.Labels {
-		out[idx] = l.Name
-	}
-	return out
-}
-
-// AssigneeLogins returns the logins assigned to the issue (may be empty).
-func (i *Issue) AssigneeLogins() []string {
-	out := make([]string, len(i.Assignees))
-	for idx, a := range i.Assignees {
-		out[idx] = a.Login
-	}
-	return out
 }
 
 type Repo struct {
@@ -84,10 +16,9 @@ type Repo struct {
 type Branch struct {
 	Repo Repo   `json:"repo"`
 	SHA  string `json:"sha"`
-	// Ref is the branch name (e.g. "heimdallm/issue-42"). Returned by
-	// the Pulls API but not the Search Issues API; the review-state
-	// fix flow (#482 phase 3) reads it to push back to the same
-	// branch the PR was opened from.
+	// Ref is the branch name. Returned by the Pulls API but not the
+	// Search Issues API; merge tracking reads it to check out and
+	// force-push the PR's head branch when resolving conflicts.
 	Ref string `json:"ref"`
 }
 

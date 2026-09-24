@@ -71,16 +71,6 @@ func (r *Recorder) handle(ev sse.Event) error {
 		return r.recordReviewError(ev)
 	case sse.EventReviewSkipped:
 		return r.recordReviewSkipped(ev)
-	case sse.EventIssueReviewCompleted:
-		return r.recordIssueTriage(ev)
-	case sse.EventIssueImplemented:
-		return r.recordIssueImplemented(ev)
-	case sse.EventIssueRefinementDone:
-		return r.recordIssueRefinementDone(ev)
-	case sse.EventIssueReviewError:
-		return r.recordIssueReviewError(ev)
-	case sse.EventIssuePromoted:
-		return r.recordIssuePromoted(ev)
 	case sse.EventMergeTrackMerged:
 		return r.recordMergeTrackMerged(ev)
 	case sse.EventMergeTrackAutoMergeArmed:
@@ -157,124 +147,6 @@ func (r *Recorder) recordReviewError(ev sse.Event) error {
 	return err
 }
 
-func (r *Recorder) recordIssueTriage(ev sse.Event) error {
-	var p struct {
-		Repo         string `json:"repo"`
-		IssueNumber  int    `json:"issue_number"`
-		IssueTitle   string `json:"issue_title"`
-		CLIUsed      string `json:"cli_used"`
-		Severity     string `json:"severity"`
-		Category     string `json:"category"`
-		ChosenAction string `json:"chosen_action"`
-	}
-	if err := decode(ev.Data, &p); err != nil {
-		return err
-	}
-	outcome := p.Severity
-	if outcome == "" {
-		outcome = "ignored"
-	}
-	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
-		p.IssueNumber, p.IssueTitle, "triage", outcome, map[string]any{
-			"cli_used":      p.CLIUsed,
-			"category":      p.Category,
-			"chosen_action": p.ChosenAction,
-		})
-	return err
-}
-
-func (r *Recorder) recordIssueImplemented(ev sse.Event) error {
-	var p struct {
-		Repo        string `json:"repo"`
-		IssueNumber int    `json:"issue_number"`
-		Number      int    `json:"number"`
-		IssueTitle  string `json:"issue_title"`
-		CLIUsed     string `json:"cli_used"`
-		PRNumber    int    `json:"pr_number"`
-		PRCreated   int    `json:"pr_created"`
-		PRURL       string `json:"pr_url"`
-		Branch      string `json:"branch"`
-	}
-	if err := decode(ev.Data, &p); err != nil {
-		return err
-	}
-	issueNumber := firstNonZero(p.IssueNumber, p.Number)
-	prNumber := firstNonZero(p.PRNumber, p.PRCreated)
-	outcome := "pr_opened"
-	if prNumber == 0 {
-		outcome = "pr_failed"
-	}
-	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
-		issueNumber, p.IssueTitle, "implement", outcome, map[string]any{
-			"cli_used":  p.CLIUsed,
-			"pr_number": prNumber,
-			"pr_url":    p.PRURL,
-			"branch":    p.Branch,
-		})
-	return err
-}
-
-func (r *Recorder) recordIssueRefinementDone(ev sse.Event) error {
-	var p struct {
-		Repo        string `json:"repo"`
-		IssueNumber int    `json:"issue_number"`
-		Number      int    `json:"number"`
-		IssueTitle  string `json:"issue_title"`
-		CLIUsed     string `json:"cli_used"`
-		ReviewID    int64  `json:"review_id"`
-		PostOK      *bool  `json:"post_ok"`
-		Truncated   bool   `json:"truncated"`
-	}
-	if err := decode(ev.Data, &p); err != nil {
-		return err
-	}
-	issueNumber := firstNonZero(p.IssueNumber, p.Number)
-	postOK := true
-	if p.PostOK != nil {
-		postOK = *p.PostOK
-	}
-	outcome := "completed"
-	if !postOK {
-		outcome = "stored_locally"
-	}
-	details := map[string]any{
-		"cli_used":  p.CLIUsed,
-		"review_id": p.ReviewID,
-		"post_ok":   postOK,
-		"truncated": p.Truncated,
-	}
-	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
-		issueNumber, p.IssueTitle, "refinement", outcome, details)
-	return err
-}
-
-func firstNonZero(primary, fallback int) int {
-	if primary != 0 {
-		return primary
-	}
-	return fallback
-}
-
-func (r *Recorder) recordIssueReviewError(ev sse.Event) error {
-	var p struct {
-		Repo        string `json:"repo"`
-		IssueNumber int    `json:"issue_number"`
-		IssueTitle  string `json:"issue_title"`
-		CLIUsed     string `json:"cli_used"`
-		Error       string `json:"error"`
-	}
-	if err := decode(ev.Data, &p); err != nil {
-		return err
-	}
-	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
-		p.IssueNumber, p.IssueTitle, "error", p.Error, map[string]any{
-			"item_type": "issue",
-			"cli_used":  p.CLIUsed,
-			"error":     p.Error,
-		})
-	return err
-}
-
 // dedupSkipReasons are review_skipped reasons that fire on routine
 // poll cycles rather than user-visible policy decisions, and therefore
 // should NOT produce activity_log rows. Recording them would spam the
@@ -335,47 +207,6 @@ func (r *Recorder) recordReviewSkipped(ev sse.Event) error {
 	}
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
 		p.PRNumber, p.PRTitle, "review_skipped", p.Reason, details)
-	return err
-}
-
-func (r *Recorder) recordIssuePromoted(ev sse.Event) error {
-	var p struct {
-		Repo        string `json:"repo"`
-		IssueNumber int    `json:"issue_number"`
-		IssueTitle  string `json:"issue_title"`
-		FromLabel   string `json:"from_label"`
-		ToLabel     string `json:"to_label"`
-		FromStage   string `json:"from_stage"`
-		ToStage     string `json:"to_stage"`
-		Trigger     string `json:"trigger"`
-		Reason      string `json:"reason"`
-	}
-	if err := decode(ev.Data, &p); err != nil {
-		return err
-	}
-	from := p.FromLabel
-	to := p.ToLabel
-	if p.FromStage != "" || p.ToStage != "" {
-		from = p.FromStage
-		to = p.ToStage
-	}
-	details := map[string]any{}
-	if p.FromStage != "" || p.ToStage != "" {
-		details["from_stage"] = p.FromStage
-		details["to_stage"] = p.ToStage
-	} else {
-		details["from_label"] = p.FromLabel
-		details["to_label"] = p.ToLabel
-	}
-	if p.Trigger != "" {
-		details["trigger"] = p.Trigger
-	}
-	if p.Reason != "" {
-		details["reason"] = p.Reason
-	}
-	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
-		p.IssueNumber, p.IssueTitle, "promote",
-		from+" → "+to, details)
 	return err
 }
 

@@ -17,9 +17,9 @@ func TestPrepareDrainsWithoutCancellingActiveWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire review: %v", err)
 	}
-	implementation, err := g.Acquire(KindImplementation)
+	mergeTrack, err := g.Acquire(KindMergeTracking)
 	if err != nil {
-		t.Fatalf("Acquire implementation: %v", err)
+		t.Fatalf("Acquire merge tracking: %v", err)
 	}
 
 	snapshot, err := g.Prepare("owner-a")
@@ -29,12 +29,12 @@ func TestPrepareDrainsWithoutCancellingActiveWork(t *testing.T) {
 	if !snapshot.Draining || snapshot.LeaseID != "owner-a" || snapshot.Total() != 2 {
 		t.Fatalf("Prepare snapshot = %+v, want owner-a draining with 2 active", snapshot)
 	}
-	if _, err := g.Acquire(KindIssue); !errors.Is(err, ErrDraining) {
+	if _, err := g.Acquire(KindPublish); !errors.Is(err, ErrDraining) {
 		t.Fatalf("Acquire during drain error = %v, want ErrDraining", err)
 	}
 
 	review.Release()
-	implementation.Release()
+	mergeTrack.Release()
 	if got := g.Status().Total(); got != 0 {
 		t.Fatalf("active total after Release = %d, want 0", got)
 	}
@@ -349,14 +349,14 @@ func TestAcquireAndPrepareAreAtomic(t *testing.T) {
 
 func TestAcquireContextReusesOuterPermit(t *testing.T) {
 	g := New(time.Minute)
-	ctx, outer, owned, err := g.AcquireContext(context.Background(), KindAutonomous)
+	ctx, outer, owned, err := g.AcquireContext(context.Background(), KindMaintenance)
 	if err != nil || !owned {
 		t.Fatalf("outer AcquireContext = (%v, %v), want owned permit", owned, err)
 	}
 	if _, err := g.Prepare("owner-a"); err != nil {
 		t.Fatal(err)
 	}
-	_, nested, nestedOwned, err := g.AcquireContext(ctx, KindImplementation)
+	_, nested, nestedOwned, err := g.AcquireContext(ctx, KindMergeTracking)
 	if err != nil || nestedOwned || nested != outer {
 		t.Fatalf("nested AcquireContext = (%p, %v, %v), want reused %p", nested, nestedOwned, err, outer)
 	}

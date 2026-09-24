@@ -190,14 +190,13 @@ func TestApplyStore_AgentConfigs_PartialFailureLeavesCfgUntouched(t *testing.T) 
 	}
 }
 
-func TestApplyStore_MergesStoreOnlyRepositoriesAndIssueTracking(t *testing.T) {
+func TestApplyStore_MergesStoreOnlyRepositories(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.GitHub.Repositories = []string{"toml/one"}
 
 	rows := map[string]string{
-		"repositories":   `["store/a","store/b"]`,
-		"issue_tracking": `{"enabled":true,"filter_mode":"inclusive","develop_labels":["feature","bug"],"default_action":"review_only"}`,
+		"repositories": `["store/a","store/b"]`,
 	}
 
 	if err := cfg.ApplyStore(rows); err != nil {
@@ -207,19 +206,6 @@ func TestApplyStore_MergesStoreOnlyRepositoriesAndIssueTracking(t *testing.T) {
 	wantRepos := []string{"toml/one", "store/a", "store/b"}
 	if fmt.Sprintf("%v", cfg.GitHub.Repositories) != fmt.Sprintf("%v", wantRepos) {
 		t.Errorf("Repositories = %v, want %v", cfg.GitHub.Repositories, wantRepos)
-	}
-	it := cfg.GitHub.IssueTracking
-	if !it.Enabled {
-		t.Errorf("IssueTracking.Enabled = false, want true")
-	}
-	if it.FilterMode != FilterModeInclusive {
-		t.Errorf("FilterMode = %q, want inclusive", it.FilterMode)
-	}
-	if len(it.DevelopLabels) != 2 || it.DevelopLabels[0] != "feature" || it.DevelopLabels[1] != "bug" {
-		t.Errorf("DevelopLabels = %v, want [feature bug]", it.DevelopLabels)
-	}
-	if it.DefaultAction != "review_only" {
-		t.Errorf("DefaultAction = %q, want review_only", it.DefaultAction)
 	}
 }
 
@@ -445,11 +431,11 @@ func TestMergeStoreLayer_FailsValidationOnBadMergedCfg(t *testing.T) {
 	cfg.applyDefaults()
 	cfg.AI.Primary = "claude"
 	originalPollInterval := cfg.GitHub.PollInterval
-	cfg.GitHub.IssueTracking.Assignees = []string{"original"}
+	cfg.GitHub.Repositories = []string{"original/repo"}
 
 	store := &fakeStoreLister{rows: map[string]string{
-		"poll_interval":  "48h", // parseable string, but above the 24h ceiling
-		"issue_tracking": `{"assignees":["mutated"]}`,
+		"poll_interval": "48h", // parseable string, but above the 24h ceiling
+		"repositories":  `["mutated/repo"]`,
 	}}
 
 	if err := cfg.MergeStoreLayer(store); err == nil {
@@ -459,8 +445,8 @@ func TestMergeStoreLayer_FailsValidationOnBadMergedCfg(t *testing.T) {
 		t.Fatalf("PollInterval mutated to %q after failed validation; want %q",
 			cfg.GitHub.PollInterval, originalPollInterval)
 	}
-	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "original" {
-		t.Fatalf("nested issue-tracking slice mutated after failed validation: %v", got)
+	if got := cfg.GitHub.Repositories; len(got) != 1 || got[0] != "original/repo" {
+		t.Fatalf("repositories slice mutated after failed validation: %v", got)
 	}
 }
 
@@ -471,12 +457,9 @@ func TestMergeStoreLayer_SanitizesLegacyUnsafeAgentFieldWithoutDroppingLayer(t *
 	cfg.AI.Agents = map[string]CLIAgentConfig{
 		"codex": {ExtraFlags: "--json"},
 	}
-	cfg.GitHub.IssueTracking.Assignees = []string{"toml-user"}
-
 	store := &fakeStoreLister{rows: map[string]string{
-		"agent_configs":  `{"codex":{"extra_flags":"--sandbox danger-full-access"}}`,
-		"poll_interval":  "30m",
-		"issue_tracking": `{"assignees":["store-user"]}`,
+		"agent_configs": `{"codex":{"extra_flags":"--sandbox danger-full-access"}}`,
+		"poll_interval": "30m",
 	}}
 
 	if err := cfg.MergeStoreLayer(store); err != nil {
@@ -487,9 +470,6 @@ func TestMergeStoreLayer_SanitizesLegacyUnsafeAgentFieldWithoutDroppingLayer(t *
 	}
 	if cfg.GitHub.PollInterval != "30m" {
 		t.Fatalf("valid store poll_interval was discarded: %q", cfg.GitHub.PollInterval)
-	}
-	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "store-user" {
-		t.Fatalf("valid issue_tracking row was discarded: %v", got)
 	}
 }
 
@@ -603,26 +583,6 @@ func TestApplyStore_PartialFailure_LeavesCfgUnchanged(t *testing.T) {
 	}
 }
 
-func TestApplyStore_PartialIssueTrackingDecodeLeavesNestedSlicesUnchanged(t *testing.T) {
-	cfg := &Config{}
-	cfg.applyDefaults()
-	cfg.AI.Primary = "claude"
-	// Spare capacity makes encoding/json reuse the backing array while
-	// decoding, which exposes shallow-copy rollback bugs deterministically.
-	cfg.GitHub.IssueTracking.Assignees = make([]string, 1, 4)
-	cfg.GitHub.IssueTracking.Assignees[0] = "original"
-
-	err := cfg.ApplyStore(map[string]string{
-		"issue_tracking": `{"assignees":["mutated"],"enabled":"not-a-bool"}`,
-	})
-	if err == nil {
-		t.Fatal("expected malformed issue_tracking row to fail")
-	}
-	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "original" {
-		t.Fatalf("nested issue-tracking slice mutated after failed decode: %v", got)
-	}
-}
-
 func TestApplyStore_ServerPort_IsIgnored(t *testing.T) {
 	// server_port is bootstrap-only: mutating the listening port at runtime
 	// would invalidate every in-flight connection and the web UI has no
@@ -637,71 +597,6 @@ func TestApplyStore_ServerPort_IsIgnored(t *testing.T) {
 	}
 	if cfg.Server.Port != 7842 {
 		t.Errorf("Server.Port = %d, want 7842 (server_port row must be ignored)", cfg.Server.Port)
-	}
-}
-
-func TestApplyStore_IssueTracking_PreservesFieldsAbsentFromStoredJSON(t *testing.T) {
-	// Real-world scenario: a user saved issue_tracking via the UI with an
-	// older build that didn't know about BlockedLabels/PromoteToLabel. The
-	// row in `configs` only carries the eight fields the old build knew
-	// about. After upgrading the daemon, HEIMDALLM_ISSUE_BLOCKED_LABELS
-	// env var fills those new fields in applyEnvOverrides — and then
-	// ApplyStore must NOT clobber them back to zero just because the
-	// stored JSON doesn't mention them.
-	//
-	// Implementation contract: json.Unmarshal into the existing struct
-	// (not into a fresh zero value) so absent keys preserve the incoming
-	// value.
-	cfg := &Config{}
-	cfg.applyDefaults()
-	// Simulate applyEnvOverrides having populated the "new" fields.
-	cfg.GitHub.IssueTracking.BlockedLabels = []string{"heimdallm-queued"}
-	cfg.GitHub.IssueTracking.PromoteToLabel = "develop"
-	cfg.GitHub.IssueTracking.Enabled = true
-
-	// Stored JSON from an older UI save — no blocked_labels / promote_to_label.
-	rows := map[string]string{
-		"issue_tracking": `{"enabled":true,"filter_mode":"exclusive","default_action":"ignore","develop_labels":["develop"],"skip_labels":["wontfix"],"organizations":[],"assignees":[],"review_only_labels":[]}`,
-	}
-
-	if err := cfg.ApplyStore(rows); err != nil {
-		t.Fatalf("ApplyStore: %v", err)
-	}
-
-	it := cfg.GitHub.IssueTracking
-	// Fields the stored JSON DID set must have landed:
-	if len(it.DevelopLabels) != 1 || it.DevelopLabels[0] != "develop" {
-		t.Errorf("DevelopLabels = %v, want [develop]", it.DevelopLabels)
-	}
-	if len(it.SkipLabels) != 1 || it.SkipLabels[0] != "wontfix" {
-		t.Errorf("SkipLabels = %v, want [wontfix]", it.SkipLabels)
-	}
-	// Fields the stored JSON did NOT set must survive from the env layer:
-	if len(it.BlockedLabels) != 1 || it.BlockedLabels[0] != "heimdallm-queued" {
-		t.Errorf("BlockedLabels = %v, want [heimdallm-queued] — stored JSON had no blocked_labels key, env value should survive", it.BlockedLabels)
-	}
-	if it.PromoteToLabel != "develop" {
-		t.Errorf("PromoteToLabel = %q, want develop — stored JSON had no promote_to_label key, env value should survive", it.PromoteToLabel)
-	}
-}
-
-func TestApplyStore_IssueTracking_ExplicitEmptyListStillClears(t *testing.T) {
-	// Symmetric contract: when the stored JSON DOES include a field and
-	// its value is an empty list, that IS a meaningful signal ("operator
-	// cleared this via UI") and must overwrite env. The fix for stale-
-	// JSON preservation cannot silently turn explicit `[]` into "no-op".
-	cfg := &Config{}
-	cfg.applyDefaults()
-	cfg.GitHub.IssueTracking.DevelopLabels = []string{"from-env"}
-
-	rows := map[string]string{
-		"issue_tracking": `{"enabled":false,"filter_mode":"exclusive","default_action":"ignore","develop_labels":[]}`,
-	}
-	if err := cfg.ApplyStore(rows); err != nil {
-		t.Fatalf("ApplyStore: %v", err)
-	}
-	if len(cfg.GitHub.IssueTracking.DevelopLabels) != 0 {
-		t.Errorf("DevelopLabels = %v, want empty — explicit [] in stored JSON must override env", cfg.GitHub.IssueTracking.DevelopLabels)
 	}
 }
 

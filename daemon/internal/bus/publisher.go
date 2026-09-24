@@ -100,52 +100,6 @@ func (p *PRPublishPublisher) PublishPRPublish(_ context.Context, reviewID int64)
 	return nil
 }
 
-// NATSIssuePublisher publishes classified issues to NATS.
-type NATSIssuePublisher struct {
-	conn *nats.Conn
-}
-
-// NewIssuePublisher creates a publisher for issue triage, refinement, and implement subjects.
-func NewIssuePublisher(conn *nats.Conn) *NATSIssuePublisher {
-	return &NATSIssuePublisher{conn: conn}
-}
-
-// PublishIssueTriage publishes a review_only issue to the triage subject.
-func (p *NATSIssuePublisher) PublishIssueTriage(_ context.Context, repo string, number int, githubID int64) error {
-	data, err := Encode(IssueMsg{Repo: repo, Number: number, GithubID: githubID})
-	if err != nil {
-		return fmt.Errorf("bus: encode issue triage: %w", err)
-	}
-	if err := p.conn.Publish(SubjIssueTriage, data); err != nil {
-		return fmt.Errorf("bus: publish issue triage: %w", err)
-	}
-	return nil
-}
-
-// PublishIssueRefinement publishes a refinement issue to the refinement subject.
-func (p *NATSIssuePublisher) PublishIssueRefinement(_ context.Context, repo string, number int, githubID int64) error {
-	data, err := Encode(IssueMsg{Repo: repo, Number: number, GithubID: githubID})
-	if err != nil {
-		return fmt.Errorf("bus: encode issue refinement: %w", err)
-	}
-	if err := p.conn.Publish(SubjIssueRefinement, data); err != nil {
-		return fmt.Errorf("bus: publish issue refinement: %w", err)
-	}
-	return nil
-}
-
-// PublishIssueImplement publishes a develop issue to the implement subject.
-func (p *NATSIssuePublisher) PublishIssueImplement(_ context.Context, repo string, number int, githubID int64) error {
-	data, err := Encode(IssueMsg{Repo: repo, Number: number, GithubID: githubID})
-	if err != nil {
-		return fmt.Errorf("bus: encode issue implement: %w", err)
-	}
-	if err := p.conn.Publish(SubjIssueImplement, data); err != nil {
-		return fmt.Errorf("bus: publish issue implement: %w", err)
-	}
-	return nil
-}
-
 // StateCheckPublisher publishes state check requests to NATS.
 type StateCheckPublisher struct {
 	conn *nats.Conn

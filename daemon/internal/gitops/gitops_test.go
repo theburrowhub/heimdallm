@@ -1,14 +1,15 @@
-package issues_test
+package gitops_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/heimdallm/daemon/internal/issues"
+	"github.com/heimdallm/daemon/internal/gitops"
 )
 
 func TestGitExecIgnoresManagedCloneMarker(t *testing.T) {
@@ -31,26 +32,11 @@ func TestGitExecIgnoresManagedCloneMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	git := issues.NewGitExec()
-	hasChanges, err := git.HasChanges(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("HasChanges marker-only: %v", err)
-	}
-	if hasChanges {
-		t.Fatal("marker-only worktree must not count as auto_implement changes")
-	}
-
+	git := gitops.NewGitExec()
 	if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("real change\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hasChanges, err = git.HasChanges(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("HasChanges real file: %v", err)
-	}
-	if !hasChanges {
-		t.Fatal("real worktree changes must still be detected")
-	}
-	if err := git.CommitAll(context.Background(), dir, "fix: add real change"); err != nil {
+	if err := commitAll(git, dir, "fix: add real change"); err != nil {
 		t.Fatalf("CommitAll: %v", err)
 	}
 
@@ -66,10 +52,10 @@ func TestGitExecIgnoresManagedCloneMarker(t *testing.T) {
 	}
 }
 
-func TestCommitAll_RefusesSensitivePaths(t *testing.T) {
+func TestStageAll_Commit_RefusesSensitivePaths(t *testing.T) {
 	// Prompt-injection defense: a compromised AI run could write
 	// secrets (.env, *.pem, config.toml) into the worktree to
-	// exfiltrate via the PR diff. CommitAll must scan staged files
+	// exfiltrate via the PR diff. StageAll must scan staged files
 	// against a denylist and refuse the commit before push.
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git binary not available")
@@ -95,8 +81,8 @@ func TestCommitAll_RefusesSensitivePaths(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			git := issues.NewGitExec()
-			err := git.CommitAll(context.Background(), dir, "fix: legit")
+			git := gitops.NewGitExec()
+			err := commitAll(git, dir, "fix: legit")
 			if err == nil {
 				t.Fatalf("CommitAll accepted sensitive path %q (M-? bypass)", filename)
 			}
@@ -118,7 +104,7 @@ func TestCommitAll_RefusesSensitivePaths(t *testing.T) {
 	}
 }
 
-func TestCommitAll_RefusesSensitivePathsCaseInsensitive(t *testing.T) {
+func TestStageAll_Commit_RefusesSensitivePathsCaseInsensitive(t *testing.T) {
 	// macOS/Windows default to case-insensitive filesystems, where
 	// `.ENV` resolves to the same file as `.env`. Lowercasing the
 	// basename before matching closes that bypass.
@@ -141,7 +127,7 @@ func TestCommitAll_RefusesSensitivePathsCaseInsensitive(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err := issues.NewGitExec().CommitAll(context.Background(), dir, "fix")
+			err := commitAll(gitops.NewGitExec(), dir, "fix")
 			if err == nil {
 				t.Fatalf("CommitAll accepted case-variant %q (case-insensitive bypass)", filename)
 			}
@@ -149,7 +135,7 @@ func TestCommitAll_RefusesSensitivePathsCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestCommitAll_RefusesSensitivePathsNested(t *testing.T) {
+func TestStageAll_Commit_RefusesSensitivePathsNested(t *testing.T) {
 	// Nested paths under arbitrary subdirectories must still be
 	// caught — match is on basename so directory depth is irrelevant.
 	if _, err := exec.LookPath("git"); err != nil {
@@ -173,7 +159,7 @@ func TestCommitAll_RefusesSensitivePathsNested(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := issues.NewGitExec().CommitAll(context.Background(), dir, "fix")
+	err := commitAll(gitops.NewGitExec(), dir, "fix")
 	if err == nil {
 		t.Fatalf("CommitAll accepted nested sensitive path")
 	}
@@ -182,11 +168,11 @@ func TestCommitAll_RefusesSensitivePathsNested(t *testing.T) {
 	}
 }
 
-func TestCommitAll_RetryAfterDenylistDoesNotLoop(t *testing.T) {
+func TestStageAll_Commit_RetryAfterDenylistDoesNotLoop(t *testing.T) {
 	// On a denylist hit we reset the index AND remove the offending
 	// file from disk so a subsequent `git add -A` does not re-stage
-	// the same secret. Without disk cleanup, the auto-implement
-	// pipeline would loop forever on the same content.
+	// the same secret. Without disk cleanup, a conflict-resolution
+	// retry would loop forever on the same content.
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git binary not available")
 	}
@@ -207,8 +193,8 @@ func TestCommitAll_RetryAfterDenylistDoesNotLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	git := issues.NewGitExec()
-	if err := git.CommitAll(context.Background(), dir, "fix"); err == nil {
+	git := gitops.NewGitExec()
+	if err := commitAll(git, dir, "fix"); err == nil {
 		t.Fatal("first CommitAll should refuse")
 	}
 	// The sensitive file must be gone from disk so the next
@@ -222,12 +208,12 @@ func TestCommitAll_RetryAfterDenylistDoesNotLoop(t *testing.T) {
 		t.Fatalf("legitimate edit was wiped or not preserved: data=%q err=%v", string(data), err)
 	}
 	// And a retry without the sensitive file must succeed.
-	if err := git.CommitAll(context.Background(), dir, "fix"); err != nil {
+	if err := commitAll(git, dir, "fix"); err != nil {
 		t.Fatalf("retry CommitAll: %v", err)
 	}
 }
 
-func TestCommitAll_RefusesSymlinkEvenWithInnocentBasename(t *testing.T) {
+func TestStageAll_Commit_RefusesSymlinkEvenWithInnocentBasename(t *testing.T) {
 	// Defense-in-depth: a symlink with an innocent basename can still
 	// signal an AI run trying to reach outside the worktree. Reject
 	// it so the intent never leaves the daemon.
@@ -249,7 +235,7 @@ func TestCommitAll_RefusesSymlinkEvenWithInnocentBasename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := issues.NewGitExec().CommitAll(context.Background(), dir, "fix")
+	err := commitAll(gitops.NewGitExec(), dir, "fix")
 	if err == nil {
 		t.Fatal("CommitAll accepted symlink with innocent basename")
 	}
@@ -258,7 +244,7 @@ func TestCommitAll_RefusesSymlinkEvenWithInnocentBasename(t *testing.T) {
 	}
 }
 
-func TestCommitAll_AllowsConfigTomlInSubdir(t *testing.T) {
+func TestStageAll_Commit_AllowsConfigTomlInSubdir(t *testing.T) {
 	// config.toml is denied at the repo root (Heimdallm's operator
 	// config) but allowed in subdirectories where projects often
 	// keep example fixtures.
@@ -283,12 +269,12 @@ func TestCommitAll_AllowsConfigTomlInSubdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := issues.NewGitExec().CommitAll(context.Background(), dir, "docs: add example"); err != nil {
+	if err := commitAll(gitops.NewGitExec(), dir, "docs: add example"); err != nil {
 		t.Fatalf("CommitAll rejected docs/examples/config.toml: %v", err)
 	}
 }
 
-func TestCommitAll_AllowsPublicSSHKeys(t *testing.T) {
+func TestStageAll_Commit_AllowsPublicSSHKeys(t *testing.T) {
 	// Public SSH keys are not secrets and projects legitimately
 	// ship them (deploy-key docs, ssh tutorials, etc.).
 	if _, err := exec.LookPath("git"); err != nil {
@@ -308,12 +294,12 @@ func TestCommitAll_AllowsPublicSSHKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := issues.NewGitExec().CommitAll(context.Background(), dir, "docs: deploy key"); err != nil {
+	if err := commitAll(gitops.NewGitExec(), dir, "docs: deploy key"); err != nil {
 		t.Fatalf("CommitAll rejected public key: %v", err)
 	}
 }
 
-func TestCommitAll_AllowsLegitimateChanges(t *testing.T) {
+func TestStageAll_Commit_AllowsLegitimateChanges(t *testing.T) {
 	// Sanity: denylist must not block normal repo edits.
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git binary not available")
@@ -332,8 +318,8 @@ func TestCommitAll_AllowsLegitimateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	git := issues.NewGitExec()
-	if err := git.CommitAll(context.Background(), dir, "feat: add main"); err != nil {
+	git := gitops.NewGitExec()
+	if err := commitAll(git, dir, "feat: add main"); err != nil {
 		t.Fatalf("CommitAll rejected a legitimate edit: %v", err)
 	}
 }
@@ -347,4 +333,19 @@ func runGitForTest(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, string(out))
 	}
 	return string(out)
+}
+
+// commitAll stages through GitExec.StageAll — the code under test, which owns
+// the sensitive-path denylist — and then commits with plain git, so each case
+// can assert on what did or did not land in history.
+func commitAll(g *gitops.GitExec, dir, message string) error {
+	if err := g.StageAll(context.Background(), dir); err != nil {
+		return err
+	}
+	cmd := exec.Command("git", "commit", "-m", message)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %w: %s", err, out)
+	}
+	return nil
 }

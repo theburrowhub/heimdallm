@@ -1004,7 +1004,6 @@ type dispatchRequest struct {
 	// here" action against the hub itself), Repo+Number alone is enough for
 	// the receiving instance to resolve or adopt the PR.
 	GithubID int64  `json:"github_id"`
-	IssueID  int64  `json:"issue_id"`
 	Repo     string `json:"repo"`
 	Number   int    `json:"number"`
 	HeadSHA  string `json:"head_sha"`
@@ -1023,10 +1022,10 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	op := strings.ToLower(chi.URLParam(r, "op"))
 	switch op {
-	case config.OpReview, config.OpMerge, config.OpIssue:
+	case config.OpReview, config.OpMerge:
 	default:
 		httpJSONErr(w, http.StatusBadRequest,
-			fmt.Sprintf("unknown operation %q; expected review, merge or issue", op))
+			fmt.Sprintf("unknown operation %q; expected review or merge", op))
 		return
 	}
 
@@ -1056,7 +1055,7 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 
 	// Deduplicate: a retry, or two GUI clients clicking at once, must not send
 	// the same work twice. A new head SHA is genuinely a new operation.
-	key := dispatchKey(op, req)
+	key := dispatchKey(req)
 	deps := srv.clusterDeps()
 	claimed := false
 	if deps != nil && deps.Store != nil {
@@ -1140,11 +1139,6 @@ func (srv *Server) executeDispatch(ctx context.Context, op string, inst instance
 				return errors.New("this daemon cannot trigger reviews")
 			}
 			return srv.triggerReviewFn(req.PRID)
-		case config.OpIssue:
-			if srv.triggerIssueReviewFn == nil {
-				return errors.New("this daemon cannot trigger issue reviews")
-			}
-			return srv.triggerIssueReviewFn(req.IssueID)
 		case config.OpMerge:
 			if srv.mergeTrackEvaluateFn == nil {
 				return errors.New("this daemon cannot evaluate merge tracking")
@@ -1166,8 +1160,6 @@ func (srv *Server) executeDispatch(ctx context.Context, op string, inst instance
 			Number:   req.Number,
 			URL:      req.PRURL,
 		})
-	case config.OpIssue:
-		return client.TriggerIssueReview(ctx, req.IssueID)
 	case config.OpMerge:
 		return client.EvaluateMergeTracking(ctx, req.PRID, req.DryRun)
 	}
@@ -1269,19 +1261,11 @@ func (srv *Server) resolveOrAdoptPR(req clusterTriggerReviewRequest) (*store.PR,
 	return srv.adoptPR(req.Repo, req.Number)
 }
 
-func dispatchKey(op string, req dispatchRequest) string {
-	switch op {
-	case config.OpIssue:
-		if req.Repo != "" && req.Number > 0 {
-			return fmt.Sprintf("%s#%d", req.Repo, req.Number)
-		}
-		return strconv.FormatInt(req.IssueID, 10)
-	default:
-		if req.Repo != "" && req.Number > 0 {
-			return fmt.Sprintf("%s#%d", req.Repo, req.Number)
-		}
-		return strconv.FormatInt(req.PRID, 10)
+func dispatchKey(req dispatchRequest) string {
+	if req.Repo != "" && req.Number > 0 {
+		return fmt.Sprintf("%s#%d", req.Repo, req.Number)
 	}
+	return strconv.FormatInt(req.PRID, 10)
 }
 
 // proxyAllowedPrefixes are the paths the hub will forward to an instance.
@@ -1293,9 +1277,9 @@ func dispatchKey(op string, req dispatchRequest) string {
 // respawn), /update/* (the replacement handshake is bound to a single process)
 // and /admin/* and /instances (no nested proxying).
 var proxyAllowedPrefixes = []string{
-	"/health", "/me", "/prs", "/issues", "/activity", "/stats",
+	"/health", "/me", "/prs", "/activity", "/stats",
 	"/github/rate_limit", "/agents", "/config", "/merge-tracking",
-	"/repos", "/events", "/logs/stream", "/reload",
+	"/events", "/logs/stream", "/reload",
 }
 
 // isStreamProxyPath reports whether path is one of the long-lived SSE routes.

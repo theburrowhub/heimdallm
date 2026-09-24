@@ -30,11 +30,7 @@ const (
 // MergeTrackingConfig configures the merge-readiness reconciler for PRs the
 // authenticated user authored or is assigned to. It is resolved per repo via
 // MergeTrackingForRepo (repo > org > global).
-//
-// Deliberately separate from AutonomousConfig: [autonomous] governs PRs the
-// agent itself opened from issues, while [merge_tracking] governs the human's
-// own PRs. Sharing one section would mean every decision needed a flag to tell
-// the two origins apart, and enabling one would drag in the other's risks.
+
 type MergeTrackingConfig struct {
 	Enabled bool `toml:"enabled"` // master switch / kill-switch
 
@@ -65,7 +61,7 @@ type MergeTrackingConfig struct {
 
 // MergeTrackingOverride is the per-org / per-repo override shape. Pointer
 // fields are nil when unset (inherit); set fields replace the inherited value.
-// Strings use the empty value as "inherit", matching AutonomousOverride.
+// Strings use the empty value as "inherit".
 type MergeTrackingOverride struct {
 	Enabled            *bool  `toml:"enabled,omitempty"`
 	EnableAutoMerge    *bool  `toml:"enable_auto_merge,omitempty"`
@@ -199,9 +195,8 @@ func ValidateMergeMethod(path, method string) error {
 	}
 }
 
-// validateMergeTracking enforces the [merge_tracking] invariants. Unlike
-// [autonomous].merge_method — which is historically unvalidated — an invalid
-// merge_method here is a hard config error: it would otherwise surface as a
+// validateMergeTracking enforces the [merge_tracking] invariants. An invalid
+// merge_method is a hard config error: it would otherwise surface as a
 // 422 from GitHub on every merge attempt, once per poll cycle, forever.
 func (c *Config) validateMergeTracking() error {
 	mt := c.MergeTracking

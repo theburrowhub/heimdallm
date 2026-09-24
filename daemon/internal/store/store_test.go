@@ -507,75 +507,6 @@ func TestSetConfigs_SurfacesWriteFailure(t *testing.T) {
 	}
 }
 
-func TestStore_AgentImplementFieldsRoundTrip(t *testing.T) {
-	s := newTestStore(t)
-
-	in := &store.Agent{
-		ID:                    "go-impl",
-		Name:                  "Go implementer",
-		CLI:                   "claude",
-		ImplementPrompt:       "custom full template for implementation",
-		ImplementInstructions: "use go 1.22 generics where helpful",
-	}
-	if err := s.UpsertAgent(in); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	got, err := s.ListAgents()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("want 1 agent, got %d", len(got))
-	}
-	if got[0].ImplementPrompt != in.ImplementPrompt {
-		t.Errorf("ImplementPrompt = %q, want %q", got[0].ImplementPrompt, in.ImplementPrompt)
-	}
-	if got[0].ImplementInstructions != in.ImplementInstructions {
-		t.Errorf("ImplementInstructions = %q, want %q", got[0].ImplementInstructions, in.ImplementInstructions)
-	}
-}
-
-// Activating an agent for one category MUST NOT touch the active flags of
-// the other two — this is the whole point of splitting the single is_default
-// into three per-category flags.
-func TestStore_UpsertAgent_ActivationIsPerCategory(t *testing.T) {
-	s := newTestStore(t)
-
-	// Seed a PR-review-active agent and an issue-triage-active agent.
-	if err := s.UpsertAgent(&store.Agent{ID: "a", Name: "A", IsDefaultPR: true}); err != nil {
-		t.Fatalf("upsert a: %v", err)
-	}
-	if err := s.UpsertAgent(&store.Agent{ID: "b", Name: "B", IsDefaultIssue: true}); err != nil {
-		t.Fatalf("upsert b: %v", err)
-	}
-
-	// Activate a new dev-only agent. Neither A (PR) nor B (issue) should flip.
-	if err := s.UpsertAgent(&store.Agent{ID: "c", Name: "C", IsDefaultDev: true}); err != nil {
-		t.Fatalf("upsert c: %v", err)
-	}
-
-	byID := map[string]*store.Agent{}
-	agents, err := s.ListAgents()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	for _, a := range agents {
-		byID[a.ID] = a
-	}
-	if !byID["a"].IsDefaultPR || byID["a"].IsDefaultIssue || byID["a"].IsDefaultDev {
-		t.Errorf("agent a: got (pr=%v issue=%v dev=%v), want (true false false)",
-			byID["a"].IsDefaultPR, byID["a"].IsDefaultIssue, byID["a"].IsDefaultDev)
-	}
-	if byID["b"].IsDefaultPR || !byID["b"].IsDefaultIssue || byID["b"].IsDefaultDev {
-		t.Errorf("agent b: got (pr=%v issue=%v dev=%v), want (false true false)",
-			byID["b"].IsDefaultPR, byID["b"].IsDefaultIssue, byID["b"].IsDefaultDev)
-	}
-	if byID["c"].IsDefaultPR || byID["c"].IsDefaultIssue || !byID["c"].IsDefaultDev {
-		t.Errorf("agent c: got (pr=%v issue=%v dev=%v), want (false false true)",
-			byID["c"].IsDefaultPR, byID["c"].IsDefaultIssue, byID["c"].IsDefaultDev)
-	}
-}
-
 // Activating a second agent for the SAME category must demote the first.
 func TestStore_UpsertAgent_ActivationReplacesWithinCategory(t *testing.T) {
 	s := newTestStore(t)
@@ -605,10 +536,10 @@ func TestStore_UpsertAgent_ActivationReplacesWithinCategory(t *testing.T) {
 	}
 }
 
-// Legacy rows with the old single `is_default=1` flag must seed all three
-// per-category flags the first time the new code opens the DB — otherwise
-// an upgrade would silently deactivate the user's only active agent.
-func TestStore_Migration_SeedsPerCategoryFlagsFromLegacyIsDefault(t *testing.T) {
+// Legacy rows with the old single `is_default=1` flag must seed the PR-review
+// flag the first time the new code opens the DB — otherwise an upgrade would
+// silently deactivate the user's only active agent.
+func TestStore_Migration_SeedsPRFlagFromLegacyIsDefault(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
 
 	// Simulate the old schema: CREATE TABLE without the per-category
@@ -650,8 +581,8 @@ func TestStore_Migration_SeedsPerCategoryFlagsFromLegacyIsDefault(t *testing.T) 
 	}
 	legacy.Close()
 
-	// Re-open with the current migration code — ALTER TABLE adds the three
-	// new columns and seeds each from `is_default`.
+	// Re-open with the current migration code — ALTER TABLE adds
+	// is_default_pr and seeds it from `is_default`.
 	s, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -667,39 +598,107 @@ func TestStore_Migration_SeedsPerCategoryFlagsFromLegacyIsDefault(t *testing.T) 
 		byID[a.ID] = a
 	}
 
-	if !byID["legacy"].IsDefaultPR || !byID["legacy"].IsDefaultIssue || !byID["legacy"].IsDefaultDev {
-		t.Errorf("legacy agent: got (pr=%v issue=%v dev=%v), want (true true true) after seed",
-			byID["legacy"].IsDefaultPR, byID["legacy"].IsDefaultIssue, byID["legacy"].IsDefaultDev)
+	if !byID["legacy"].IsDefaultPR {
+		t.Error("legacy agent: IsDefaultPR = false, want true after seed")
 	}
-	if byID["other"].IsDefaultPR || byID["other"].IsDefaultIssue || byID["other"].IsDefaultDev {
-		t.Errorf("other agent: got (pr=%v issue=%v dev=%v), want all false (was legacy is_default=0)",
-			byID["other"].IsDefaultPR, byID["other"].IsDefaultIssue, byID["other"].IsDefaultDev)
+	if byID["other"].IsDefaultPR {
+		t.Error("other agent: IsDefaultPR = true, want false (was legacy is_default=0)")
 	}
 }
 
-// DefaultAgentFor returns the agent active for the requested category and
-// ignores agents active in a different category.
-func TestStore_DefaultAgentFor_ReturnsPerCategoryAgent(t *testing.T) {
+// DefaultAgentFor returns the active review agent, and an error — not some
+// other agent — when none is active.
+func TestStore_DefaultAgentFor_ReturnsActiveAgent(t *testing.T) {
 	s := newTestStore(t)
+	if _, err := s.DefaultAgentFor(store.AgentCategoryPR); err == nil {
+		t.Fatal("DefaultAgentFor(pr) with no agents: want error, got nil")
+	}
+	if err := s.UpsertAgent(&store.Agent{ID: "idle", Name: "idle"}); err != nil {
+		t.Fatalf("upsert idle: %v", err)
+	}
 	if err := s.UpsertAgent(&store.Agent{ID: "pr-only", Name: "pr", IsDefaultPR: true}); err != nil {
 		t.Fatalf("upsert pr-only: %v", err)
-	}
-	if err := s.UpsertAgent(&store.Agent{ID: "issue-only", Name: "issue", IsDefaultIssue: true}); err != nil {
-		t.Fatalf("upsert issue-only: %v", err)
 	}
 
 	got, err := s.DefaultAgentFor(store.AgentCategoryPR)
 	if err != nil || got == nil || got.ID != "pr-only" {
 		t.Errorf("DefaultAgentFor(pr) = %+v, err=%v; want pr-only", got, err)
 	}
-	got, err = s.DefaultAgentFor(store.AgentCategoryIssue)
-	if err != nil || got == nil || got.ID != "issue-only" {
-		t.Errorf("DefaultAgentFor(issue) = %+v, err=%v; want issue-only", got, err)
+	if _, err := s.DefaultAgentFor(store.AgentCategory("issue")); err == nil {
+		t.Error("DefaultAgentFor(issue): want unknown-category error, got nil")
 	}
-	// No agent is dev-default — should return an error (ErrNoRows), not one
-	// of the other two.
-	if got, err := s.DefaultAgentFor(store.AgentCategoryDev); err == nil {
-		t.Errorf("DefaultAgentFor(dev) = %+v, want error for no-match", got)
+}
+
+// Databases created while Heimdallm still ran the issue pipelines must come
+// out of Open with that data gone and everything else untouched.
+func TestStore_Open_DropsLegacyIssuePipelineData(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id INTEGER PRIMARY KEY, github_id INTEGER, repo TEXT)`,
+		`CREATE TABLE issue_reviews (id INTEGER PRIMARY KEY, issue_id INTEGER)`,
+		`CREATE TABLE issue_triage_in_flight (issue_id INTEGER, updated_at TEXT, started_at DATETIME)`,
+		`INSERT INTO issues (id, github_id, repo) VALUES (1, 10, 'org/repo')`,
+		`CREATE TABLE watch_state (key TEXT PRIMARY KEY, type TEXT NOT NULL, repo TEXT NOT NULL,
+			number INTEGER NOT NULL, github_id INTEGER NOT NULL, next_check TEXT NOT NULL,
+			backoff_ns INTEGER NOT NULL, last_seen TEXT NOT NULL)`,
+		`INSERT INTO watch_state VALUES ('issue.10', 'issue', 'org/repo', 7, 10, '', 0, '')`,
+		`INSERT INTO watch_state VALUES ('pr.20', 'pr', 'org/repo', 1, 20, '', 0, '')`,
+		`CREATE TABLE configs (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO configs VALUES ('issue_tracking', '{"enabled":true}')`,
+		`INSERT INTO configs VALUES ('poll_interval', '5m')`,
+	} {
+		if _, err := legacy.Exec(stmt); err != nil {
+			t.Fatalf("seed legacy %q: %v", stmt, err)
+		}
+	}
+	legacy.Close()
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	for _, table := range []string{"issues", "issue_reviews", "issue_triage_in_flight"} {
+		var n int
+		if err := s.DB().QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+		).Scan(&n); err != nil {
+			t.Fatalf("inspect %s: %v", table, err)
+		}
+		if n != 0 {
+			t.Errorf("legacy table %s still exists after Open", table)
+		}
+	}
+	var watchTypes []string
+	rows, err := s.DB().Query(`SELECT type FROM watch_state ORDER BY key`)
+	if err != nil {
+		t.Fatalf("list watch_state: %v", err)
+	}
+	for rows.Next() {
+		var typ string
+		if err := rows.Scan(&typ); err != nil {
+			t.Fatalf("scan watch_state: %v", err)
+		}
+		watchTypes = append(watchTypes, typ)
+	}
+	rows.Close()
+	if len(watchTypes) != 1 || watchTypes[0] != "pr" {
+		t.Errorf("watch_state types = %v, want only the PR row", watchTypes)
+	}
+	cfgRows, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("list configs: %v", err)
+	}
+	if _, ok := cfgRows["issue_tracking"]; ok {
+		t.Error("stale issue_tracking config row survived Open")
+	}
+	if cfgRows["poll_interval"] != "5m" {
+		t.Errorf("poll_interval config row = %q, want it untouched", cfgRows["poll_interval"])
 	}
 }
 
@@ -804,98 +803,3 @@ func TestUpdatePRStateByGithubID(t *testing.T) {
 // ---------------------------------------------------------------------------
 // State-filter tests for Issues
 // ---------------------------------------------------------------------------
-
-func TestListIssues_StateFilter(t *testing.T) {
-	s := newTestStore(t)
-
-	now := time.Now().UTC().Truncate(time.Second)
-	openIssue := &store.Issue{GithubID: 401, Repo: "org/r", Number: 401, Title: "open issue", Author: "a", State: "open", CreatedAt: now, FetchedAt: now}
-	closedIssue := &store.Issue{GithubID: 402, Repo: "org/r", Number: 402, Title: "closed issue", Author: "a", State: "closed", CreatedAt: now, FetchedAt: now}
-
-	if _, err := s.UpsertIssue(openIssue); err != nil {
-		t.Fatalf("upsert open: %v", err)
-	}
-	if _, err := s.UpsertIssue(closedIssue); err != nil {
-		t.Fatalf("upsert closed: %v", err)
-	}
-
-	all, err := s.ListIssues()
-	if err != nil {
-		t.Fatalf("ListIssues() all: %v", err)
-	}
-	if len(all) != 2 {
-		t.Errorf("ListIssues() = %d, want 2", len(all))
-	}
-
-	open, err := s.ListIssues("open")
-	if err != nil {
-		t.Fatalf("ListIssues(open): %v", err)
-	}
-	if len(open) != 1 {
-		t.Errorf("ListIssues(open) = %d, want 1", len(open))
-	}
-	if open[0].State != "open" {
-		t.Errorf("ListIssues(open)[0].State = %q, want open", open[0].State)
-	}
-
-	closed, err := s.ListIssues("closed")
-	if err != nil {
-		t.Fatalf("ListIssues(closed): %v", err)
-	}
-	if len(closed) != 1 {
-		t.Errorf("ListIssues(closed) = %d, want 1", len(closed))
-	}
-	if closed[0].State != "closed" {
-		t.Errorf("ListIssues(closed)[0].State = %q, want closed", closed[0].State)
-	}
-}
-
-func TestUpdateIssueState(t *testing.T) {
-	s := newTestStore(t)
-
-	now := time.Now().UTC().Truncate(time.Second)
-	id, err := s.UpsertIssue(&store.Issue{GithubID: 403, Repo: "org/r", Number: 403, Title: "t", Author: "a", State: "open", CreatedAt: now, FetchedAt: now})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-
-	if err := s.UpdateIssueState(id, "closed"); err != nil {
-		t.Fatalf("UpdateIssueState: %v", err)
-	}
-
-	closed, err := s.ListIssues("closed")
-	if err != nil {
-		t.Fatalf("ListIssues(closed): %v", err)
-	}
-	if len(closed) != 1 || closed[0].ID != id {
-		t.Errorf("expected 1 closed issue with id=%d, got %v", id, closed)
-	}
-	if closed[0].State != "closed" {
-		t.Errorf("State = %q, want closed", closed[0].State)
-	}
-}
-
-func TestUpdateIssueStateByGithubID(t *testing.T) {
-	s := newTestStore(t)
-
-	now := time.Now().UTC().Truncate(time.Second)
-	id, err := s.UpsertIssue(&store.Issue{GithubID: 404, Repo: "org/r", Number: 404, Title: "t", Author: "a", State: "open", CreatedAt: now, FetchedAt: now})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-
-	if err := s.UpdateIssueStateByGithubID(404, "closed"); err != nil {
-		t.Fatalf("UpdateIssueStateByGithubID: %v", err)
-	}
-
-	closed, err := s.ListIssues("closed")
-	if err != nil {
-		t.Fatalf("ListIssues(closed): %v", err)
-	}
-	if len(closed) != 1 || closed[0].ID != id {
-		t.Errorf("expected 1 closed issue with id=%d, got %v", id, closed)
-	}
-	if closed[0].GithubID != 404 {
-		t.Errorf("GithubID = %d, want 404", closed[0].GithubID)
-	}
-}

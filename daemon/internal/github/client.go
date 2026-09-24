@@ -80,7 +80,6 @@ type Client struct {
 	searchGate    atomic.Pointer[func() error]
 	graphqlGate   atomic.Pointer[func() error]
 	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
-	useGraphQL    atomic.Bool // when true, SearchIssues dispatches to GraphQL with REST fallback
 
 	// The authenticated login is immutable for the lifetime of a client (the
 	// token is immutable too). Cache it after the first successful lookup so
@@ -158,9 +157,9 @@ func (c *Client) SetRateObserver(o RateLimitObserver) {
 // pagination included. Returning an error aborts the search.
 //
 // The gate exists because the search budget (30/min) is metered separately
-// from core and one aggregated prefetch can issue several requests: one query
-// per assignee group, each up to the 10-page cap. Acquiring a single permit per
-// poll cycle counted one and spent many. Pass nil to disable.
+// from core and one PR search can span several pages, each up to the 10-page
+// cap. Acquiring a single permit per poll cycle counted one and spent many.
+// Pass nil to disable.
 func (c *Client) SetSearchGate(fn func() error) {
 	if fn == nil {
 		c.searchGate.Store(nil)
@@ -169,10 +168,11 @@ func (c *Client) SetSearchGate(fn func() error) {
 	c.searchGate.Store(&fn)
 }
 
-// SetGraphQLGate registers a hook invoked before every GraphQL request made
-// by the issue-search path. GitHub accounts GraphQL separately from REST
-// Search, so sharing the search gate can block a healthy GraphQL budget when
-// the much smaller REST Search budget is low.
+// SetGraphQLGate registers a hook invoked before every merge-tracking GraphQL
+// request (merge readiness, auto-merge arming). GitHub accounts GraphQL
+// separately from REST Search, so sharing the search gate can block a healthy
+// GraphQL budget when the much smaller REST Search budget is low. Pass nil to
+// disable.
 func (c *Client) SetGraphQLGate(fn func() error) {
 	if fn == nil {
 		c.graphqlGate.Store(nil)
@@ -330,7 +330,7 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 		}
 		// Do not cache paginated responses: a 304 re-serve would lose the
 		// Link header and break the caller's cursor-based pagination
-		// (e.g. FetchCollaborators). Serve the body normally without storing.
+		// (e.g. paginated lists). Serve the body normally without storing.
 		if resp.Header.Get("Link") != "" {
 			return resp, nil
 		}
@@ -728,21 +728,6 @@ func (c *Client) PostComment(repo string, number int, body string) (time.Time, e
 	return result.CreatedAt, nil
 }
 
-// MergePR merges a pull request using the given method ("squash"|"merge"|
-// "rebase"). Built for the autonomous merge gate, which is disabled by
-// default — this only runs when AutoMerge is explicitly enabled.
-//
-// It sends no expected head SHA, so a push landing between the caller's
-// decision and this request is merged silently. Merge tracking uses
-// MergePRAtSHA instead, which refuses that case. Migrating the autonomous gate
-// onto the same guard is tracked separately (see theburrowhub/heimdallm#674).
-func (c *Client) MergePR(repo string, number int, method string) error {
-	if _, err := c.mergePR(repo, number, method, ""); err != nil {
-		return err
-	}
-	return nil
-}
-
 // maxDiscoveryPages bounds the number of Search API pages consumed per org.
 // GitHub caps search results at 1000 entries (10 pages × 100 per_page); we stop
 // there to avoid endless pagination in the unlikely event of a malformed response.
@@ -994,7 +979,7 @@ func (c *Client) GetPRHeadInfo(repo string, number int) (PRHeadInfo, error) {
 
 // PRSnapshot is the subset of PR fields Tier 3's guard evaluator needs.
 // Returned by GetPRSnapshot in one call so the watch tier doesn't have to
-// combine GetIssue + GetPRHeadSHA. The Pulls API returns state="closed" for
+// combine several lookups. The Pulls API returns state="closed" for
 // merged PRs already (merged_at is non-null but the top-level state is still
 // normalised to "closed"), so Tier 3's not_open guard fires correctly without
 // an explicit merged_at check.
@@ -1280,16 +1265,6 @@ func (c *Client) FetchComments(repo string, number int) ([]Comment, error) {
 	return all, nil
 }
 
-// FetchIssueCommentsOnly retrieves the issue comments for an issue or PR
-// number WITHOUT also calling /pulls/:n/comments. Callers that operate on
-// issue numbers MUST use this method: /pulls/:n/comments always 404s on
-// issues, and FetchComments treats that as a hard error. See
-// theburrowhub/heimdallm#292 — the 404 cascade broke the marker-scan
-// idempotency check and produced a re-triage loop.
-func (c *Client) FetchIssueCommentsOnly(repo string, number int) ([]Comment, error) {
-	return c.fetchIssueComments(repo, number)
-}
-
 // TimelineEvent is a slim view of a GitHub PR timeline entry. Only the
 // two events the pipeline needs are surfaced: review_requested (someone
 // asked the reviewer for a review) and review_dismissed (someone
@@ -1553,175 +1528,7 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 		maxPaginationPages, repo, number, perPage)
 }
 
-// FetchLabels returns the label names for a repository.
-func (c *Client) FetchLabels(repo string) ([]string, error) {
-	if repo == "" {
-		return nil, nil
-	}
-	resp, err := c.do("GET", fmt.Sprintf("/repos/%s/labels?per_page=100", repo), "application/vnd.github+json")
-	if err != nil {
-		return nil, fmt.Errorf("github: fetch labels: %w", err)
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github: fetch labels %s: status %d", repo, resp.StatusCode)
-	}
-	var raw []struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("github: decode labels: %w", err)
-	}
-	names := make([]string, len(raw))
-	for i, l := range raw {
-		names[i] = l.Name
-	}
-	return names, nil
-}
-
-// CreateLabel creates a repository label. A 422 is tolerated only when GitHub
-// reports an already-existing label, which can happen if another process wins
-// the race after FetchLabels.
-func (c *Client) CreateLabel(repo, name, color, description string) error {
-	if repo == "" || name == "" {
-		return nil
-	}
-	color = strings.TrimPrefix(color, "#")
-	if !labelColorRE.MatchString(color) {
-		return fmt.Errorf("github: invalid label color %q", color)
-	}
-	payload, err := json.Marshal(map[string]string{
-		"name":        name,
-		"color":       color,
-		"description": description,
-	})
-	if err != nil {
-		return fmt.Errorf("github: marshal label: %w", err)
-	}
-	resp, err := c.doWithBody("POST",
-		fmt.Sprintf("/repos/%s/labels", repo),
-		"application/vnd.github+json", "application/json",
-		strings.NewReader(string(payload)))
-	if err != nil {
-		return fmt.Errorf("github: create label: %w", err)
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		if resp.StatusCode == http.StatusUnprocessableEntity && labelAlreadyExistsBody(body) {
-			return nil
-		}
-		return fmt.Errorf("github: create label %q in %s: status %d: %s", name, repo, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
-	}
-	return nil
-}
-
 func labelAlreadyExistsBody(body []byte) bool {
 	s := strings.ToLower(string(body))
 	return strings.Contains(s, "already_exists") || strings.Contains(s, "already exists")
-}
-
-// AddIssueLabel adds a label to an issue. No-op if the label is already present.
-func (c *Client) AddIssueLabel(repo string, number int, label string) error {
-	body := fmt.Sprintf(`{"labels":[%q]}`, label)
-	resp, err := c.doWithBody("POST",
-		fmt.Sprintf("/repos/%s/issues/%d/labels", repo, number),
-		"application/vnd.github+json", "application/json",
-		strings.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("github: add label: %w", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("github: add label %q to %s#%d: status %d", label, repo, number, resp.StatusCode)
-	}
-	return nil
-}
-
-// RemoveIssueLabel removes a label from an issue. No-op if the label is not present (404 ignored).
-func (c *Client) RemoveIssueLabel(repo string, number int, label string) error {
-	resp, err := c.do("DELETE",
-		fmt.Sprintf("/repos/%s/issues/%d/labels/%s", repo, number, url.PathEscape(label)),
-		"application/vnd.github+json")
-	if err != nil {
-		return fmt.Errorf("github: remove label: %w", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil // label not present — no-op
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("github: remove label %q from %s#%d: status %d", label, repo, number, resp.StatusCode)
-	}
-	return nil
-}
-
-// parseNextLink extracts the URL whose rel parameter is "next" from a GitHub
-// Link header. Returns "" when no such URL exists. The header format is:
-//
-//	<https://api.github.com/...&page=2>; rel="next", <...>; rel="last"
-//
-// We do not pull in a parser dependency; a small string scan is sufficient.
-func parseNextLink(header string) string {
-	for _, part := range strings.Split(header, ",") {
-		segs := strings.Split(strings.TrimSpace(part), ";")
-		if len(segs) < 2 {
-			continue
-		}
-		urlPart := strings.TrimSpace(segs[0])
-		if !strings.HasPrefix(urlPart, "<") || !strings.HasSuffix(urlPart, ">") {
-			continue
-		}
-		linkURL := urlPart[1 : len(urlPart)-1]
-		for _, s := range segs[1:] {
-			s = strings.TrimSpace(s)
-			if s == `rel="next"` || s == "rel=next" {
-				return linkURL
-			}
-		}
-	}
-	return ""
-}
-
-// FetchCollaborators returns the login names of repository collaborators,
-// following GitHub's Link: rel="next" header to walk every page.
-func (c *Client) FetchCollaborators(repo string) ([]string, error) {
-	if repo == "" {
-		return nil, nil
-	}
-	const maxPages = 100
-	path := fmt.Sprintf("/repos/%s/collaborators?per_page=100", repo)
-	var logins []string
-	for page := 0; page < maxPages; page++ {
-		resp, err := c.do("GET", path, "application/vnd.github+json")
-		if err != nil {
-			return nil, fmt.Errorf("github: fetch collaborators: %w", err)
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-		linkHeader := resp.Header.Get("Link")
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("github: fetch collaborators %s: status %d", repo, resp.StatusCode)
-		}
-		var raw []struct {
-			Login string `json:"login"`
-		}
-		if err := json.Unmarshal(body, &raw); err != nil {
-			return nil, fmt.Errorf("github: decode collaborators: %w", err)
-		}
-		for _, u := range raw {
-			logins = append(logins, u.Login)
-		}
-		next := parseNextLink(linkHeader)
-		if next == "" {
-			return logins, nil
-		}
-		nextURL, err := url.Parse(next)
-		if err != nil {
-			return nil, fmt.Errorf("github: parse next link %q: %w", next, err)
-		}
-		path = nextURL.RequestURI()
-	}
-	return nil, fmt.Errorf("github: fetch collaborators %s: pagination exceeded %d pages", repo, maxPages)
 }

@@ -712,9 +712,9 @@ func TestAcquireWorktreeWithBranchCreatesAndChecksOut(t *testing.T) {
 	h, err := m.Acquire(context.Background(), Request{
 		Repo:            "org/repo",
 		Token:           "secret",
-		WorktreeToken:   "develop-7",
+		WorktreeToken:   "merge-conflict-7",
 		WorktreeBaseRef: "main",
-		Branch:          "heimdallm/issue-7",
+		Branch:          "heimdallm/merge-7",
 	})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
@@ -728,7 +728,7 @@ func TestAcquireWorktreeWithBranchCreatesAndChecksOut(t *testing.T) {
 			break
 		}
 	}
-	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "develop-7.1"), "-b", "heimdallm/issue-7", "main"}
+	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "merge-conflict-7.1"), "-b", "heimdallm/merge-7", "main"}
 	if !reflect.DeepEqual(addArgs, want) {
 		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
 	}
@@ -1159,7 +1159,7 @@ func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
 		Repo:          "org/repo",
 		Token:         "secret",
 		Mode:          ModeRead,
-		WorktreeToken: "triage-42",
+		WorktreeToken: "merge-update-42",
 	})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
@@ -1167,7 +1167,7 @@ func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
 
 	// The manager appends a monotonic seq to disambiguate concurrent
 	// same-token acquires; the first acquire on a fresh manager is .1.
-	wantWT := filepath.Join(target, ".worktrees", "triage-42.1")
+	wantWT := filepath.Join(target, ".worktrees", "merge-update-42.1")
 	if h.Path() != wantWT {
 		t.Fatalf("handle path = %q, want %q", h.Path(), wantWT)
 	}
@@ -1246,12 +1246,12 @@ func TestAcquireRejectsInvalidWorktreeToken(t *testing.T) {
 
 func TestAcquireAcceptsValidWorktreeToken(t *testing.T) {
 	// Valid tokens cover the patterns the callsites use:
-	// stage-<n> (triage-42), <purpose>-<random> (inspect-deadbeef),
+	// <purpose>-<n> (merge-update-42), <purpose>-<random> (inspect-deadbeef),
 	// dotted decorations (pr-review-1234.retry).
 	good := []string{
-		"triage-42",
+		"merge-update-42",
 		"pr-review-1234",
-		"develop-7",
+		"merge-conflict-7",
 		"inspect-deadbeef",
 		"a",
 		"a_b-c.d",

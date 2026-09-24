@@ -211,12 +211,6 @@ func (c *Client) DispatchPRReview(ctx context.Context, ref PRDispatchRef) error 
 	return err
 }
 
-// TriggerIssueReview queues a triage run for an issue.
-func (c *Client) TriggerIssueReview(ctx context.Context, issueID int64) error {
-	_, _, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/review", issueID), nil, true)
-	return err
-}
-
 // EvaluateMergeTracking runs one merge-tracking evaluation for a PR.
 func (c *Client) EvaluateMergeTracking(ctx context.Context, prID int64, dryRun bool) error {
 	path := fmt.Sprintf("/merge-tracking/%d/evaluate?dry_run=%t", prID, dryRun)

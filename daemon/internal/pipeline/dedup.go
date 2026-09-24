@@ -3,13 +3,7 @@ package pipeline
 import "time"
 
 // GraceDefault is the standard updated_at grace window applied by the
-// PR review dedup (see PRAlreadyReviewed in cmd/heimdallm/main.go). The
-// issue triage path (daemon/internal/issues/fetcher.go) currently uses
-// its own RecomputeGrace = 30 * time.Second — NOT this constant. The two
-// are intentionally separate until a future task consolidates them
-// through this helper. When you do that consolidation, delete the
-// issue-side constant and route issues/fetcher.go through
-// ReviewFreshEnough.
+// PR review dedup (see PRAlreadyReviewed in cmd/heimdallm/main.go).
 //
 // 2 minutes absorbs GitHub replication lag plus any peer-bot submission
 // timing without suppressing legitimate human activity (a human push
@@ -23,10 +17,7 @@ const GraceDefault = 2 * time.Minute
 
 // ReviewFreshEnough returns true when observed (the GitHub updated_at we
 // just fetched) is within grace of anchor (the local timestamp we recorded
-// when the review was successfully posted). Intended to be shared by both
-// the PR and issue dedup paths; currently only the PR path calls it (the
-// issue path still uses issues.RecomputeGrace directly — see the comment
-// on GraceDefault above for the consolidation plan).
+// when the review was successfully posted).
 //
 // anchor.IsZero() is treated as "no fresh anchor, cannot dedup" — the
 // caller decides whether to fall back to an older anchor (e.g. CreatedAt

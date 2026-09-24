@@ -44,7 +44,6 @@ const (
 const (
 	OpReview = "review"
 	OpMerge  = "merge"
-	OpIssue  = "issue"
 )
 
 // DefaultClusterProbeInterval is how often the hub polls each instance's
@@ -429,10 +428,10 @@ func (c *Config) validateCluster() error {
 	}
 	for _, op := range cl.Routing.RoundRobinOps {
 		switch strings.ToLower(strings.TrimSpace(op)) {
-		case OpReview, OpMerge, OpIssue:
+		case OpReview, OpMerge:
 		default:
-			return fmt.Errorf("config: cluster.routing.round_robin_ops contains %q; allowed: %q, %q, %q",
-				op, OpReview, OpMerge, OpIssue)
+			return fmt.Errorf("config: cluster.routing.round_robin_ops contains %q; allowed: %q, %q",
+				op, OpReview, OpMerge)
 		}
 	}
 

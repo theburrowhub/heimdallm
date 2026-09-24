@@ -110,8 +110,7 @@ func (e *PRAlreadyMergedError) Error() string {
 // This is the merge path merge tracking uses, and the `sha` field is what makes
 // it safe: GitHub compares it against the current head and answers 409 if they
 // differ, so a push landing between evaluation and merge can never result in
-// merging an unreviewed commit. MergePR (without a sha) is kept for the
-// autonomous gate that predates this.
+// merging an unreviewed commit.
 func (c *Client) MergePRAtSHA(repo string, number int, method, expectedHeadSHA string) (MergeOutcome, error) {
 	if strings.TrimSpace(expectedHeadSHA) == "" {
 		return MergeOutcome{}, fmt.Errorf("github: merge %s#%d: expected head sha is required", repo, number)
@@ -119,16 +118,12 @@ func (c *Client) MergePRAtSHA(repo string, number int, method, expectedHeadSHA s
 	return c.mergePR(repo, number, method, expectedHeadSHA)
 }
 
-// mergePR is the shared implementation behind MergePR (no sha) and
-// MergePRAtSHA (sha enforced).
+// mergePR is the implementation behind MergePRAtSHA.
 func (c *Client) mergePR(repo string, number int, method, expectedHeadSHA string) (MergeOutcome, error) {
 	if method == "" {
 		method = "squash"
 	}
-	payload := map[string]any{"merge_method": method}
-	if expectedHeadSHA != "" {
-		payload["sha"] = expectedHeadSHA
-	}
+	payload := map[string]any{"merge_method": method, "sha": expectedHeadSHA}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return MergeOutcome{}, fmt.Errorf("github: marshal merge: %w", err)

@@ -1,4 +1,4 @@
-package issues
+package gitops
 
 import (
 	"context"
@@ -120,25 +120,6 @@ func (g *GitExec) RebaseOnto(ctx context.Context, dir, ontoSHA string) (RebaseOu
 			fmt.Errorf("gitops: rebase onto %s failed (%v) and abort also failed: %w", ontoSHA, err, abortErr)
 	}
 	return RebaseOutcome{Stderr: err.Error()}, fmt.Errorf("gitops: rebase onto %s: %w", ontoSHA, err)
-}
-
-// MergeRef merges ontoSHA into the current branch, reporting conflicts the same
-// way RebaseOnto does.
-func (g *GitExec) MergeRef(ctx context.Context, dir, ontoSHA, message string) (RebaseOutcome, error) {
-	args := append(rebaseIdentityArgs(), "merge", "--no-ff", "-m", message, ontoSHA)
-	_, err := captureGit(ctx, dir, rebaseEnv(), args...)
-	if err == nil {
-		return RebaseOutcome{Clean: true}, nil
-	}
-	conflicts, listErr := g.ConflictedFiles(ctx, dir)
-	if listErr == nil && len(conflicts) > 0 {
-		return RebaseOutcome{Conflicts: conflicts, Stderr: err.Error()}, nil
-	}
-	if abortErr := g.AbortMerge(ctx, dir); abortErr != nil {
-		return RebaseOutcome{Stderr: err.Error()},
-			fmt.Errorf("gitops: merge %s failed (%v) and abort also failed: %w", ontoSHA, err, abortErr)
-	}
-	return RebaseOutcome{Stderr: err.Error()}, fmt.Errorf("gitops: merge %s: %w", ontoSHA, err)
 }
 
 // splitNUL splits git's -z output, which is NUL-separated with no trailing
@@ -283,8 +264,7 @@ func (g *GitExec) FilesWithConflictMarkers(ctx context.Context, dir string, path
 }
 
 // StageAll stages every change and enforces the sensitive-path denylist, so a
-// prompt-injected agent cannot smuggle credentials into a commit. Shared with
-// CommitAll, which is StageAll plus the commit itself.
+// prompt-injected agent cannot smuggle credentials into a commit.
 func (g *GitExec) StageAll(ctx context.Context, dir string) error {
 	if err := runGit(ctx, dir, nil, "add", "-A", "--",
 		".", ":(exclude)"+managedCloneMarkerFile); err != nil {
@@ -302,29 +282,12 @@ func (g *GitExec) ContinueRebase(ctx context.Context, dir string) error {
 	return nil
 }
 
-// CommitMerge finishes a conflicted merge after the conflicts were staged.
-func (g *GitExec) CommitMerge(ctx context.Context, dir, message string) error {
-	args := append(rebaseIdentityArgs(), "commit", "--no-verify", "-m", message)
-	if err := runGit(ctx, dir, rebaseEnv(), args...); err != nil {
-		return fmt.Errorf("gitops: commit merge: %w", err)
-	}
-	return nil
-}
-
 // AbortRebase returns the tree to its pre-rebase state. Safe to call when no
 // rebase is in progress: git's failure is reported but callers treat it as
 // advisory.
 func (g *GitExec) AbortRebase(ctx context.Context, dir string) error {
 	if err := runGit(ctx, dir, rebaseEnv(), "rebase", "--abort"); err != nil {
 		return fmt.Errorf("gitops: rebase --abort: %w", err)
-	}
-	return nil
-}
-
-// AbortMerge returns the tree to its pre-merge state.
-func (g *GitExec) AbortMerge(ctx context.Context, dir string) error {
-	if err := runGit(ctx, dir, rebaseEnv(), "merge", "--abort"); err != nil {
-		return fmt.Errorf("gitops: merge --abort: %w", err)
 	}
 	return nil
 }

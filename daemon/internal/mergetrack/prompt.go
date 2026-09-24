@@ -3,8 +3,6 @@ package mergetrack
 import (
 	"fmt"
 	"strings"
-
-	"github.com/heimdallm/daemon/internal/issues"
 )
 
 // buildConflictPrompt produces the write-mode prompt for a merge-conflict
@@ -49,7 +47,7 @@ func buildConflictPrompt(req ConflictRequest, conflicts []string) string {
 	for _, f := range conflicts {
 		data.WriteString("  - " + f + "\n")
 	}
-	b.WriteString(issues.FenceUntrustedRepoContent(data.String()))
+	b.WriteString(fenceUntrustedRepoContent(data.String()))
 
 	b.WriteString("\n\nResolve the conflicts now by editing the files in the working tree. ")
 	b.WriteString("Do not summarise, do not explain, do not open a pull request — just make the files correct.\n")
