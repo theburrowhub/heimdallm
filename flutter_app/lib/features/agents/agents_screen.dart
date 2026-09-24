@@ -4,7 +4,6 @@ import 'package:mix/mix.dart';
 import '../../core/models/agent.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
-import '../../shared/widgets/keep_alive_tab.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
 
@@ -42,108 +41,32 @@ class _PromptsView extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Active agent per category — each pipeline picks the agent whose
-    // corresponding flag is set. Absent entries render as "built-in default"
-    // in the banner so the user can see at a glance which categories have
-    // explicit prompts and which fall through to the daemon default.
-    final active = <PromptCategory, ReviewPrompt>{
-      for (final c in PromptCategory.values)
-        if (prompts.where((p) => p.isDefaultFor(c)).firstOrNull != null)
-          c: prompts.firstWhere((p) => p.isDefaultFor(c)),
-    };
+    // The daemon reviews with whichever prompt carries the active flag; none
+    // means its built-in default template.
+    final active = prompts.where((p) => p.isDefaultPr).firstOrNull;
 
-    return DefaultTabController(
-      length: 3,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Active prompts banner (above tabs) — shows one line per category
-          _ActiveBanner(active: active),
-
-          const SizedBox(height: 8),
-
-          // Category tabs
-          const TabBar(
-            tabs: [
-              Tab(icon: Icon(Icons.rate_review, size: 18), text: 'PR Review'),
-              Tab(icon: Icon(Icons.bug_report, size: 18), text: 'Issue Triage'),
-              Tab(icon: Icon(Icons.code, size: 18), text: 'Development'),
-            ],
-            labelStyle: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-            unselectedLabelStyle: TextStyle(fontSize: 12),
-            indicatorSize: TabBarIndicatorSize.label,
-          ),
-
-          // Tab content
-          Expanded(
-            child: TabBarView(
-              children: [
-                KeepAliveTab(
-                  child: _CategoryTab(
-                    category: PromptCategory.prReview,
-                    prompts: prompts,
-                    presets: ReviewPrompt.presets,
-                    emptyMessage: 'Add a preset or create a custom prompt.',
-                  ),
-                ),
-                KeepAliveTab(
-                  child: _CategoryTab(
-                    category: PromptCategory.issueTriage,
-                    prompts: prompts,
-                    presets: ReviewPrompt.issueTriagePresets,
-                    emptyMessage:
-                        'Tap a preset above or create a custom prompt to customise how issues are analysed.',
-                  ),
-                ),
-                KeepAliveTab(
-                  child: _CategoryTab(
-                    category: PromptCategory.development,
-                    prompts: prompts,
-                    presets: ReviewPrompt.developmentPresets,
-                    emptyMessage:
-                        'Tap a preset above or create a custom prompt to customise auto-implementation.',
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _ActiveBanner(active: active),
+        const SizedBox(height: 8),
+        Expanded(child: _PromptsList(prompts: prompts)),
+      ],
     );
   }
 }
 
-// ── Category tab (shared between PR Review, Issue Triage, Development) ───────
+// ── Prompt list ───────────────────────────────────────────────────────────────
 
 /// Renders a horizontal preset row at the top + the list of already-added
-/// prompts below it. The per-category differences (which agents filter into
-/// the list, which subtitle to render on each tile, whether the Activate
-/// button appears on the tile trailing row) are parameterised off the
-/// category enum — otherwise the three tabs were ~130 lines of near-duplicate
-/// scaffolding.
-class _CategoryTab extends ConsumerWidget {
-  final PromptCategory category;
+/// review prompts below it.
+class _PromptsList extends ConsumerWidget {
   final List<ReviewPrompt> prompts;
-  final List<PresetDef> presets;
-  final String emptyMessage;
-  const _CategoryTab({
-    required this.category,
-    required this.prompts,
-    required this.presets,
-    required this.emptyMessage,
-  });
+  const _PromptsList({required this.prompts});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final filtered = prompts
-        .where(
-          (p) => switch (category) {
-            PromptCategory.prReview => p.hasPRReview,
-            PromptCategory.issueTriage => p.hasIssueTriage,
-            PromptCategory.development => p.hasDevelopment,
-          },
-        )
-        .toList();
+    final filtered = prompts.where((p) => p.hasPRReview).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -153,7 +76,7 @@ class _CategoryTab extends ConsumerWidget {
           trailing: TextButton.icon(
             icon: const Icon(Icons.add, size: 16),
             label: const Text('Custom'),
-            onPressed: () => _openEditor(context, ref, null, category),
+            onPressed: () => _openEditor(context, ref, null),
           ),
         ),
         SizedBox(
@@ -161,20 +84,20 @@ class _CategoryTab extends ConsumerWidget {
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            children: presets.map((preset) {
+            children: ReviewPrompt.presets.map((preset) {
               final stored = prompts
                   .where((p) => p.id == preset.id)
                   .firstOrNull;
-              final alreadyActive = stored?.isDefaultFor(category) ?? false;
+              final alreadyActive = stored?.isDefaultPr ?? false;
               return _PresetCard(
                 preset: preset,
                 added: stored != null,
-                activeForCategory: alreadyActive,
+                active: alreadyActive,
                 onAdd: stored == null
                     ? () => _addPreset(context, ref, preset)
                     : null,
                 onActivate: stored != null && !alreadyActive
-                    ? () => _setDefault(context, ref, stored, category)
+                    ? () => _setDefault(context, ref, stored)
                     : null,
               );
             }).toList(),
@@ -187,19 +110,12 @@ class _CategoryTab extends ConsumerWidget {
             child: ListView.builder(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               itemCount: filtered.length,
-              itemBuilder: (_, i) {
-                final subtitle = _tileSubtitle(filtered[i]);
-                return _PromptTile(
-                  prompt: filtered[i],
-                  subtitleOverride: subtitle,
-                  category: category,
-                  onEdit: () =>
-                      _openEditor(context, ref, filtered[i], category),
-                  onDelete: () => _delete(context, ref, filtered[i]),
-                  onActivate: () =>
-                      _setDefault(context, ref, filtered[i], category),
-                );
-              },
+              itemBuilder: (_, i) => _PromptTile(
+                prompt: filtered[i],
+                onEdit: () => _openEditor(context, ref, filtered[i]),
+                onDelete: () => _delete(context, ref, filtered[i]),
+                onActivate: () => _setDefault(context, ref, filtered[i]),
+              ),
             ),
           ),
         ] else
@@ -211,7 +127,7 @@ class _CategoryTab extends ConsumerWidget {
                   elevation: AppSurfaceElevation.canvas,
                   padding: const EdgeInsets.all(16),
                   child: AppText.muted(
-                    emptyMessage,
+                    'Add a preset or create a custom prompt.',
                     textAlign: TextAlign.center,
                   ),
                 ),
@@ -220,21 +136,6 @@ class _CategoryTab extends ConsumerWidget {
           ),
       ],
     );
-  }
-
-  String _tileSubtitle(ReviewPrompt p) {
-    switch (category) {
-      case PromptCategory.prReview:
-        return p.instructions.isNotEmpty ? p.instructions : 'Custom template';
-      case PromptCategory.issueTriage:
-        return p.issueInstructions.isNotEmpty
-            ? p.issueInstructions
-            : 'Custom issue triage template';
-      case PromptCategory.development:
-        return p.implementInstructions.isNotEmpty
-            ? p.implementInstructions
-            : 'Custom development template';
-    }
   }
 }
 
@@ -254,39 +155,23 @@ Future<void> _addPreset(
   }
 }
 
-/// Activates `p` for `category` only — leaves the other two category flags
-/// untouched, so activating a triage prompt no longer clobbers an active
-/// PR review or development prompt.
+/// Makes `p` the active review prompt. The daemon clears the flag on every
+/// other agent in the same transaction.
 Future<void> _setDefault(
   BuildContext context,
   WidgetRef ref,
   ReviewPrompt p,
-  PromptCategory category,
 ) async {
   try {
     await ref
         .read(apiClientProvider)
-        .upsertAgent(p.withActive(category, true).toJson());
+        .upsertAgent(p.copyWith(isDefaultPr: true).toJson());
     ref.invalidate(agentsProvider);
     if (context.mounted) {
-      showToast(
-        context,
-        '"${p.name}" is now active for ${_categoryName(category)}',
-      );
+      showToast(context, '"${p.name}" is now the active review prompt');
     }
   } catch (e) {
     if (context.mounted) showToast(context, 'Error: $e', isError: true);
-  }
-}
-
-String _categoryName(PromptCategory c) {
-  switch (c) {
-    case PromptCategory.prReview:
-      return 'PR Review';
-    case PromptCategory.issueTriage:
-      return 'Issue Triage';
-    case PromptCategory.development:
-      return 'Development';
   }
 }
 
@@ -346,12 +231,11 @@ Future<void> _openEditor(
   BuildContext context,
   WidgetRef ref,
   ReviewPrompt? existing,
-  PromptCategory category,
 ) async {
   final saved = await showDialog<ReviewPrompt>(
     context: context,
     barrierDismissible: false,
-    builder: (_) => _PromptEditorDialog(prompt: existing, category: category),
+    builder: (_) => _PromptEditorDialog(prompt: existing),
   );
   if (saved == null) return;
   try {
@@ -372,15 +256,15 @@ class _PresetCard extends StatelessWidget {
   /// of activation status).
   final bool added;
 
-  /// True when the stored agent is currently active for the *enclosing tab's*
-  /// category — controls the footer text and whether onActivate is a no-op.
-  final bool activeForCategory;
+  /// True when the stored agent is the active review prompt — controls the
+  /// footer text and whether onActivate is a no-op.
+  final bool active;
   final VoidCallback? onAdd;
   final VoidCallback? onActivate;
   const _PresetCard({
     required this.preset,
     required this.added,
-    required this.activeForCategory,
+    required this.active,
     this.onAdd,
     this.onActivate,
   });
@@ -388,13 +272,13 @@ class _PresetCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final focusColor = _focusColor(context, preset.focus);
-    final activeColor = _categoryColor(context, _categoryForPreset(preset));
-    final borderColor = activeForCategory
+    final activeColor = AppColors.featurePrReview.resolve(context);
+    final borderColor = active
         ? activeColor.withValues(alpha: 0.65)
         : added
         ? AppColors.border.resolve(context)
         : AppColors.border.resolve(context).withValues(alpha: 0.75);
-    final backgroundColor = activeForCategory
+    final backgroundColor = active
         ? activeColor.withValues(alpha: 0.12)
         : added
         ? AppColors.surfaceRaised.resolve(context)
@@ -402,7 +286,7 @@ class _PresetCard extends StatelessWidget {
     final String footer;
     if (!added) {
       footer = 'Tap to add';
-    } else if (activeForCategory) {
+    } else if (active) {
       footer = 'Active';
     } else {
       footer = 'Tap to activate';
@@ -419,7 +303,7 @@ class _PresetCard extends StatelessWidget {
           color: Colors.transparent,
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
-            onTap: !added ? onAdd : (activeForCategory ? null : onActivate),
+            onTap: !added ? onAdd : (active ? null : onActivate),
             child: Padding(
               padding: const EdgeInsets.all(12),
               child: Column(
@@ -439,13 +323,13 @@ class _PresetCard extends StatelessWidget {
                         ),
                       ),
                       Icon(
-                        activeForCategory
+                        active
                             ? Icons.check_circle
                             : added
                             ? Icons.check_circle_outline
                             : Icons.add_circle_outline,
                         size: 16,
-                        color: activeForCategory
+                        color: active
                             ? activeColor
                             : Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
@@ -460,7 +344,7 @@ class _PresetCard extends StatelessWidget {
                   const Spacer(),
                   AppText.label(
                     footer,
-                    color: activeForCategory
+                    color: active
                         ? activeColor
                         : Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
@@ -478,26 +362,18 @@ class _PresetCard extends StatelessWidget {
 
 class _PromptTile extends StatelessWidget {
   final ReviewPrompt prompt;
-
-  /// The tab this tile is rendered under. Drives the ACTIVE badge and
-  /// whether the Activate button is shown — each are category-scoped, so
-  /// an agent active for PR review does NOT show ACTIVE on the Issue
-  /// Triage tab and vice versa.
-  final PromptCategory category;
   final VoidCallback onEdit, onDelete, onActivate;
-  final String? subtitleOverride;
   const _PromptTile({
     required this.prompt,
-    required this.category,
     required this.onEdit,
     required this.onDelete,
     required this.onActivate,
-    this.subtitleOverride,
   });
 
   @override
   Widget build(BuildContext context) {
-    final isActive = prompt.isDefaultFor(category);
+    final isActive = prompt.isDefaultPr;
+    final activeColor = AppColors.featurePrReview.resolve(context);
     final focusColor = _focusColor(context, prompt.focus);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -528,19 +404,18 @@ class _PromptTile extends StatelessWidget {
                       ? AppColors.onAccent.resolve(context)
                       : focusColor,
                   background: isActive
-                      ? _categoryColor(context, category)
+                      ? activeColor
                       : focusColor.withValues(alpha: 0.14),
                   border: isActive
-                      ? _categoryColor(context, category)
+                      ? activeColor
                       : focusColor.withValues(alpha: 0.35),
                 ),
               ],
             ),
             subtitle: AppText.muted(
-              subtitleOverride ??
-                  (prompt.instructions.isNotEmpty
-                      ? prompt.instructions
-                      : 'Custom template'),
+              prompt.instructions.isNotEmpty
+                  ? prompt.instructions
+                  : 'Custom template',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -573,16 +448,19 @@ class _PromptTile extends StatelessWidget {
 
 // ── Active banner ─────────────────────────────────────────────────────────────
 
-/// Shows the three per-category active prompts side by side so the user
-/// can see at a glance which agent is driving each pipeline. Categories
-/// with no active agent render as "built-in default" (grey) — that's the
-/// zero-config state and the daemon's built-in templates take over.
+/// Shows which prompt drives PR reviews. No active prompt renders as
+/// "built-in default" (grey) — that's the zero-config state and the daemon's
+/// built-in template takes over.
 class _ActiveBanner extends StatelessWidget {
-  final Map<PromptCategory, ReviewPrompt> active;
+  final ReviewPrompt? active;
   const _ActiveBanner({required this.active});
 
   @override
   Widget build(BuildContext context) {
+    final p = active;
+    final name = p?.name ?? 'Built-in default';
+    final emoji = p != null ? _focusEmoji(p.focus) : '⚙️';
+    final categoryColor = AppColors.featurePrReview.resolve(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
       child: Box(
@@ -600,91 +478,43 @@ class _ActiveBanner extends StatelessWidget {
                 const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               ),
             ),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final compact = constraints.maxWidth < 720;
-            final children = [
-              _bannerRow(context, PromptCategory.prReview),
-              _bannerRow(context, PromptCategory.issueTriage),
-              _bannerRow(context, PromptCategory.development),
-            ];
-            if (compact) {
-              return Column(
+        child: Row(
+          children: [
+            Text(emoji, style: const TextStyle(fontSize: 16)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  for (var i = 0; i < children.length; i++) ...[
-                    if (i > 0) _divider(context, Axis.horizontal),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: children[i],
-                    ),
-                  ],
+                  AppBadge(
+                    label: 'PR Review',
+                    foreground: categoryColor,
+                    background: categoryColor.withValues(alpha: 0.12),
+                    border: categoryColor.withValues(alpha: 0.35),
+                  ),
+                  const SizedBox(height: 6),
+                  StyledText(
+                    name,
+                    style: TextStyler()
+                        .style(AppTextStyles.body.mix())
+                        .fontWeight(FontWeight.w600)
+                        .color(
+                          p != null
+                              ? AppColors.text.resolve(context)
+                              : AppColors.textMuted.resolve(context),
+                        )
+                        .maxLines(1)
+                        .overflow(TextOverflow.ellipsis),
+                  ),
                 ],
-              );
-            }
-            return Row(
-              children: [
-                Expanded(child: children[0]),
-                _divider(context, Axis.vertical),
-                Expanded(child: children[1]),
-                _divider(context, Axis.vertical),
-                Expanded(child: children[2]),
-              ],
-            );
-          },
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
-
-  Widget _bannerRow(BuildContext context, PromptCategory c) {
-    final p = active[c];
-    final name = p?.name ?? 'Built-in default';
-    final emoji = p != null ? _focusEmoji(p.focus) : '⚙️';
-    final categoryColor = _categoryColor(context, c);
-    return Row(
-      children: [
-        Text(emoji, style: const TextStyle(fontSize: 16)),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AppBadge(
-                label: _categoryName(c),
-                foreground: categoryColor,
-                background: categoryColor.withValues(alpha: 0.12),
-                border: categoryColor.withValues(alpha: 0.35),
-              ),
-              const SizedBox(height: 6),
-              StyledText(
-                name,
-                style: TextStyler()
-                    .style(AppTextStyles.body.mix())
-                    .fontWeight(FontWeight.w600)
-                    .color(
-                      p != null
-                          ? AppColors.text.resolve(context)
-                          : AppColors.textMuted.resolve(context),
-                    )
-                    .maxLines(1)
-                    .overflow(TextOverflow.ellipsis),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _divider(BuildContext context, Axis axis) => Container(
-    width: axis == Axis.vertical ? 1 : double.infinity,
-    height: axis == Axis.vertical ? 36 : 1,
-    margin: axis == Axis.vertical
-        ? const EdgeInsets.symmetric(horizontal: 10)
-        : const EdgeInsets.symmetric(vertical: 2),
-    color: AppColors.border.resolve(context).withValues(alpha: 0.55),
-  );
 }
 
 class _SectionHeader extends StatelessWidget {
@@ -711,8 +541,7 @@ class _SectionHeader extends StatelessWidget {
 
 class _PromptEditorDialog extends StatefulWidget {
   final ReviewPrompt? prompt;
-  final PromptCategory category;
-  const _PromptEditorDialog({this.prompt, required this.category});
+  const _PromptEditorDialog({this.prompt});
 
   @override
   State<_PromptEditorDialog> createState() => _PromptEditorDialogState();
@@ -722,26 +551,12 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
     with SingleTickerProviderStateMixin {
   final _idCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
-  // PR Review fields
   final _instrCtrl = TextEditingController();
   final _templateCtrl = TextEditingController();
   final _flagsCtrl = TextEditingController();
-  // Issue Triage fields
-  final _issueInstrCtrl = TextEditingController();
-  final _issueTemplateCtrl = TextEditingController();
-  // Development fields
-  final _implInstrCtrl = TextEditingController();
-  final _implTemplateCtrl = TextEditingController();
 
   String _focus = 'general';
-  // One active flag per category — the editor lets the user activate the
-  // prompt across any subset of categories in one save. Defaults mirror the
-  // existing agent when editing; for a brand-new prompt we pre-tick the
-  // active flag of the tab the user opened the editor from (they almost
-  // always want the thing they just created to be active for that pipeline).
   bool _isDefaultPr = false;
-  bool _isDefaultIssue = false;
-  bool _isDefaultDev = false;
   late final TabController _tabCtrl;
 
   @override
@@ -755,14 +570,8 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
       _instrCtrl.text = p.instructions;
       _templateCtrl.text = p.prompt;
       _flagsCtrl.text = p.cliFlags;
-      _issueInstrCtrl.text = p.issueInstructions;
-      _issueTemplateCtrl.text = p.issuePrompt;
-      _implInstrCtrl.text = p.implementInstructions;
-      _implTemplateCtrl.text = p.implementPrompt;
       _focus = p.focus;
       _isDefaultPr = p.isDefaultPr;
-      _isDefaultIssue = p.isDefaultIssue;
-      _isDefaultDev = p.isDefaultDev;
     }
   }
 
@@ -774,81 +583,12 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
     _instrCtrl.dispose();
     _templateCtrl.dispose();
     _flagsCtrl.dispose();
-    _issueInstrCtrl.dispose();
-    _issueTemplateCtrl.dispose();
-    _implInstrCtrl.dispose();
-    _implTemplateCtrl.dispose();
     super.dispose();
-  }
-
-  /// Returns the relevant instructions/template controllers and labels for the current category.
-  ({
-    TextEditingController instrCtrl,
-    TextEditingController templateCtrl,
-    String instrHint,
-    String instrDescription,
-    String templateDescription,
-    List<String> placeholders,
-  })
-  _categoryFields() {
-    switch (widget.category) {
-      case PromptCategory.issueTriage:
-        return (
-          instrCtrl: _issueInstrCtrl,
-          templateCtrl: _issueTemplateCtrl,
-          instrHint:
-              'e.g. Categorise by severity, suggest labels, identify duplicates...',
-          instrDescription:
-              'Describe how issues should be triaged. Heimdallm will inject '
-              'these instructions into the issue triage pipeline.',
-          templateDescription:
-              'Override the entire issue triage prompt. When set, Instructions are ignored.',
-          placeholders: ReviewPrompt.issuePlaceholders,
-        );
-      case PromptCategory.development:
-        return (
-          instrCtrl: _implInstrCtrl,
-          templateCtrl: _implTemplateCtrl,
-          instrHint:
-              'e.g. Follow TDD, write tests first, keep functions under 30 lines...',
-          instrDescription:
-              'Describe how code should be implemented. Heimdallm will inject '
-              'these instructions into the development pipeline.',
-          templateDescription:
-              'Override the entire development prompt. When set, Instructions are ignored.',
-          placeholders: ReviewPrompt.implementPlaceholders,
-        );
-      case PromptCategory.prReview:
-        return (
-          instrCtrl: _instrCtrl,
-          templateCtrl: _templateCtrl,
-          instrHint:
-              'e.g. Focus on security vulnerabilities and potential injection attacks...',
-          instrDescription:
-              'Describe what to look for. Heimdallm will inject these '
-              'instructions into its default review template.',
-          templateDescription:
-              'Override the entire prompt. When set, Instructions are ignored.',
-          placeholders: ReviewPrompt.placeholders,
-        );
-    }
-  }
-
-  String get _categoryLabel {
-    switch (widget.category) {
-      case PromptCategory.prReview:
-        return 'PR Review';
-      case PromptCategory.issueTriage:
-        return 'Issue Triage';
-      case PromptCategory.development:
-        return 'Development';
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     final isNew = widget.prompt == null;
-    final fields = _categoryFields();
 
     return Dialog(
       backgroundColor: Colors.transparent,
@@ -865,9 +605,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
               Row(
                 children: [
                   AppText.pageTitle(
-                    isNew
-                        ? 'New $_categoryLabel Prompt'
-                        : 'Edit $_categoryLabel Prompt',
+                    isNew ? 'New Review Prompt' : 'Edit Review Prompt',
                   ),
                   const Spacer(),
                   IconButton(
@@ -952,34 +690,36 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        AppText.muted(fields.instrDescription),
+                        const AppText.muted(
+                          'Describe what to look for. Heimdallm will inject these '
+                          'instructions into its default review template.',
+                        ),
                         const SizedBox(height: 8),
                         Expanded(
                           child: TextFormField(
-                            controller: fields.instrCtrl,
+                            controller: _instrCtrl,
                             maxLines: null,
                             expands: true,
-                            decoration: InputDecoration(
-                              hintText: fields.instrHint,
-                              border: const OutlineInputBorder(),
+                            decoration: const InputDecoration(
+                              hintText:
+                                  'e.g. Focus on security vulnerabilities and potential injection attacks...',
+                              border: OutlineInputBorder(),
                               alignLabelWithHint: true,
                             ),
                           ),
                         ),
-                        if (widget.category == PromptCategory.prReview) ...[
-                          const SizedBox(height: 8),
-                          TextFormField(
-                            controller: _flagsCtrl,
-                            decoration: const InputDecoration(
-                              labelText: 'Extra CLI flags (optional)',
-                              hintText: 'Flags allowed for the configured CLI',
-                              border: OutlineInputBorder(),
-                              isDense: true,
-                              helperText:
-                                  'Passed directly to the AI binary (claude, gemini, codex)',
-                            ),
+                        const SizedBox(height: 8),
+                        TextFormField(
+                          controller: _flagsCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Extra CLI flags (optional)',
+                            hintText: 'Flags allowed for the configured CLI',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                            helperText:
+                                'Passed directly to the AI binary (claude, gemini, codex)',
                           ),
-                        ],
+                        ),
                       ],
                     ),
 
@@ -987,12 +727,14 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        AppText.muted(fields.templateDescription),
+                        const AppText.muted(
+                          'Override the entire prompt. When set, Instructions are ignored.',
+                        ),
                         const SizedBox(height: 4),
                         Wrap(
                           spacing: 6,
                           runSpacing: 4,
-                          children: fields.placeholders
+                          children: ReviewPrompt.placeholders
                               .map(
                                 (p) => ActionChip(
                                   label: Text(
@@ -1004,16 +746,16 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                                   ),
                                   padding: EdgeInsets.zero,
                                   onPressed: () {
-                                    final sel = fields.templateCtrl.selection;
-                                    final text = fields.templateCtrl.text;
+                                    final sel = _templateCtrl.selection;
+                                    final text = _templateCtrl.text;
                                     final pos = sel.isValid
                                         ? sel.baseOffset
                                         : text.length;
-                                    fields.templateCtrl.text =
+                                    _templateCtrl.text =
                                         text.substring(0, pos) +
                                         p +
                                         text.substring(pos);
-                                    fields.templateCtrl.selection =
+                                    _templateCtrl.selection =
                                         TextSelection.collapsed(
                                           offset: pos + p.length,
                                         );
@@ -1025,7 +767,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                         const SizedBox(height: 6),
                         Expanded(
                           child: TextFormField(
-                            controller: fields.templateCtrl,
+                            controller: _templateCtrl,
                             maxLines: null,
                             expands: true,
                             style: const TextStyle(
@@ -1045,25 +787,22 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
               ),
 
               const SizedBox(height: 12),
-              // Active toggles — one per category so a single save can
-              // activate the prompt across any combination of pipelines.
               AppSurface(
                 elevation: AppSurfaceElevation.canvas,
                 padding: const EdgeInsets.all(12),
-                child: _ActiveToggles(
-                  prReview: _isDefaultPr,
-                  issueTriage: _isDefaultIssue,
-                  development: _isDefaultDev,
-                  onChanged: (c, v) => setState(() {
-                    switch (c) {
-                      case PromptCategory.prReview:
-                        _isDefaultPr = v;
-                      case PromptCategory.issueTriage:
-                        _isDefaultIssue = v;
-                      case PromptCategory.development:
-                        _isDefaultDev = v;
-                    }
-                  }),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      height: 28,
+                      child: Switch(
+                        value: _isDefaultPr,
+                        onChanged: (v) => setState(() => _isDefaultPr = v),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    const AppText('Use as the active review prompt'),
+                  ],
                 ),
               ),
               const SizedBox(height: 8),
@@ -1084,18 +823,9 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                                 : 'prompt-${DateTime.now().millisecondsSinceEpoch}'
                           : widget.prompt!.id;
                       if (_nameCtrl.text.isEmpty) return;
-                      // Validate non-empty content for the active category
-                      final hasContent = switch (widget.category) {
-                        PromptCategory.prReview =>
+                      final hasContent =
                           _instrCtrl.text.trim().isNotEmpty ||
-                              _templateCtrl.text.trim().isNotEmpty,
-                        PromptCategory.issueTriage =>
-                          _issueInstrCtrl.text.trim().isNotEmpty ||
-                              _issueTemplateCtrl.text.trim().isNotEmpty,
-                        PromptCategory.development =>
-                          _implInstrCtrl.text.trim().isNotEmpty ||
-                              _implTemplateCtrl.text.trim().isNotEmpty,
-                      };
+                          _templateCtrl.text.trim().isNotEmpty;
                       if (!hasContent) {
                         showToast(
                           context,
@@ -1114,12 +844,6 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                           prompt: _templateCtrl.text.trim(),
                           cliFlags: _flagsCtrl.text.trim(),
                           isDefaultPr: _isDefaultPr,
-                          isDefaultIssue: _isDefaultIssue,
-                          isDefaultDev: _isDefaultDev,
-                          issuePrompt: _issueTemplateCtrl.text.trim(),
-                          issueInstructions: _issueInstrCtrl.text.trim(),
-                          implementPrompt: _implTemplateCtrl.text.trim(),
-                          implementInstructions: _implInstrCtrl.text.trim(),
                         ),
                       );
                     },
@@ -1134,71 +858,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
   }
 }
 
-/// Trio of Switch rows for the editor's "Set as active for ..." section.
-/// Extracted so the editor's save button stays focused on persistence and
-/// the widget tree around the three toggles stays shallow.
-class _ActiveToggles extends StatelessWidget {
-  final bool prReview, issueTriage, development;
-  final void Function(PromptCategory category, bool value) onChanged;
-  const _ActiveToggles({
-    required this.prReview,
-    required this.issueTriage,
-    required this.development,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const AppText.label('Set as active for'),
-        const SizedBox(height: 4),
-        _toggle(PromptCategory.prReview, 'PR Review', prReview),
-        _toggle(PromptCategory.issueTriage, 'Issue Triage', issueTriage),
-        _toggle(PromptCategory.development, 'Development', development),
-      ],
-    );
-  }
-
-  Widget _toggle(PromptCategory c, String label, bool value) => Row(
-    children: [
-      SizedBox(
-        height: 28,
-        child: Switch(
-          value: value,
-          onChanged: (v) => onChanged(c, v),
-          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        ),
-      ),
-      const SizedBox(width: 10),
-      AppText(label),
-    ],
-  );
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-PromptCategory _categoryForPreset(PresetDef preset) {
-  if (preset.issueInstructions.isNotEmpty) {
-    return PromptCategory.issueTriage;
-  }
-  if (preset.implementInstructions.isNotEmpty) {
-    return PromptCategory.development;
-  }
-  return PromptCategory.prReview;
-}
-
-Color _categoryColor(BuildContext context, PromptCategory category) {
-  switch (category) {
-    case PromptCategory.prReview:
-      return AppColors.featurePrReview.resolve(context);
-    case PromptCategory.issueTriage:
-      return AppColors.featureIssueTracking.resolve(context);
-    case PromptCategory.development:
-      return AppColors.featureDevelop.resolve(context);
-  }
-}
 
 Color _focusColor(BuildContext context, String focus) {
   switch (focus) {
@@ -1207,7 +867,7 @@ Color _focusColor(BuildContext context, String focus) {
     case 'performance':
       return AppColors.info.resolve(context);
     case 'architecture':
-      return AppColors.featureDevelop.resolve(context);
+      return AppColors.success.resolve(context);
     case 'docs':
       return AppColors.warning.resolve(context);
     case 'custom':

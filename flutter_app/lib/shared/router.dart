@@ -5,7 +5,6 @@ import '../features/cli_agents/cli_agents_screen.dart';
 import '../features/dashboard/dashboard_screen.dart';
 import '../features/instances/instances_screen.dart';
 import '../features/instances/routing_screen.dart';
-import '../features/issues/issue_detail_screen.dart';
 import '../features/merge_tracking/merge_tracking_screen.dart';
 import '../features/organizations/orgs_screen.dart';
 import '../features/pr_detail/pr_detail_screen.dart';
@@ -121,14 +120,6 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
         // than one daemon is registered.
         final instance = state.uri.queryParameters['instance'] ?? '';
         return PRDetailScreen(prId: id, instanceId: instance);
-      },
-    ),
-    GoRoute(
-      path: '/issues/:id',
-      builder: (context, state) {
-        final id = int.parse(state.pathParameters['id']!);
-        final instance = state.uri.queryParameters['instance'] ?? '';
-        return IssueDetailScreen(issueId: id, instanceId: instance);
       },
     ),
     GoRoute(

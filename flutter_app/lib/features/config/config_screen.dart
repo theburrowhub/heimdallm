@@ -11,10 +11,8 @@ import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
-import '../../shared/widgets/autocomplete_chip_field.dart';
 import '../../shared/widgets/restart_required_banner.dart';
 import '../../shared/widgets/toast.dart';
-import '../agents/agents_screen.dart' show agentsProvider;
 import '../dashboard/dashboard_providers.dart';
 import '../server/server_actions.dart' as server_actions;
 import '../updates/check_for_updates_button.dart';
@@ -94,10 +92,6 @@ enum _ConfigSectionId {
   retention,
   ai,
   polling,
-  issueTracking,
-  pipeline,
-  develop,
-  autonomous,
   mergeTracking,
   circuitBreaker,
   cluster,
@@ -151,32 +145,8 @@ const _configSections = <_ConfigSectionMeta>[
   _ConfigSectionMeta(
     id: _ConfigSectionId.polling,
     title: 'Polling / Rate Limit',
-    summary: 'Adaptive polling and API backoff safeguards.',
+    summary: 'Polling cadences and API backoff safeguards.',
     icon: Icons.tune_outlined,
-  ),
-  _ConfigSectionMeta(
-    id: _ConfigSectionId.issueTracking,
-    title: 'Issue Tracking',
-    summary: 'Issue triage scope, filters, and prompts.',
-    icon: Icons.bug_report_outlined,
-  ),
-  _ConfigSectionMeta(
-    id: _ConfigSectionId.pipeline,
-    title: 'Pipeline',
-    summary: 'Shared defaults for triage ownership, clone paths, and promotions.',
-    icon: Icons.account_tree_outlined,
-  ),
-  _ConfigSectionMeta(
-    id: _ConfigSectionId.develop,
-    title: 'Develop',
-    summary: 'Auto-implementation labels, reviewers, and PR defaults.',
-    icon: Icons.code_outlined,
-  ),
-  _ConfigSectionMeta(
-    id: _ConfigSectionId.autonomous,
-    title: 'Autonomous Mode',
-    summary: 'How Heimdallm acts on tasks when autonomous execution is enabled.',
-    icon: Icons.auto_mode_outlined,
   ),
   _ConfigSectionMeta(
     id: _ConfigSectionId.mergeTracking,
@@ -221,46 +191,29 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   String _pollInterval = '5m';
   int _retentionDays = 90;
-  IssueTrackingConfig _issueTracking = const IssueTrackingConfig();
-  String? _issuePromptId;
-  String? _developPromptId;
   PollingConfig _polling = const PollingConfig();
 
   // All known repos. Key = "org/repo", Value = per-repo settings.
   Map<String, RepoConfig> _repoConfigs = {};
 
-  // Autonomous mode
-  AutonomousConfig _autonomous = const AutonomousConfig();
   MergeTrackingConfig _mergeTracking = const MergeTrackingConfig();
   CircuitBreakerConfig _circuitBreaker = const CircuitBreakerConfig();
   String _clusterRole = ClusterRole.standalone;
-  late TextEditingController _devMaxTurnsController;
-  late TextEditingController _devTimeoutController;
-  late TextEditingController _claimLeaseController;
   late TextEditingController _mtPollIntervalController;
   late TextEditingController _mtResolveTimeoutController;
   late TextEditingController _perPr24hController;
   late TextEditingController _perRepoHrController;
-  late TextEditingController _perIssue24hController;
-  late TextEditingController _perIssueRepoHrController;
-  late TextEditingController _perImplRepoHrController;
-  bool _autonomousControllersInitialized = false;
+  bool _sectionControllersInitialized = false;
 
   bool _initialized = false;
 
   @override
   void initState() {
     super.initState();
-    _devMaxTurnsController = TextEditingController();
-    _devTimeoutController = TextEditingController();
-    _claimLeaseController = TextEditingController();
     _mtPollIntervalController = TextEditingController();
     _mtResolveTimeoutController = TextEditingController();
     _perPr24hController = TextEditingController();
     _perRepoHrController = TextEditingController();
-    _perIssue24hController = TextEditingController();
-    _perIssueRepoHrController = TextEditingController();
-    _perImplRepoHrController = TextEditingController();
     _detectToken();
   }
 
@@ -270,16 +223,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _pollController.dispose();
     _cloneDirController.dispose();
     _formScrollController.dispose();
-    _devMaxTurnsController.dispose();
-    _devTimeoutController.dispose();
-    _claimLeaseController.dispose();
     _mtPollIntervalController.dispose();
     _mtResolveTimeoutController.dispose();
     _perPr24hController.dispose();
     _perRepoHrController.dispose();
-    _perIssue24hController.dispose();
-    _perIssueRepoHrController.dispose();
-    _perImplRepoHrController.dispose();
     super.dispose();
   }
 
@@ -312,36 +259,20 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _pollController.text = config.pollInterval;
     _retentionDays = config.retentionDays;
     _repoConfigs = Map.from(config.repoConfigs);
-    _issueTracking = config.issueTracking;
     _polling = config.polling;
-    _issuePromptId = config.globalIssuePrompt.isEmpty
-        ? null
-        : config.globalIssuePrompt;
-    _developPromptId = config.globalImplementPrompt.isEmpty
-        ? null
-        : config.globalImplementPrompt;
     _clusterRole = config.clusterRole;
-    _initAutonomousFromConfig(config);
+    _initSectionControllersFromConfig(config);
   }
 
-  void _initAutonomousFromConfig(AppConfig config) {
-    if (_autonomousControllersInitialized) return;
-    _autonomousControllersInitialized = true;
-    _autonomous = config.autonomous;
+  void _initSectionControllersFromConfig(AppConfig config) {
+    if (_sectionControllersInitialized) return;
+    _sectionControllersInitialized = true;
     _mergeTracking = config.mergeTracking;
     _circuitBreaker = config.circuitBreaker;
-    _devMaxTurnsController.text = config.autonomous.devMaxTurns.toString();
-    _devTimeoutController.text = config.autonomous.devTimeout;
-    _claimLeaseController.text = config.autonomous.claimLease;
     _mtPollIntervalController.text = config.mergeTracking.pollInterval;
     _mtResolveTimeoutController.text = config.mergeTracking.resolveTimeout;
     _perPr24hController.text = config.circuitBreaker.perPr24h.toString();
     _perRepoHrController.text = config.circuitBreaker.perRepoHr.toString();
-    _perIssue24hController.text = config.circuitBreaker.perIssue24h.toString();
-    _perIssueRepoHrController.text = config.circuitBreaker.perIssueRepoHr
-        .toString();
-    _perImplRepoHrController.text = config.circuitBreaker.perImplRepoHr
-        .toString();
   }
 
   @override
@@ -416,10 +347,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               _retentionSection(),
               _aiSection(config),
               _pollingSection(),
-              _issueTrackingSection(config),
-              _pipelineSection(config),
-              _developSection(config),
-              _autonomousSection(),
               _mergeTrackingSection(),
               _circuitBreakerSection(),
               if (_showClusterSection()) _clusterSection(config),
@@ -488,10 +415,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     'Retention' => _ConfigSectionId.retention,
     'AI defaults' => _ConfigSectionId.ai,
     'Polling / Rate Limit' => _ConfigSectionId.polling,
-    'Issue Tracking' => _ConfigSectionId.issueTracking,
-    'Pipeline' => _ConfigSectionId.pipeline,
-    'Develop' => _ConfigSectionId.develop,
-    'Autonomous Mode' => _ConfigSectionId.autonomous,
     'Merge Tracking' => _ConfigSectionId.mergeTracking,
     'Circuit Breaker' => _ConfigSectionId.circuitBreaker,
     'Cluster' => _ConfigSectionId.cluster,
@@ -733,20 +656,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   Widget _pollingSection() {
     return _settingsCard('Polling / Rate Limit', [
-      SwitchListTile(
-        title: const Text('Adaptive polling', style: TextStyle(fontSize: 13)),
-        subtitle: const Text(
-          'Dynamically adjust poll interval based on activity',
-          style: TextStyle(fontSize: 11),
-        ),
-        dense: true,
-        contentPadding: EdgeInsets.zero,
-        value: _polling.adaptive,
-        onChanged: (v) => setState(() {
-          _polling = _polling.copyWith(adaptive: v);
-        }),
-      ),
-      const SizedBox(height: 10),
       TextFormField(
         initialValue: _polling.pollInterval,
         decoration: const InputDecoration(
@@ -761,72 +670,38 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           _polling = _polling.copyWith(pollInterval: v);
         }),
       ),
-      if (_polling.adaptive) ...[
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: TextFormField(
-                initialValue: _polling.minInterval,
-                decoration: const InputDecoration(
-                  labelText: 'Min interval',
-                  helperText: 'Shortest allowed poll cycle',
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (v) => setState(() {
-                  _polling = _polling.copyWith(minInterval: v);
-                }),
+      const SizedBox(height: 10),
+      Row(
+        children: [
+          Expanded(
+            child: TextFormField(
+              initialValue: _polling.discoveryInterval,
+              decoration: const InputDecoration(
+                labelText: 'Discovery interval',
+                helperText: 'Repo discovery scan cadence',
+                border: OutlineInputBorder(),
               ),
+              onChanged: (v) => setState(() {
+                _polling = _polling.copyWith(discoveryInterval: v);
+              }),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: TextFormField(
-                initialValue: _polling.maxInterval,
-                decoration: const InputDecoration(
-                  labelText: 'Max interval',
-                  helperText: 'Longest allowed poll cycle',
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (v) => setState(() {
-                  _polling = _polling.copyWith(maxInterval: v);
-                }),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: TextFormField(
+              initialValue: _polling.tier3Interval,
+              decoration: const InputDecoration(
+                labelText: 'Tier-3 interval',
+                helperText: 'How often watched PRs are re-checked',
+                border: OutlineInputBorder(),
               ),
+              onChanged: (v) => setState(() {
+                _polling = _polling.copyWith(tier3Interval: v);
+              }),
             ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: TextFormField(
-                initialValue: _polling.discoveryInterval,
-                decoration: const InputDecoration(
-                  labelText: 'Discovery interval',
-                  helperText: 'Repo discovery scan cadence',
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (v) => setState(() {
-                  _polling = _polling.copyWith(discoveryInterval: v);
-                }),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: TextFormField(
-                initialValue: _polling.tier3Interval,
-                decoration: const InputDecoration(
-                  labelText: 'Tier-3 interval',
-                  helperText: 'Slow-lane repos poll cadence',
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (v) => setState(() {
-                  _polling = _polling.copyWith(tier3Interval: v);
-                }),
-              ),
-            ),
-          ],
-        ),
-      ],
+          ),
+        ],
+      ),
       const SizedBox(height: 10),
       TextFormField(
         initialValue: _polling.rateLimitSafetyThreshold.toString(),
@@ -871,22 +746,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                   _polling = _polling.copyWith(useEtag: v);
                 }),
               ),
-              SwitchListTile(
-                title: const Text(
-                  'Use GraphQL API',
-                  style: TextStyle(fontSize: 11),
-                ),
-                subtitle: Text(
-                  'Fetch PR/issue data via GraphQL instead of REST',
-                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-                ),
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                value: _polling.useGraphql,
-                onChanged: (v) => setState(() {
-                  _polling = _polling.copyWith(useGraphql: v);
-                }),
-              ),
             ],
           ),
         ),
@@ -894,146 +753,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     ]);
   }
 
-  // ── Issue tracking ──────────────────────────────────────────────────────
-
-  Widget _issueTrackingSection(AppConfig config) {
-    return _settingsCard('Issue Tracking', [
-      SwitchListTile(
-        title: const Text('Triage issues', style: TextStyle(fontSize: 13)),
-        subtitle: const Text(
-          'AI reviews and triages GitHub issues',
-          style: TextStyle(fontSize: 11),
-        ),
-        dense: true,
-        contentPadding: EdgeInsets.zero,
-        value: _issueTracking.enabled,
-        onChanged: (v) => setState(() {
-          _issueTracking = _issueTracking.copyWith(enabled: v);
-        }),
-      ),
-      if (_issueTracking.enabled) ...[
-        const SizedBox(height: 8),
-        AutocompleteChipField(
-          label: 'Review-only labels',
-          helper: 'Issues with these labels get an AI triage comment',
-          selectedValues: _issueTracking.reviewOnlyLabels,
-          availableOptions: const [],
-          onChanged: (v) => setState(() {
-            _issueTracking = _issueTracking.copyWith(reviewOnlyLabels: v ?? []);
-          }),
-        ),
-        const SizedBox(height: 10),
-        AutocompleteChipField(
-          label: 'Refinement labels',
-          helper: 'Issues with these labels get a deep implementation plan',
-          selectedValues: _issueTracking.refinementLabels,
-          availableOptions: const [],
-          onChanged: (v) => setState(() {
-            _issueTracking = _issueTracking.copyWith(refinementLabels: v ?? []);
-          }),
-        ),
-        const SizedBox(height: 10),
-        AutocompleteChipField(
-          label: 'Skip labels',
-          helper: 'Issues with these labels are ignored (highest priority)',
-          selectedValues: _issueTracking.skipLabels,
-          availableOptions: const [],
-          onChanged: (v) => setState(() {
-            _issueTracking = _issueTracking.copyWith(skipLabels: v ?? []);
-          }),
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: DropdownButtonFormField<String>(
-                initialValue: _issueTracking.filterMode,
-                decoration: const InputDecoration(
-                  labelText: 'Filter mode',
-                  helperText: 'exclusive = AND, inclusive = OR',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: ['exclusive', 'inclusive']
-                    .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-                    .toList(),
-                onChanged: (v) => setState(() {
-                  _issueTracking = _issueTracking.copyWith(filterMode: v);
-                }),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: DropdownButtonFormField<String>(
-                initialValue: _issueTracking.defaultAction,
-                decoration: const InputDecoration(
-                  labelText: 'Default action',
-                  helperText: 'When no label matches',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: ['ignore', 'review_only']
-                    .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-                    .toList(),
-                onChanged: (v) => setState(() {
-                  _issueTracking = _issueTracking.copyWith(defaultAction: v);
-                }),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        AutocompleteChipField(
-          label: 'Organizations',
-          helper: 'Limit to issues from these orgs (empty = all monitored)',
-          selectedValues: _issueTracking.organizations,
-          availableOptions: _knownOrganizationOptions(config),
-          onChanged: (v) => setState(() {
-            _issueTracking = _issueTracking.copyWith(organizations: v ?? []);
-          }),
-        ),
-        const SizedBox(height: 10),
-        AutocompleteChipField(
-          label: 'Assignees',
-          helper: 'Only process issues assigned to these users',
-          selectedValues: _issueTracking.assignees,
-          availableOptions: config.knownGitHubUsers,
-          onChanged: (v) => setState(() {
-            _issueTracking = _issueTracking.copyWith(assignees: v ?? []);
-          }),
-        ),
-        const SizedBox(height: 10),
-        _agentDropdown(
-          label: 'Issue Prompt',
-          helper: 'Agent profile for issue triage',
-          value: _issuePromptId,
-          onChanged: (v) => setState(() => _issuePromptId = v),
-        ),
-      ],
-    ]);
-  }
-
-  List<String> _knownOrganizationOptions(AppConfig config) {
-    final orgs = <String>{...config.knownOrganizations};
-    for (final repo in _repoConfigs.keys) {
-      final slash = repo.indexOf('/');
-      if (slash > 0) orgs.add(repo.substring(0, slash));
-    }
-    return orgs.where((o) => o.trim().isNotEmpty).toList()..sort();
-  }
-
-  List<String> _globalPRReviewers = [];
-  List<String> _globalPRLabels = [];
-  String _globalPRAssignee = '';
-  bool _globalPRDraft = false;
   bool _globalNeverApproveWithIssues = false;
   String _globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity;
-  String _globalTriageOwner = '';
   String _globalCloneDir = '';
-  bool _globalAutoPromoteTriage = false;
-  bool _globalAutoPromoteRefinement = false;
-  bool _globalGeneratePRDescription = false;
-  bool _developInitialized = false;
 
   String _aiPrimary = 'claude';
   String _aiFallback = '';
@@ -1046,14 +768,14 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _aiPrimary = config.aiPrimary.isEmpty ? 'claude' : config.aiPrimary;
     _aiFallback = config.aiFallback;
     _reviewMode = config.reviewMode.isEmpty ? 'single' : config.reviewMode;
+    _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
+    _globalNeverApproveMinSeverity = config.globalNeverApproveMinSeverity;
+    _globalCloneDir = config.globalCloneDir;
+    _cloneDirController.text = config.globalCloneDir;
   }
 
   Widget _aiSection(AppConfig config) {
     _initAiFromConfig(config);
-    // never_approve lives here but is initialized by _initDevelopFromConfig,
-    // which otherwise only runs in the later Pipeline/Develop sections — call
-    // it now (idempotent) so the switch shows the real value on the first frame.
-    _initDevelopFromConfig(config);
     return _settingsCard('AI defaults', [
       DropdownButtonFormField<String>(
         initialValue: _aiPrimary,
@@ -1135,24 +857,30 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               )
             : null,
       ),
+      const SizedBox(height: 12),
+      TextFormField(
+        controller: _cloneDirController,
+        decoration: InputDecoration(
+          labelText: 'Clone directory',
+          hintText: 'Base directory for managed repo clones',
+          isDense: true,
+          suffixIcon: IconButton(
+            tooltip: 'Browse…',
+            icon: const Icon(Icons.folder_open, size: 18),
+            onPressed: () async {
+              final dir = await FilePicker.getDirectoryPath(
+                dialogTitle: 'Select clone directory',
+                lockParentWindow: true,
+              );
+              if (dir == null || dir.isEmpty) return;
+              _cloneDirController.text = dir;
+              _globalCloneDir = dir;
+            },
+          ),
+        ),
+        onChanged: (v) => _globalCloneDir = v.trim(),
+      ),
     ]);
-  }
-
-  void _initDevelopFromConfig(AppConfig config) {
-    if (_developInitialized) return;
-    _developInitialized = true;
-    _globalPRReviewers = List.from(config.globalPRReviewers);
-    _globalPRLabels = List.from(config.globalPRLabels);
-    _globalPRAssignee = config.globalPRAssignee;
-    _globalPRDraft = config.globalPRDraft;
-    _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
-    _globalNeverApproveMinSeverity = config.globalNeverApproveMinSeverity;
-    _globalTriageOwner = config.globalTriageOwner;
-    _globalCloneDir = config.globalCloneDir;
-    _cloneDirController.text = config.globalCloneDir;
-    _globalAutoPromoteTriage = config.globalAutoPromoteTriage ?? false;
-    _globalAutoPromoteRefinement = config.globalAutoPromoteRefinement ?? false;
-    _globalGeneratePRDescription = config.globalGeneratePRDescription;
   }
 
   Widget _globalSwitchTile(
@@ -1181,322 +909,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         onChanged: (v) => setState(() => onChanged(v)),
       ),
     );
-  }
-
-  Widget _pipelineSection(AppConfig config) {
-    _initDevelopFromConfig(config);
-    return _settingsCard('Pipeline', [
-      TextFormField(
-        initialValue: _globalTriageOwner,
-        decoration: const InputDecoration(
-          labelText: 'Triage owner',
-          hintText: 'GitHub username that owns triaged issues',
-          isDense: true,
-        ),
-        onChanged: (v) => _globalTriageOwner = v.trim(),
-      ),
-      const SizedBox(height: 12),
-      TextFormField(
-        controller: _cloneDirController,
-        decoration: InputDecoration(
-          labelText: 'Clone directory',
-          hintText: 'Base directory for managed repo clones',
-          isDense: true,
-          suffixIcon: IconButton(
-            tooltip: 'Browse…',
-            icon: const Icon(Icons.folder_open, size: 18),
-            onPressed: () async {
-              final dir = await FilePicker.getDirectoryPath(
-                dialogTitle: 'Select clone directory',
-                lockParentWindow: true,
-              );
-              if (dir == null || dir.isEmpty) return;
-              _cloneDirController.text = dir;
-              _globalCloneDir = dir;
-            },
-          ),
-        ),
-        onChanged: (v) => _globalCloneDir = v.trim(),
-      ),
-      const SizedBox(height: 12),
-      _globalSwitchTile(
-        'Auto-promote triage',
-        'Promote triaged issues to refinement automatically',
-        _globalAutoPromoteTriage,
-        (v) => _globalAutoPromoteTriage = v,
-      ),
-      const SizedBox(height: 10),
-      _globalSwitchTile(
-        'Auto-promote refinement',
-        'Promote refined issues to develop automatically',
-        _globalAutoPromoteRefinement,
-        (v) => _globalAutoPromoteRefinement = v,
-      ),
-      const SizedBox(height: 10),
-      _globalSwitchTile(
-        'Generate PR description',
-        'Use an LLM to generate PR titles and descriptions for auto_implement PRs',
-        _globalGeneratePRDescription,
-        (v) => _globalGeneratePRDescription = v,
-      ),
-    ]);
-  }
-
-  Widget _developSection(AppConfig config) {
-    _initDevelopFromConfig(config);
-    final hasLabels = _issueTracking.developLabels.isNotEmpty;
-    return _settingsCard('Develop', [
-      SwitchListTile(
-        title: const Text(
-          'Auto-implement issues',
-          style: TextStyle(fontSize: 13),
-        ),
-        subtitle: const Text(
-          'Issues with develop labels get a branch + PR',
-          style: TextStyle(fontSize: 11),
-        ),
-        dense: true,
-        contentPadding: EdgeInsets.zero,
-        value: hasLabels,
-        onChanged: (v) => setState(() {
-          if (v) {
-            // Give it a default label so the section stays enabled
-            if (_issueTracking.developLabels.isEmpty) {
-              _issueTracking = _issueTracking.copyWith(
-                developLabels: ['develop'],
-              );
-            }
-          } else {
-            _issueTracking = _issueTracking.copyWith(developLabels: []);
-          }
-        }),
-      ),
-      if (hasLabels) ...[
-        const SizedBox(height: 6),
-        AutocompleteChipField(
-          label: 'Develop labels',
-          helper: 'Issues with these labels get a branch + PR',
-          selectedValues: _issueTracking.developLabels,
-          availableOptions: const [],
-          onChanged: (v) => setState(() {
-            _issueTracking = _issueTracking.copyWith(developLabels: v ?? []);
-          }),
-        ),
-        const SizedBox(height: 10),
-        AutocompleteChipField(
-          label: 'PR Reviewers',
-          helper: 'GitHub usernames to request review',
-          selectedValues: _globalPRReviewers,
-          availableOptions: const [],
-          onChanged: (v) => setState(() {
-            _globalPRReviewers = v ?? [];
-          }),
-        ),
-        const SizedBox(height: 10),
-        AutocompleteChipField(
-          label: 'PR Assignee',
-          helper: 'GitHub username to assign PRs to',
-          selectedValues: _globalPRAssignee.isEmpty ? [] : [_globalPRAssignee],
-          availableOptions: const [],
-          onChanged: (v) => setState(() {
-            _globalPRAssignee = (v != null && v.isNotEmpty) ? v.first : '';
-          }),
-        ),
-        const SizedBox(height: 10),
-        AutocompleteChipField(
-          label: 'PR Labels',
-          helper: 'Labels to add to PRs',
-          selectedValues: _globalPRLabels,
-          availableOptions: const [],
-          onChanged: (v) => setState(() {
-            _globalPRLabels = v ?? [];
-          }),
-        ),
-        const SizedBox(height: 10),
-        _globalSwitchTile(
-          'Create as draft',
-          'PRs are created as drafts by default',
-          _globalPRDraft,
-          (v) => _globalPRDraft = v,
-        ),
-        const SizedBox(height: 10),
-        _agentDropdown(
-          label: 'Develop Prompt',
-          helper: 'Agent profile for auto-implementation',
-          value: _developPromptId,
-          onChanged: (v) => setState(() => _developPromptId = v),
-        ),
-      ],
-    ]);
-  }
-
-  // ── Autonomous mode ────────────────────────────────────────────────────────
-
-  Widget _autonomousSection() {
-    return _settingsCard('Autonomous Mode', [
-      SwitchListTile(
-        title: const Text(
-          'Enable autonomous mode',
-          style: TextStyle(fontSize: 13),
-        ),
-        subtitle: const Text(
-          'Allow Heimdallm to act autonomously on PRs and issues',
-          style: TextStyle(fontSize: 11),
-        ),
-        dense: true,
-        contentPadding: EdgeInsets.zero,
-        value: _autonomous.enabled,
-        onChanged: (v) => setState(() {
-          _autonomous = _autonomous.copyWith(enabled: v);
-        }),
-      ),
-      if (_autonomous.enabled) ...[
-        const SizedBox(height: 8),
-        SwitchListTile(
-          title: const Text(
-            'Auto-merge approved PRs',
-            style: TextStyle(fontSize: 13),
-          ),
-          subtitle: const Text(
-            'Automatically merge PRs that pass all checks',
-            style: TextStyle(fontSize: 11),
-          ),
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          value: _autonomous.autoMerge,
-          onChanged: (v) => setState(() {
-            _autonomous = _autonomous.copyWith(autoMerge: v);
-          }),
-        ),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          // ignore: deprecated_member_use
-          value: _autonomous.mergeMethod,
-          decoration: const InputDecoration(
-            labelText: 'Merge method',
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-          items: [
-            'squash',
-            'merge',
-            'rebase',
-          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-          onChanged: (v) => setState(() {
-            _autonomous = _autonomous.copyWith(mergeMethod: v);
-          }),
-        ),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          // ignore: deprecated_member_use
-          value: _autonomous.devEffort,
-          decoration: const InputDecoration(
-            labelText: 'Dev effort',
-            helperText: 'Effort level for autonomous development tasks',
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-          items: [
-            'low',
-            'medium',
-            'high',
-            'max',
-          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-          onChanged: (v) => setState(() {
-            _autonomous = _autonomous.copyWith(devEffort: v);
-          }),
-        ),
-        const SizedBox(height: 8),
-        TextFormField(
-          controller: _devMaxTurnsController,
-          decoration: const InputDecoration(
-            labelText: 'Dev max turns (0 = unlimited)',
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-          keyboardType: TextInputType.number,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          onChanged: (v) => setState(() {
-            _autonomous = _autonomous.copyWith(
-              devMaxTurns: int.tryParse(v) ?? 0,
-            );
-          }),
-        ),
-        const SizedBox(height: 8),
-        TextFormField(
-          controller: _devTimeoutController,
-          decoration: const InputDecoration(
-            labelText: 'Dev timeout (e.g. 45m)',
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-          onChanged: (v) => setState(() {
-            _autonomous = _autonomous.copyWith(devTimeout: v);
-          }),
-        ),
-        const SizedBox(height: 8),
-        TextFormField(
-          controller: _claimLeaseController,
-          decoration: const InputDecoration(
-            labelText: 'Claim lease (e.g. 2h)',
-            helperText: 'How long to hold a claim on an issue before releasing',
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-          onChanged: (v) => setState(() {
-            _autonomous = _autonomous.copyWith(claimLease: v);
-          }),
-        ),
-        const SizedBox(height: 8),
-        SwitchListTile(
-          title: const Text(
-            "Take others' tasks",
-            style: TextStyle(fontSize: 13),
-          ),
-          subtitle: const Text(
-            'Claim issues assigned to other users',
-            style: TextStyle(fontSize: 11),
-          ),
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          value: _autonomous.takeOthersTasks,
-          onChanged: (v) => setState(() {
-            _autonomous = _autonomous.copyWith(
-              takeOthersTasks: v,
-              reassignOnTake: v ? _autonomous.reassignOnTake : false,
-            );
-          }),
-        ),
-        if (_autonomous.takeOthersTasks) ...[
-          const SizedBox(height: 4),
-          Container(
-            decoration: BoxDecoration(
-              color: Theme.of(
-                context,
-              ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-            child: SwitchListTile(
-              title: const Text(
-                'Reassign on take',
-                style: TextStyle(fontSize: 11),
-              ),
-              subtitle: Text(
-                'Reassign issue to the bot user when claiming',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-              ),
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: _autonomous.reassignOnTake,
-              onChanged: (v) => setState(() {
-                _autonomous = _autonomous.copyWith(reassignOnTake: v);
-              }),
-            ),
-          ),
-        ],
-      ],
-    ]);
   }
 
   // ── Circuit breaker ────────────────────────────────────────────────────────
@@ -1745,54 +1157,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           );
         }),
       ),
-      const SizedBox(height: 8),
-      TextFormField(
-        controller: _perIssue24hController,
-        decoration: const InputDecoration(
-          labelText: 'Issues per 24h',
-          border: OutlineInputBorder(),
-          isDense: true,
-        ),
-        keyboardType: TextInputType.number,
-        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-        onChanged: (v) => setState(() {
-          _circuitBreaker = _circuitBreaker.copyWith(
-            perIssue24h: int.tryParse(v) ?? _circuitBreaker.perIssue24h,
-          );
-        }),
-      ),
-      const SizedBox(height: 8),
-      TextFormField(
-        controller: _perIssueRepoHrController,
-        decoration: const InputDecoration(
-          labelText: 'Issues per repo per hour',
-          border: OutlineInputBorder(),
-          isDense: true,
-        ),
-        keyboardType: TextInputType.number,
-        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-        onChanged: (v) => setState(() {
-          _circuitBreaker = _circuitBreaker.copyWith(
-            perIssueRepoHr: int.tryParse(v) ?? _circuitBreaker.perIssueRepoHr,
-          );
-        }),
-      ),
-      const SizedBox(height: 8),
-      TextFormField(
-        controller: _perImplRepoHrController,
-        decoration: const InputDecoration(
-          labelText: 'Implementations per repo per hour (autonomous dev)',
-          border: OutlineInputBorder(),
-          isDense: true,
-        ),
-        keyboardType: TextInputType.number,
-        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-        onChanged: (v) => setState(() {
-          _circuitBreaker = _circuitBreaker.copyWith(
-            perImplRepoHr: int.tryParse(v) ?? _circuitBreaker.perImplRepoHr,
-          );
-        }),
-      ),
     ]);
   }
 
@@ -1898,79 +1262,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     // after dispose throws.
     if (!mounted) return;
     setState(() => _clusterRole = next);
-  }
-
-  Widget _agentDropdown({
-    required String label,
-    required String helper,
-    required String? value,
-    required ValueChanged<String?> onChanged,
-  }) {
-    final agents = ref.watch(agentsProvider).value ?? [];
-    final effective = (value != null && agents.any((a) => a.id == value))
-        ? value
-        : null;
-    return Container(
-      decoration: BoxDecoration(
-        color: Theme.of(
-          context,
-        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      padding: const EdgeInsets.all(10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                label,
-                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-              ),
-              const Spacer(),
-              Text(
-                'global',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          DropdownButtonFormField<String?>(
-            key: ValueKey('$label-$effective'),
-            initialValue: effective,
-            decoration: const InputDecoration(
-              isDense: true,
-              border: OutlineInputBorder(),
-              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            ),
-            style: const TextStyle(fontSize: 12),
-            items: [
-              const DropdownMenuItem<String?>(
-                value: null,
-                child: Text('default', style: TextStyle(fontSize: 12)),
-              ),
-              ...agents.map(
-                (a) => DropdownMenuItem<String?>(
-                  value: a.id,
-                  child: Text(
-                    a.name.isNotEmpty ? a.name : a.id,
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ),
-              ),
-            ],
-            onChanged: onChanged,
-          ),
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              helper,
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   Widget _settingsCard(String title, List<Widget> children) {
@@ -2203,22 +1494,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     pollInterval: _pollInterval,
     retentionDays: _retentionDays,
     repoConfigs: Map.from(_repoConfigs),
-    issueTracking: _issueTracking,
     polling: _polling,
-    globalPRReviewers: _globalPRReviewers,
-    globalPRLabels: _globalPRLabels,
-    globalPRAssignee: _globalPRAssignee,
-    globalPRDraft: _globalPRDraft,
     globalNeverApproveWithIssues: _globalNeverApproveWithIssues,
     globalNeverApproveMinSeverity: _globalNeverApproveMinSeverity,
-    globalTriageOwner: _globalTriageOwner,
     globalCloneDir: _globalCloneDir,
-    globalAutoPromoteTriage: _globalAutoPromoteTriage,
-    globalAutoPromoteRefinement: _globalAutoPromoteRefinement,
-    globalGeneratePRDescription: _globalGeneratePRDescription,
-    globalIssuePrompt: _issuePromptId ?? '',
-    globalImplementPrompt: _developPromptId ?? '',
-    autonomous: _autonomous,
     mergeTracking: _mergeTracking,
     circuitBreaker: _circuitBreaker,
     aiPrimary: _aiPrimary,

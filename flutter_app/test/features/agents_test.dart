@@ -52,129 +52,32 @@ Future<_MockApiClient> _pumpAgentsScreen(
 }
 
 void main() {
-  group('ReviewPrompt.fromPreset', () {
-    test('PR review preset populates `instructions`, not the others', () {
+  group('ReviewPrompt presets', () {
+    test('fromPreset carries the review instructions', () {
       final p = ReviewPrompt.fromPreset(ReviewPrompt.presets.first);
       expect(p.instructions, isNotEmpty);
-      expect(p.issueInstructions, isEmpty);
-      expect(p.implementInstructions, isEmpty);
+      expect(p.hasPRReview, isTrue);
     });
 
-    test(
-      'issue-triage preset populates `issueInstructions`, not the others',
-      () {
-        final p = ReviewPrompt.fromPreset(
-          ReviewPrompt.issueTriagePresets.first,
-        );
-        expect(p.issueInstructions, isNotEmpty);
-        expect(p.instructions, isEmpty);
-        expect(p.implementInstructions, isEmpty);
-      },
-    );
+    test('preset → toJson → fromJson round-trips the instructions', () {
+      final original = ReviewPrompt.fromPreset(ReviewPrompt.presets[1]);
+      final round = ReviewPrompt.fromJson(original.toJson());
+      expect(round.instructions, equals(original.instructions));
+      expect(round.focus, equals(original.focus));
+    });
 
-    test(
-      'development preset populates `implementInstructions`, not the others',
-      () {
-        final p = ReviewPrompt.fromPreset(
-          ReviewPrompt.developmentPresets.first,
-        );
-        expect(p.implementInstructions, isNotEmpty);
-        expect(p.instructions, isEmpty);
-        expect(p.issueInstructions, isEmpty);
-      },
-    );
-
-    test(
-      'preset → toJson → fromJson round-trips category-specific content',
-      () {
-        final original = ReviewPrompt.fromPreset(
-          ReviewPrompt.developmentPresets[1],
-        );
-        final round = ReviewPrompt.fromJson(original.toJson());
-        expect(
-          round.implementInstructions,
-          equals(original.implementInstructions),
-        );
-        expect(round.issueInstructions, equals(original.issueInstructions));
-        expect(round.instructions, equals(original.instructions));
-      },
-    );
-  });
-
-  group('preset lists', () {
-    test('every PR-review preset has only `instructions` populated', () {
+    test('every preset has instructions', () {
       for (final p in ReviewPrompt.presets) {
         expect(
           p.instructions,
           isNotEmpty,
           reason: '${p.id} must have instructions',
         );
-        expect(
-          p.issueInstructions,
-          isEmpty,
-          reason: '${p.id} leaks into issueInstructions',
-        );
-        expect(
-          p.implementInstructions,
-          isEmpty,
-          reason: '${p.id} leaks into implementInstructions',
-        );
       }
     });
 
-    test(
-      'every issue-triage preset has only `issueInstructions` populated',
-      () {
-        for (final p in ReviewPrompt.issueTriagePresets) {
-          expect(
-            p.issueInstructions,
-            isNotEmpty,
-            reason: '${p.id} must have issueInstructions',
-          );
-          expect(
-            p.instructions,
-            isEmpty,
-            reason: '${p.id} leaks into instructions',
-          );
-          expect(
-            p.implementInstructions,
-            isEmpty,
-            reason: '${p.id} leaks into implementInstructions',
-          );
-        }
-      },
-    );
-
-    test(
-      'every development preset has only `implementInstructions` populated',
-      () {
-        for (final p in ReviewPrompt.developmentPresets) {
-          expect(
-            p.implementInstructions,
-            isNotEmpty,
-            reason: '${p.id} must have implementInstructions',
-          );
-          expect(
-            p.instructions,
-            isEmpty,
-            reason: '${p.id} leaks into instructions',
-          );
-          expect(
-            p.issueInstructions,
-            isEmpty,
-            reason: '${p.id} leaks into issueInstructions',
-          );
-        }
-      },
-    );
-
-    test('preset ids are unique across all three categories', () {
-      final all = [
-        ...ReviewPrompt.presets,
-        ...ReviewPrompt.issueTriagePresets,
-        ...ReviewPrompt.developmentPresets,
-      ];
-      final ids = all.map((p) => p.id).toList();
+    test('preset ids are unique', () {
+      final ids = ReviewPrompt.presets.map((p) => p.id).toList();
       expect(
         ids.toSet().length,
         equals(ids.length),
@@ -183,9 +86,7 @@ void main() {
     });
   });
 
-  testWidgets('AgentsScreen renders preset cards for every tab', (
-    tester,
-  ) async {
+  testWidgets('AgentsScreen renders every review preset card', (tester) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -198,45 +99,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // Default selected tab is PR Review — its 5 presets should be visible
     for (final preset in ReviewPrompt.presets) {
       expect(
         find.text(preset.name),
         findsOneWidget,
-        reason: 'PR Review tab missing "${preset.name}"',
+        reason: 'missing preset "${preset.name}"',
       );
     }
-
-    final issueTriageTab = find.descendant(
-      of: find.byType(TabBar),
-      matching: find.text('Issue Triage'),
-    );
-    expect(issueTriageTab, findsOneWidget);
-    await tester.tap(issueTriageTab);
-    await tester.pumpAndSettle();
-    for (final preset in ReviewPrompt.issueTriagePresets) {
-      expect(
-        find.text(preset.name),
-        findsOneWidget,
-        reason: 'Issue Triage tab missing "${preset.name}"',
-      );
-    }
-
-    // Switch to Development and assert its 5 presets render.
-    final developmentTab = find.descendant(
-      of: find.byType(TabBar),
-      matching: find.text('Development'),
-    );
-    expect(developmentTab, findsOneWidget);
-    await tester.tap(developmentTab);
-    await tester.pumpAndSettle();
-    for (final preset in ReviewPrompt.developmentPresets) {
-      expect(
-        find.text(preset.name),
-        findsOneWidget,
-        reason: 'Development tab missing "${preset.name}"',
-      );
-    }
+    // The screen covers PR review only — no per-pipeline tabs any more.
+    expect(find.byType(TabBar), findsNothing);
   });
 
   testWidgets('custom PR prompt marks extra flags as CLI-specific', (
@@ -283,34 +154,20 @@ void main() {
     expect(find.text('Error: Exception: boom'), findsOneWidget);
   });
 
-  testWidgets(
-    'active banner renders built-in defaults on wide and compact layouts',
-    (tester) async {
-      final prompts = [
-        ReviewPrompt.fromPreset(
-          ReviewPrompt.presets.first,
-        ).withActive(PromptCategory.prReview, true),
-        ReviewPrompt.fromPreset(
-          ReviewPrompt.developmentPresets.first,
-        ).withActive(PromptCategory.development, true),
-      ];
+  testWidgets('active banner names the active prompt or the built-in default', (
+    tester,
+  ) async {
+    await _pumpAgentsScreen(tester);
+    expect(find.text('Built-in default'), findsOneWidget);
 
-      await _pumpAgentsScreen(tester, prompts: prompts);
-      expect(find.text('Built-in default'), findsOneWidget);
-      expect(find.text('General Review'), findsWidgets);
-      expect(find.text('Plan First'), findsWidgets);
-
-      await _pumpAgentsScreen(
-        tester,
-        prompts: prompts,
-        size: const Size(600, 900),
-      );
-      expect(find.text('Built-in default'), findsOneWidget);
-      expect(find.text('PR Review'), findsWidgets);
-      expect(find.text('Issue Triage'), findsWidgets);
-      expect(find.text('Development'), findsWidgets);
-    },
-  );
+    final active = ReviewPrompt.fromPreset(
+      ReviewPrompt.presets.first,
+    ).copyWith(isDefaultPr: true);
+    await _pumpAgentsScreen(tester, prompts: [active]);
+    expect(find.text('Built-in default'), findsNothing);
+    expect(find.text('General Review'), findsWidgets);
+    expect(find.text('ACTIVE'), findsOneWidget);
+  });
 
   testWidgets('preset cards expose add, active, and activate states', (
     tester,
@@ -318,7 +175,7 @@ void main() {
     final inactive = ReviewPrompt.fromPreset(ReviewPrompt.presets.first);
     final active = ReviewPrompt.fromPreset(
       ReviewPrompt.presets[1],
-    ).withActive(PromptCategory.prReview, true);
+    ).copyWith(isDefaultPr: true);
     final api = await _pumpAgentsScreen(tester, prompts: [inactive, active]);
 
     expect(find.text('Tap to add'), findsWidgets);
@@ -341,26 +198,20 @@ void main() {
   });
 
   testWidgets(
-    'custom issue prompt validates content, inserts placeholders, and saves toggles',
+    'custom prompt validates content, inserts placeholders, and saves the active flag',
     (tester) async {
       tester.platformDispatcher.textScaleFactorTestValue = 0.5;
       addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
 
       final api = await _pumpAgentsScreen(tester);
 
-      final issueTriageTab = find.descendant(
-        of: find.byType(TabBar),
-        matching: find.text('Issue Triage'),
-      );
-      await tester.tap(issueTriageTab);
-      await tester.pumpAndSettle();
       await tester.tap(find.text('Custom').first);
       await tester.pumpAndSettle();
 
-      expect(find.text('New Issue Triage Prompt'), findsOneWidget);
+      expect(find.text('New Review Prompt'), findsOneWidget);
       await tester.enterText(
         find.byType(TextFormField).first,
-        'Issue custom prompt',
+        'Custom review prompt',
       );
 
       await tester.tap(find.text('Save'));
@@ -385,8 +236,6 @@ void main() {
       await tester.tap(find.text('Custom').last);
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(Switch).at(1));
-      await tester.pump();
       await tester.tap(find.byType(Switch).last);
       await tester.pump();
       await tester.tap(find.text('Save'));
@@ -397,11 +246,10 @@ void main() {
           any(
             that: predicate<Map<String, dynamic>>(
               (json) =>
-                  json['name'] == 'Issue custom prompt' &&
+                  json['name'] == 'Custom review prompt' &&
                   json['focus'] == 'custom' &&
-                  json['issue_prompt'] == '{repo}' &&
-                  json['is_default_issue'] == true &&
-                  json['is_default_dev'] == true,
+                  json['prompt'] == '{repo}' &&
+                  json['is_default_pr'] == true,
             ),
           ),
         ),
@@ -409,20 +257,11 @@ void main() {
     },
   );
 
-  testWidgets('development prompt tiles can be deleted after confirmation', (
-    tester,
-  ) async {
+  testWidgets('prompt tiles can be deleted after confirmation', (tester) async {
     final prompt = ReviewPrompt.fromPreset(
-      ReviewPrompt.developmentPresets.first,
-    ).copyWith(isDefaultDev: true);
+      ReviewPrompt.presets.first,
+    ).copyWith(isDefaultPr: true);
     final api = await _pumpAgentsScreen(tester, prompts: [prompt]);
-
-    final developmentTab = find.descendant(
-      of: find.byType(TabBar),
-      matching: find.text('Development'),
-    );
-    await tester.tap(developmentTab);
-    await tester.pumpAndSettle();
     expect(find.text('ACTIVE'), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.delete).first);
@@ -440,73 +279,78 @@ void main() {
     verify(() => api.deleteAgent(prompt.id)).called(1);
   });
 
-  group('per-category activation', () {
-    test('withActive flips only the targeted flag', () {
-      const p = ReviewPrompt(
-        id: 'x',
-        name: 'X',
-        instructions: 'pr',
-        issueInstructions: 'issue',
-        implementInstructions: 'dev',
-      );
-      final pr = p.withActive(PromptCategory.prReview, true);
-      expect(pr.isDefaultPr, isTrue);
-      expect(pr.isDefaultIssue, isFalse);
-      expect(pr.isDefaultDev, isFalse);
+  testWidgets('an inactive prompt tile can be activated and edited', (
+    tester,
+  ) async {
+    const prompt = ReviewPrompt(
+      id: 'custom-1',
+      name: 'Team prompt',
+      instructions: 'Check our conventions',
+    );
+    // The editor dialog has a fixed-width layout the wide test font overflows.
+    tester.platformDispatcher.textScaleFactorTestValue = 0.6;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final api = await _pumpAgentsScreen(tester, prompts: [prompt]);
+    final tile = find.ancestor(
+      of: find.text('Team prompt'),
+      matching: find.byType(ListTile),
+    );
 
-      final both = pr.withActive(PromptCategory.development, true);
-      expect(both.isDefaultPr, isTrue, reason: 'PR flag preserved');
-      expect(both.isDefaultDev, isTrue);
-      expect(both.isDefaultIssue, isFalse);
-    });
+    await tester.tap(
+      find.descendant(of: tile, matching: find.widgetWithText(TextButton, 'Activate')),
+    );
+    await tester.pumpAndSettle();
+    final activated =
+        verify(() => api.upsertAgent(captureAny())).captured.single
+            as Map<String, dynamic>;
+    expect(activated['id'], 'custom-1');
+    expect(activated['is_default_pr'], isTrue);
 
-    test('toJson emits per-category flags and no legacy is_default', () {
+    await tester.tap(
+      find.descendant(of: tile, matching: find.byIcon(Icons.edit)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Use as the active review prompt'), findsOneWidget);
+  });
+
+  group('active flag', () {
+    test('toJson emits is_default_pr and no legacy is_default', () {
       const p = ReviewPrompt(
         id: 'x',
         name: 'X',
         isDefaultPr: true,
-        isDefaultDev: true,
         instructions: 'pr',
-        implementInstructions: 'dev',
       );
       final json = p.toJson();
       expect(json['is_default_pr'], isTrue);
-      expect(json['is_default_issue'], isFalse);
-      expect(json['is_default_dev'], isTrue);
       expect(
         json.containsKey('is_default'),
         isFalse,
         reason: 'legacy key must not be emitted',
       );
+      expect(json.containsKey('is_default_issue'), isFalse);
+      expect(json.containsKey('is_default_dev'), isFalse);
     });
 
-    test('fromJson seeds all three flags from legacy is_default', () {
-      final json = {
+    test('fromJson seeds the flag from legacy is_default', () {
+      final p = ReviewPrompt.fromJson({
         'id': 'x',
         'name': 'X',
         'is_default': true,
         'instructions': 'pr',
-      };
-      final p = ReviewPrompt.fromJson(json);
+      });
       expect(p.isDefaultPr, isTrue);
-      expect(p.isDefaultIssue, isTrue);
-      expect(p.isDefaultDev, isTrue);
     });
 
-    test('fromJson prefers per-category flags over legacy is_default', () {
-      final json = {
+    test('fromJson prefers is_default_pr over legacy is_default', () {
+      final p = ReviewPrompt.fromJson({
         'id': 'x',
         'name': 'X',
         'is_default': true,
         'is_default_pr': false,
-        'is_default_issue': true,
-        'is_default_dev': false,
         'instructions': 'pr',
-      };
-      final p = ReviewPrompt.fromJson(json);
+      });
       expect(p.isDefaultPr, isFalse);
-      expect(p.isDefaultIssue, isTrue);
-      expect(p.isDefaultDev, isFalse);
     });
   });
 }

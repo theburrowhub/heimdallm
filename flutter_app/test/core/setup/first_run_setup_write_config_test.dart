@@ -7,7 +7,7 @@ import 'package:heimdallm/core/setup/first_run_setup.dart';
 /// Regression tests for the config-loss bug: "Save and start Heimdallm" used
 /// to blindly overwrite config.toml with a TOML view built from AppConfig,
 /// which does not model [cluster], [polling], [merge_tracking],
-/// [circuit_breaker], [autonomous], [activity_log], server.bind_addr,
+/// [circuit_breaker], [activity_log], server.bind_addr,
 /// github.token, discovery_* — every one of those was silently dropped by a
 /// save made from the config screen while the daemon was down (exactly the
 /// path this button takes, since GET /config could not have populated the

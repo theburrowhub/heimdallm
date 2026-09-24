@@ -4,13 +4,13 @@ import 'package:flutter/material.dart';
 /// purpose — adding a new bucket should be deliberate.
 enum EventStatus {
   /// Work that just started and may still be running (review_started,
-  /// issue_review_started, polling_started, …).
+  /// polling_started, …).
   started,
 
-  /// Terminal-success: review_completed, issue_implemented, polling_completed.
+  /// Terminal-success: review_completed, polling_completed.
   succeeded,
 
-  /// Terminal-failure: review_error, issue_review_error.
+  /// Terminal-failure: review_error.
   failed,
 
   /// Intentionally not run: review_skipped, dismissed, dedup hit.
@@ -36,7 +36,7 @@ enum EventStatus {
 /// fallback rather than the primary view.
 @immutable
 class FormattedEvent {
-  /// Human-readable title: `Review started`, `Issue triaged`, etc.
+  /// Human-readable title: `Review started`, `Review completed`, etc.
   /// Capitalised, no underscores, no event-id leakage.
   final String label;
 
@@ -135,81 +135,9 @@ FormattedEvent format(String type, Map<String, dynamic> payload) {
         icon: Icons.remove,
         color: _color(EventStatus.skipped),
       );
-    case 'issue_detected':
-      return FormattedEvent(
-        label: 'Issue detected',
-        target: _repoRef(payload),
-        details: const [],
-        status: EventStatus.info,
-        icon: Icons.fiber_manual_record,
-        color: _color(EventStatus.info),
-      );
-    case 'issue_review_started':
-      return FormattedEvent(
-        label: 'Triage started',
-        target: _repoRef(payload),
-        details: _agentDetails(payload),
-        status: EventStatus.started,
-        icon: Icons.play_arrow,
-        color: _color(EventStatus.started),
-      );
-    case 'issue_review_completed':
-      return FormattedEvent(
-        label: 'Triage completed',
-        target: _repoRef(payload),
-        details: _durationDetails(payload),
-        status: EventStatus.succeeded,
-        icon: Icons.check,
-        color: _color(EventStatus.succeeded),
-      );
-    case 'issue_refinement_done':
-      return FormattedEvent(
-        label: 'Refinement completed',
-        target: _repoRef(payload),
-        details: _durationDetails(payload),
-        status: EventStatus.succeeded,
-        icon: Icons.check,
-        color: _color(EventStatus.succeeded),
-      );
-    case 'issue_implemented':
-      return FormattedEvent(
-        label: 'Issue implemented',
-        target: _repoRef(payload),
-        details: _durationDetails(payload),
-        status: EventStatus.succeeded,
-        icon: Icons.check,
-        color: _color(EventStatus.succeeded),
-      );
-    case 'issue_review_error':
-      return FormattedEvent(
-        label: 'Triage failed',
-        target: _repoRef(payload),
-        details: _errorDetails(payload),
-        status: EventStatus.failed,
-        icon: Icons.close,
-        color: _color(EventStatus.failed),
-      );
-    case 'issue_promoted':
-      return FormattedEvent(
-        label: 'Stage promoted',
-        target: _repoRef(payload),
-        details: _stageDetails(payload),
-        status: EventStatus.warning,
-        icon: Icons.sync_alt,
-        color: _color(EventStatus.warning),
-      );
     case 'pr_state_changed':
       return FormattedEvent(
         label: 'PR state changed',
-        target: _repoRef(payload),
-        details: _stateChangeDetails(payload),
-        status: EventStatus.info,
-        icon: Icons.sync_alt,
-        color: _color(EventStatus.info),
-      );
-    case 'issue_state_changed':
-      return FormattedEvent(
-        label: 'Issue state changed',
         target: _repoRef(payload),
         details: _stateChangeDetails(payload),
         status: EventStatus.info,
@@ -264,7 +192,7 @@ FormattedEvent format(String type, Map<String, dynamic> payload) {
   }
 }
 
-/// `org/repo#42` for PR/issue-scoped events, `org/repo` for repo-only.
+/// `org/repo#42` for PR-scoped events, `org/repo` for repo-only.
 String _repoRef(Map<String, dynamic> payload) {
   final repo = payload['repo'] as String?;
   final number = payload['number'];
@@ -297,16 +225,6 @@ List<String> _reasonDetails(Map<String, dynamic> payload) {
   final reason = payload['reason'] as String?;
   if (reason == null || reason.isEmpty) return const [];
   return [reason];
-}
-
-List<String> _stageDetails(Map<String, dynamic> payload) {
-  final from = payload['from_stage'] as String?;
-  final to = payload['to_stage'] as String?;
-  final trigger = payload['trigger'] as String?;
-  final out = <String>[];
-  if (from != null && to != null) out.add('$from → $to');
-  if (trigger != null && trigger.isNotEmpty) out.add(trigger);
-  return out;
 }
 
 List<String> _stateChangeDetails(Map<String, dynamic> payload) {

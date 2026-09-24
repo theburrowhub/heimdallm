@@ -5,9 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../core/models/pr.dart';
-import '../../core/models/tracked_issue.dart';
 import '../dashboard/dashboard_providers.dart';
-import '../issues/issues_providers.dart';
 import 'stats_filter_bar.dart';
 
 class StatsScreen extends ConsumerWidget {
@@ -17,12 +15,8 @@ class StatsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final statsAsync = ref.watch(statsProvider);
     final prs = ref.watch(prsProvider).value ?? <PR>[];
-    final issues = ref.watch(issuesProvider).value ?? <TrackedIssue>[];
 
-    final allRepos = <String>{
-      ...prs.map((p) => p.repo),
-      ...issues.map((i) => i.repo),
-    }..remove('');
+    final allRepos = <String>{...prs.map((p) => p.repo)}..remove('');
 
     return Column(
       children: [

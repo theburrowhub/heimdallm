@@ -9,17 +9,13 @@ import '../../core/instances/models.dart' show RoutingRules;
 import '../instances/widgets/instance_badge.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review_status.dart';
-import '../../core/models/tracked_issue.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
-import '../../shared/widgets/attention_badge.dart';
-import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../../shared/widgets/type_badge.dart';
 import '../activity/add_pr_dialog.dart';
-import '../issues/issues_providers.dart';
 import 'activity_filter_bar.dart';
 import 'activity_filters.dart';
 import 'dashboard_providers.dart';
@@ -78,34 +74,6 @@ class SortNotifier extends Notifier<SortMode> {
   }
 }
 
-// ── Unified activity item ────────────────────────────────────────────────────
-
-sealed class _ActivityItem {
-  const _ActivityItem();
-}
-
-class _PRItem extends _ActivityItem {
-  final InstanceGroup<PR> group;
-  const _PRItem(this.group);
-
-  PR get pr => group.value;
-}
-
-class _IssueItem extends _ActivityItem {
-  final InstanceGroup<TrackedIssue> group;
-  const _IssueItem(this.group);
-
-  TrackedIssue get issue => group.value;
-}
-
-String _itemType(_ActivityItem item) => switch (item) {
-  _PRItem() => 'pr',
-  _IssueItem(:final issue) =>
-    (issue.latestReview != null && issue.latestReview!.actionTaken == 'develop')
-        ? 'dev'
-        : 'it',
-};
-
 /// The identity key [groupByIdentity] collapses PR rows on: repo + number,
 /// not the local store id. A PR's `id` is a per-daemon SQLite row and is not
 /// comparable across instances (two daemons can independently assign PR #769
@@ -115,10 +83,9 @@ String _itemType(_ActivityItem item) => switch (item) {
 /// what `reviewKeyFor` and `reconcileReviewing` already key on for the same
 /// reason.
 String _prIdentityKey(PR pr) => '${pr.repo}#${pr.number}';
-String _issueIdentityKey(TrackedIssue issue) => '${issue.repo}#${issue.number}';
 
-/// Picks which instance's row is authoritative for a group of the same PR or
-/// issue reported by several instances (theburrowhub/heimdallm#769).
+/// Picks which instance's row is authoritative for a group of the same PR
+/// reported by several instances (theburrowhub/heimdallm#769).
 ///
 /// In order: the routing owner, if routing is engaged and one of the
 /// candidates is it; otherwise whichever candidate actually has a review
@@ -152,103 +119,51 @@ InstanceScoped<T> _preferOwner<T>(
   return withWork.first;
 }
 
-String _itemRepo(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr) => pr.repo,
-  _IssueItem(:final issue) => issue.repo,
-};
+int _priorityKey(PR pr) => pr.latestReview == null
+    ? 0
+    : switch (pr.latestReview!.severity.toLowerCase()) {
+        'high' => 1,
+        'medium' => 2,
+        _ => 3,
+      };
 
-String _itemTitle(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr) => pr.title,
-  _IssueItem(:final issue) => issue.title,
-};
-
-int _itemNumber(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr) => pr.number,
-  _IssueItem(:final issue) => issue.number,
-};
-
-String _itemAuthor(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr) => pr.author,
-  _IssueItem(:final issue) => issue.author,
-};
-
-DateTime _itemDate(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr) => pr.updatedAt,
-  _IssueItem(:final issue) => issue.latestReview?.createdAt ?? issue.fetchedAt,
-};
-
-int _itemPriorityKey(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr) =>
-    pr.latestReview == null
-        ? 0
-        : switch (pr.latestReview!.severity.toLowerCase()) {
-            'high' => 1,
-            'medium' => 2,
-            _ => 3,
-          },
-  _IssueItem(:final issue) =>
-    issue.latestReview == null
-        ? 0
-        : switch (issue.latestReview!.severity.toLowerCase()) {
-            'critical' => 0,
-            'high' => 1,
-            'medium' => 2,
-            _ => 3,
-          },
-};
-
-String _itemState(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr) => pr.state,
-  _IssueItem(:final issue) => issue.state,
-};
-
-bool _matchesFilters(_ActivityItem item, ActivityFilters filters) {
-  // Type filter
-  if (filters.types.isNotEmpty) {
-    final type = _itemType(item);
-    if (!filters.types.contains(type)) return false;
-  }
+bool _matchesFilters(PR pr, ActivityFilters filters) {
   // Org filter
   if (filters.orgs.isNotEmpty) {
-    final repo = _itemRepo(item);
-    final org = repo.contains('/') ? repo.split('/').first : repo;
+    final org = pr.repo.contains('/') ? pr.repo.split('/').first : pr.repo;
     if (!filters.orgs.contains(org)) return false;
   }
   // Repo filter
   if (filters.repos.isNotEmpty) {
-    if (!filters.repos.contains(_itemRepo(item))) return false;
+    if (!filters.repos.contains(pr.repo)) return false;
   }
   // State filter
   if (filters.states.isNotEmpty) {
-    if (!filters.states.contains(_itemState(item))) return false;
+    if (!filters.states.contains(pr.state)) return false;
   }
   // Search
   if (filters.search.isNotEmpty) {
     final q = filters.search.toLowerCase();
-    final title = _itemTitle(item).toLowerCase();
-    final repo = _itemRepo(item).toLowerCase();
-    final number = _itemNumber(item).toString();
-    final author = _itemAuthor(item).toLowerCase();
-    if (!title.contains(q) &&
-        !repo.contains(q) &&
-        !number.contains(q) &&
-        !author.contains(q)) {
+    if (!pr.title.toLowerCase().contains(q) &&
+        !pr.repo.toLowerCase().contains(q) &&
+        !pr.number.toString().contains(q) &&
+        !pr.author.toLowerCase().contains(q)) {
       return false;
     }
   }
   return true;
 }
 
-void _sortItems(List<_ActivityItem> items, SortMode mode) {
+void _sortItems(List<InstanceGroup<PR>> items, SortMode mode) {
   switch (mode) {
     case SortMode.priority:
       items.sort((a, b) {
-        final sev = _itemPriorityKey(a).compareTo(_itemPriorityKey(b));
+        final sev = _priorityKey(a.value).compareTo(_priorityKey(b.value));
         if (sev != 0) return sev;
-        return _itemDate(b).compareTo(_itemDate(a));
+        return b.value.updatedAt.compareTo(a.value.updatedAt);
       });
     case SortMode.newest:
-      items.sort((a, b) => _itemDate(b).compareTo(_itemDate(a)));
+      items.sort((a, b) => b.value.updatedAt.compareTo(a.value.updatedAt));
   }
 }
 
@@ -264,10 +179,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     // SSE listener for state changes (open/closed transitions)
     ref.listen(sseStreamProvider, (_, next) {
       next.whenData((event) {
-        if (event.type == 'pr_state_changed' ||
-            event.type == 'issue_state_changed') {
+        if (event.type == 'pr_state_changed') {
           ref.invalidate(prsByInstanceProvider);
-          ref.invalidate(issuesByInstanceProvider);
         }
       });
     });
@@ -275,9 +188,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     // Watch the aggregating providers so every row knows which instance
     // served it; the flat lists below are just their values.
     final prsAsync = ref.watch(prsByInstanceProvider);
-    final issuesAsync = ref.watch(issuesByInstanceProvider);
     // Discovery is global (every instance learns about every repo), so the
-    // same PR or issue legitimately arrives from more than one instance's
+    // same PR legitimately arrives from more than one instance's
     // fan-out — grouping below collapses those into one row instead of the
     // duplicate rows behind theburrowhub/heimdallm#769. `.value` rather than
     // `.future`/`.when`: the activity list must not block or spinner waiting
@@ -294,8 +206,9 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       onAddPR: () => showAddPRDialog(context),
     );
 
-    // Combine loading states
-    if (prsAsync.isLoading && issuesAsync.isLoading) {
+    // Spinner/error only before the first value: a refresh (e.g. after a
+    // dismiss) must keep the rows mounted so their toasts' Undo still works.
+    if (prsAsync.isLoading && !prsAsync.hasValue) {
       return Column(
         children: [
           emptyToolbar,
@@ -303,7 +216,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         ],
       );
     }
-    if (prsAsync.hasError && issuesAsync.hasError) {
+    if (prsAsync.hasError && !prsAsync.hasValue) {
       return Column(
         children: [
           emptyToolbar,
@@ -313,16 +226,10 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     }
 
     final prScoped = prsAsync.value?.items ?? const <InstanceScoped<PR>>[];
-    final issueScoped =
-        issuesAsync.value?.items ?? const <InstanceScoped<TrackedIssue>>[];
     final prs = prScoped.map((e) => e.value).toList();
-    final issues = issueScoped.map((e) => e.value).toList();
 
     // Collect all known repos for the filter bar.
-    final allRepos = <String>{
-      ...prs.map((p) => p.repo),
-      ...issues.map((i) => i.repo),
-    }..remove('');
+    final allRepos = <String>{...prs.map((p) => p.repo)}..remove('');
 
     // Group before building items, not after: the "N items" count and the
     // filters below must see the collapsed rows, or a PR reported by two
@@ -338,27 +245,9 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         rules: routingRules,
       ),
     );
-    final issueGroups = groupByIdentity<TrackedIssue>(
-      issueScoped,
-      keyOf: _issueIdentityKey,
-      pick: (candidates) => _preferOwner<TrackedIssue>(
-        candidates,
-        repoOf: (issue) => issue.repo,
-        hasWork: (issue) => issue.latestReview != null,
-        reviewIdOf: (issue) => issue.latestReview?.id ?? 0,
-        rules: routingRules,
-      ),
-    );
-
-    // Build unified list of items.
-    final List<_ActivityItem> items = [
-      ...prGroups.map(_PRItem.new),
-      ...issueGroups.map(_IssueItem.new),
-    ];
-
     // Apply filters.
-    final filtered = items
-        .where((item) => _matchesFilters(item, filters))
+    final filtered = prGroups
+        .where((group) => _matchesFilters(group.value, filters))
         .toList();
 
     // Sort.
@@ -384,7 +273,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         ),
     ];
 
-    if (prs.isEmpty && issues.isEmpty) {
+    if (prs.isEmpty) {
       return Column(
         children: [
           ...header,
@@ -413,7 +302,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
               padding: const EdgeInsets.all(8),
               gridDelegate: AppGridDelegate.entities(),
               itemCount: filtered.length,
-              itemBuilder: (ctx, i) => _ActivityGridTile(item: filtered[i]),
+              itemBuilder: (ctx, i) => _ActivityGridTile(pr: filtered[i].value),
             ),
           ),
         ],
@@ -425,12 +314,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
         ...header,
-        ...filtered.map(
-          (item) => switch (item) {
-            _PRItem(:final group) => _PRTile(group: group),
-            _IssueItem(:final group) => _IssueActivityTile(group: group),
-          },
-        ),
+        ...filtered.map((group) => _PRTile(group: group)),
       ],
     );
   }
@@ -459,10 +343,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
             runSpacing: 8,
             children: [
               TextButton(
-                onPressed: () {
-                  ref.invalidate(prsByInstanceProvider);
-                  ref.invalidate(issuesByInstanceProvider);
-                },
+                onPressed: () => ref.invalidate(prsByInstanceProvider),
                 child: const Text('Retry'),
               ),
               FilledButton.icon(
@@ -786,226 +667,28 @@ class _PRTileState extends ConsumerState<_PRTile> {
   }
 }
 
-class _IssueActivityTile extends ConsumerStatefulWidget {
-  final InstanceGroup<TrackedIssue> group;
-  const _IssueActivityTile({required this.group});
-
-  @override
-  ConsumerState<_IssueActivityTile> createState() => _IssueActivityTileState();
-}
-
-class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
-  TrackedIssue get _issue => widget.group.value;
-  String get _instanceId => widget.group.instanceId;
-  String get _type => _itemType(_IssueItem(widget.group));
-
-  /// Dismisses the issue on every instance that reported it — see
-  /// _PRTileState._dismiss for why this must fan out rather than touch only
-  /// the primary.
-  Future<void> _dismiss() async {
-    final members = widget.group.members;
-    final errors = <Object>[];
-    await Future.wait(
-      members.map((m) async {
-        try {
-          await clientForInstanceOf(ref, m.instanceId).dismissIssue(m.value.id);
-        } catch (e) {
-          errors.add(e);
-        }
-      }),
-    );
-    ref.invalidate(issuesByInstanceProvider);
-    if (!mounted) return;
-    if (errors.isEmpty) {
-      showToast(
-        context,
-        'Issue #${_issue.number} dismissed',
-        duration: const Duration(seconds: 5),
-        actionLabel: 'Undo',
-        onAction: () async {
-          await Future.wait(
-            members.map((m) async {
-              try {
-                await clientForInstanceOf(
-                  ref,
-                  m.instanceId,
-                ).undismissIssue(m.value.id);
-              } catch (_) {}
-            }),
-          );
-          ref.invalidate(issuesByInstanceProvider);
-        },
-      );
-    } else {
-      showToast(
-        context,
-        'Error dismissing issue #${_issue.number}: ${errors.first}',
-        isError: true,
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final issue = _issue;
-    final reviewed = issue.latestReview != null;
-    final severity = issue.latestReview?.severity ?? '';
-    // auto_implement_no_changes is a terminal "needs attention" state —
-    // the review row has an empty triage block (severity defaults to
-    // LOW/green), which would otherwise misrepresent it as a clean low
-    // severity result. See #483.
-    final needsAttention =
-        issue.latestReview?.actionTaken == 'auto_implement_no_changes';
-
-    return AppListRow(
-      dimmed: issue.state != 'open',
-      onTap: () => context.push(issueDetailRoute(issue.id, _instanceId)),
-      accentColor: needsAttention
-          ? Colors.deepOrange.shade700
-          : reviewed
-          ? _severityColor(severity)
-          : Colors.grey.shade600,
-      leading: [
-        TypeBadge(type: _type),
-        StateBadge(state: issue.state),
-      ],
-      title: Text(
-        issue.title,
-        style: const TextStyle(fontWeight: FontWeight.w600),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: Row(
-        children: [
-          Flexible(
-            child: Text(
-              '${issue.repo} · #${issue.number} · ${issue.author}',
-              style: Theme.of(context).textTheme.bodySmall,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (widget.group.members.isNotEmpty) ...[
-            const SizedBox(width: 6),
-            Flexible(
-              child: InstanceBadges(
-                instances: [
-                  for (final m in widget.group.orderedMembers)
-                    (id: m.instanceId, name: m.instanceName),
-                ],
-                compact: true,
-              ),
-            ),
-          ],
-        ],
-      ),
-      trailing: [
-        if (issue.linkedPR != null &&
-            issue.linkedPR!.externalReviewState.isNotEmpty)
-          PRReviewStateBadge(state: issue.linkedPR!.externalReviewState),
-        if (needsAttention)
-          const AttentionBadge()
-        else if (reviewed)
-          SeverityBadge(severity: severity)
-        else
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade700,
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: const Text(
-              'PENDING',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        IconButton(
-          icon: const Icon(Icons.close, size: 14),
-          tooltip: 'Dismiss issue',
-          color: Colors.grey.shade600,
-          visualDensity: VisualDensity.compact,
-          onPressed: _dismiss,
-        ),
-      ],
-    );
-  }
-
-  Color _severityColor(String s) {
-    switch (s.toLowerCase()) {
-      case 'critical':
-        return Colors.red.shade900;
-      case 'high':
-        return Colors.red.shade700;
-      case 'medium':
-        return Colors.orange.shade700;
-      default:
-        return Colors.green.shade700;
-    }
-  }
-}
-
 // ── Grid tile ─────────────────────────────────────────────────────────────────
 
 class _ActivityGridTile extends StatelessWidget {
-  final _ActivityItem item;
-  const _ActivityGridTile({required this.item});
+  final PR pr;
+  const _ActivityGridTile({required this.pr});
 
   @override
   Widget build(BuildContext context) {
-    final String type;
-    final Color color;
-    final String state;
-    final String title;
-    final String subtitle;
-    final String? severity;
-    final bool needsAttention;
-    final DateTime timestamp;
-
-    switch (item) {
-      case _PRItem(:final pr):
-        type = 'PR';
-        color = AppColors.featurePrReview.resolve(context);
-        state = pr.state;
-        title = pr.title;
-        subtitle = '${pr.repo} #${pr.number} · ${pr.author}';
-        severity = pr.latestReview?.severity;
-        needsAttention = false;
-        timestamp = pr.updatedAt;
-      case _IssueItem(:final issue):
-        final isDev = issue.latestReview?.actionTaken == 'auto_implement';
-        type = isDev ? 'DEV' : 'IT';
-        color =
-            (isDev ? AppColors.featureDevelop : AppColors.featureIssueTracking)
-                .resolve(context);
-        state = issue.state;
-        title = issue.title;
-        subtitle = '${issue.repo} #${issue.number} · ${issue.author}';
-        // Terminal no-changes rows have an empty triage block — render
-        // them as a NEEDS ATTENTION chip instead of a misleading green
-        // LOW badge (#483).
-        needsAttention =
-            issue.latestReview?.actionTaken == 'auto_implement_no_changes';
-        severity = issue.latestReview?.severity;
-        timestamp = issue.fetchedAt;
-    }
-
+    final severity = pr.latestReview?.severity;
     return AppGridCard(
-      dimmed: state != 'open',
+      dimmed: pr.state != 'open',
       header: Row(
         children: [
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
             decoration: BoxDecoration(
-              color: color,
+              color: AppColors.featurePrReview.resolve(context),
               borderRadius: BorderRadius.circular(3),
             ),
-            child: Text(
-              type,
-              style: const TextStyle(
+            child: const Text(
+              'PR',
+              style: TextStyle(
                 color: Colors.white,
                 fontSize: 9,
                 fontWeight: FontWeight.bold,
@@ -1013,28 +696,25 @@ class _ActivityGridTile extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          StateBadge(state: state),
+          StateBadge(state: pr.state),
         ],
       ),
       title: Text(
-        title,
+        pr.title,
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
       ),
       subtitle: AppText.muted(
-        subtitle,
+        '${pr.repo} #${pr.number} · ${pr.author}',
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
       footer: Row(
         children: [
-          if (needsAttention)
-            const AttentionBadge()
-          else if (severity != null)
-            SeverityBadge(severity: severity),
+          if (severity != null) SeverityBadge(severity: severity),
           const Spacer(),
-          AppText.muted(_timeAgo(timestamp)),
+          AppText.muted(_timeAgo(pr.updatedAt)),
         ],
       ),
     );

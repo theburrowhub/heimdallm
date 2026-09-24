@@ -9,6 +9,7 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/repositories/repo_detail_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
+import 'package:heimdallm/shared/widgets/override_field.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -36,7 +37,6 @@ Map<String, dynamic> _configJson({
   'ai_primary': 'claude',
   'ai_fallback': '',
   'review_mode': 'single',
-  'issue_tracking': {'enabled': true},
   'merge_tracking': {
     'enabled': globalMtEnabled,
     ...globalMergeTracking,
@@ -64,12 +64,6 @@ Future<MockApiClient> _mountMergeTrackingDetail(
       monitored: monitored,
     ),
   );
-  when(
-    () => mockApi.fetchRepoLabels(_repoName),
-  ).thenAnswer((_) async => <String>[]);
-  when(
-    () => mockApi.fetchRepoCollaborators(_repoName),
-  ).thenAnswer((_) async => <String>[]);
   when(() => mockApi.patchMergeTrackingRepoConfig(_repoName, any())).thenAnswer(
     (invocation) async {
       final patch = invocation.positionalArguments[1] as Map<String, dynamic>;
@@ -119,76 +113,8 @@ Future<MockApiClient> _mountMergeTrackingDetail(
 void main() {
   setUpAll(() => registerFallbackValue(<String, dynamic>{}));
 
-  testWidgets('RepoDetailScreen hides Organizations filter in Issue Tracking', (
-    tester,
-  ) async {
-    const repoName = 'theburrowhub/heimdallm';
-    final mockApi = MockApiClient();
-
-    when(() => mockApi.fetchConfig()).thenAnswer(
-      (_) async => {
-        'repositories': [repoName],
-        'server_port': 1,
-        'poll_interval': '60s',
-        'retention_days': 30,
-        'ai_primary': 'claude',
-        'ai_fallback': '',
-        'review_mode': 'single',
-        'issue_tracking': {'enabled': true},
-      },
-    );
-    when(
-      () => mockApi.fetchRepoLabels(repoName),
-    ).thenAnswer((_) async => <String>[]);
-    when(
-      () => mockApi.fetchRepoCollaborators(repoName),
-    ).thenAnswer((_) async => <String>[]);
-
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          apiClientProvider.overrideWithValue(mockApi),
-          configNotifierProvider.overrideWith(ConfigNotifier.new),
-          agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
-        ],
-        child: MaterialApp(
-          theme: HeimdallmTheme.light(),
-          builder: (context, navigatorChild) => HeimdallmTheme.scope(
-            child: navigatorChild ?? const SizedBox.shrink(),
-          ),
-          home: const RepoDetailScreen(repoName: repoName),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    // Regression guard: the Issue Tracking "Organizations" filter field must
-    // not appear at repo scope (it is a global/org-only filter). Target its
-    // unique helper text so the guard is not confused by the unrelated
-    // "Organizations" review-policy section header on this screen.
-    expect(
-      find.textContaining('Limit to issues from these orgs'),
-      findsNothing,
-    );
-
-    // Sanity: surrounding Issue Tracking fields still render.
-    expect(find.text('Review-only labels'), findsOneWidget);
-    expect(find.text('Refinement labels'), findsOneWidget);
-    expect(find.text('Skip labels'), findsOneWidget);
-    expect(find.text('Filter mode'), findsOneWidget);
-    expect(find.text('Default action'), findsOneWidget);
-    expect(find.text('Assignees'), findsOneWidget);
-    expect(find.text('Prompt'), findsWidgets);
-  });
-
   testWidgets('RepoDetailScreen shows a config error state', (tester) async {
     final mockApi = MockApiClient();
-    when(
-      () => mockApi.fetchRepoLabels(_repoName),
-    ).thenAnswer((_) async => <String>[]);
-    when(
-      () => mockApi.fetchRepoCollaborators(_repoName),
-    ).thenAnswer((_) async => <String>[]);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -219,12 +145,6 @@ void main() {
         'local_dirs_detected': {_repoName: '/repos/heimdallm'},
       },
     );
-    when(
-      () => mockApi.fetchRepoLabels(_repoName),
-    ).thenAnswer((_) async => <String>[]);
-    when(
-      () => mockApi.fetchRepoCollaborators(_repoName),
-    ).thenAnswer((_) async => <String>[]);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -447,4 +367,75 @@ void main() {
       await tester.pump(const Duration(seconds: 4));
     },
   );
+
+  group('clone directory override', () {
+    Future<MockApiClient> mount(WidgetTester tester) async {
+      final mockApi = MockApiClient();
+      final json = {
+        ..._configJson(),
+        'clone_dir': '/work/global',
+        'repo_overrides': {
+          _repoName: {'clone_dir': '/work/repo'},
+        },
+      };
+      when(() => mockApi.fetchConfig()).thenAnswer((_) async => json);
+      when(
+        () => mockApi.patchRepoConfig(_repoName, any()),
+      ).thenAnswer((_) async => json);
+      when(
+        () => mockApi.deleteRepoField(_repoName, any()),
+      ).thenAnswer((_) async => _configJson());
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            apiClientProvider.overrideWithValue(mockApi),
+            configNotifierProvider.overrideWith(ConfigNotifier.new),
+            agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
+          ],
+          child: MaterialApp(
+            theme: HeimdallmTheme.light(),
+            builder: (context, navigatorChild) => HeimdallmTheme.scope(
+              child: navigatorChild ?? const SizedBox.shrink(),
+            ),
+            home: const RepoDetailScreen(repoName: _repoName),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return mockApi;
+    }
+
+    Finder cloneDirField() =>
+        find.widgetWithText(OverrideTextField, 'Clone directory');
+
+    testWidgets('an edit is autosaved as clone_dir', (tester) async {
+      final mockApi = await mount(tester);
+
+      await tester.enterText(
+        find.descendant(
+          of: cloneDirField(),
+          matching: find.byType(TextFormField),
+        ),
+        '/work/elsewhere',
+      );
+      await tester.pump(const Duration(milliseconds: 801));
+      await tester.pumpAndSettle();
+
+      final captured = verify(
+        () => mockApi.patchRepoConfig(_repoName, captureAny()),
+      ).captured;
+      expect(captured.single, {'clone_dir': '/work/elsewhere'});
+    });
+
+    testWidgets('reset deletes the repo clone_dir override', (tester) async {
+      final mockApi = await mount(tester);
+
+      await tester.tap(
+        find.descendant(of: cloneDirField(), matching: find.text('\u00d7 reset')),
+      );
+      await tester.pumpAndSettle();
+
+      verify(() => mockApi.deleteRepoField(_repoName, 'clone_dir')).called(1);
+    });
+  });
 }

@@ -51,9 +51,9 @@ void main() {
           children: [
             AppFilterChip(label: 'PR', selected: true, onTap: () {}),
             AppFilterChip(
-              label: 'IT',
+              label: 'MT',
               selected: false,
-              accent: AppColors.featureIssueTracking,
+              accent: AppColors.featureMergeTracking,
               onTap: () {},
             ),
           ],
@@ -63,7 +63,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('PR'), findsOneWidget);
-    expect(find.text('IT'), findsOneWidget);
+    expect(find.text('MT'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

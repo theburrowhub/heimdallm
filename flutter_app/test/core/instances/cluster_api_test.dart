@@ -332,7 +332,6 @@ void main() {
     await api.dispatch(
       'merge',
       prId: 1,
-      issueId: 2,
       repo: 'acme/tools',
       number: 3,
       headSha: 'sha',
@@ -341,7 +340,7 @@ void main() {
       instance: 'srv-b',
     );
     final body = jsonDecode(recorder.bodies.single) as Map<String, dynamic>;
-    expect(body['issue_id'], 2);
+    expect(body['pr_id'], 1);
     expect(body['pr_url'], contains('pull/3'));
     expect(body['dry_run'], isTrue);
     expect(body['instance'], 'srv-b');

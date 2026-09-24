@@ -189,9 +189,8 @@ class RoutingMode {
 class RoutingOp {
   static const review = 'review';
   static const merge = 'merge';
-  static const issue = 'issue';
 
-  static const all = [review, merge, issue];
+  static const all = [review, merge];
 }
 
 /// Cluster roles. Mirrors the daemon's config.Role* constants

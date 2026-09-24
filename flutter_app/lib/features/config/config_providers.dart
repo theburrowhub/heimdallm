@@ -373,44 +373,8 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     aiDiff['review_mode'] = updated.reviewMode;
   }
 
-  // PR metadata
-  final prMeta = <String, dynamic>{};
-  if (_listsDiffer(old.globalPRReviewers, updated.globalPRReviewers)) {
-    prMeta['reviewers'] = updated.globalPRReviewers;
-  }
-  if (_listsDiffer(old.globalPRLabels, updated.globalPRLabels)) {
-    prMeta['labels'] = updated.globalPRLabels;
-  }
-  if (old.globalPRAssignee != updated.globalPRAssignee) {
-    prMeta['pr_assignee'] = updated.globalPRAssignee;
-  }
-  if (old.globalPRDraft != updated.globalPRDraft) {
-    prMeta['pr_draft'] = updated.globalPRDraft;
-  }
-  if (prMeta.isNotEmpty) aiDiff['pr_metadata'] = prMeta;
-
-  if (old.globalIssuePrompt != updated.globalIssuePrompt) {
-    aiDiff['issue_prompt'] = updated.globalIssuePrompt;
-  }
-  if (old.globalImplementPrompt != updated.globalImplementPrompt) {
-    aiDiff['implement_prompt'] = updated.globalImplementPrompt;
-  }
-  if (old.globalTriageOwner != updated.globalTriageOwner) {
-    aiDiff['triage_owner'] = updated.globalTriageOwner;
-  }
   if (old.globalCloneDir != updated.globalCloneDir) {
     aiDiff['clone_dir'] = updated.globalCloneDir;
-  }
-  if (old.globalAutoPromoteTriage != updated.globalAutoPromoteTriage &&
-      updated.globalAutoPromoteTriage != null) {
-    aiDiff['auto_promote_triage'] = updated.globalAutoPromoteTriage;
-  }
-  if (old.globalAutoPromoteRefinement != updated.globalAutoPromoteRefinement &&
-      updated.globalAutoPromoteRefinement != null) {
-    aiDiff['auto_promote_refinement'] = updated.globalAutoPromoteRefinement;
-  }
-  if (old.globalGeneratePRDescription != updated.globalGeneratePRDescription) {
-    aiDiff['generate_pr_description'] = updated.globalGeneratePRDescription;
   }
   if (old.globalNeverApproveWithIssues !=
       updated.globalNeverApproveWithIssues) {
@@ -487,15 +451,6 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     githubDiff['non_monitored'] = newNonMon;
   }
 
-  // Issue tracking (global)
-  final itDiff = _computeIssueTrackingDiff(
-    old.issueTracking,
-    updated.issueTracking,
-  );
-  if (itDiff.isNotEmpty) {
-    githubDiff['issue_tracking'] = itDiff;
-  }
-
   if (githubDiff.isNotEmpty) {
     diff['github'] = githubDiff;
   }
@@ -507,37 +462,6 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   if (retentionDiff.isNotEmpty) {
     diff['retention'] = retentionDiff;
   }
-
-  // Autonomous mode
-  final autonomousDiff = <String, dynamic>{};
-  if (old.autonomous.enabled != updated.autonomous.enabled) {
-    autonomousDiff['enabled'] = updated.autonomous.enabled;
-  }
-  if (old.autonomous.autoMerge != updated.autonomous.autoMerge) {
-    autonomousDiff['auto_merge'] = updated.autonomous.autoMerge;
-  }
-  if (old.autonomous.mergeMethod != updated.autonomous.mergeMethod) {
-    autonomousDiff['merge_method'] = updated.autonomous.mergeMethod;
-  }
-  if (old.autonomous.takeOthersTasks != updated.autonomous.takeOthersTasks) {
-    autonomousDiff['take_others_tasks'] = updated.autonomous.takeOthersTasks;
-  }
-  if (old.autonomous.reassignOnTake != updated.autonomous.reassignOnTake) {
-    autonomousDiff['reassign_on_take'] = updated.autonomous.reassignOnTake;
-  }
-  if (old.autonomous.devMaxTurns != updated.autonomous.devMaxTurns) {
-    autonomousDiff['dev_max_turns'] = updated.autonomous.devMaxTurns;
-  }
-  if (old.autonomous.devEffort != updated.autonomous.devEffort) {
-    autonomousDiff['dev_effort'] = updated.autonomous.devEffort;
-  }
-  if (old.autonomous.devTimeout != updated.autonomous.devTimeout) {
-    autonomousDiff['dev_timeout'] = updated.autonomous.devTimeout;
-  }
-  if (old.autonomous.claimLease != updated.autonomous.claimLease) {
-    autonomousDiff['claim_lease'] = updated.autonomous.claimLease;
-  }
-  if (autonomousDiff.isNotEmpty) diff['autonomous'] = autonomousDiff;
 
   // Merge tracking
   final mtDiff = <String, dynamic>{};
@@ -601,31 +525,11 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   if (old.circuitBreaker.perRepoHr != updated.circuitBreaker.perRepoHr) {
     cbDiff['per_repo_hr'] = updated.circuitBreaker.perRepoHr;
   }
-  if (old.circuitBreaker.perIssue24h != updated.circuitBreaker.perIssue24h) {
-    cbDiff['per_issue_24h'] = updated.circuitBreaker.perIssue24h;
-  }
-  if (old.circuitBreaker.perIssueRepoHr !=
-      updated.circuitBreaker.perIssueRepoHr) {
-    cbDiff['per_issue_repo_hr'] = updated.circuitBreaker.perIssueRepoHr;
-  }
-  if (old.circuitBreaker.perImplRepoHr !=
-      updated.circuitBreaker.perImplRepoHr) {
-    cbDiff['per_impl_repo_hr'] = updated.circuitBreaker.perImplRepoHr;
-  }
   if (cbDiff.isNotEmpty) diff['circuit_breaker'] = cbDiff;
   // Polling
   final pollingDiff = <String, dynamic>{};
-  if (old.polling.adaptive != updated.polling.adaptive) {
-    pollingDiff['adaptive'] = updated.polling.adaptive;
-  }
   if (old.polling.pollInterval != updated.polling.pollInterval) {
     pollingDiff['poll_interval'] = updated.polling.pollInterval;
-  }
-  if (old.polling.minInterval != updated.polling.minInterval) {
-    pollingDiff['min_interval'] = updated.polling.minInterval;
-  }
-  if (old.polling.maxInterval != updated.polling.maxInterval) {
-    pollingDiff['max_interval'] = updated.polling.maxInterval;
   }
   if (old.polling.discoveryInterval != updated.polling.discoveryInterval) {
     pollingDiff['discovery_interval'] = updated.polling.discoveryInterval;
@@ -641,9 +545,6 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   if (old.polling.useEtag != updated.polling.useEtag) {
     pollingDiff['use_etag'] = updated.polling.useEtag;
   }
-  if (old.polling.useGraphql != updated.polling.useGraphql) {
-    pollingDiff['use_graphql'] = updated.polling.useGraphql;
-  }
   if (pollingDiff.isNotEmpty) diff['polling'] = pollingDiff;
 
   // Cluster. Only the role: instance identity and the registry are owned by
@@ -652,41 +553,6 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     diff['cluster'] = <String, dynamic>{'role': updated.clusterRole};
   }
 
-  return diff;
-}
-
-Map<String, dynamic> _computeIssueTrackingDiff(
-  IssueTrackingConfig old,
-  IssueTrackingConfig updated,
-) {
-  final diff = <String, dynamic>{};
-  if (old.enabled != updated.enabled) {
-    diff['enabled'] = updated.enabled;
-  }
-  if (old.filterMode != updated.filterMode) {
-    diff['filter_mode'] = updated.filterMode;
-  }
-  if (old.defaultAction != updated.defaultAction) {
-    diff['default_action'] = updated.defaultAction;
-  }
-  if (_listsDiffer(old.developLabels, updated.developLabels)) {
-    diff['develop_labels'] = updated.developLabels;
-  }
-  if (_listsDiffer(old.refinementLabels, updated.refinementLabels)) {
-    diff['refinement_labels'] = updated.refinementLabels;
-  }
-  if (_listsDiffer(old.reviewOnlyLabels, updated.reviewOnlyLabels)) {
-    diff['review_only_labels'] = updated.reviewOnlyLabels;
-  }
-  if (_listsDiffer(old.skipLabels, updated.skipLabels)) {
-    diff['skip_labels'] = updated.skipLabels;
-  }
-  if (_listsDiffer(old.organizations, updated.organizations)) {
-    diff['organizations'] = updated.organizations;
-  }
-  if (_listsDiffer(old.assignees, updated.assignees)) {
-    diff['assignees'] = updated.assignees;
-  }
   return diff;
 }
 

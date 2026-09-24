@@ -21,9 +21,7 @@ void main() {
           selectedCount: 3,
           aggregates: const {
             Feature.prReview: true,
-            Feature.issueTracking: null,
-            Feature.develop: false,
-            Feature.mergeTracking: false,
+            Feature.mergeTracking: null,
           },
           onApply: (_, _) {},
           onClear: () {},
@@ -31,7 +29,7 @@ void main() {
       ),
     );
     expect(find.text('3 selected'), findsOneWidget);
-    expect(find.byType(Switch), findsNWidgets(3)); // three pure states
+    expect(find.byType(Switch), findsNWidgets(1)); // one pure state
     expect(find.byKey(const Key('FeatureSwitch_mixed')), findsOneWidget);
   });
 
@@ -42,9 +40,7 @@ void main() {
           selectedCount: 2,
           aggregates: const {
             Feature.prReview: true,
-            Feature.issueTracking: null,
-            Feature.develop: false,
-            Feature.mergeTracking: false,
+            Feature.mergeTracking: null,
           },
           onApply: (_, _) {},
           onClear: () {},
@@ -65,9 +61,7 @@ void main() {
           selectedCount: 3,
           aggregates: const {
             Feature.prReview: false,
-            Feature.issueTracking: true,
-            Feature.develop: false,
-            Feature.mergeTracking: false,
+            Feature.mergeTracking: true,
           },
           onApply: (f, v) {
             calledFeature = f;
@@ -91,8 +85,6 @@ void main() {
           selectedCount: 1,
           aggregates: const {
             Feature.prReview: true,
-            Feature.issueTracking: true,
-            Feature.develop: true,
             Feature.mergeTracking: true,
           },
           onApply: (_, _) {},
@@ -114,8 +106,6 @@ void main() {
             selectedCount: 2,
             aggregates: const {
               Feature.prReview: true,
-              Feature.issueTracking: false,
-              Feature.develop: false,
               Feature.mergeTracking: false,
             },
             onApply: (_, _) {},
@@ -135,8 +125,6 @@ void main() {
             selectedCount: 2,
             aggregates: const {
               Feature.prReview: true,
-              Feature.issueTracking: false,
-              Feature.develop: false,
               Feature.mergeTracking: false,
             },
             onApply: (_, _) {},
@@ -171,8 +159,6 @@ void main() {
             selectedCount: 1,
             aggregates: const {
               Feature.prReview: true,
-              Feature.issueTracking: false,
-              Feature.develop: false,
               Feature.mergeTracking: false,
             },
             onApply: (_, _) {},

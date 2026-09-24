@@ -285,14 +285,13 @@ void main() {
   group('route helpers', () {
     test('omit the instance on a single-daemon install', () {
       expect(prDetailRoute(42, ''), '/prs/42');
-      expect(issueDetailRoute(9, ''), '/issues/9');
     });
 
     test('carry the instance so the record is unambiguous', () {
       // Store ids are per-instance: /prs/42 alone can mean two different pull
       // requests once more than one daemon is registered.
       expect(prDetailRoute(42, 'srv-a'), '/prs/42?instance=srv-a');
-      expect(issueDetailRoute(9, 'srv a'), contains('instance=srv+a'));
+      expect(prDetailRoute(9, 'srv a'), contains('instance=srv+a'));
     });
   });
 }

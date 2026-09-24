@@ -420,12 +420,8 @@ class _ActivityDetailSheet extends StatelessWidget {
     );
   }
 
-  static Uri _githubUrl(ActivityEntry entry) {
-    final kind = entry.itemType == 'issue' ? 'issues' : 'pull';
-    return Uri.parse(
-      'https://github.com/${entry.repo}/$kind/${entry.itemNumber}',
-    );
-  }
+  static Uri _githubUrl(ActivityEntry entry) =>
+      Uri.parse('https://github.com/${entry.repo}/pull/${entry.itemNumber}');
 
   static String _formatTimestamp(DateTime t) {
     final date =

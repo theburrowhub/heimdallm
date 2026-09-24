@@ -37,8 +37,6 @@ class ActivityQueryNotifier extends Notifier<ActivityQuery> {
       state = state.copyWith(orgs: _toggled(state.orgs, org));
   void toggleRepo(String repo) =>
       state = state.copyWith(repos: _toggled(state.repos, repo));
-  void toggleItemType(String itemType) =>
-      state = state.copyWith(itemTypes: _toggled(state.itemTypes, itemType));
   void toggleAction(ActivityAction a) =>
       state = state.copyWith(actions: _toggled(state.actions, a));
   void toggleOutcome(String outcome) =>
@@ -46,7 +44,6 @@ class ActivityQueryNotifier extends Notifier<ActivityQuery> {
 
   void setQuickFilter({
     ActivityAction? action,
-    String? itemType,
     String? outcome,
     required bool enabled,
   }) {
@@ -54,9 +51,6 @@ class ActivityQueryNotifier extends Notifier<ActivityQuery> {
       actions: action == null
           ? null
           : _setMembership(state.actions, action, enabled),
-      itemTypes: itemType == null
-          ? null
-          : _setMembership(state.itemTypes, itemType, enabled),
       outcomes: outcome == null
           ? null
           : _setMembership(state.outcomes, outcome, enabled),
@@ -66,7 +60,6 @@ class ActivityQueryNotifier extends Notifier<ActivityQuery> {
   void clearFilters() => state = state.copyWith(
     orgs: const {},
     repos: const {},
-    itemTypes: const {},
     actions: const {},
     outcomes: const {},
   );
@@ -105,11 +98,6 @@ const _activityLogEventTypes = {
   'review_completed',
   'review_error',
   'review_skipped',
-  'issue_review_completed',
-  'issue_refinement_done',
-  'issue_implemented',
-  'issue_review_error',
-  'issue_promoted',
 };
 
 /// Installs the live-mode SSE listener for ActivityScreen.

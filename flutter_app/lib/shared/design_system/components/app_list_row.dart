@@ -19,11 +19,11 @@ import '../tokens.dart';
 const _trailingMaxWidth = 260.0;
 const _trailingMaxWidthFraction = 0.5;
 
-/// The single row shape for every list of PRs/issues/repos/instances/
-/// prompts/events in the app.
+/// The single row shape for every list of PRs/repos/instances/prompts/events
+/// in the app.
 ///
 /// Reproduces Activity's current row look (`dashboard_screen.dart`'s
-/// `_PRTile`/`_IssueActivityTile`) through design-system tokens, so Merge,
+/// `_PRTile`) through design-system tokens, so Merge,
 /// Repositories, Organizations, Instances, Prompts and the server Events
 /// tab render list rows with the exact same background, border, radius and
 /// accent bar instead of four visibly different implementations.

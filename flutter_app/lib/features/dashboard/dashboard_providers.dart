@@ -10,7 +10,6 @@ import '../../core/models/pr.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../core/state/local_state_notifier.dart';
 import '../../main.dart' show sendPRNotification;
-import '../issues/issues_providers.dart';
 import '../stats/stats_filters.dart';
 import 'activity_filters.dart';
 
@@ -362,87 +361,15 @@ void _handleSseEvent(Ref ref, SseEvent event) {
               .update((s) => Map.of(s)..remove(key));
         }
 
-      // ── Issue tracking events ──────────────────────────────────────────
-      case 'issue_detected':
-        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
-
-      case 'issue_review_started':
-        final issueNumber = (data['number'] as num?)?.toInt();
-        final issueKey = (repo.isNotEmpty && issueNumber != null)
-            ? '$repo:$issueNumber'
-            : null;
-        if (issueKey != null) {
-          ref
-              .read(reviewingIssuesProvider.notifier)
-              .update((s) => {...s, issueKey});
-        }
-
-      case 'issue_review_completed':
-        final issueNumber = (data['number'] as num?)?.toInt();
-        final issueKey = (repo.isNotEmpty && issueNumber != null)
-            ? '$repo:$issueNumber'
-            : null;
-        if (issueKey != null) {
-          ref
-              .read(reviewingIssuesProvider.notifier)
-              .update((s) => s.difference({issueKey}));
-        }
-        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
-
-      case 'issue_refinement_done':
-      case 'issue_implemented':
-      case 'issue_promoted':
-        final rawNumber = data['number'] ?? data['issue_number'];
-        final issueNumber = (rawNumber as num?)?.toInt();
-        final issueKey = (repo.isNotEmpty && issueNumber != null)
-            ? '$repo:$issueNumber'
-            : null;
-        if (issueKey != null) {
-          ref
-              .read(reviewingIssuesProvider.notifier)
-              .update((s) => s.difference({issueKey}));
-          ref
-              .read(promotingIssuesProvider.notifier)
-              .update((s) => s.difference({issueKey}));
-        }
-        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
-
-      case 'issue_review_error':
-        final issueNumber = (data['number'] as num?)?.toInt();
-        final issueKey = (repo.isNotEmpty && issueNumber != null)
-            ? '$repo:$issueNumber'
-            : null;
-        if (issueKey != null) {
-          ref
-              .read(reviewingIssuesProvider.notifier)
-              .update((s) => s.difference({issueKey}));
-        }
-        // Terminal failure — bump the list refresh so the issue's row
-        // re-fetches its latest review state (e.g. the new
-        // auto_implement_no_changes terminal state from #483), matching
-        // the behaviour of the other terminal issue events above.
-        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
-
-      // pr_review_state_changed fires when Tier 3 observes a new
-      // aggregate external review state on an auto_implement-created
-      // PR (#482 phase 1). The dashboard tile renders the chip from
-      // the issue's linked_pr.external_review_state, so a list
-      // refresh re-fetches that field and the chip updates live.
-      // Without this case the badge can sit stale until the next
-      // unrelated refresh (poll completion, manual reload).
-      case 'pr_review_state_changed':
-        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
-
       // repo_renamed fires when the rename reconciler propagates a
       // GitHub repo/org rename through daemon state (#489). Every
-      // cached list keyed on the OLD slug is now stale: PRs, issues,
-      // activity, stats. Bump every refresh counter so the next
+      // cached list keyed on the OLD slug is now stale: PRs, activity,
+      // stats. Bump every refresh counter so the next
       // render pulls the post-rename data. Payload also carries
       // worktree_purged so a follow-up surface could badge a
       // dashboard warning when false; for now we just refresh.
       case 'repo_renamed':
         ref.read(prListRefreshProvider.notifier).update((s) => s + 1);
-        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
 
       // repo_non_monitored_stale fires when the rename probe detects
       // that an entry in github.non_monitored has been renamed

@@ -56,30 +56,6 @@ class ActivityFilterBar extends ConsumerWidget {
         ),
         const _ToolbarDivider(),
         AppFilterChip(
-          label: 'PR',
-          selected: filters.types.contains('pr'),
-          accent: AppColors.featurePrReview,
-          onTap: () => notifier.update(
-            filters.copyWith(types: _toggled(filters.types, 'pr')),
-          ),
-        ),
-        AppFilterChip(
-          label: 'IT',
-          selected: filters.types.contains('it'),
-          accent: AppColors.featureIssueTracking,
-          onTap: () => notifier.update(
-            filters.copyWith(types: _toggled(filters.types, 'it')),
-          ),
-        ),
-        AppFilterChip(
-          label: 'DEV',
-          selected: filters.types.contains('dev'),
-          accent: AppColors.featureDevelop,
-          onTap: () => notifier.update(
-            filters.copyWith(types: _toggled(filters.types, 'dev')),
-          ),
-        ),
-        AppFilterChip(
           label: 'Open',
           selected: filters.states.contains('open'),
           accent: AppColors.success,

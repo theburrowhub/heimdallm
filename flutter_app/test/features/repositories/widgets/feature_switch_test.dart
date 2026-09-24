@@ -33,7 +33,7 @@ void main() {
     await tester.pumpWidget(
       _host(
         FeatureSwitch(
-          feature: Feature.develop,
+          feature: Feature.mergeTracking,
           value: false,
           onChanged: (_) {},
         ),
@@ -48,7 +48,7 @@ void main() {
     await tester.pumpWidget(
       _host(
         FeatureSwitch(
-          feature: Feature.issueTracking,
+          feature: Feature.mergeTracking,
           value: null,
           onChanged: (_) {},
         ),
@@ -63,7 +63,7 @@ void main() {
     await tester.pumpWidget(
       _host(
         FeatureSwitch(
-          feature: Feature.develop,
+          feature: Feature.mergeTracking,
           value: null,
           onChanged: (v) => lastValue = v,
         ),

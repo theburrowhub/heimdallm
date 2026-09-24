@@ -9,7 +9,6 @@ import '../../core/models/agent.dart';
 import '../../core/models/config_model.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
-import '../../shared/widgets/autocomplete_chip_field.dart';
 import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
 import '../../shared/widgets/toast.dart';
@@ -17,7 +16,6 @@ import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
 import '../repositories/widgets/feature_palette.dart';
-import '../repositories/widgets/feature_switch.dart';
 
 class OrgDetailScreen extends ConsumerStatefulWidget {
   final String orgName;
@@ -135,35 +133,8 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     if (old.localDir != updated.localDir) {
       diff['local_dir'] = updated.localDir ?? '';
     }
-    if (old.triageOwner != updated.triageOwner) {
-      diff['triage_owner'] = updated.triageOwner ?? '';
-    }
     if (old.cloneDir != updated.cloneDir) {
       diff['clone_dir'] = updated.cloneDir ?? '';
-    }
-    if (old.autoPromoteTriage != updated.autoPromoteTriage &&
-        updated.autoPromoteTriage != null) {
-      diff['auto_promote_triage'] = updated.autoPromoteTriage!;
-    }
-    if (old.autoPromoteRefinement != updated.autoPromoteRefinement &&
-        updated.autoPromoteRefinement != null) {
-      diff['auto_promote_refinement'] = updated.autoPromoteRefinement!;
-    }
-    if (old.generatePRDescription != updated.generatePRDescription &&
-        updated.generatePRDescription != null) {
-      diff['generate_pr_description'] = updated.generatePRDescription!;
-    }
-    if (old.issuePromptId != updated.issuePromptId) {
-      diff['issue_prompt'] = updated.issuePromptId ?? '';
-    }
-    if (old.developPromptId != updated.developPromptId) {
-      diff['implement_prompt'] = updated.developPromptId ?? '';
-    }
-    if (old.prAssignee != updated.prAssignee) {
-      diff['pr_assignee'] = updated.prAssignee ?? '';
-    }
-    if (old.prDraft != updated.prDraft && updated.prDraft != null) {
-      diff['pr_draft'] = updated.prDraft!;
     }
     if (old.neverApproveWithIssues != updated.neverApproveWithIssues &&
         updated.neverApproveWithIssues != null) {
@@ -173,59 +144,8 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
       diff['never_approve_min_severity'] =
           updated.neverApproveMinSeverity ?? '';
     }
-    if (!_listsEqual(old.prReviewers, updated.prReviewers)) {
-      diff['pr_reviewers'] = updated.prReviewers ?? <String>[];
-    }
-    if (!_listsEqual(old.prLabels, updated.prLabels)) {
-      diff['pr_labels'] = updated.prLabels ?? <String>[];
-    }
-
-    final itDiff = <String, dynamic>{};
-    if (old.itEnabled != updated.itEnabled && updated.itEnabled != null) {
-      itDiff['enabled'] = updated.itEnabled!;
-    }
-    if (old.devEnabled != updated.devEnabled && updated.devEnabled != null) {
-      itDiff['develop_enabled'] = updated.devEnabled!;
-    }
-    if (old.issueFilterMode != updated.issueFilterMode) {
-      itDiff['filter_mode'] = updated.issueFilterMode ?? '';
-    }
-    if (old.issueDefaultAction != updated.issueDefaultAction) {
-      itDiff['default_action'] = updated.issueDefaultAction ?? '';
-    }
-    if (!_listsEqual(old.reviewOnlyLabels, updated.reviewOnlyLabels)) {
-      itDiff['review_only_labels'] = updated.reviewOnlyLabels ?? <String>[];
-    }
-    if (!_listsEqual(old.refinementLabels, updated.refinementLabels)) {
-      itDiff['refinement_labels'] = updated.refinementLabels ?? <String>[];
-    }
-    if (!_listsEqual(old.developLabels, updated.developLabels)) {
-      itDiff['develop_labels'] = updated.developLabels ?? <String>[];
-    }
-    if (!_listsEqual(old.skipLabels, updated.skipLabels)) {
-      itDiff['skip_labels'] = updated.skipLabels ?? <String>[];
-    }
-    if (!_listsEqual(old.issueOrganizations, updated.issueOrganizations)) {
-      itDiff['organizations'] = updated.issueOrganizations ?? <String>[];
-    }
-    if (!_listsEqual(old.issueAssignees, updated.issueAssignees)) {
-      itDiff['assignees'] = updated.issueAssignees ?? <String>[];
-    }
-    if (itDiff.isNotEmpty) diff['issue_tracking'] = itDiff;
     return diff;
   }
-
-  bool _listsEqual(List<String>? a, List<String>? b) {
-    if (a == null && b == null) return true;
-    if (a == null || b == null) return false;
-    if (a.length != b.length) return false;
-    for (var i = 0; i < a.length; i++) {
-      if (a[i] != b[i]) return false;
-    }
-    return true;
-  }
-
-  String _joinList(List<String>? list) => list?.join(', ') ?? '';
 
   @override
   Widget build(BuildContext context) {
@@ -288,6 +208,14 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                       isDirectory: true,
                       onChanged: (v) => _update(_config.copyWith(localDir: v)),
                       onReset: () => _resetField('local_dir'),
+                    ),
+                    const SizedBox(height: 10),
+                    OverrideTextField(
+                      label: 'Clone directory',
+                      globalValue: appConfig.globalCloneDir,
+                      overrideValue: _config.cloneDir,
+                      onChanged: (v) => _update(_config.copyWith(cloneDir: v)),
+                      onReset: () => _resetField('clone_dir'),
                     ),
                   ]),
                   _sectionCard('PR Review', [
@@ -357,279 +285,6 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                       onReset: () => _resetField('never_approve_min_severity'),
                     ),
                   ], accent: FeaturePalette.prReview),
-                  _sectionCard('Issue Tracking', [
-                    Row(
-                      children: [
-                        const Expanded(child: AppText('Triage issues')),
-                        FeatureSwitch(
-                          feature: Feature.issueTracking,
-                          value:
-                              _config.itEnabled ??
-                              appConfig.issueTracking.enabled,
-                          onChanged: (v) =>
-                              _update(_config.copyWith(itEnabled: v)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Review-only labels',
-                      selectedValues:
-                          _config.reviewOnlyLabels ??
-                          appConfig.issueTracking.reviewOnlyLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.reviewOnlyLabels != null,
-                      globalHint: _joinList(
-                        appConfig.issueTracking.reviewOnlyLabels,
-                      ),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(reviewOnlyLabels: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/review_only_labels'),
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Refinement labels',
-                      helper:
-                          'Issues with these labels get a deep implementation plan',
-                      selectedValues:
-                          _config.refinementLabels ??
-                          appConfig.issueTracking.refinementLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.refinementLabels != null,
-                      globalHint: _joinList(
-                        appConfig.issueTracking.refinementLabels,
-                      ),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(refinementLabels: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/refinement_labels'),
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Skip labels',
-                      selectedValues:
-                          _config.skipLabels ??
-                          appConfig.issueTracking.skipLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.skipLabels != null,
-                      globalHint: _joinList(appConfig.issueTracking.skipLabels),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(skipLabels: v)),
-                      onReset: () => _resetField('issue_tracking/skip_labels'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Filter mode',
-                      globalValue: appConfig.issueTracking.filterMode,
-                      overrideValue: _config.issueFilterMode,
-                      options: const ['exclusive', 'inclusive'],
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issueFilterMode: v)),
-                      onReset: () => _resetField('issue_tracking/filter_mode'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Default action',
-                      globalValue: appConfig.issueTracking.defaultAction,
-                      overrideValue: _config.issueDefaultAction,
-                      options: const ['ignore', 'review_only'],
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issueDefaultAction: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/default_action'),
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Organizations',
-                      helper: 'GitHub org names to filter issues',
-                      selectedValues:
-                          _config.issueOrganizations ??
-                          appConfig.issueTracking.organizations,
-                      availableOptions: appConfig.knownOrganizations,
-                      isOverridden: _config.issueOrganizations != null,
-                      globalHint: _joinList(
-                        appConfig.issueTracking.organizations,
-                      ),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issueOrganizations: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/organizations'),
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Assignees',
-                      helper: 'Only process issues assigned to these users',
-                      selectedValues:
-                          _config.issueAssignees ??
-                          appConfig.issueTracking.assignees,
-                      availableOptions: appConfig.knownGitHubUsers,
-                      isOverridden: _config.issueAssignees != null,
-                      globalHint: _joinList(appConfig.issueTracking.assignees),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issueAssignees: v)),
-                      onReset: () => _resetField('issue_tracking/assignees'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Prompt',
-                      globalValue: appConfig.globalIssuePrompt.isEmpty
-                          ? 'default'
-                          : appConfig.globalIssuePrompt,
-                      overrideValue: _config.issuePromptId,
-                      options: promptOptions,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issuePromptId: v)),
-                      onReset: () => _resetField('issue_prompt'),
-                    ),
-                  ], accent: FeaturePalette.issueTracking),
-                  _sectionCard('Pipeline', [
-                    OverrideTextField(
-                      label: 'Triage owner',
-                      globalValue: appConfig.globalTriageOwner,
-                      overrideValue: _config.triageOwner,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(triageOwner: v)),
-                      onReset: () => _resetField('triage_owner'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideTextField(
-                      label: 'Clone directory',
-                      globalValue: appConfig.globalCloneDir,
-                      overrideValue: _config.cloneDir,
-                      onChanged: (v) => _update(_config.copyWith(cloneDir: v)),
-                      onReset: () => _resetField('clone_dir'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Auto-promote triage',
-                      globalValue: (appConfig.globalAutoPromoteTriage ?? false)
-                          .toString(),
-                      overrideValue: _config.autoPromoteTriage?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          autoPromoteTriage: v != null ? v == 'true' : null,
-                        ),
-                      ),
-                      onReset: () => _resetField('auto_promote_triage'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Auto-promote refinement',
-                      globalValue:
-                          (appConfig.globalAutoPromoteRefinement ?? false)
-                              .toString(),
-                      overrideValue: _config.autoPromoteRefinement?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          autoPromoteRefinement: v != null ? v == 'true' : null,
-                        ),
-                      ),
-                      onReset: () => _resetField('auto_promote_refinement'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Generate PR description',
-                      globalValue: appConfig.globalGeneratePRDescription
-                          .toString(),
-                      overrideValue: _config.generatePRDescription?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          generatePRDescription: v != null ? v == 'true' : null,
-                        ),
-                      ),
-                      onReset: () => _resetField('generate_pr_description'),
-                    ),
-                  ]),
-                  _sectionCard('Develop', [
-                    Row(
-                      children: [
-                        const Expanded(child: AppText('Auto-implement issues')),
-                        FeatureSwitch(
-                          feature: Feature.develop,
-                          value: _config.devEnabled ?? false,
-                          onChanged: (v) =>
-                              _update(_config.copyWith(devEnabled: v)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Develop labels',
-                      selectedValues:
-                          _config.developLabels ??
-                          appConfig.issueTracking.developLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.developLabels != null,
-                      globalHint: _joinList(
-                        appConfig.issueTracking.developLabels,
-                      ),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(developLabels: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/develop_labels'),
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'PR Reviewers',
-                      selectedValues:
-                          _config.prReviewers ?? appConfig.globalPRReviewers,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.prReviewers != null,
-                      globalHint: _joinList(appConfig.globalPRReviewers),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(prReviewers: v)),
-                      onReset: () => _resetField('pr_reviewers'),
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'PR Labels',
-                      selectedValues:
-                          _config.prLabels ?? appConfig.globalPRLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.prLabels != null,
-                      globalHint: _joinList(appConfig.globalPRLabels),
-                      onChanged: (v) => _update(_config.copyWith(prLabels: v)),
-                      onReset: () => _resetField('pr_labels'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideTextField(
-                      label: 'PR Assignee',
-                      globalValue: appConfig.globalPRAssignee,
-                      overrideValue: _config.prAssignee,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(prAssignee: v)),
-                      onReset: () => _resetField('pr_assignee'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Draft',
-                      globalValue: appConfig.globalPRDraft.toString(),
-                      overrideValue: _config.prDraft?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          prDraft: v != null ? v == 'true' : null,
-                        ),
-                      ),
-                      onReset: () => _resetField('pr_draft'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Prompt',
-                      globalValue: appConfig.globalImplementPrompt.isEmpty
-                          ? 'default'
-                          : appConfig.globalImplementPrompt,
-                      overrideValue: _config.developPromptId,
-                      options: promptOptions,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(developPromptId: v)),
-                      onReset: () => _resetField('implement_prompt'),
-                    ),
-                  ], accent: FeaturePalette.develop),
                   _sectionCard('Merge Tracking', [
                     MergeTrackingOverrideEditor(
                       scopeKey: 'org',

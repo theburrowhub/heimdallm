@@ -35,10 +35,6 @@ class AppColors {
   // repositories/widgets/feature_palette.dart so every surface agrees on
   // what "PR Review" purple vs. "Merge Tracking" green means.
   static const featurePrReview = ColorToken('app.color.feature.prReview');
-  static const featureIssueTracking = ColorToken(
-    'app.color.feature.issueTracking',
-  );
-  static const featureDevelop = ColorToken('app.color.feature.develop');
   static const featureMergeTracking = ColorToken(
     'app.color.feature.mergeTracking',
   );

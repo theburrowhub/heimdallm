@@ -27,7 +27,6 @@ class ActivityFilterChips extends ConsumerWidget {
     final anyActive =
         q.orgs.isNotEmpty ||
         q.repos.isNotEmpty ||
-        q.itemTypes.isNotEmpty ||
         q.actions.isNotEmpty ||
         q.outcomes.isNotEmpty;
 
@@ -36,20 +35,6 @@ class ActivityFilterChips extends ConsumerWidget {
       runSpacing: 4,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        _quickChip(
-          label: 'PRs',
-          selected: q.itemTypes.contains('pr'),
-          onSelected: (v) => ref
-              .read(activityQueryProvider.notifier)
-              .setQuickFilter(itemType: 'pr', enabled: v),
-        ),
-        _quickChip(
-          label: 'Issues',
-          selected: q.itemTypes.contains('issue'),
-          onSelected: (v) => ref
-              .read(activityQueryProvider.notifier)
-              .setQuickFilter(itemType: 'issue', enabled: v),
-        ),
         _quickChip(
           label: 'Skipped',
           selected: q.actions.contains(ActivityAction.reviewSkipped),
@@ -101,19 +86,6 @@ class ActivityFilterChips extends ConsumerWidget {
             select: (q) => q.repos,
             toggle: (v) =>
                 ref.read(activityQueryProvider.notifier).toggleRepo(v),
-          ),
-        ),
-        _chip(
-          context,
-          label: 'Type',
-          count: q.itemTypes.length,
-          onTap: () => _pickStrings(
-            context,
-            options: const ['pr', 'issue'],
-            select: (q) => q.itemTypes,
-            toggle: (v) =>
-                ref.read(activityQueryProvider.notifier).toggleItemType(v),
-            labelFor: _itemTypeLabel,
           ),
         ),
         _chip(
@@ -179,7 +151,6 @@ class ActivityFilterChips extends ConsumerWidget {
     bool optionsLimited = false,
     required Set<String> Function(ActivityQuery q) select,
     required void Function(String) toggle,
-    String Function(String)? labelFor,
   }) async {
     await showModalBottomSheet<void>(
       context: context,
@@ -206,7 +177,7 @@ class ActivityFilterChips extends ConsumerWidget {
               ...options.map(
                 (o) => CheckboxListTile(
                   value: selected.contains(o),
-                  title: Text(labelFor?.call(o) ?? o),
+                  title: Text(o),
                   onChanged: (_) => toggle(o),
                 ),
               ),
@@ -224,10 +195,6 @@ class ActivityFilterChips extends ConsumerWidget {
     const options = [
       ActivityAction.review,
       ActivityAction.reviewSkipped,
-      ActivityAction.triage,
-      ActivityAction.refinement,
-      ActivityAction.implement,
-      ActivityAction.promote,
       ActivityAction.error,
     ];
     await showModalBottomSheet<void>(
@@ -251,19 +218,9 @@ class ActivityFilterChips extends ConsumerWidget {
     );
   }
 
-  static String _itemTypeLabel(String itemType) => switch (itemType) {
-    'pr' => 'Pull requests',
-    'issue' => 'Issues',
-    _ => itemType,
-  };
-
   static String _actionLabel(ActivityAction action) => switch (action) {
     ActivityAction.review => 'Reviews',
     ActivityAction.reviewSkipped => 'Skipped reviews',
-    ActivityAction.triage => 'Triage',
-    ActivityAction.refinement => 'Refinement',
-    ActivityAction.implement => 'Implementation',
-    ActivityAction.promote => 'Promotion',
     ActivityAction.error => 'Errors',
     ActivityAction.unknown => 'Unknown',
   };

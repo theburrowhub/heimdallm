@@ -91,7 +91,6 @@ AppConfig _cfg() => const AppConfig(
     'a/one': RepoConfig(prEnabled: true),
     'a/two': RepoConfig(prEnabled: true),
   },
-  issueTracking: IssueTrackingConfig(),
 );
 
 void main() {
@@ -134,7 +133,6 @@ void main() {
         'a/one': RepoConfig(prEnabled: true),
         'a/two': RepoConfig(prEnabled: false),
       },
-      issueTracking: IssueTrackingConfig(),
     );
     await tester.pumpWidget(_host(cfg));
     await tester.pumpAndSettle();
@@ -243,7 +241,6 @@ void main() {
         'alpha/one': RepoConfig(prEnabled: true),
         'beta/two': RepoConfig(prEnabled: true),
       },
-      issueTracking: IssueTrackingConfig(),
     );
 
     await tester.pumpWidget(_host(cfg));

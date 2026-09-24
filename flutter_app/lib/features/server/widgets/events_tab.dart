@@ -15,7 +15,7 @@ import 'event_row.dart';
 ///
 /// Each event is rendered through [format] (see event_summary.dart) so
 /// the row shows a human title (e.g. "Review completed"), the target
-/// repo/PR/issue, and chip-style details (agent, duration, reason)
+/// repo/PR, and chip-style details (agent, duration, reason)
 /// instead of the raw event type name plus a JSON dump (#453). The full
 /// JSON payload is still accessible by clicking a row to expand.
 ///
@@ -47,7 +47,6 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   bool _connected = true;
   final Set<String> _enabledGroups = {
     'pr',
-    'issue',
     'polling',
     'state',
     'circuit_breaker',
@@ -82,7 +81,6 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   String _groupOf(String type) {
     if (type == 'repo_discovered') return 'pr';
     if (type.startsWith('pr_')) return 'pr';
-    if (type.startsWith('issue_')) return 'issue';
     if (type.startsWith('polling_')) return 'polling';
     if (type.contains('state_changed')) return 'state';
     if (type == 'circuit_breaker_tripped') return 'circuit_breaker';
@@ -233,7 +231,6 @@ class _Toolbar extends StatelessWidget {
 
   static const _groups = {
     'pr': 'PR',
-    'issue': 'Issue',
     'polling': 'Polling',
     'state': 'State',
     'circuit_breaker': 'Circuit',

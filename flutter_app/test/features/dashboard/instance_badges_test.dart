@@ -8,17 +8,14 @@ import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
-import 'package:heimdallm/core/models/tracked_issue.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/instances/widgets/instance_badge.dart';
 import 'package:heimdallm/features/instances/widgets/instance_selector.dart';
-import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/shared/design_system/components/app_list_row.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
-import 'package:heimdallm/shared/widgets/pr_review_state_badge.dart';
 import 'package:mocktail/mocktail.dart';
 
 import '../../core/platform/fake_platform_services.dart';
@@ -47,52 +44,6 @@ Review _review(int id, String severity) => Review(
   issues: const [],
   severity: severity,
   createdAt: DateTime(2026, 9, 1),
-);
-
-TrackedIssue _issue(
-  int id,
-  String repo,
-  int number,
-  String title, {
-  TrackedIssueReview? latestReview,
-  TrackedIssueLinkedPR? linkedPR,
-}) => TrackedIssue(
-  id: id,
-  githubId: 2000 + id,
-  repo: repo,
-  number: number,
-  title: title,
-  body: '',
-  author: 'alice',
-  assignees: const [],
-  labels: const [],
-  state: 'open',
-  createdAt: DateTime(2026, 9, 1),
-  fetchedAt: DateTime(2026, 9, 1),
-  dismissed: false,
-  latestReview: latestReview,
-  linkedPR: linkedPR,
-);
-
-TrackedIssueReview _issueReview(int id) => TrackedIssueReview(
-  id: id,
-  issueId: 0,
-  cliUsed: 'claude',
-  summary: '',
-  triage: const {},
-  nextSteps: const [],
-  actionTaken: '',
-  prCreated: 0,
-  createdAt: DateTime(2026, 9, 1),
-);
-
-TrackedIssueLinkedPR _linkedPr() => TrackedIssueLinkedPR(
-  number: 17,
-  url: 'https://github.com/acme/tools/pull/17',
-  state: 'open',
-  externalReviewState: 'APPROVED',
-  externalReviewer: 'alice',
-  externalReviewAt: DateTime(2026, 9, 1),
 );
 
 ClusterRegistry _registry() => ClusterRegistry.fromJson({
@@ -132,7 +83,6 @@ class _DashboardHost extends ConsumerWidget {
 Future<void> _pumpDashboard(
   WidgetTester tester, {
   required AggregatedResult<PR> prs,
-  AggregatedResult<TrackedIssue>? issues,
   ClusterRegistry? registry,
   RoutingRules? routing,
   ApiClient? api,
@@ -158,9 +108,6 @@ Future<void> _pumpDashboard(
           (ref) async => registry ?? ClusterRegistry.empty,
         ),
         prsByInstanceProvider.overrideWith((ref) async => prs),
-        issuesByInstanceProvider.overrideWith(
-          (ref) async => issues ?? singleInstanceResult(<TrackedIssue>[]),
-        ),
         routingRulesProvider.overrideWith(
           (ref) async => routing ?? RoutingRules.empty,
         ),
@@ -179,12 +126,6 @@ Future<void> _pumpDashboard(
               path: '/prs/:id',
               builder: (_, state) => Scaffold(
                 body: Text('PR detail ${state.pathParameters['id']}'),
-              ),
-            ),
-            GoRoute(
-              path: '/issues/:id',
-              builder: (_, state) => Scaffold(
-                body: Text('Issue detail ${state.pathParameters['id']}'),
               ),
             ),
           ],
@@ -208,58 +149,6 @@ void main() {
     // Every row would carry the same badge, which is pure noise.
     expect(find.byType(InstanceBadge), findsNothing);
     expect(find.text('All instances'), findsNothing);
-  });
-
-  testWidgets('an issue with a reviewed linked PR shows its review state', (
-    tester,
-  ) async {
-    await _pumpDashboard(
-      tester,
-      prs: singleInstanceResult(const <PR>[]),
-      issues: singleInstanceResult([
-        _issue(
-          1,
-          'acme/tools',
-          12,
-          'Needs follow-up',
-          latestReview: _issueReview(7),
-          linkedPR: _linkedPr(),
-        ),
-      ]),
-    );
-
-    expect(find.byType(PRReviewStateBadge), findsOneWidget);
-    expect(find.text('PR APPROVED'), findsOneWidget);
-  });
-
-  testWidgets('an auto-implement-without-changes issue shows attention', (
-    tester,
-  ) async {
-    await _pumpDashboard(
-      tester,
-      prs: singleInstanceResult(const <PR>[]),
-      issues: singleInstanceResult([
-        _issue(
-          1,
-          'acme/tools',
-          12,
-          'Needs follow-up',
-          latestReview: TrackedIssueReview(
-            id: 7,
-            issueId: 0,
-            cliUsed: 'claude',
-            summary: '',
-            triage: const {},
-            nextSteps: const [],
-            actionTaken: 'auto_implement_no_changes',
-            prCreated: 0,
-            createdAt: DateTime(2026, 9, 1),
-          ),
-        ),
-      ]),
-    );
-
-    expect(find.text('NEEDS ATTENTION'), findsOneWidget);
   });
 
   testWidgets('rows from several instances carry their origin', (tester) async {
@@ -464,33 +353,6 @@ void main() {
     },
   );
 
-  testWidgets('the same issue reported by two instances renders as one row', (
-    tester,
-  ) async {
-    await _pumpDashboard(
-      tester,
-      registry: _registry(),
-      prs: singleInstanceResult(const <PR>[]),
-      issues: AggregatedResult<TrackedIssue>(
-        items: [
-          InstanceScoped(
-            instanceId: 'srv-a',
-            instanceName: 'Server A',
-            value: _issue(1, 'acme/tools', 12, 'Same issue'),
-          ),
-          InstanceScoped(
-            instanceId: 'hub-1',
-            instanceName: 'Local hub',
-            value: _issue(2, 'acme/tools', 12, 'Same issue'),
-          ),
-        ],
-      ),
-    );
-
-    expect(find.byType(AppListRow), findsOneWidget);
-    expect(find.text('Same issue'), findsOneWidget);
-  });
-
   testWidgets('dismissing a shared PR fans out to every reporting instance', (
     tester,
   ) async {
@@ -648,104 +510,6 @@ void main() {
     verify(() => srvApi.triggerReview(42)).called(1);
   });
 
-  testWidgets('tapping an issue row navigates to its detail route', (
-    tester,
-  ) async {
-    await _pumpDashboard(
-      tester,
-      registry: _registry(),
-      prs: singleInstanceResult(const <PR>[]),
-      issues: AggregatedResult<TrackedIssue>(
-        items: [
-          InstanceScoped(
-            instanceId: 'srv-a',
-            instanceName: 'Server A',
-            value: _issue(9, 'acme/tools', 12, 'Some issue'),
-          ),
-        ],
-      ),
-    );
-
-    await tester.tap(find.text('Some issue'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Issue detail 9'), findsOneWidget);
-  });
-
-  testWidgets('an issue with a reviewed linked PR shows its review state', (
-    tester,
-  ) async {
-    await _pumpDashboard(
-      tester,
-      registry: _registry(),
-      prs: singleInstanceResult(const <PR>[]),
-      issues: AggregatedResult<TrackedIssue>(
-        items: [
-          InstanceScoped(
-            instanceId: 'srv-a',
-            instanceName: 'Server A',
-            value: _issue(
-              10,
-              'acme/tools',
-              13,
-              'Issue with a linked PR',
-              linkedPR: const TrackedIssueLinkedPR(
-                number: 14,
-                url: 'https://github.com/acme/tools/pull/14',
-                state: 'open',
-                externalReviewState: 'APPROVED',
-                externalReviewer: 'bob',
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    expect(find.text('Issue with a linked PR'), findsOneWidget);
-    expect(find.byType(PRReviewStateBadge), findsOneWidget);
-  });
-
-  testWidgets('undoing a dismissed issue un-dismisses it on every instance', (
-    tester,
-  ) async {
-    final hubApi = _MockApiClient();
-    final srvApi = _MockApiClient();
-    when(() => hubApi.dismissIssue(any())).thenAnswer((_) async {});
-    when(() => srvApi.dismissIssue(any())).thenAnswer((_) async {});
-    when(() => hubApi.undismissIssue(any())).thenAnswer((_) async {});
-    when(() => srvApi.undismissIssue(any())).thenAnswer((_) async {});
-
-    await _pumpDashboard(
-      tester,
-      registry: _registry(),
-      apiByInstance: {'hub-1': hubApi, 'srv-a': srvApi},
-      prs: singleInstanceResult(const <PR>[]),
-      issues: AggregatedResult<TrackedIssue>(
-        items: [
-          InstanceScoped(
-            instanceId: 'hub-1',
-            instanceName: 'Local hub',
-            value: _issue(1, 'acme/tools', 12, 'Same issue'),
-          ),
-          InstanceScoped(
-            instanceId: 'srv-a',
-            instanceName: 'Server A',
-            value: _issue(2, 'acme/tools', 12, 'Same issue'),
-          ),
-        ],
-      ),
-    );
-
-    await tester.tap(find.byTooltip('Dismiss issue'));
-    await tester.pump();
-    await tester.tap(find.text('Undo'));
-    await tester.pumpAndSettle();
-
-    verify(() => hubApi.undismissIssue(1)).called(1);
-    verify(() => srvApi.undismissIssue(2)).called(1);
-  });
-
   testWidgets(
     'when both instances have a review, the newer one wins the tie-break',
     (tester) async {
@@ -782,119 +546,6 @@ void main() {
 
       expect(find.text('HIGH'), findsOneWidget);
       expect(find.text('LOW'), findsNothing);
-    },
-  );
-
-  testWidgets('the routing owner wins for issues too', (tester) async {
-    await _pumpDashboard(
-      tester,
-      registry: _registry(),
-      routing: const RoutingRules(
-        enabled: true,
-        repos: {'acme/tools': 'srv-a'},
-      ),
-      prs: singleInstanceResult(const <PR>[]),
-      issues: AggregatedResult<TrackedIssue>(
-        items: [
-          InstanceScoped(
-            instanceId: 'hub-1',
-            instanceName: 'Local hub',
-            value: _issue(1, 'acme/tools', 12, 'Same issue'),
-          ),
-          InstanceScoped(
-            instanceId: 'srv-a',
-            instanceName: 'Server A',
-            value: _issue(2, 'acme/tools', 12, 'Same issue'),
-          ),
-        ],
-      ),
-    );
-
-    // Only the owner's badge shows first; both are present since the row is
-    // still shared, but the tap target must resolve to srv-a — verified via
-    // detail navigation.
-    await tester.tap(find.text('Same issue'));
-    await tester.pumpAndSettle();
-    expect(find.text('Issue detail 2'), findsOneWidget);
-  });
-
-  testWidgets(
-    'when both instances have reviewed the issue, the newer one wins',
-    (tester) async {
-      await _pumpDashboard(
-        tester,
-        registry: _registry(),
-        prs: singleInstanceResult(const <PR>[]),
-        issues: AggregatedResult<TrackedIssue>(
-          items: [
-            InstanceScoped(
-              instanceId: 'hub-1',
-              instanceName: 'Local hub',
-              value: _issue(
-                1,
-                'acme/tools',
-                12,
-                'Same issue',
-                latestReview: _issueReview(10),
-              ),
-            ),
-            InstanceScoped(
-              instanceId: 'srv-a',
-              instanceName: 'Server A',
-              value: _issue(
-                2,
-                'acme/tools',
-                12,
-                'Same issue',
-                latestReview: _issueReview(20),
-              ),
-            ),
-          ],
-        ),
-      );
-
-      await tester.tap(find.text('Same issue'));
-      await tester.pumpAndSettle();
-      // The winner is whichever candidate carries the newer review (id 20 =
-      // srv-a's local row id 2), the same tie-break _preferOwner uses for PRs.
-      expect(find.text('Issue detail 2'), findsOneWidget);
-    },
-  );
-
-  testWidgets(
-    'a partial issue dismiss failure is reported and does not offer Undo',
-    (tester) async {
-      final hubApi = _MockApiClient();
-      final srvApi = _MockApiClient();
-      when(() => hubApi.dismissIssue(any())).thenAnswer((_) async {});
-      when(() => srvApi.dismissIssue(any())).thenThrow(Exception('offline'));
-
-      await _pumpDashboard(
-        tester,
-        registry: _registry(),
-        apiByInstance: {'hub-1': hubApi, 'srv-a': srvApi},
-        prs: singleInstanceResult(const <PR>[]),
-        issues: AggregatedResult<TrackedIssue>(
-          items: [
-            InstanceScoped(
-              instanceId: 'hub-1',
-              instanceName: 'Local hub',
-              value: _issue(1, 'acme/tools', 12, 'Same issue'),
-            ),
-            InstanceScoped(
-              instanceId: 'srv-a',
-              instanceName: 'Server A',
-              value: _issue(2, 'acme/tools', 12, 'Same issue'),
-            ),
-          ],
-        ),
-      );
-
-      await tester.tap(find.byTooltip('Dismiss issue'));
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('Error dismissing issue #12'), findsOneWidget);
-      expect(find.text('Undo'), findsNothing);
     },
   );
 }
