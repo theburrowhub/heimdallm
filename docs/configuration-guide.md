@@ -844,6 +844,8 @@ These can also be set over HTTP: `PATCH /config/merge_tracking/repos/{repo}` and
 
 This is the highest-blast-radius setting in Heimdallm: an AI agent rewrites your branch and force-pushes it.
 
+To do that the agent has to edit files without stopping to ask, so the conflict-resolution run is **put into write mode whenever you left the CLI's permission setting empty**: Claude gets `permission_mode = "acceptEdits"`, Codex `approval_mode = "never"`, Gemini `approval_mode = "auto_edit"`. A value you set in `[ai.agents.<cli>]` is kept as is. PR reviews are unaffected — only this run is promoted.
+
 What bounds it:
 
 - the agent works in an **ephemeral, Heimdallm-managed worktree** — never your own checkout;
