@@ -18,13 +18,6 @@ func TestFormatSSEData(t *testing.T) {
 			wantInfo:  "acme/foo PR #42 [high]",
 		},
 		{
-			name:      "issue_review_completed with repo + issue_number",
-			eventType: "issue_review_completed",
-			data:      `{"repo":"acme/foo","issue_number":7}`,
-			wantType:  "issue",
-			wantInfo:  "acme/foo Issue #7",
-		},
-		{
 			name:      "polling_started renders kind + repo count",
 			eventType: "polling_started",
 			data:      `{"kind":"prs","repos":["acme/foo","acme/bar"]}`,
@@ -34,9 +27,9 @@ func TestFormatSSEData(t *testing.T) {
 		{
 			name:      "polling_completed renders kind + count + duration",
 			eventType: "polling_completed",
-			data:      `{"kind":"issues","count":5,"duration_ms":800}`,
+			data:      `{"kind":"prs","count":5,"duration_ms":800}`,
 			wantType:  "",
-			wantInfo:  "issues 5 items in 800ms",
+			wantInfo:  "prs 5 items in 800ms",
 		},
 		{
 			name:      "polling_started with empty repos list",

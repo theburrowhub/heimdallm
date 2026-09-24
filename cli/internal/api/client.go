@@ -219,35 +219,6 @@ type PR struct {
 	LatestReview *Review   `json:"latest_review,omitempty"`
 }
 
-type IssueReview struct {
-	ID          int64           `json:"id"`
-	IssueID     int64           `json:"issue_id"`
-	CLIUsed     string          `json:"cli_used"`
-	Summary     string          `json:"summary"`
-	Triage      json.RawMessage `json:"triage"`
-	Suggestions json.RawMessage `json:"suggestions"`
-	ActionTaken string          `json:"action_taken"`
-	PRCreated   int             `json:"pr_created"`
-	CreatedAt   time.Time       `json:"created_at"`
-}
-
-type Issue struct {
-	ID           int64           `json:"id"`
-	GithubID     int64           `json:"github_id"`
-	Repo         string          `json:"repo"`
-	Number       int             `json:"number"`
-	Title        string          `json:"title"`
-	Body         string          `json:"body"`
-	Author       string          `json:"author"`
-	Assignees    json.RawMessage `json:"assignees"`
-	Labels       json.RawMessage `json:"labels"`
-	State        string          `json:"state"`
-	CreatedAt    time.Time       `json:"created_at"`
-	FetchedAt    time.Time       `json:"fetched_at"`
-	Dismissed    bool            `json:"dismissed"`
-	LatestReview *IssueReview    `json:"latest_review,omitempty"`
-}
-
 type RepoCount struct {
 	Repo  string `json:"repo"`
 	Count int    `json:"count"`
@@ -318,19 +289,6 @@ func (c *Client) ListPRs() ([]PR, error) {
 	return prs, nil
 }
 
-// ListIssues fetches all issues with their latest review.
-func (c *Client) ListIssues() ([]Issue, error) {
-	data, err := c.do("GET", "/issues")
-	if err != nil {
-		return nil, err
-	}
-	var issues []Issue
-	if err := json.Unmarshal(data, &issues); err != nil {
-		return nil, fmt.Errorf("parsing issues: %w", err)
-	}
-	return issues, nil
-}
-
 // GetConfig returns the daemon's running configuration.
 func (c *Client) GetConfig() (map[string]any, error) {
 	data, err := c.do("GET", "/config")
@@ -376,33 +334,9 @@ func (c *Client) TriggerPRReview(id int64) error {
 	return err
 }
 
-// TriggerIssueReview queues a review for the given issue ID.
-func (c *Client) TriggerIssueReview(id int64) error {
-	_, err := c.do("POST", fmt.Sprintf("/issues/%d/review", id))
-	return err
-}
-
-// PromoteIssue moves an issue to its next configured stage by changing labels.
-func (c *Client) PromoteIssue(id int64) error {
-	_, err := c.do("POST", fmt.Sprintf("/issues/%d/promote", id))
-	return err
-}
-
 // Shutdown asks the daemon to stop gracefully.
 func (c *Client) Shutdown() error {
 	_, err := c.do("POST", "/shutdown")
-	return err
-}
-
-// DismissIssue hides an issue from the pipeline, stopping retries until undismissed.
-func (c *Client) DismissIssue(id int64) error {
-	_, err := c.do("POST", fmt.Sprintf("/issues/%d/dismiss", id))
-	return err
-}
-
-// UndismissIssue restores a previously dismissed issue, allowing the pipeline to retry it.
-func (c *Client) UndismissIssue(id int64) error {
-	_, err := c.do("POST", fmt.Sprintf("/issues/%d/undismiss", id))
 	return err
 }
 
@@ -410,12 +344,6 @@ func (c *Client) UndismissIssue(id int64) error {
 type PRDetail struct {
 	PR      PR       `json:"pr"`
 	Reviews []Review `json:"reviews"`
-}
-
-// IssueDetail is the response from GET /issues/{id}.
-type IssueDetail struct {
-	Issue   Issue         `json:"issue"`
-	Reviews []IssueReview `json:"reviews"`
 }
 
 // GetPR fetches a single PR with all its reviews.
@@ -427,19 +355,6 @@ func (c *Client) GetPR(id int64) (*PRDetail, error) {
 	var detail PRDetail
 	if err := json.Unmarshal(data, &detail); err != nil {
 		return nil, fmt.Errorf("parsing PR detail: %w", err)
-	}
-	return &detail, nil
-}
-
-// GetIssue fetches a single issue with all its reviews.
-func (c *Client) GetIssue(id int64) (*IssueDetail, error) {
-	data, err := c.do("GET", fmt.Sprintf("/issues/%d", id))
-	if err != nil {
-		return nil, err
-	}
-	var detail IssueDetail
-	if err := json.Unmarshal(data, &detail); err != nil {
-		return nil, fmt.Errorf("parsing issue detail: %w", err)
 	}
 	return &detail, nil
 }

@@ -14,7 +14,6 @@ import (
 
 var (
 	badgePR     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#3B82F6"))
-	badgeIssue  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F59E0B"))
 	badgeError  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EF4444"))
 	badgeSystem = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#06B6D4"))
 	styleError  = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
@@ -27,8 +26,6 @@ func eventCategory(eventType string) string {
 		strings.HasPrefix(eventType, "review_"),
 		strings.HasPrefix(eventType, "circuit_breaker_"):
 		return "pr"
-	case strings.HasPrefix(eventType, "issue_"):
-		return "issue"
 	default:
 		return "system"
 	}
@@ -41,8 +38,6 @@ func eventBadge(eventType string) string {
 	switch eventCategory(eventType) {
 	case "pr":
 		return badgePR.Render("[PR]")
-	case "issue":
-		return badgeIssue.Render("[ISSUE]")
 	default:
 		return badgeSystem.Render("[SYSTEM]")
 	}
@@ -127,7 +122,7 @@ func newFollowCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output raw JSON events")
 	cmd.Flags().StringVar(&repoFilter, "repo", "", "filter by repository (e.g. org/repo)")
-	cmd.Flags().StringVar(&typeFilter, "type", "", "filter by event category: pr, issue, system (comma-separated)")
+	cmd.Flags().StringVar(&typeFilter, "type", "", "filter by event category: pr, system (comma-separated)")
 
 	return cmd
 }
@@ -163,31 +158,8 @@ func formatEventData(data string) string {
 		parts = append(parts, s)
 	}
 
-	if num := toInt(m["issue_number"]); num != 0 {
-		s := fmt.Sprintf("#%d", num)
-		if title, ok := m["issue_title"].(string); ok && title != "" {
-			s += " " + truncate(title, 40)
-		}
-		parts = append(parts, s)
-	}
-
 	if sev, ok := m["severity"].(string); ok && sev != "" {
 		parts = append(parts, fmt.Sprintf("[%s]", sev))
-	}
-
-	if action, ok := m["chosen_action"].(string); ok && action != "" {
-		parts = append(parts, action)
-	}
-
-	if from, ok := m["from_label"].(string); ok {
-		if to, ok := m["to_label"].(string); ok {
-			parts = append(parts, from+" → "+to)
-		}
-	}
-	if from, ok := m["from_stage"].(string); ok {
-		if to, ok := m["to_stage"].(string); ok {
-			parts = append(parts, from+" → "+to)
-		}
 	}
 
 	if reason, ok := m["reason"].(string); ok && reason != "" {

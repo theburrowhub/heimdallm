@@ -21,10 +21,10 @@ const (
 
 type logLine struct {
 	Time    string
-	Badge   string // "PR", "ISSUE", "REPO"
-	Action  string // "Detected", "Review ▶", "Implement ✓", etc.
+	Badge   string // "PR", "REPO", "EVENT"
+	Action  string // "Detected", "Review ▶", "Review ✓", etc.
 	Target  string // "org/repo #123"
-	Details string // "severity=low", "error: …", "→ PR #157"
+	Details string // "severity=low", "error: …"
 	Status  logStatus
 }
 
@@ -38,9 +38,6 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 	repo, _ := m["repo"].(string)
 	errMsg, _ := m["error"].(string)
 	title, _ := m["pr_title"].(string)
-	if title == "" {
-		title, _ = m["issue_title"].(string)
-	}
 	author, _ := m["author"].(string)
 
 	line := logLine{
@@ -77,68 +74,6 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 		line.Status = logError
 		if errMsg != "" {
 			line.Details = "error: " + errMsg
-		}
-
-	case "issue_detected":
-		num = jsonInt(m, "issue_number")
-		line.Badge = "ISSUE"
-		line.Action = "Detected"
-		line.Status = logNeutral
-
-	case "issue_review_started":
-		num = jsonInt(m, "issue_number")
-		line.Badge = "ISSUE"
-		action := "Review"
-		if a, ok := m["action"].(string); ok && a == "implement" {
-			action = "Implement"
-		}
-		line.Action = action + " ▶"
-		line.Status = logProgress
-
-	case "issue_review_completed":
-		num = jsonInt(m, "issue_number")
-		line.Badge = "ISSUE"
-		line.Action = "Review ✓"
-		line.Status = logSuccess
-		if sev, ok := m["severity"].(string); ok {
-			line.Details = "severity=" + sev
-		}
-
-	case "issue_implemented":
-		num = jsonInt(m, "issue_number")
-		line.Badge = "ISSUE"
-		line.Action = "Implement ✓"
-		line.Status = logSuccess
-		if pr := jsonInt(m, "pr_created"); pr > 0 {
-			line.Details = fmt.Sprintf("→ PR #%d", pr)
-		}
-
-	case "issue_review_error":
-		num = jsonInt(m, "issue_number")
-		line.Badge = "ISSUE"
-		action := "Review"
-		if a, ok := m["action"].(string); ok && a == "implement" {
-			action = "Implement"
-		}
-		line.Action = action + " ✗"
-		line.Status = logError
-		if errMsg != "" {
-			line.Details = "error: " + errMsg
-		}
-
-	case "issue_promoted":
-		num = jsonInt(m, "issue_number")
-		line.Badge = "ISSUE"
-		line.Action = "Promoted"
-		line.Status = logSuccess
-		from, _ := m["from_stage"].(string)
-		to, _ := m["to_stage"].(string)
-		if from == "" && to == "" {
-			from, _ = m["from_label"].(string)
-			to, _ = m["to_label"].(string)
-		}
-		if from != "" || to != "" {
-			line.Details = strings.TrimSpace(from + " -> " + to)
 		}
 
 	case "repo_discovered":
@@ -184,8 +119,6 @@ func activityToLogLine(e api.ActivityEntry) logLine {
 	switch e.ItemType {
 	case "pr":
 		line.Badge = "PR"
-	case "issue":
-		line.Badge = "ISSUE"
 	default:
 		if e.ItemType != "" {
 			line.Badge = strings.ToUpper(e.ItemType)
@@ -229,9 +162,6 @@ func activityToLogLine(e api.ActivityEntry) logLine {
 	}
 	if em, ok := e.Details["error"]; ok {
 		line.Details = appendDetail(line.Details, fmt.Sprintf("error: %v", em))
-	}
-	if pr, ok := e.Details["pr_created"]; ok {
-		line.Details = appendDetail(line.Details, fmt.Sprintf("→ PR #%v", pr))
 	}
 
 	return line
@@ -293,8 +223,6 @@ var (
 		switch badge {
 		case "PR":
 			return lipgloss.NewStyle().Foreground(colorSecondary)
-		case "ISSUE":
-			return lipgloss.NewStyle().Foreground(colorPrimary)
 		default:
 			return lipgloss.NewStyle().Foreground(colorMuted)
 		}

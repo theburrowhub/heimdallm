@@ -140,11 +140,9 @@ func TestCfgRepoLinesAutoDetected(t *testing.T) {
 func TestCfgAILines(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	cfg := map[string]any{
-		"ai_primary":       "claude",
-		"ai_fallback":      "gemini",
-		"review_mode":      "single",
-		"issue_prompt":     "",
-		"implement_prompt": "",
+		"ai_primary":  "claude",
+		"ai_fallback": "gemini",
+		"review_mode": "single",
 		"agent_configs": map[string]any{
 			"claude": map[string]any{
 				"model":           "claude-sonnet-4-6",
@@ -176,47 +174,14 @@ func TestCfgAILines(t *testing.T) {
 	}
 }
 
-func TestCfgAILinesPRMetadata(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	cfg := map[string]any{
-		"ai_primary":       "claude",
-		"ai_fallback":      "",
-		"review_mode":      "single",
-		"issue_prompt":     "",
-		"implement_prompt": "",
-		"agent_configs":    map[string]any{},
-		"pr_metadata": map[string]any{
-			"reviewers":   []any{"alice", "bob"},
-			"labels":      []any{"ai-review"},
-			"pr_assignee": "charlie",
-		},
-	}
-	lines := cfgAILines(cfg)
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "alice") {
-		t.Error("missing PR reviewer alice")
-	}
-	if !strings.Contains(joined, "ai-review") {
-		t.Error("missing PR label")
-	}
-	if !strings.Contains(joined, "charlie") {
-		t.Error("missing PR assignee")
-	}
-}
-
 func TestCfgOrgLines(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	cfg := map[string]any{
 		"org_overrides": map[string]any{
 			"myorg": map[string]any{
-				"primary":      "gemini",
-				"review_mode":  "multi",
-				"pr_reviewers": []any{"alice"},
-				"issue_tracking": map[string]any{
-					"enabled":         true,
-					"develop_enabled": false,
-					"develop_labels":  []any{"ready"},
-				},
+				"primary":     "gemini",
+				"review_mode": "multi",
+				"clone_dir":   "/srv/clones",
 			},
 		},
 	}
@@ -228,61 +193,8 @@ func TestCfgOrgLines(t *testing.T) {
 	if !strings.Contains(joined, "gemini") {
 		t.Error("missing org primary")
 	}
-	if !strings.Contains(joined, "ready") {
-		t.Error("missing org issue tracking labels")
-	}
-	if !strings.Contains(joined, "Develop enabled") || !strings.Contains(joined, "false") {
-		t.Error("missing org issue tracking develop_enabled=false")
-	}
-}
-
-func TestCfgIssueTrackingLinesDisabled(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	cfg := map[string]any{
-		"issue_tracking": map[string]any{
-			"enabled":            false,
-			"filter_mode":        "",
-			"organizations":      []any{},
-			"assignees":          []any{},
-			"develop_labels":     []any{},
-			"review_only_labels": []any{},
-			"skip_labels":        []any{},
-			"blocked_labels":     []any{},
-			"promote_to_label":   "",
-			"default_action":     "",
-		},
-	}
-	lines := cfgIssueTrackingLines(cfg)
-	if len(lines) != 0 {
-		t.Errorf("disabled issue tracking should produce no lines, got %d: %v", len(lines), lines)
-	}
-}
-
-func TestCfgIssueTrackingLinesEnabled(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	cfg := map[string]any{
-		"issue_tracking": map[string]any{
-			"enabled":        true,
-			"filter_mode":    "exclusive",
-			"default_action": "ignore",
-			"develop_labels": []any{"implement"},
-			"organizations":  []any{},
-			"assignees":      []any{},
-		},
-	}
-	lines := cfgIssueTrackingLines(cfg)
-	if len(lines) < 3 {
-		t.Fatalf("expected at least 3 lines, got %d: %v", len(lines), lines)
-	}
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "true") {
-		t.Error("missing enabled=true")
-	}
-	if !strings.Contains(joined, "exclusive") {
-		t.Error("missing filter_mode")
-	}
-	if !strings.Contains(joined, "implement") {
-		t.Error("missing develop label")
+	if !strings.Contains(joined, "/srv/clones") {
+		t.Error("missing org clone dir")
 	}
 }
 

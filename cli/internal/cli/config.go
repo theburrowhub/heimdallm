@@ -54,7 +54,6 @@ func printHumanConfig(cfg map[string]any) {
 		{"Repositories", cfgRepoLines(cfg)},
 		{"AI", cfgAILines(cfg)},
 		{"Organizations", cfgOrgLines(cfg)},
-		{"Issue Tracking", cfgIssueTrackingLines(cfg)},
 		{"Discovery", cfgDiscoveryLines(cfg)},
 	}
 
@@ -114,11 +113,9 @@ func cfgRepoLines(cfg map[string]any) []string {
 			sub = cfgSubKV(sub, "Primary", ro["primary"])
 			sub = cfgSubKV(sub, "Fallback", ro["fallback"])
 			sub = cfgSubKV(sub, "Review mode", ro["review_mode"])
+			sub = cfgSubKV(sub, "Prompt", ro["prompt"])
 			sub = cfgSubKV(sub, "Local dir", ro["local_dir"])
-			sub = cfgSubList(sub, "PR reviewers", ro["pr_reviewers"])
-			sub = cfgSubKV(sub, "PR assignee", ro["pr_assignee"])
-			sub = cfgSubList(sub, "PR labels", ro["pr_labels"])
-			sub = cfgSubKV(sub, "PR draft", ro["pr_draft"])
+			sub = cfgSubKV(sub, "Clone dir", ro["clone_dir"])
 		}
 		if d, ok := detected[repo]; ok && !cfgEmpty(d) {
 			sub = cfgSubKV(sub, "Local dir (auto)", d)
@@ -136,15 +133,6 @@ func cfgAILines(cfg map[string]any) []string {
 	out = cfgKV(out, "Primary", cfg["ai_primary"])
 	out = cfgKV(out, "Fallback", cfg["ai_fallback"])
 	out = cfgKV(out, "Review mode", cfg["review_mode"])
-	out = cfgKV(out, "Issue prompt", cfg["issue_prompt"])
-	out = cfgKV(out, "Implement prompt", cfg["implement_prompt"])
-
-	if pm, ok := cfg["pr_metadata"].(map[string]any); ok {
-		out = cfgStringList(out, "PR reviewers", pm["reviewers"])
-		out = cfgStringList(out, "PR labels", pm["labels"])
-		out = cfgKV(out, "PR assignee", pm["pr_assignee"])
-		out = cfgKV(out, "PR draft", pm["pr_draft"])
-	}
 
 	agents, _ := cfg["agent_configs"].(map[string]any)
 	for _, name := range cfgSortedKeys(agents) {
@@ -184,73 +172,11 @@ func cfgOrgLines(cfg map[string]any) []string {
 		sub = cfgSubKV(sub, "Fallback", ov["fallback"])
 		sub = cfgSubKV(sub, "Review mode", ov["review_mode"])
 		sub = cfgSubKV(sub, "Prompt", ov["prompt"])
-		sub = cfgSubKV(sub, "Issue prompt", ov["issue_prompt"])
-		sub = cfgSubKV(sub, "Implement prompt", ov["implement_prompt"])
 		sub = cfgSubKV(sub, "Local dir", ov["local_dir"])
-		sub = cfgSubKV(sub, "Triage owner", ov["triage_owner"])
 		sub = cfgSubKV(sub, "Clone dir", ov["clone_dir"])
-		sub = cfgSubKV(sub, "Auto-promote triage", ov["auto_promote_triage"])
-		sub = cfgSubKV(sub, "Auto-promote refinement", ov["auto_promote_refinement"])
-		sub = cfgSubKV(sub, "Generate PR description", ov["generate_pr_description"])
-		sub = cfgSubList(sub, "PR reviewers", ov["pr_reviewers"])
-		sub = cfgSubKV(sub, "PR assignee", ov["pr_assignee"])
-		sub = cfgSubList(sub, "PR labels", ov["pr_labels"])
-		sub = cfgSubKV(sub, "PR draft", ov["pr_draft"])
-		if it, ok := ov["issue_tracking"].(map[string]any); ok {
-			sub = cfgIssueTrackingSubLines(sub, it)
-		}
 		if len(sub) > 0 {
 			out = append(out, fmt.Sprintf("  %s", cfgKeyStyle.Render(org)))
 			out = append(out, sub...)
-		}
-	}
-	return out
-}
-
-type cfgIssueTrackingLine struct {
-	label string
-	key   string
-	list  bool
-}
-
-var cfgIssueTrackingLineSpecs = []cfgIssueTrackingLine{
-	{label: "Enabled", key: "enabled"},
-	{label: "Develop enabled", key: "develop_enabled"},
-	{label: "Filter mode", key: "filter_mode"},
-	{label: "Default action", key: "default_action"},
-	{label: "Organizations", key: "organizations", list: true},
-	{label: "Assignees", key: "assignees", list: true},
-	{label: "Develop labels", key: "develop_labels", list: true},
-	{label: "Review only labels", key: "review_only_labels", list: true},
-	{label: "Skip labels", key: "skip_labels", list: true},
-	{label: "Blocked labels", key: "blocked_labels", list: true},
-	{label: "Promote to label", key: "promote_to_label"},
-}
-
-func cfgIssueTrackingSubLines(out []string, m map[string]any) []string {
-	for _, spec := range cfgIssueTrackingLineSpecs {
-		if spec.list {
-			out = cfgSubList(out, spec.label, m[spec.key])
-		} else if _, ok := m[spec.key]; ok {
-			out = cfgSubKVPresent(out, spec.label, m[spec.key])
-		} else {
-			out = cfgSubKV(out, spec.label, m[spec.key])
-		}
-	}
-	return out
-}
-
-func cfgIssueTrackingLines(cfg map[string]any) []string {
-	m, ok := cfg["issue_tracking"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	var out []string
-	for _, spec := range cfgIssueTrackingLineSpecs {
-		if spec.list {
-			out = cfgStringList(out, spec.label, m[spec.key])
-		} else {
-			out = cfgKV(out, spec.label, m[spec.key])
 		}
 	}
 	return out
@@ -306,17 +232,6 @@ func cfgSubKV(lines []string, key string, val any) []string {
 	return append(lines, fmt.Sprintf("    %s %s", cfgKeyStyle.Render(padded), cfgFmtVal(val)))
 }
 
-func cfgSubKVPresent(lines []string, key string, val any) []string {
-	if val == nil {
-		return lines
-	}
-	if s, ok := val.(string); ok && s == "" {
-		return lines
-	}
-	padded := fmt.Sprintf("%-20s", key+":")
-	return append(lines, fmt.Sprintf("    %s %s", cfgKeyStyle.Render(padded), cfgFmtVal(val)))
-}
-
 func cfgStringList(lines []string, key string, val any) []string {
 	arr, ok := val.([]any)
 	if !ok || len(arr) == 0 {
@@ -325,18 +240,6 @@ func cfgStringList(lines []string, key string, val any) []string {
 	lines = append(lines, fmt.Sprintf("  %s", cfgKeyStyle.Render(key+":")))
 	for _, item := range arr {
 		lines = append(lines, fmt.Sprintf("    • %v", item))
-	}
-	return lines
-}
-
-func cfgSubList(lines []string, key string, val any) []string {
-	arr, ok := val.([]any)
-	if !ok || len(arr) == 0 {
-		return lines
-	}
-	lines = append(lines, fmt.Sprintf("    %s", cfgKeyStyle.Render(key+":")))
-	for _, item := range arr {
-		lines = append(lines, fmt.Sprintf("      • %v", item))
 	}
 	return lines
 }

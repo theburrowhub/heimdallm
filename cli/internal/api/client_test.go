@@ -107,22 +107,6 @@ func TestReadEndpointContracts(t *testing.T) {
 			},
 		},
 		{
-			name: "issue list",
-			path: "/issues",
-			body: `[{"id":42,"repo":"acme/widget","number":8,"latest_review":{"id":6,"action_taken":"review_only","triage":{"severity":"medium"}}}]`,
-			call: func(c *Client) error {
-				issues, err := c.ListIssues()
-				if err != nil {
-					return err
-				}
-				if len(issues) != 1 || issues[0].ID != 42 || issues[0].Repo != "acme/widget" ||
-					issues[0].LatestReview == nil || issues[0].LatestReview.ActionTaken != "review_only" {
-					return fmt.Errorf("decoded issues = %#v", issues)
-				}
-				return nil
-			},
-		},
-		{
 			name: "config",
 			path: "/config",
 			body: `{"server_port":7842,"repositories":["acme/widget"]}`,
@@ -183,22 +167,6 @@ func TestReadEndpointContracts(t *testing.T) {
 				return nil
 			},
 		},
-		{
-			name: "issue detail",
-			path: "/issues/42",
-			body: `{"issue":{"id":42,"number":8},"reviews":[{"id":6,"action_taken":"review_only"}]}`,
-			call: func(c *Client) error {
-				detail, err := c.GetIssue(42)
-				if err != nil {
-					return err
-				}
-				if detail.Issue.ID != 42 || len(detail.Reviews) != 1 ||
-					detail.Reviews[0].ActionTaken != "review_only" {
-					return fmt.Errorf("decoded issue detail = %#v", detail)
-				}
-				return nil
-			},
-		},
 	}
 
 	for _, tc := range tests {
@@ -225,18 +193,6 @@ func TestMutationEndpointContractsAndErrors(t *testing.T) {
 	}{
 		{"queue PR review", "/prs/41/review", http.StatusAccepted, `{"status":"review queued"}`, func(c *Client) error {
 			return c.TriggerPRReview(41)
-		}},
-		{"queue issue review", "/issues/42/review", http.StatusAccepted, `{"status":"review queued"}`, func(c *Client) error {
-			return c.TriggerIssueReview(42)
-		}},
-		{"promote issue", "/issues/42/promote", http.StatusAccepted, `{"status":"promotion applied"}`, func(c *Client) error {
-			return c.PromoteIssue(42)
-		}},
-		{"dismiss issue", "/issues/42/dismiss", http.StatusOK, `{"status":"dismissed"}`, func(c *Client) error {
-			return c.DismissIssue(42)
-		}},
-		{"undismiss issue", "/issues/42/undismiss", http.StatusOK, `{"status":"undismissed"}`, func(c *Client) error {
-			return c.UndismissIssue(42)
 		}},
 		{"shutdown", "/shutdown", http.StatusAccepted, `{"status":"shutdown queued"}`, func(c *Client) error {
 			return c.Shutdown()
@@ -290,11 +246,11 @@ func TestStreamEventsEndpointContract(t *testing.T) {
 				"event: review_completed\n" +
 				"data: {\"repo\":\"acme/widget\",\n" +
 				"data: \"pr_number\":7}\n\n" +
-				"event: issue_review_completed\n" +
-				"data: {\"issue_number\":8}\n\n",
+				"event: merge_track_merged\n" +
+				"data: {\"pr_number\":8}\n\n",
 			wantEvents: []SSEEvent{
 				{Type: "review_completed", Data: "{\"repo\":\"acme/widget\",\n\"pr_number\":7}"},
-				{Type: "issue_review_completed", Data: `{"issue_number":8}`},
+				{Type: "merge_track_merged", Data: `{"pr_number":8}`},
 			},
 		},
 		{

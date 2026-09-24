@@ -32,10 +32,6 @@ func newReposCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("fetching PRs: %w", err)
 			}
-			issues, err := c.ListIssues()
-			if err != nil {
-				return fmt.Errorf("fetching issues: %w", err)
-			}
 
 			prCount := make(map[string]int)
 			for _, pr := range prs {
@@ -43,15 +39,9 @@ func newReposCmd() *cobra.Command {
 					prCount[pr.Repo]++
 				}
 			}
-			issueCount := make(map[string]int)
-			for _, iss := range issues {
-				if iss.State == "open" {
-					issueCount[iss.Repo]++
-				}
-			}
 
-			fmt.Printf("%-35s %-10s %-8s %-10s\n", "REPO", "LOCAL_DIR", "ISSUES", "PRS")
-			fmt.Println(strings.Repeat("─", 67))
+			fmt.Printf("%-35s %-10s %-10s\n", "REPO", "LOCAL_DIR", "PRS")
+			fmt.Println(strings.Repeat("─", 58))
 
 			for _, r := range repos {
 				repo := fmt.Sprintf("%v", r)
@@ -66,8 +56,8 @@ func newReposCmd() *cobra.Command {
 						localDir = "auto"
 					}
 				}
-				fmt.Printf("%-35s %-10s %-8d %-10d\n",
-					truncate(repo, 33), localDir, issueCount[repo], prCount[repo])
+				fmt.Printf("%-35s %-10s %-10d\n",
+					truncate(repo, 33), localDir, prCount[repo])
 			}
 
 			fmt.Printf("\n%d repositories monitored.\n", len(repos))

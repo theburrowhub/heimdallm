@@ -17,13 +17,7 @@ func TestEventCategory(t *testing.T) {
 		{"review_error", "pr"},
 		{"review_skipped", "pr"},
 		{"circuit_breaker_tripped", "pr"},
-		{"issue_detected", "issue"},
-		{"issue_review_started", "issue"},
-		{"issue_review_completed", "issue"},
-		{"issue_implemented", "issue"},
-		{"issue_review_error", "issue"},
-		{"issue_promoted", "issue"},
-		{"issue_state_changed", "issue"},
+		{"issue_detected", "system"},
 		{"repo_discovered", "system"},
 		{"unknown_event", "system"},
 	}
@@ -76,16 +70,6 @@ func TestFormatEventData(t *testing.T) {
 			"Fix login",
 		},
 		{
-			"issue number shown",
-			`{"repo":"acme/web","issue_number":7,"issue_title":"Bug report"}`,
-			"#7",
-		},
-		{
-			"issue title shown",
-			`{"repo":"acme/web","issue_number":7,"issue_title":"Bug report"}`,
-			"Bug report",
-		},
-		{
 			"severity shown",
 			`{"repo":"acme/web","pr_number":1,"severity":"medium"}`,
 			"[medium]",
@@ -94,16 +78,6 @@ func TestFormatEventData(t *testing.T) {
 			"error shown",
 			`{"repo":"acme/web","pr_number":1,"error":"timeout"}`,
 			"timeout",
-		},
-		{
-			"promotion labels shown",
-			`{"repo":"acme/web","issue_number":3,"from_label":"blocked","to_label":"ready"}`,
-			"→",
-		},
-		{
-			"chosen action shown",
-			`{"repo":"acme/web","issue_number":5,"chosen_action":"implement"}`,
-			"implement",
 		},
 		{
 			"invalid json returns raw",

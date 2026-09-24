@@ -21,7 +21,6 @@ const (
 	tabActivity tab = iota
 	tabPRs
 	tabMerges
-	tabIssues
 	tabConfig
 	tabStats
 	tabServer
@@ -29,7 +28,7 @@ const (
 )
 
 var tabNames = []string{
-	"Activity", "PRs", "Merges", "Issues", "Config", "Stats", "Server", "Instances",
+	"Activity", "PRs", "Merges", "Config", "Stats", "Server", "Instances",
 }
 
 type Dashboard struct {
@@ -47,7 +46,6 @@ type Dashboard struct {
 	registry *api.ClusterRegistry
 
 	prs    []api.PR
-	issues []api.Issue
 	merges []api.MergeTrackingEntry
 	config map[string]any
 	stats  *api.Stats
@@ -91,19 +89,15 @@ type Dashboard struct {
 	showDetail   bool
 	detailScroll int
 	detailLines  []string
-
-	issueRepoFilter   string
-	issueActionFilter string
 }
 
 type tickMsg time.Time
 type dataMsg struct {
-	prs      []api.PR
+	prs []api.PR
 	// registry is nil when this daemon is not a hub, which is the normal
 	// answer on a single-daemon install rather than a failure.
 	registry *api.ClusterRegistry
 	merges   []api.MergeTrackingEntry
-	issues   []api.Issue
 	config   map[string]any
 	stats    *api.Stats
 	activity *api.ActivityResponse
@@ -129,10 +123,6 @@ type healthCheckMsg struct {
 	lastEventAt time.Time
 }
 type shutdownMsg struct{ err error }
-type promoteIssueMsg struct {
-	id  int64
-	err error
-}
 type openURLMsg struct{ err error }
 
 func NewDashboard(host, token, version string) *Dashboard {
@@ -206,13 +196,6 @@ func (d *Dashboard) fetchData() tea.Msg {
 		msg.registry = registry
 	}
 
-	issues, err := d.client.ListIssues()
-	if err != nil {
-		msg.err = err
-		return msg
-	}
-	msg.issues = issues
-
 	cfg, err := d.client.GetConfig()
 	if err != nil {
 		msg.err = err
@@ -283,12 +266,6 @@ func (d *Dashboard) resetSSE() {
 func (d *Dashboard) shutdownDaemon() tea.Cmd {
 	return func() tea.Msg {
 		return shutdownMsg{err: d.client.Shutdown()}
-	}
-}
-
-func (d *Dashboard) promoteIssue(id int64) tea.Cmd {
-	return func() tea.Msg {
-		return promoteIssueMsg{id: id, err: d.client.PromoteIssue(id)}
 	}
 }
 
@@ -387,15 +364,6 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			// Kept in the daemon's order: it sorts PRs blocked by CI first.
 			d.merges = msg.merges
-			d.issues = nil
-			for _, iss := range msg.issues {
-				if iss.LatestReview != nil {
-					d.issues = append(d.issues, iss)
-				}
-			}
-			sort.Slice(d.issues, func(i, j int) bool {
-				return d.issues[i].LatestReview.CreatedAt.After(d.issues[j].LatestReview.CreatedAt)
-			})
 			d.config = msg.config
 			d.stats = msg.stats
 			d.registry = msg.registry
@@ -496,16 +464,6 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.sseCancel()
 		}
 		return d, nil
-
-	case promoteIssueMsg:
-		d.refreshing = false
-		if msg.err != nil {
-			d.err = msg.err
-			d.shutdownMessage = fmt.Sprintf("Promotion failed: %v", msg.err)
-			return d, nil
-		}
-		d.shutdownMessage = "Promotion requested"
-		return d, d.fetchData
 
 	case openURLMsg:
 		if msg.err != nil {
@@ -620,27 +578,12 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "f":
-		switch d.activeTab {
-		case tabPRs:
+		if d.activeTab == tabPRs {
 			d.cycleRepoFilter()
-		case tabIssues:
-			d.cycleIssueRepoFilter()
-			d.cursor = 0
-		}
-	case "F":
-		if d.activeTab == tabIssues {
-			d.cycleIssueActionFilter()
-			d.cursor = 0
 		}
 	case "enter":
 		if d.activeTab == tabPRs && d.cursor < len(d.visiblePRs()) {
 			d.openDetail()
-		} else if d.activeTab == tabIssues && d.cursor < len(d.visibleIssues()) {
-			d.openDetail()
-		}
-	case "p", "P":
-		if cmd := d.promoteSelectedIssue(); cmd != nil {
-			return d, cmd
 		}
 	case "r":
 		d.refreshing = true
@@ -650,7 +593,7 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			d.confirmShutdown = true
 			d.shutdownMessage = "Stop daemon? y/n"
 		}
-	case "1", "2", "3", "4", "5", "6", "7", "8":
+	case "1", "2", "3", "4", "5", "6", "7":
 		// One key per tab, in tab order. The previous mapping skipped Merges
 		// outright, so that tab had no numeric jump at all while the help text
 		// advertised [1-6] for seven tabs.
@@ -678,10 +621,6 @@ func (d *Dashboard) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return d, openURLCmd(prs[d.cursor].URL)
 			}
 		}
-	case "p", "P":
-		if cmd := d.promoteSelectedIssue(); cmd != nil {
-			return d, cmd
-		}
 	case "j", "down":
 		d.scrollDetailDown()
 	case "k", "up":
@@ -705,20 +644,6 @@ func (d *Dashboard) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return d, nil
 }
 
-func (d *Dashboard) promoteSelectedIssue() tea.Cmd {
-	visible := d.visibleIssues()
-	if d.activeTab != tabIssues || d.cursor >= len(visible) {
-		return nil
-	}
-	issue := visible[d.cursor]
-	if !canPromoteIssue(issue) {
-		return nil
-	}
-	d.refreshing = true
-	d.shutdownMessage = fmt.Sprintf("Promoting issue #%d...", issue.Number)
-	return d.promoteIssue(issue.ID)
-}
-
 func (d *Dashboard) openDetail() {
 	d.showDetail = true
 	d.detailScroll = 0
@@ -729,8 +654,6 @@ func (d *Dashboard) openDetail() {
 		if d.cursor < len(d.merges) {
 			d.detailLines = buildMergeDetailLines(d.merges[d.cursor], d.width)
 		}
-	case tabIssues:
-		d.detailLines = buildIssueDetailLines(d.visibleIssues()[d.cursor], d.width)
 	}
 }
 
@@ -889,7 +812,6 @@ func (d *Dashboard) renderTabs() string {
 func (d *Dashboard) renderStatusBar() string {
 	uptime := time.Since(d.startTime).Truncate(time.Second)
 	prCount := len(d.prs)
-	issueCount := len(d.issues)
 	repoCount := 0
 	if d.config != nil {
 		if repos, ok := d.config["repositories"]; ok {
@@ -902,7 +824,6 @@ func (d *Dashboard) renderStatusBar() string {
 	parts := []string{
 		fmt.Sprintf("Repos: %d", repoCount),
 		fmt.Sprintf("PRs: %d", prCount),
-		fmt.Sprintf("Issues: %d", issueCount),
 		fmt.Sprintf("Uptime: %s", uptime),
 	}
 
@@ -938,8 +859,6 @@ func (d *Dashboard) renderContent(height int) string {
 		return d.renderPRs(height)
 	case tabMerges:
 		return d.renderMerges(height)
-	case tabIssues:
-		return d.renderIssues(height)
 	case tabConfig:
 		return d.renderConfig(height)
 	case tabStats:
@@ -1015,81 +934,6 @@ func (d *Dashboard) renderPRs(height int) string {
 	}
 
 	if ind := scrollIndicator(start, end, len(prs)); ind != "" {
-		b.WriteString(lipgloss.NewStyle().Foreground(colorMuted).Render(ind))
-	}
-	return b.String()
-}
-
-func (d *Dashboard) renderIssues(height int) string {
-	issues := d.visibleIssues()
-	if len(issues) == 0 {
-		msg := "  No issues found."
-		if d.issueRepoFilter != "" || d.issueActionFilter != "" {
-			msg = "  No issues match the current filter."
-		}
-		return lipgloss.NewStyle().Foreground(colorMuted).Render(msg)
-	}
-
-	var b strings.Builder
-
-	filterInfo := ""
-	if d.issueRepoFilter != "" {
-		filterInfo += fmt.Sprintf(" repo:%s", d.issueRepoFilter)
-	}
-	if d.issueActionFilter != "" {
-		filterInfo += fmt.Sprintf(" action:%s", d.issueActionFilter)
-	}
-	if filterInfo != "" {
-		b.WriteString(lipgloss.NewStyle().Foreground(colorWarning).Render(fmt.Sprintf("  Filter:%s", filterInfo)))
-		b.WriteString("\n")
-	}
-
-	header := fmt.Sprintf("  %-7s %-20s %-28s %-12s %-8s %-18s %-10s", "#", "REPO", "TITLE", "AUTHOR", "SEVERITY", "ACTION", "DATE")
-	b.WriteString(headerStyle.Render(header))
-	b.WriteString("\n")
-	b.WriteString("  " + strings.Repeat("─", 107))
-	b.WriteString("\n")
-
-	extraLines := 2
-	if filterInfo != "" {
-		extraLines = 3
-	}
-	maxVisible := height - extraLines
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-	start, end := visibleRange(d.cursor, len(issues), maxVisible)
-
-	for i := start; i < end; i++ {
-		iss := issues[i]
-		sev := "---"
-		action := "---"
-		dateStr := "---"
-		if iss.LatestReview != nil {
-			sev = extractSeverity(iss.LatestReview.Triage)
-			action = humanizeAction(iss.LatestReview)
-			dateStr = timeAgo(iss.LatestReview.CreatedAt)
-		}
-
-		number := fmt.Sprintf("#%d", iss.Number)
-		if iss.Dismissed {
-			number += " D"
-		}
-		title := truncateRunes(iss.Title, 26)
-		repo := truncateRunes(iss.Repo, 18)
-		author := truncateRunes(iss.Author, 10)
-		sevRendered := severityStyle(sev).Render(fmt.Sprintf("%-8s", sev))
-		line := fmt.Sprintf("  %-7s %-20s %-28s %-12s %s %-18s %-10s", number, repo, title, author, sevRendered, action, dateStr)
-
-		if i == d.cursor {
-			b.WriteString(selectedRowStyle.Render(line))
-		} else {
-			b.WriteString(line)
-		}
-		b.WriteString("\n")
-	}
-
-	if ind := scrollIndicator(start, end, len(issues)); ind != "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(colorMuted).Render(ind))
 	}
 	return b.String()
@@ -1361,22 +1205,15 @@ func (d *Dashboard) renderHelp() string {
 		if d.activeTab == tabPRs {
 			return helpStyle.Render("[esc]close  [o]pen in browser  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 		}
-		visible := d.visibleIssues()
-		if d.activeTab == tabIssues && d.cursor < len(visible) && canPromoteIssue(visible[d.cursor]) {
-			return helpStyle.Render("[esc]close  [p]romote  [j/k]scroll  [pgup/pgdn]page  [q]uit")
-		}
 		return helpStyle.Render("[esc]close  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 	}
-	if d.activeTab == tabIssues {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [p]romote  [f]ilter repo  [F]ilter action  [tab]switch  [j/k]scroll  [1-8]jump")
-	}
 	if d.activeTab == tabPRs {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [o]pen  [f]ilter repo  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-8]jump")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [o]pen  [f]ilter repo  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
 	}
 	if d.activeTab == tabActivity {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-8]jump  [G]follow")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump  [G]follow")
 	}
-	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-8]jump")
+	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
 }
 
 func (d *Dashboard) contentHeight() int {
@@ -1399,8 +1236,6 @@ func (d *Dashboard) tabItemCount() int {
 		return len(d.visiblePRs())
 	case tabMerges:
 		return len(d.merges)
-	case tabIssues:
-		return len(d.visibleIssues())
 	case tabConfig:
 		return len(d.buildConfigLines())
 	case tabStats:
@@ -1498,74 +1333,8 @@ func (d *Dashboard) buildConfigLines() []string {
 	kv("Primary", str("ai_primary"))
 	kv("Fallback", str("ai_fallback"))
 	kv("Mode", str("review_mode"))
-	kv("Refinement timeout", str("refinement_timeout"))
-	kv("Triage owner", str("triage_owner"))
 	kv("Clone dir", str("clone_dir"))
-	kv("Generate PR desc", boolStr("generate_pr_description"))
-	if _, ok := d.config["auto_promote_triage"]; ok {
-		kv("Auto promote triage", boolStr("auto_promote_triage"))
-	}
-	if _, ok := d.config["auto_promote_refinement"]; ok {
-		kv("Auto promote refine", boolStr("auto_promote_refinement"))
-	}
 	blank()
-
-	// ── Issue Tracking ──
-	if itRaw, ok := d.config["issue_tracking"]; ok {
-		section("Issue Tracking")
-		if it, ok := itRaw.(map[string]any); ok {
-			if v, ok := it["enabled"].(bool); ok {
-				kv("Enabled", fmt.Sprintf("%v", v))
-			}
-			if v, ok := it["filter_mode"].(string); ok && v != "" {
-				kv("Filter mode", v)
-			}
-			for _, pair := range [][2]string{
-				{"develop_labels", "Develop"},
-				{"refinement_labels", "Refinement"},
-				{"review_only_labels", "Review only"},
-				{"skip_labels", "Skip"},
-				{"blocked_labels", "Blocked"},
-			} {
-				if labels := configStringSlice(it[pair[0]]); len(labels) > 0 {
-					kv(pair[1], strings.Join(labels, ", "))
-				}
-			}
-			if v, ok := it["promote_to_label"].(string); ok && v != "" {
-				kv("Promote to label", v)
-			}
-			if v, ok := it["default_action"].(string); ok && v != "" {
-				kv("Default action", v)
-			}
-			if orgs := configStringSlice(it["organizations"]); len(orgs) > 0 {
-				kv("Organizations", strings.Join(orgs, ", "))
-			}
-			if assignees := configStringSlice(it["assignees"]); len(assignees) > 0 {
-				kv("Assignees", strings.Join(assignees, ", "))
-			}
-		}
-		blank()
-	}
-
-	// ── PR Metadata (defaults) ──
-	if pmRaw, ok := d.config["pr_metadata"]; ok {
-		if pm, ok := pmRaw.(map[string]any); ok && len(pm) > 0 {
-			section("PR Metadata (defaults)")
-			if reviewers := configStringSlice(pm["reviewers"]); len(reviewers) > 0 {
-				kv("Reviewers", strings.Join(reviewers, ", "))
-			}
-			if labels := configStringSlice(pm["labels"]); len(labels) > 0 {
-				kv("Labels", strings.Join(labels, ", "))
-			}
-			if v, ok := pm["pr_assignee"].(string); ok && v != "" {
-				kv("Assignee", v)
-			}
-			if v, ok := pm["pr_draft"].(bool); ok {
-				kv("Draft", fmt.Sprintf("%v", v))
-			}
-			blank()
-		}
-	}
 
 	// ── Agent Configs ──
 	if acRaw, ok := d.config["agent_configs"]; ok {
@@ -1669,45 +1438,6 @@ func (d *Dashboard) buildConfigLines() []string {
 		blank()
 	}
 
-	// ── Autonomous Mode ──
-	if autRaw, ok := d.config["autonomous"]; ok {
-		if aut, ok := autRaw.(map[string]any); ok {
-			section("Autonomous Mode")
-			if v, ok := aut["enabled"].(bool); ok {
-				kv("Enabled", fmt.Sprintf("%v", v))
-			}
-			if v, ok := aut["auto_merge"].(bool); ok {
-				kv("Auto merge", fmt.Sprintf("%v", v))
-			}
-			if v, ok := aut["merge_method"].(string); ok && v != "" {
-				kv("Merge method", v)
-			}
-			if f, ok := aut["dev_max_turns"].(float64); ok {
-				if int(f) == 0 {
-					kv("Dev max turns", "unlimited")
-				} else {
-					kv("Dev max turns", fmt.Sprintf("%d", int(f)))
-				}
-			}
-			if v, ok := aut["dev_effort"].(string); ok && v != "" {
-				kv("Dev effort", v)
-			}
-			if v, ok := aut["dev_timeout"].(string); ok && v != "" {
-				kv("Dev timeout", v)
-			}
-			if v, ok := aut["claim_lease"].(string); ok && v != "" {
-				kv("Claim lease", v)
-			}
-			if v, ok := aut["take_others_tasks"].(bool); ok {
-				kv("Take others tasks", fmt.Sprintf("%v", v))
-			}
-			if v, ok := aut["reassign_on_take"].(bool); ok {
-				kv("Reassign on take", fmt.Sprintf("%v", v))
-			}
-			blank()
-		}
-	}
-
 	// ── Circuit Breaker ──
 	if cbRaw, ok := d.config["circuit_breaker"]; ok {
 		if cb, ok := cbRaw.(map[string]any); ok {
@@ -1718,14 +1448,8 @@ func (d *Dashboard) buildConfigLines() []string {
 			if f, ok := cb["per_repo_hr"].(float64); ok {
 				kv("Per repo / hr", fmt.Sprintf("%d", int(f)))
 			}
-			if f, ok := cb["per_issue_24h"].(float64); ok {
-				kv("Per issue / 24h", fmt.Sprintf("%d", int(f)))
-			}
-			if f, ok := cb["per_issue_repo_hr"].(float64); ok {
-				kv("Per issue-repo / hr", fmt.Sprintf("%d", int(f)))
-			}
-			if f, ok := cb["per_impl_repo_hr"].(float64); ok {
-				kv("Per impl-repo / hr", fmt.Sprintf("%d", int(f)))
+			if f, ok := cb["per_review_failure_repo_hr"].(float64); ok {
+				kv("Failed reviews / repo / hr", fmt.Sprintf("%d", int(f)))
 			}
 			blank()
 		}
@@ -1735,17 +1459,8 @@ func (d *Dashboard) buildConfigLines() []string {
 	if pRaw, ok := d.config["polling"]; ok {
 		if p, ok := pRaw.(map[string]any); ok {
 			section("Polling / Rate Limit")
-			if v, ok := p["adaptive"].(bool); ok {
-				kv("Adaptive", fmt.Sprintf("%v", v))
-			}
 			if v, ok := p["poll_interval"].(string); ok && v != "" {
 				kv("Poll interval", v)
-			}
-			if v, ok := p["min_interval"].(string); ok && v != "" {
-				kv("Min interval", v)
-			}
-			if v, ok := p["max_interval"].(string); ok && v != "" {
-				kv("Max interval", v)
 			}
 			if v, ok := p["discovery_interval"].(string); ok && v != "" {
 				kv("Discovery interval", v)
@@ -1758,9 +1473,6 @@ func (d *Dashboard) buildConfigLines() []string {
 			}
 			if v, ok := p["use_etag"].(bool); ok {
 				kv("ETag/304 caching", fmt.Sprintf("%v", v))
-			}
-			if v, ok := p["use_graphql"].(bool); ok {
-				kv("GraphQL batching", fmt.Sprintf("%v", v))
 			}
 			blank()
 		}
@@ -1895,13 +1607,6 @@ func formatSSEData(eventType, data string) (itemType string, info string) {
 			parts = append(parts, fmt.Sprintf("PR #%d", n))
 		}
 	}
-	if num, ok := m["issue_number"]; ok {
-		itemType = "issue"
-		n := toInt(num)
-		if n != 0 {
-			parts = append(parts, fmt.Sprintf("Issue #%d", n))
-		}
-	}
 	if sev, ok := m["severity"]; ok {
 		parts = append(parts, fmt.Sprintf("[%v]", sev))
 	}
@@ -1910,18 +1615,6 @@ func formatSSEData(eventType, data string) (itemType string, info string) {
 		return itemType, strings.Join(parts, " ")
 	}
 	return itemType, data
-}
-
-func canPromoteIssue(issue api.Issue) bool {
-	if issue.LatestReview == nil {
-		return false
-	}
-	switch issue.LatestReview.ActionTaken {
-	case "review_only", "refinement":
-		return true
-	default:
-		return false
-	}
 }
 
 func (d *Dashboard) visiblePRs() []api.PR {
@@ -1987,25 +1680,6 @@ func openURLCmd(url string) tea.Cmd {
 	}
 }
 
-func humanizeAction(r *api.IssueReview) string {
-	if r == nil {
-		return "---"
-	}
-	switch r.ActionTaken {
-	case "review_only":
-		return "Triaged"
-	case "auto_implement":
-		if r.PRCreated > 0 {
-			return fmt.Sprintf("→ PR #%d", r.PRCreated)
-		}
-		return "Implemented"
-	case "refinement":
-		return "Refined"
-	default:
-		return r.ActionTaken
-	}
-}
-
 func timeAgo(t time.Time) string {
 	if t.IsZero() {
 		return "---"
@@ -2025,125 +1699,6 @@ func timeAgo(t time.Time) string {
 	}
 }
 
-func parseLabels(raw json.RawMessage) []string {
-	if len(raw) == 0 {
-		return nil
-	}
-	var names []string
-	if json.Unmarshal(raw, &names) == nil {
-		return names
-	}
-	var objects []struct {
-		Name string `json:"name"`
-	}
-	if json.Unmarshal(raw, &objects) == nil {
-		// Fresh slice — the prior Unmarshal into `names` may have
-		// partially populated it with zero-value strings before the
-		// type error surfaced, which would leak empty entries here.
-		out := make([]string, 0, len(objects))
-		for _, o := range objects {
-			out = append(out, o.Name)
-		}
-		return out
-	}
-	return nil
-}
-
-func (d *Dashboard) visibleIssues() []api.Issue {
-	if d.issueRepoFilter == "" && d.issueActionFilter == "" {
-		return d.issues
-	}
-	var result []api.Issue
-	for _, iss := range d.issues {
-		if d.issueRepoFilter != "" && iss.Repo != d.issueRepoFilter {
-			continue
-		}
-		if d.issueActionFilter != "" {
-			action := ""
-			if iss.LatestReview != nil {
-				action = iss.LatestReview.ActionTaken
-			}
-			if action != d.issueActionFilter {
-				continue
-			}
-		}
-		result = append(result, iss)
-	}
-	return result
-}
-
-func (d *Dashboard) cycleIssueRepoFilter() {
-	repos := d.uniqueIssueRepos()
-	if len(repos) == 0 {
-		d.issueRepoFilter = ""
-		return
-	}
-	if d.issueRepoFilter == "" {
-		d.issueRepoFilter = repos[0]
-		return
-	}
-	for i, r := range repos {
-		if r == d.issueRepoFilter {
-			if i+1 < len(repos) {
-				d.issueRepoFilter = repos[i+1]
-			} else {
-				d.issueRepoFilter = ""
-			}
-			return
-		}
-	}
-	d.issueRepoFilter = ""
-}
-
-func (d *Dashboard) cycleIssueActionFilter() {
-	actions := d.uniqueIssueActions()
-	if len(actions) == 0 {
-		d.issueActionFilter = ""
-		return
-	}
-	if d.issueActionFilter == "" {
-		d.issueActionFilter = actions[0]
-		return
-	}
-	for i, a := range actions {
-		if a == d.issueActionFilter {
-			if i+1 < len(actions) {
-				d.issueActionFilter = actions[i+1]
-			} else {
-				d.issueActionFilter = ""
-			}
-			return
-		}
-	}
-	d.issueActionFilter = ""
-}
-
-func (d *Dashboard) uniqueIssueRepos() []string {
-	seen := map[string]bool{}
-	var repos []string
-	for _, iss := range d.issues {
-		if !seen[iss.Repo] {
-			seen[iss.Repo] = true
-			repos = append(repos, iss.Repo)
-		}
-	}
-	sort.Strings(repos)
-	return repos
-}
-
-func (d *Dashboard) uniqueIssueActions() []string {
-	seen := map[string]bool{}
-	var actions []string
-	for _, iss := range d.issues {
-		if iss.LatestReview != nil && !seen[iss.LatestReview.ActionTaken] {
-			seen[iss.LatestReview.ActionTaken] = true
-			actions = append(actions, iss.LatestReview.ActionTaken)
-		}
-	}
-	sort.Strings(actions)
-	return actions
-}
-
 func toInt(v any) int {
 	switch n := v.(type) {
 	case float64:
@@ -2155,20 +1710,6 @@ func toInt(v any) int {
 	default:
 		return 0
 	}
-}
-
-func extractSeverity(triage json.RawMessage) string {
-	if len(triage) == 0 {
-		return "---"
-	}
-	var t map[string]any
-	if err := json.Unmarshal(triage, &t); err != nil {
-		return "---"
-	}
-	if sev, ok := t["severity"]; ok {
-		return fmt.Sprintf("%v", sev)
-	}
-	return "---"
 }
 
 // truncateRunes returns s truncated to at most maxLen runes, appending an
