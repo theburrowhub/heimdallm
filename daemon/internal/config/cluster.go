@@ -46,6 +46,13 @@ const (
 	OpMerge  = "merge"
 )
 
+// retiredOpIssue was the round-robin operation of the removed issue pipeline.
+// Configs written before its removal (and the docs of that era) list it in
+// round_robin_ops, and a hub on an older version can still push it. It is
+// accepted so those configs keep booting, and it matches no operation, so a
+// list of only ["issue"] still round-robins nothing — exactly as before.
+const retiredOpIssue = "issue"
+
 // DefaultClusterProbeInterval is how often the hub polls each instance's
 // unauthenticated GET /health.
 const DefaultClusterProbeInterval = "30s"
@@ -428,7 +435,7 @@ func (c *Config) validateCluster() error {
 	}
 	for _, op := range cl.Routing.RoundRobinOps {
 		switch strings.ToLower(strings.TrimSpace(op)) {
-		case OpReview, OpMerge:
+		case OpReview, OpMerge, retiredOpIssue:
 		default:
 			return fmt.Errorf("config: cluster.routing.round_robin_ops contains %q; allowed: %q, %q",
 				op, OpReview, OpMerge)

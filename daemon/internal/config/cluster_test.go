@@ -562,6 +562,47 @@ func TestClusterTakeoverThresholdStaysUnsetWithoutCluster(t *testing.T) {
 	}
 }
 
+// Configs from before the issue pipeline was removed listed "issue" in
+// round_robin_ops (the documented example did). They must keep booting, and
+// the retired value must not change which live operations are round-robined.
+func TestLoad_AcceptsRetiredIssueRoundRobinOp(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ops        string
+		wantReview bool
+		wantMerge  bool
+	}{
+		{"documented example", `["review", "merge", "issue"]`, true, true},
+		{"issue only", `["issue"]`, false, false},
+		{"review and issue", `["review", "issue"]`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			contents := `
+[ai]
+primary = "claude"
+
+[cluster.routing]
+mode = "dispatch"
+round_robin_ops = ` + tc.ops + "\n"
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			r := cfg.Cluster.Routing
+			if got := r.RoundRobinsOp(OpReview); got != tc.wantReview {
+				t.Errorf("RoundRobinsOp(review) = %v, want %v", got, tc.wantReview)
+			}
+			if got := r.RoundRobinsOp(OpMerge); got != tc.wantMerge {
+				t.Errorf("RoundRobinsOp(merge) = %v, want %v", got, tc.wantMerge)
+			}
+		})
+	}
+}
+
 // A [cluster] section must survive a TOML round trip, or the daemon would
 // silently drop the registry the first time it rewrote its own config.
 func TestClusterTOMLRoundTrip(t *testing.T) {
