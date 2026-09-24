@@ -1,6 +1,6 @@
 # Heimdallm
 
-> AI-powered GitHub automation for macOS and Linux — reviews your pull requests, triages your issues, and can even open implementation PRs for you. Uses Claude, Gemini, Codex, or OpenCode under the hood, posts everything back as your GitHub account, and keeps you informed via a native menu-bar app or a Flutter Web UI.
+> AI-powered pull request review agent for macOS and Linux — reviews the PRs you're asked to review and tracks your own PRs towards merge. Uses Claude, Gemini, Codex, or OpenCode under the hood, posts everything back as your GitHub account, and keeps you informed via a native menu-bar app or a Flutter Web UI.
 
 ![Heimdallm icon](assets/icon.png)
 
@@ -8,26 +8,21 @@
 
 ## What it does
 
-Heimdallm runs in the background and does four things, in parallel, at your configured poll interval:
+Heimdallm runs in the background and does three things, in parallel, at your configured poll interval:
 
 ### 1. PR reviews
 Watches the PRs where you're requested as a reviewer, runs an AI code review, and submits it to GitHub as your account. No copy-pasting, no manual prompting.
 
-### 2. Issue triage & auto-implement
-Fetches issues from monitored repos, classifies them by label (`review_only` triage, `refinement`, `develop` / `auto_implement`, `skip`, `blocked`), and can move issues through triage -> refinement -> development. Develop-track issues optionally **create a branch, commit the change, and open a PR** against your default branch. Issues can declare dependencies on other issues/PRs; Heimdallm holds them in a `blocked` state until the prerequisites close, then promotes them automatically.
-
-### 3. Merge tracking
+### 2. Merge tracking
 Watches the PRs **you** authored or are assigned to and works out exactly what is stopping each one from merging — which check is failing, which reviewer is waiting, which conversation is unresolved — and says so where you cannot miss it. Optionally moves them along too: arm GitHub's auto-merge, update branches that fall behind, have the agent resolve conflicts, and merge when everything is green. Every automation is off by default.
 
-### 4. Self-monitoring UI
+### 3. Self-monitoring UI
 A Flutter Web UI (`:3000`) with responsive sidebar/rail/drawer navigation for Activity, Merge, Repositories, Organizations, Prompts, Agents, Stats, and Instances, plus live Settings and Server/Logs screens. Opens alongside the daemon in Docker mode.
 
 ### Headline features
 
 - **Automatic reviews** — polls `review-requested:@me` on GitHub and submits reviews as your account
 - **Merge tracking** — tells you which check is blocking each of your own PRs, and can arm auto-merge, update stale branches, resolve conflicts and merge, each behind its own switch
-- **Issue pipeline** — label-driven triage, refinement planning, and optional auto-implement with branch/commit/PR cycle
-- **Issue dependencies** — mark downstream work with a `blocked` label; declare deps via a `## Depends on` body section *or* GitHub's native sub-issues; Heimdallm auto-promotes when all blockers close
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/prompts` (`/agents` remains a compatibility alias)
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
 - **Per-repo overrides** — different AI agent, prompt, and feedback mode per repository
@@ -121,7 +116,7 @@ make uninstall-linux PURGE=1 # also wipe ~/.config + ~/.local/share state
 
 ### CLI / TUI
 
-The terminal client is distributed as `heimdallm-cli` via Homebrew and GitHub Releases. It connects to a running daemon and supports status checks, PR/issue lists, manual review triggers, live event following, stats, config inspection, and a Bubble Tea dashboard.
+The terminal client is distributed as `heimdallm-cli` via Homebrew and GitHub Releases. It connects to a running daemon and supports status checks, PR lists, manual review triggers, live event following, stats, config inspection, and a Bubble Tea dashboard.
 
 ```bash
 brew install theburrowhub/tap/heimdallm-cli
@@ -185,7 +180,7 @@ Then open `docker/.env` in your editor and set at minimum:
 
 For non-Claude providers see [Reusing your host's AI authentication](#reusing-your-hosts-ai-authentication) (Gemini OAuth reuse) or just set the relevant `*_API_KEY` variable from the Prerequisites list.
 
-See [`docker/.env.example`](docker/.env.example) for every supported variable including issue-tracking, topic-based discovery, and web UI settings.
+See [`docker/.env.example`](docker/.env.example) for every supported variable including topic-based discovery, and web UI settings.
 
 #### 3. Start the stack
 
@@ -335,75 +330,6 @@ errors fall back to the last known-good list, so an outage never empties the
 set silently. The static `HEIMDALLM_REPOSITORIES` list keeps working — the
 two sources are merged (deduplicated) at poll time.
 
-#### Dependency-based issue promotion
-
-For multi-step work that must land in order, Heimdallm can hold downstream
-issues out of the pipeline until their prerequisites close, then promote
-them automatically.
-
-**Enable it** by declaring one or more "blocked" labels:
-
-```bash
-HEIMDALLM_ISSUE_BLOCKED_LABELS=blocked
-# optional — defaults to the first HEIMDALLM_ISSUE_DEVELOP_LABELS entry:
-HEIMDALLM_ISSUE_PROMOTE_TO_LABEL=ready
-```
-
-**Declare dependencies** in either (or both) of two ways — Heimdallm
-reads both on every poll and unions the results:
-
-1. **Markdown `## Depends on` section** in the issue body:
-
-    ```markdown
-    ## Depends on
-    - #42
-    - other-org/shared#57
-    ```
-
-    Same-repo refs use `#N`. Cross-repo refs use `owner/repo#N` — works
-    with any repo your `GITHUB_TOKEN` can read (cross-org included). The
-    heading is case-insensitive and accepts an optional trailing colon.
-    Multiple refs per bullet are fine.
-
-2. **GitHub native sub-issues** attached to the parent via the issue UI
-   or REST API. Available since the sub-issues GA; fully same-owner,
-   cross-repo supported (`org/repo-a#1` can have `org/repo-b#2` as a
-   sub-issue — but **not** `other-org/repo#3`, GitHub refuses that).
-   No extra declaration in the body needed.
-
-Either source alone is enough to mark an issue as having dependencies.
-Refs that appear in both are deduped, and the sub-issue's state
-pre-populates the dep cache so Heimdallm spends one fewer GitHub API
-call on shared refs.
-
-**How it runs.** Every poll cycle, for each issue carrying a blocked
-label:
-
-1. Parse the `## Depends on` bullets from the body.
-2. Call GitHub's sub-issues REST endpoint for the same issue.
-3. Union the refs from both sources; dedup.
-4. For each unique ref, fetch state via the GitHub API (cached within
-   the cycle).
-5. If all are `closed` (merged PRs count as closed), remove the blocked
-   label(s), add `HEIMDALLM_ISSUE_PROMOTE_TO_LABEL`, and leave an audit
-   comment listing each dep and its state at check time.
-6. The same poll cycle's fetch pass then classifies the promoted issue
-   normally and dispatches it to triage, refinement, or auto-implement.
-
-Issues with a blocked label but **no declared deps in either source**
-stay blocked — the daemon won't guess when to unblock them. Remove the
-label manually to opt out. If the sub-issues API errors transiently on
-a given issue, Heimdallm skips that issue for the current cycle rather
-than risk promoting on incomplete information.
-
-Classification precedence is
-`skip > blocked > review_only > refinement > develop > default_action`, so an issue
-tagged with both a blocked and a develop label stays blocked until
-promotion. Stage promotion updates labels only; the next poll executes the newly visible stage. The feature is **opt-in**: leave `HEIMDALLM_ISSUE_BLOCKED_LABELS`
-empty and nothing about the existing pipeline changes.
-
-**Upgrade note for staged issues:** earlier-stage labels now win over later-stage labels. If you previously used overlapping triage/develop labels to force direct development, split them into dedicated labels or remove the triage label before applying the develop label. `auto_promote_triage` defaults on only when `refinement_labels` is configured, and `auto_promote_refinement` defaults on only when `develop_labels` is configured; set either flag to `false` to keep that promotion manual.
-
 ### Automated install (for agents / scripts)
 
 See [LLM-HOW-TO-INSTALL.md](LLM-HOW-TO-INSTALL.md) for a step-by-step guide suitable for Claude Code, shell scripts, or any automation tool.
@@ -414,7 +340,7 @@ On first launch Heimdallm detects your `gh` CLI token automatically and sets its
 
 ## Architecture
 
-The **Go daemon** (`heimdalld`, port `7842`) is the engine. It polls GitHub for PRs and issues, dispatches work to the configured AI CLI, posts reviews or opens implementation PRs, and broadcasts state to any connected UI over SSE.
+The **Go daemon** (`heimdalld`, port `7842`) is the engine. It polls GitHub for PRs, dispatches reviews to the configured AI CLI, posts them back to GitHub, tracks your own PRs towards merge, and broadcasts state to any connected UI over SSE.
 
 Three first-party UIs talk to it over HTTP:
 
@@ -427,8 +353,7 @@ Flutter app ─┐
 Web UI      ─┼──→ HTTP / SSE ──→  heimdalld  ──→  GitHub API
 CLI / TUI   ─┘                       │
                                      ├──→  PR review pipeline   ──→  POST /reviews
-                                     ├──→  Issue triage pipeline
-                                     └──→  Auto-implement       ──→  branch + commits + PR
+                                     └──→  Merge tracking       ──→  auto-merge / branch update / merge
                                                  │
                                       claude / gemini / codex / opencode CLI
 ```
@@ -466,7 +391,7 @@ heimdallm-cli instances              # the fleet, with health and versions
 heimdallm-cli routing                # who owns what
 ```
 
-See [§18 Multiple Instances](docs/configuration-guide.md#18-multiple-instances)
+See [§15 Multiple Instances](docs/configuration-guide.md#15-multiple-instances)
 for the full configuration, the routing precedence, and what does and does not
 propagate.
 
@@ -568,13 +493,13 @@ make uninstall-linux   # Linux: remove the native install (add PURGE=1 to wipe c
 heimdallm/
 ├── daemon/                  Go background service (port 7842)
 │   └── internal/
-│       ├── github/          GitHub API client (PRs, issues, diffs, reviews)
+│       ├── github/          GitHub API client (PRs, diffs, reviews)
 │       ├── executor/        AI CLI runner (claude, gemini, codex, opencode)
-│       ├── pipeline/        PR-review orchestration (fase 1)
-│       ├── issues/          Issue triage + auto-implement (fase 2)
+│       ├── pipeline/        PR-review orchestration
+│       ├── gitops/          Git plumbing for merge-tracking branch updates
 │       ├── mergetrack/       Merge-readiness evaluator and reconciler
 │       ├── discovery/       Topic-based repo auto-discovery
-│       ├── store/           SQLite (prs, issues, reviews, agents)
+│       ├── store/           SQLite (prs, reviews, agents)
 │       ├── scheduler/       Poll loop, grace windows
 │       ├── server/          HTTP + SSE API
 │       └── keychain/        Host credential storage

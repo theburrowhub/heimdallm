@@ -779,7 +779,7 @@ type putPartitionResponse struct {
 //
 // Never touches role, cluster.instances, any token, probe_interval or
 // routing.mode/round_robin_pool — those describe this machine or the hub's
-// own registry, not the partition (see docs/configuration-guide.md §18.4).
+// own registry, not the partition (see docs/configuration-guide.md §15.4).
 func (srv *Server) handlePutPartition(w http.ResponseWriter, r *http.Request) {
 	if srv.configPath == "" {
 		httpJSONErr(w, http.StatusServiceUnavailable, "PUT not available — configPath not set")

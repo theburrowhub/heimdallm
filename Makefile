@@ -507,7 +507,7 @@ _check-env: _check-docker
 
 # Prints a short post-up summary: the web URL, which AI keys are set, and
 # hints for the opt-in knobs operators most often miss (full-repo analysis,
-# topic discovery, issue tracking). Called after `up` / `up-build`.
+# topic discovery). Called after `up` / `up-build`.
 _post-up-hints:
 	@echo ""
 	@echo "✅  Heimdallm is up at http://localhost:$${HEIMDALLM_WEB_PORT:-3000}"

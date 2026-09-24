@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Heimdallm — AI agent for GitHub PRs &amp; issues</title>
-  <meta name="description" content="Heimdallm — AI daemon that reviews PRs, triages issues, and opens implementation PRs on GitHub. Open source. macOS, Linux, Docker, web UI, CLI/TUI.">
-  <meta property="og:title" content="Heimdallm — Autonomous GitHub automation">
-  <meta property="og:description" content="AI agent that reviews your PRs, triages your issues, and opens implementation PRs for you. macOS, Linux, Docker, Web UI and CLI/TUI. Open source.">
+  <title>Heimdallm — AI review agent for GitHub PRs</title>
+  <meta name="description" content="Heimdallm — AI daemon that reviews your GitHub pull requests and tracks your own PRs towards merge. Open source. macOS, Linux, Docker, web UI, CLI/TUI.">
+  <meta property="og:title" content="Heimdallm — AI pull request reviews">
+  <meta property="og:description" content="AI agent that reviews your PRs and tracks your own PRs towards merge. macOS, Linux, Docker, Web UI and CLI/TUI. Open source.">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -335,11 +335,11 @@
 <!-- Hero -->
 <section class="hero">
   <div class="hero-badge">⚡ v0.8.27 · macOS · Linux · Docker · Free · Open Source</div><!-- x-release-please-version -->
-  <h1>Your GitHub, on <em>autopilot</em>.<br>Reviews, triage, and PRs.</h1>
+  <h1>Your PR reviews, on <em>autopilot</em>.</h1>
   <p>
-    Heimdallm is a background daemon that reviews your pull requests, triages and refines your issues,
-    and can even open implementation PRs for you — driven by Claude, Gemini, Codex or OpenCode and posted
-    to GitHub as your account.
+    Heimdallm is a background daemon that reviews the pull requests you're asked to review and tracks
+    your own PRs towards merge — driven by Claude, Gemini, Codex or OpenCode and posted to GitHub as
+    your account.
   </p>
   <div class="hero-actions">
     <a href="https://github.com/theburrowhub/heimdallm/releases/latest" class="btn btn-primary">
@@ -363,25 +363,14 @@
     <div class="flow-arrow">→</div>
     <div class="flow-step"><span class="flow-icon">🔔</span><strong>You're notified</strong><p>Desktop notification with a link straight to the review</p></div>
   </div>
-
-  <div class="flow-label">Issue pipeline</div>
-  <div class="flow">
-    <div class="flow-step"><span class="flow-icon">🏷️</span><strong>New issue</strong><p>Labels drive what Heimdallm does next</p></div>
-    <div class="flow-arrow">→</div>
-    <div class="flow-step"><span class="flow-icon">🧭</span><strong>Triage &amp; refine</strong><p>Classify, summarise, and plan the work</p></div>
-    <div class="flow-arrow">→</div>
-    <div class="flow-step"><span class="flow-icon">🛠️</span><strong>Auto-implement</strong><p>Branch, commit, and open a PR against your default branch</p></div>
-    <div class="flow-arrow">→</div>
-    <div class="flow-step"><span class="flow-icon">👀</span><strong>You review</strong><p>Same review pipeline kicks in on the AI's own PR</p></div>
-  </div>
 </div>
 
 <!-- Features -->
 <section class="section" id="features">
   <div class="section-inner">
     <div class="section-label">Features</div>
-    <h2>One daemon. Every GitHub chore.</h2>
-    <p>Heimdallm is a Go daemon plus a Flutter desktop / web app and a CLI/TUI. It polls GitHub on your behalf and runs three pipelines in parallel: PR reviews, issue triage, and auto-implement.</p>
+    <h2>One daemon. Every review.</h2>
+    <p>Heimdallm is a Go daemon plus a Flutter desktop / web app and a CLI/TUI. It polls GitHub on your behalf and runs two pipelines in parallel: PR reviews and merge tracking.</p>
     <div class="grid">
       <div class="card">
         <div class="card-icon">🤖</div>
@@ -389,19 +378,9 @@
         <p>Polls <code>review-requested:@me</code>, runs your AI agent on the diff, and submits a proper GitHub review under your account. <code>REQUEST_CHANGES</code> on high severity, <code>APPROVE</code> otherwise.</p>
       </div>
       <div class="card">
-        <div class="card-icon">🧭</div>
-        <h3>Issue triage &amp; refinement</h3>
-        <p>Classifies issues by label — <code>review_only</code>, <code>refinement</code>, <code>develop</code>, <code>skip</code>, <code>blocked</code> — and walks them through triage → refinement → development with a state machine you control.</p>
-      </div>
-      <div class="card">
-        <div class="card-icon">🛠️</div>
-        <h3>Auto-implement</h3>
-        <p>For <code>develop</code>-track issues the agent creates a branch, commits the change, and opens a PR against your default branch — hardened against prompt injection.</p>
-      </div>
-      <div class="card">
-        <div class="card-icon">🔗</div>
-        <h3>Issue dependencies</h3>
-        <p>Declare blockers with a <code>## Depends on</code> section or GitHub's native sub-issues. Heimdallm holds the issue until every prerequisite closes, then auto-promotes it.</p>
+        <div class="card-icon">🔀</div>
+        <h3>Merge tracking</h3>
+        <p>Watches the PRs you authored or are assigned to and tells you exactly what blocks each merge. Optionally arms auto-merge, updates stale branches, resolves conflicts and merges — every automation behind its own switch, off by default.</p>
       </div>
       <div class="card">
         <div class="card-icon">🧠</div>
@@ -681,7 +660,7 @@ sudo apt-get install -f -y</pre>
             <h4>Point at a running daemon</h4>
             <pre class="inline-code">export HEIMDALLM_HOST=http://localhost:7842
 export HEIMDALLM_TOKEN=&lt;your token&gt;</pre>
-            <p style="margin-top:.4rem;">Defaults to localhost — skip these if you're on the same host. See the <a href="https://github.com/theburrowhub/heimdallm/blob/main/docs/configuration-guide.md#12-cli">configuration guide</a> for token setup.</p>
+            <p style="margin-top:.4rem;">Defaults to localhost — skip these if you're on the same host. See the <a href="https://github.com/theburrowhub/heimdallm/blob/main/docs/configuration-guide.md#10-cli">configuration guide</a> for token setup.</p>
           </div>
         </div>
         <div class="install-step">
@@ -689,7 +668,7 @@ export HEIMDALLM_TOKEN=&lt;your token&gt;</pre>
           <div>
             <h4>Launch the dashboard</h4>
             <pre class="inline-code">heimdallm-cli dashboard</pre>
-            <p style="margin-top:.4rem;">Or: <code>prs</code>, <code>issues</code>, <code>repos</code>, <code>review-pr</code>, <code>follow</code>, <code>config</code>, <code>stats</code>.</p>
+            <p style="margin-top:.4rem;">Or: <code>prs</code>, <code>repos</code>, <code>review-pr</code>, <code>follow</code>, <code>config</code>, <code>stats</code>.</p>
           </div>
         </div>
       </div>

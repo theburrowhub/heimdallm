@@ -51,7 +51,7 @@ RUN mkdir -p /home/heimdallm/.claude \
              /home/heimdallm/.local/share/opencode \
     && chown -R heimdallm:heimdallm /home/heimdallm
 
-# ── SSH setup for git operations (auto_implement) ───────────────────────────
+# ── SSH setup for git operations (merge tracking) ───────────────────────────
 # Pre-seed GitHub's host key so git fetch/push over SSH never prompts.
 # The host's SSH agent socket is forwarded at runtime via docker-compose.
 RUN mkdir -p /home/heimdallm/.ssh \
