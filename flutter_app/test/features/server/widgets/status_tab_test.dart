@@ -28,7 +28,6 @@ Future<_MockApiClient> _mount(WidgetTester tester) async {
       'ai_primary': 'claude',
       'ai_fallback': '',
       'review_mode': 'single',
-      'issue_tracking': {'enabled': false},
     },
   );
   when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);

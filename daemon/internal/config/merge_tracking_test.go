@@ -133,8 +133,7 @@ func TestMergeTrackingOverride_IntOverridesApply(t *testing.T) {
 }
 
 // An invalid merge_method would otherwise surface as a 422 from GitHub on every
-// merge attempt, once per cycle, forever. [autonomous] has that bug; this must
-// not inherit it.
+// merge attempt, once per cycle, forever.
 func TestValidate_RejectsInvalidMergeMethod(t *testing.T) {
 	for _, scope := range []string{"global", "org", "repo"} {
 		t.Run(scope, func(t *testing.T) {

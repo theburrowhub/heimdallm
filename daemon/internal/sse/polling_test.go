@@ -42,7 +42,7 @@ func TestEmitPollingStarted_FormatsPayload(t *testing.T) {
 
 func TestEmitPollingCompleted_FormatsPayload(t *testing.T) {
 	pub := &capturePublisher{}
-	EmitPollingCompleted(pub, "issues", 7, 1234*time.Millisecond)
+	EmitPollingCompleted(pub, "prs", 7, 1234*time.Millisecond)
 
 	if len(pub.events) != 1 {
 		t.Fatalf("want 1 event, got %d", len(pub.events))
@@ -59,7 +59,7 @@ func TestEmitPollingCompleted_FormatsPayload(t *testing.T) {
 	if err := json.Unmarshal([]byte(got.Data), &payload); err != nil {
 		t.Fatalf("payload decode: %v", err)
 	}
-	if payload.Kind != "issues" || payload.Count != 7 || payload.DurationMs != 1234 {
+	if payload.Kind != "prs" || payload.Count != 7 || payload.DurationMs != 1234 {
 		t.Errorf("payload: got %+v", payload)
 	}
 }
@@ -67,5 +67,5 @@ func TestEmitPollingCompleted_FormatsPayload(t *testing.T) {
 func TestEmit_NilPublisherIsSafe(t *testing.T) {
 	// Should not panic — production code may call before publisher is wired.
 	EmitPollingStarted(nil, "prs", []string{"acme/foo"})
-	EmitPollingCompleted(nil, "issues", 0, 0)
+	EmitPollingCompleted(nil, "prs", 0, 0)
 }

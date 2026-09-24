@@ -1225,7 +1225,7 @@ func TestDispatchToTheHubWithoutATrigger(t *testing.T) {
 	}
 }
 
-func TestDispatchMergeAndIssueOps(t *testing.T) {
+func TestDispatchMergeOp(t *testing.T) {
 	a := newFakeInstance(t, "srv-a", nil)
 	f := newHub(t, map[string]*fakeInstance{"srv-a": a}, config.RoutingConfig{
 		Repos: map[string]string{"acme/tools": "srv-a"},
@@ -1235,17 +1235,15 @@ func TestDispatchMergeAndIssueOps(t *testing.T) {
 		`{"pr_id":42,"repo":"acme/tools","number":7,"head_sha":"s1","dry_run":true}`); rec.Code != http.StatusAccepted {
 		t.Fatalf("merge dispatch = %d: %s", rec.Code, rec.Body)
 	}
+	// The issue operation went away with the issue pipelines.
 	if rec := f.do(t, http.MethodPost, "/cluster/dispatch/issue",
-		`{"issue_id":9,"repo":"acme/tools","number":9,"head_sha":"s1"}`); rec.Code != http.StatusAccepted {
-		t.Fatalf("issue dispatch = %d: %s", rec.Code, rec.Body)
+		`{"repo":"acme/tools","number":9}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("issue dispatch = %d, want 400: %s", rec.Code, rec.Body)
 	}
 
 	seen := a.seen()
 	if !containsAny(seen, "POST /merge-tracking/42/evaluate") {
 		t.Errorf("requests = %v, want the merge evaluation", seen)
-	}
-	if !containsAny(seen, "POST /issues/9/review") {
-		t.Errorf("requests = %v, want the issue trigger", seen)
 	}
 }
 

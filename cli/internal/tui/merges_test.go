@@ -176,8 +176,8 @@ func TestTabNames_MatchTheEnum(t *testing.T) {
 	if tabNames[tabMerges] != "Merges" {
 		t.Errorf("tabNames[tabMerges] = %q, want Merges", tabNames[tabMerges])
 	}
-	if tabNames[tabIssues] != "Issues" {
-		t.Errorf("tabNames[tabIssues] = %q — inserting a tab shifted the others", tabNames[tabIssues])
+	if tabNames[tabConfig] != "Config" {
+		t.Errorf("tabNames[tabConfig] = %q — removing a tab shifted the others", tabNames[tabConfig])
 	}
 	if tabNames[tabServer] != "Server" {
 		t.Errorf("tabNames[tabServer] = %q", tabNames[tabServer])

@@ -176,7 +176,7 @@ class FirstRunSetup {
   /// [AppConfig] models only a subset of the daemon's schema ([server]'s
   /// port, [github], [ai], [retention]). Everything else — [cluster] and its
   /// instances/tokens/routing, [polling], [merge_tracking],
-  /// [circuit_breaker], [autonomous], [activity_log], server.bind_addr,
+  /// [circuit_breaker], [activity_log], server.bind_addr,
   /// github.token, any operator-only key — is preserved from the file on
   /// disk untouched. Before this, "Save and start Heimdallm" (shown
   /// precisely when the daemon is down and GET /config could not populate
@@ -281,9 +281,6 @@ class FirstRunSetup {
       .replaceAll('\n', r'\n')
       .replaceAll('\r', r'\r');
 
-  static String _tomlStringArray(List<String> values) =>
-      '[${values.map((v) => '"${_tomlEscapeString(v)}"').join(', ')}]';
-
   @visibleForTesting
   static String buildTomlForTesting(AppConfig config) => _buildToml(config);
 
@@ -327,107 +324,16 @@ class FirstRunSetup {
     }
     buf.writeln();
 
-    // Issue tracking
-    final it = config.issueTracking;
-    buf.writeln('[github.issue_tracking]');
-    buf.writeln('enabled = ${it.enabled}');
-    buf.writeln('filter_mode = "${_tomlEscapeString(it.filterMode)}"');
-    buf.writeln('default_action = "${_tomlEscapeString(it.defaultAction)}"');
-    if (it.developLabels.isNotEmpty) {
-      buf.writeln(
-        'develop_labels = [${it.developLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
-      );
-    }
-    if (it.refinementLabels.isNotEmpty) {
-      buf.writeln(
-        'refinement_labels = [${it.refinementLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
-      );
-    }
-    if (it.reviewOnlyLabels.isNotEmpty) {
-      buf.writeln(
-        'review_only_labels = [${it.reviewOnlyLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
-      );
-    }
-    if (it.skipLabels.isNotEmpty) {
-      buf.writeln(
-        'skip_labels = [${it.skipLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
-      );
-    }
-    if (it.organizations.isNotEmpty) {
-      buf.writeln(
-        'organizations = [${it.organizations.map((o) => '"${_tomlEscapeString(o)}"').join(', ')}]',
-      );
-    }
-    if (it.assignees.isNotEmpty) {
-      buf.writeln(
-        'assignees = [${it.assignees.map((a) => '"${_tomlEscapeString(a)}"').join(', ')}]',
-      );
-    }
-    buf.writeln();
-
     buf.writeln('[ai]');
     buf.writeln('primary = "${_tomlEscapeString(config.aiPrimary)}"');
     if (config.aiFallback.isNotEmpty) {
       buf.writeln('fallback = "${_tomlEscapeString(config.aiFallback)}"');
     }
     buf.writeln('review_mode = "${_tomlEscapeString(config.reviewMode)}"');
-    if (config.globalIssuePrompt.isNotEmpty) {
-      buf.writeln(
-        'issue_prompt = "${_tomlEscapeString(config.globalIssuePrompt)}"',
-      );
-    }
-    if (config.globalImplementPrompt.isNotEmpty) {
-      buf.writeln(
-        'implement_prompt = "${_tomlEscapeString(config.globalImplementPrompt)}"',
-      );
-    }
-    if (config.globalTriageOwner.isNotEmpty) {
-      buf.writeln(
-        'triage_owner = "${_tomlEscapeString(config.globalTriageOwner)}"',
-      );
-    }
     if (config.globalCloneDir.isNotEmpty) {
       buf.writeln('clone_dir = "${_tomlEscapeString(config.globalCloneDir)}"');
     }
-    if (config.globalAutoPromoteTriage != null) {
-      buf.writeln('auto_promote_triage = ${config.globalAutoPromoteTriage}');
-    }
-    if (config.globalAutoPromoteRefinement != null) {
-      buf.writeln(
-        'auto_promote_refinement = ${config.globalAutoPromoteRefinement}',
-      );
-    }
-    if (config.globalGeneratePRDescription) {
-      buf.writeln('generate_pr_description = true');
-    }
     buf.writeln();
-
-    // Global PR metadata defaults
-    if (config.globalPRReviewers.isNotEmpty ||
-        config.globalPRLabels.isNotEmpty ||
-        config.globalPRAssignee.isNotEmpty ||
-        config.globalPRDraft) {
-      buf.writeln('[ai.pr_metadata]');
-      if (config.globalPRReviewers.isNotEmpty) {
-        buf.writeln(
-          'reviewers = [${config.globalPRReviewers.map((r) => '"${_tomlEscapeString(r)}"').join(', ')}]',
-        );
-      }
-      if (config.globalPRLabels.isNotEmpty) {
-        buf.writeln(
-          'labels = [${config.globalPRLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
-        );
-      }
-      if (config.globalPRAssignee.isNotEmpty) {
-        buf.writeln(
-          'pr_assignee = "${_tomlEscapeString(config.globalPRAssignee)}"',
-        );
-      }
-      if (config.globalPRDraft) {
-        buf.writeln('pr_draft = true');
-      }
-      buf.writeln();
-    }
 
     // Per-agent CLI configs
     for (final entry in config.agentConfigs.entries) {
@@ -484,102 +390,14 @@ class FirstRunSetup {
         if (oc.promptId != null) {
           buf.writeln('prompt = "${_tomlEscapeString(oc.promptId!)}"');
         }
-        if (oc.issuePromptId != null) {
-          buf.writeln(
-            'issue_prompt = "${_tomlEscapeString(oc.issuePromptId!)}"',
-          );
-        }
-        if (oc.developPromptId != null) {
-          buf.writeln(
-            'implement_prompt = "${_tomlEscapeString(oc.developPromptId!)}"',
-          );
-        }
         if (oc.reviewMode != null) {
           buf.writeln('review_mode = "${_tomlEscapeString(oc.reviewMode!)}"');
         }
         if (oc.localDir != null && oc.localDir!.isNotEmpty) {
           buf.writeln('local_dir = "${_tomlEscapeString(oc.localDir!)}"');
         }
-        if (oc.triageOwner != null && oc.triageOwner!.isNotEmpty) {
-          buf.writeln('triage_owner = "${_tomlEscapeString(oc.triageOwner!)}"');
-        }
         if (oc.cloneDir != null && oc.cloneDir!.isNotEmpty) {
           buf.writeln('clone_dir = "${_tomlEscapeString(oc.cloneDir!)}"');
-        }
-        if (oc.autoPromoteTriage != null) {
-          buf.writeln('auto_promote_triage = ${oc.autoPromoteTriage}');
-        }
-        if (oc.autoPromoteRefinement != null) {
-          buf.writeln('auto_promote_refinement = ${oc.autoPromoteRefinement}');
-        }
-        if (oc.generatePRDescription != null) {
-          buf.writeln('generate_pr_description = ${oc.generatePRDescription}');
-        }
-        if (oc.prReviewers != null) {
-          buf.writeln('pr_reviewers = ${_tomlStringArray(oc.prReviewers!)}');
-        }
-        if (oc.prAssignee != null && oc.prAssignee!.isNotEmpty) {
-          buf.writeln('pr_assignee = "${_tomlEscapeString(oc.prAssignee!)}"');
-        }
-        if (oc.prLabels != null) {
-          buf.writeln('pr_labels = ${_tomlStringArray(oc.prLabels!)}');
-        }
-        if (oc.prDraft != null) {
-          buf.writeln('pr_draft = ${oc.prDraft}');
-        }
-        final hasIT =
-            oc.developLabels != null ||
-            oc.refinementLabels != null ||
-            oc.reviewOnlyLabels != null ||
-            oc.skipLabels != null ||
-            oc.issueFilterMode != null ||
-            oc.issueDefaultAction != null ||
-            oc.issueOrganizations != null ||
-            oc.issueAssignees != null ||
-            oc.itEnabled != null ||
-            oc.devEnabled != null;
-        if (hasIT) {
-          buf.writeln('[ai.orgs."${_tomlEscapeString(org)}".issue_tracking]');
-          if (oc.itEnabled != null) buf.writeln('enabled = ${oc.itEnabled}');
-          if (oc.devEnabled != null) {
-            buf.writeln('develop_enabled = ${oc.devEnabled}');
-          }
-          if (oc.developLabels != null) {
-            buf.writeln(
-              'develop_labels = ${_tomlStringArray(oc.developLabels!)}',
-            );
-          }
-          if (oc.refinementLabels != null) {
-            buf.writeln(
-              'refinement_labels = ${_tomlStringArray(oc.refinementLabels!)}',
-            );
-          }
-          if (oc.reviewOnlyLabels != null) {
-            buf.writeln(
-              'review_only_labels = ${_tomlStringArray(oc.reviewOnlyLabels!)}',
-            );
-          }
-          if (oc.skipLabels != null) {
-            buf.writeln('skip_labels = ${_tomlStringArray(oc.skipLabels!)}');
-          }
-          if (oc.issueFilterMode != null) {
-            buf.writeln(
-              'filter_mode = "${_tomlEscapeString(oc.issueFilterMode!)}"',
-            );
-          }
-          if (oc.issueDefaultAction != null) {
-            buf.writeln(
-              'default_action = "${_tomlEscapeString(oc.issueDefaultAction!)}"',
-            );
-          }
-          if (oc.issueOrganizations != null) {
-            buf.writeln(
-              'organizations = ${_tomlStringArray(oc.issueOrganizations!)}',
-            );
-          }
-          if (oc.issueAssignees != null) {
-            buf.writeln('assignees = ${_tomlStringArray(oc.issueAssignees!)}');
-          }
         }
         buf.writeln();
       }
@@ -600,104 +418,14 @@ class FirstRunSetup {
         if (rc.promptId != null) {
           buf.writeln('prompt = "${_tomlEscapeString(rc.promptId!)}"');
         }
-        if (rc.issuePromptId != null) {
-          buf.writeln(
-            'issue_prompt = "${_tomlEscapeString(rc.issuePromptId!)}"',
-          );
-        }
-        if (rc.developPromptId != null) {
-          buf.writeln(
-            'implement_prompt = "${_tomlEscapeString(rc.developPromptId!)}"',
-          );
-        }
         if (rc.reviewMode != null) {
           buf.writeln('review_mode = "${_tomlEscapeString(rc.reviewMode!)}"');
         }
         if (rc.localDir != null && rc.localDir!.isNotEmpty) {
           buf.writeln('local_dir = "${_tomlEscapeString(rc.localDir!)}"');
         }
-        if (rc.triageOwner != null && rc.triageOwner!.isNotEmpty) {
-          buf.writeln('triage_owner = "${_tomlEscapeString(rc.triageOwner!)}"');
-        }
         if (rc.cloneDir != null && rc.cloneDir!.isNotEmpty) {
           buf.writeln('clone_dir = "${_tomlEscapeString(rc.cloneDir!)}"');
-        }
-        if (rc.autoPromoteTriage != null) {
-          buf.writeln('auto_promote_triage = ${rc.autoPromoteTriage}');
-        }
-        if (rc.autoPromoteRefinement != null) {
-          buf.writeln('auto_promote_refinement = ${rc.autoPromoteRefinement}');
-        }
-        if (rc.generatePRDescription != null) {
-          buf.writeln('generate_pr_description = ${rc.generatePRDescription}');
-        }
-        // PR metadata (must be written BEFORE any sub-table headers)
-        if (rc.prReviewers != null) {
-          buf.writeln('pr_reviewers = ${_tomlStringArray(rc.prReviewers!)}');
-        }
-        if (rc.prAssignee != null && rc.prAssignee!.isNotEmpty) {
-          buf.writeln('pr_assignee = "${_tomlEscapeString(rc.prAssignee!)}"');
-        }
-        if (rc.prLabels != null) {
-          buf.writeln('pr_labels = ${_tomlStringArray(rc.prLabels!)}');
-        }
-        if (rc.prDraft != null) {
-          buf.writeln('pr_draft = ${rc.prDraft}');
-        }
-        // Issue tracking overrides (sub-table — must come after all repo-level keys)
-        final hasIT =
-            rc.developLabels != null ||
-            rc.refinementLabels != null ||
-            rc.reviewOnlyLabels != null ||
-            rc.skipLabels != null ||
-            rc.issueFilterMode != null ||
-            rc.issueDefaultAction != null ||
-            rc.itEnabled != null ||
-            rc.devEnabled != null ||
-            rc.issueOrganizations != null ||
-            rc.issueAssignees != null;
-        if (hasIT) {
-          buf.writeln('[ai.repos."${_tomlEscapeString(repo)}".issue_tracking]');
-          if (rc.itEnabled != null) buf.writeln('enabled = ${rc.itEnabled}');
-          if (rc.devEnabled != null) {
-            buf.writeln('develop_enabled = ${rc.devEnabled}');
-          }
-          if (rc.developLabels != null) {
-            buf.writeln(
-              'develop_labels = ${_tomlStringArray(rc.developLabels!)}',
-            );
-          }
-          if (rc.refinementLabels != null) {
-            buf.writeln(
-              'refinement_labels = ${_tomlStringArray(rc.refinementLabels!)}',
-            );
-          }
-          if (rc.reviewOnlyLabels != null) {
-            buf.writeln(
-              'review_only_labels = ${_tomlStringArray(rc.reviewOnlyLabels!)}',
-            );
-          }
-          if (rc.skipLabels != null) {
-            buf.writeln('skip_labels = ${_tomlStringArray(rc.skipLabels!)}');
-          }
-          if (rc.issueFilterMode != null) {
-            buf.writeln(
-              'filter_mode = "${_tomlEscapeString(rc.issueFilterMode!)}"',
-            );
-          }
-          if (rc.issueDefaultAction != null) {
-            buf.writeln(
-              'default_action = "${_tomlEscapeString(rc.issueDefaultAction!)}"',
-            );
-          }
-          if (rc.issueOrganizations != null) {
-            buf.writeln(
-              'organizations = ${_tomlStringArray(rc.issueOrganizations!)}',
-            );
-          }
-          if (rc.issueAssignees != null) {
-            buf.writeln('assignees = ${_tomlStringArray(rc.issueAssignees!)}');
-          }
         }
         buf.writeln();
       }

@@ -276,7 +276,7 @@ func TestHandleExcludeAndIncludeMergeTracking(t *testing.T) {
 }
 
 // The listing exposes PR titles, repos and check names, so it must be behind
-// auth like /prs and /issues.
+// auth like /prs.
 func TestMergeTrackingListing_RequiresAuth(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
@@ -353,10 +353,9 @@ func TestPatchMergeTrackingRepoConfig_WritesTheSection(t *testing.T) {
 			t.Errorf("config should contain %q:\n%s", want, written)
 		}
 	}
-	// The section is nested under merge_tracking.repos, not merged into the
-	// autonomous block that the shared helper also serves.
-	if strings.Contains(written, "[autonomous") {
-		t.Errorf("the patch leaked into the autonomous section:\n%s", written)
+	// The section is nested under merge_tracking.repos, not merged into ai.
+	if strings.Contains(written, "[ai.repos") {
+		t.Errorf("the patch leaked into the ai section:\n%s", written)
 	}
 }
 
@@ -504,25 +503,6 @@ func TestPatchMergeTrackingConfig_UnavailableWithoutAConfigPath(t *testing.T) {
 	code, _ := patch(t, srv, "/config/merge_tracking/repos/acme%2Fwidgets", `{"merge":true}`)
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503 without a config path", code)
-	}
-}
-
-// The autonomous handlers share the generalised implementation; a regression
-// there would silently break an existing endpoint.
-func TestPatchAutonomousConfig_StillWorksAfterTheGeneralisation(t *testing.T) {
-	srv, cfgPath := newPatchServer(t)
-
-	code, body := patch(t, srv, "/config/autonomous/repos/acme%2Fwidgets", `{"enabled": true}`)
-	if code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", code, body)
-	}
-	raw, _ := os.ReadFile(cfgPath)
-	written := string(raw)
-	if !strings.Contains(written, "autonomous") || !strings.Contains(written, "acme/widgets") {
-		t.Errorf("autonomous patch did not land:\n%s", written)
-	}
-	if strings.Contains(written, "merge_tracking") {
-		t.Errorf("the autonomous patch leaked into merge_tracking:\n%s", written)
 	}
 }
 

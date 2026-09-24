@@ -9,13 +9,11 @@ import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/core/models/activity.dart';
 import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/core/models/pr.dart';
-import 'package:heimdallm/core/models/tracked_issue.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/core/state/local_state_notifier.dart';
 import 'package:heimdallm/features/activity/activity_providers.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
-import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/layout/app_shell.dart';
@@ -140,7 +138,6 @@ List<dynamic> _baseOverrides({
   int mergeCount = 0,
   DaemonConnectionStatus? connection,
   AggregatedResult<PR>? prs,
-  Future<AggregatedResult<TrackedIssue>> Function(Ref ref)? issuesByInstance,
   Future<AggregatedResult<MergeTrackingEntry>> Function(Ref ref)?
   mergeTrackingByInstance,
   Future<AggregatedResult<Map<String, dynamic>>> Function(Ref ref)?
@@ -156,10 +153,6 @@ List<dynamic> _baseOverrides({
     daemonInstancesProvider.overrideWith((ref) async => ClusterRegistry.empty),
     prsByInstanceProvider.overrideWith(
       (ref) async => prs ?? singleInstanceResult<PR>(const []),
-    ),
-    issuesByInstanceProvider.overrideWith(
-      issuesByInstance ??
-          (ref) async => singleInstanceResult<TrackedIssue>(const []),
     ),
     mergeTrackingByInstanceProvider.overrideWith(
       mergeTrackingByInstance ??

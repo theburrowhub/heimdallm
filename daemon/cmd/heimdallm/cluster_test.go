@@ -425,53 +425,6 @@ func TestTier2FetchWithoutOwnershipFilter(t *testing.T) {
 	}
 }
 
-func TestTier2ProcessRepoSkipsUnowned(t *testing.T) {
-	a := tier2OwnershipHarness(t, nil)
-	a.owns = func(string) bool { return false }
-	// A healthy, trusted owner: safe to skip and let it process its own issues.
-	a.ownerCanHandleIssues = func(string) bool { return true }
-
-	n, err := a.ProcessRepo(t.Context(), "acme/not-mine")
-	if err != nil {
-		t.Fatalf("ProcessRepo: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("processed %d issues on an unowned repo with a healthy owner, want 0", n)
-	}
-}
-
-// The routing decision behind ProcessRepo's guard — "process locally" vs
-// "trust the routed owner" — as a pure predicate, exercised directly rather
-// than through ProcessRepo's full issue-processing machinery (whose (0, nil)
-// return on this harness's zero-value config would be indistinguishable
-// between "skipped due to routing" and "skipped, issue tracking disabled").
-//
-// A repo routed away with no healthy owner to trust must not simply be
-// abandoned: that is exactly what let issues on a repo routed to a down
-// instance go completely unattended before this existed.
-func TestTier2ShouldProcessLocally(t *testing.T) {
-	tests := []struct {
-		name           string
-		owns           func(string) bool
-		ownerCanHandle func(string) bool
-		wantSkip       bool
-	}{
-		{"owned", func(string) bool { return true }, nil, false},
-		{"unowned, no dispatch wired", func(string) bool { return false }, nil, false},
-		{"unowned, owner unhealthy", func(string) bool { return false }, func(string) bool { return false }, false},
-		{"unowned, owner healthy", func(string) bool { return false }, func(string) bool { return true }, true},
-		{"single-daemon (owns nil)", nil, nil, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			skip := !tier2ShouldProcessLocally(tt.owns, tt.ownerCanHandle, "acme/repo")
-			if skip != tt.wantSkip {
-				t.Errorf("skip = %v, want %v", skip, tt.wantSkip)
-			}
-		})
-	}
-}
-
 func containsRepo(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if strings.EqualFold(s, needle) {
@@ -869,7 +822,6 @@ type dispatchRemote struct {
 	mu        sync.Mutex
 	healthy   bool
 	reviewed  []int64
-	triaged   []int64
 	failNext  bool
 	failCount int
 }
@@ -898,14 +850,6 @@ func newDispatchRemote(t *testing.T) *dispatchRemote {
 			}
 			d.reviewed = append(d.reviewed, 1)
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "review queued"})
-		case strings.HasPrefix(r.URL.Path, "/issues/") && strings.HasSuffix(r.URL.Path, "/review"):
-			if d.failNext {
-				d.failCount++
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			d.triaged = append(d.triaged, 1)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		default:
 			http.NotFound(w, r)
 		}
@@ -930,12 +874,6 @@ func (d *dispatchRemote) reviewCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.reviewed)
-}
-
-func (d *dispatchRemote) triageCount() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return len(d.triaged)
 }
 
 // dispatchHub builds a hub clusterState routing "theirs/*" to a live fake
@@ -1095,7 +1033,7 @@ func TestClusterStateDispatchFailureCounterResetsOnSuccess(t *testing.T) {
 }
 
 // The counter is per (operation, repo): one repo the remote refuses must not
-// drag another repo, or another operation, into a takeover with it.
+// drag another repo into a takeover with it.
 func TestClusterStateDispatchFailureCounterIsPerWorkUnit(t *testing.T) {
 	remote := newDispatchRemote(t)
 	cs := dispatchHub(t, remote)
@@ -1106,9 +1044,6 @@ func TestClusterStateDispatchFailureCounterIsPerWorkUnit(t *testing.T) {
 	}
 	if cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}) {
 		t.Fatal("precondition: theirs/repo should have been taken over by now")
-	}
-	if !cs.DispatchIssueReview(context.Background(), "theirs/repo", 99) {
-		t.Error("a repo taken over for review also took over issue triage on the first rejection")
 	}
 	if !cs.DispatchPRReview(context.Background(), "theirs/other", instances.PRDispatchRef{GithubID: 43, Repo: "theirs/other"}) {
 		t.Error("one repo's rejections triggered a takeover of a different repo")
@@ -1224,37 +1159,6 @@ func TestClusterStateActsLocallyWhenTheRoutedOwnerIsDisabled(t *testing.T) {
 	if handled := cs.DispatchPRReview(context.Background(), "theirs/repo", instances.PRDispatchRef{GithubID: 42, Repo: "theirs/repo"}); handled {
 		t.Error("DispatchPRReview() = true, want false — a disabled owner is not going to review anything")
 	}
-	if !tier2ShouldProcessLocally(cs.Owns, cs.OwnerCanHandle, "theirs/repo") {
-		t.Error("issue triage deferred to a disabled instance; the repo would go unattended")
-	}
-}
-
-func TestClusterStateOwnerCanHandleDefersWhileMerelyUnreachable(t *testing.T) {
-	remote := newDispatchRemote(t)
-	cs := dispatchHub(t, remote)
-	remote.setHealthy(false)
-	cs.Prober().ProbeAll(context.Background())
-
-	if !cs.OwnerCanHandle("theirs/repo") {
-		t.Error("OwnerCanHandle() = false, want true — issue triage must not be duplicated on one missed probe")
-	}
-	// Review feedback: skipping triage because a peer is unreachable is a
-	// state an operator needs to see, and this path recorded nothing at all
-	// while the PR path logged it through noteDeferral.
-	if cs.notes.claim("srv-a", noticeSubject("defer", dispatchUnit("issue_triage", "theirs/repo"))) {
-		t.Error("deferring issue triage left no record; the skip is invisible to the operator")
-	}
-}
-
-func TestClusterStateOwnerCanHandleFalseOnceConfirmedDown(t *testing.T) {
-	remote := newDispatchRemote(t)
-	cs := dispatchHub(t, remote)
-	remote.setHealthy(false)
-	probeUntilConfirmedDown(t, cs)
-
-	if cs.OwnerCanHandle("theirs/repo") {
-		t.Error("OwnerCanHandle() = true, want false — a dead owner's issues must not go unattended")
-	}
 }
 
 func TestClusterTakeoverThresholdDefaults(t *testing.T) {
@@ -1282,19 +1186,6 @@ func TestClusterTakeoverThresholdDefaults(t *testing.T) {
 	}
 }
 
-func TestClusterStateDispatchIssueReviewToHealthyOwner(t *testing.T) {
-	remote := newDispatchRemote(t)
-	cs := dispatchHub(t, remote)
-
-	handled := cs.DispatchIssueReview(context.Background(), "theirs/repo", 99)
-	if !handled {
-		t.Fatal("DispatchIssueReview() = false, want true when the owner is healthy")
-	}
-	if remote.triageCount() != 1 {
-		t.Errorf("triage calls = %d, want 1", remote.triageCount())
-	}
-}
-
 // A repo this daemon already owns (or that has no configured owner at all)
 // has nothing to dispatch — the caller is expected not to even ask, but the
 // method must still degrade to "handle locally" rather than erroring.
@@ -1307,32 +1198,6 @@ func TestClusterStateDispatchNoOpWhenNotRouted(t *testing.T) {
 	}
 	if remote.reviewCount() != 0 {
 		t.Errorf("review calls = %d, want 0", remote.reviewCount())
-	}
-}
-
-// OwnerCanHandle backs the issue-processing path, which has no single issue
-// id to dispatch at the point it decides whether to skip a repo. It must
-// agree with DispatchPRReview's notion of "safe to hand off" so a repo is
-// never left completely unattended just because its routed owner is down.
-//
-// Since #765 "down" means confirmed down, not merely unreachable — see
-// TestClusterStateOwnerCanHandleDefersWhileMerelyUnreachable for the
-// distinction and why triaging locally on one missed probe was wrong.
-func TestClusterStateOwnerCanHandleReflectsHealth(t *testing.T) {
-	remote := newDispatchRemote(t)
-	cs := dispatchHub(t, remote)
-
-	if !cs.OwnerCanHandle("theirs/repo") {
-		t.Error("OwnerCanHandle() = false, want true for a routed, healthy owner")
-	}
-	if cs.OwnerCanHandle("ours/repo") {
-		t.Error("OwnerCanHandle() = true for a repo with no configured remote owner")
-	}
-
-	remote.setHealthy(false)
-	probeUntilConfirmedDown(t, cs)
-	if cs.OwnerCanHandle("theirs/repo") {
-		t.Error("OwnerCanHandle() = true for an owner confirmed down")
 	}
 }
 
@@ -1394,18 +1259,18 @@ func TestClusterStateUpdatePrunesNotesForRemovedInstances(t *testing.T) {
 	}
 }
 
-// The notes are keyed per operation as well as per repo: PR review and issue
-// triage are taken over through different call paths, and a repo-only key let
-// whichever fired first silence the other.
+// The notes are keyed per operation as well as per repo: PR review and merge
+// tracking are taken over through different call paths, and a repo-only key
+// let whichever fired first silence the other.
 func TestClusterStateNotesAreKeyedPerOperation(t *testing.T) {
 	var n instanceNotes
 	review := noticeSubject("takeover:probes_failed", dispatchUnit("review", "o/r"))
-	triage := noticeSubject("takeover:probes_failed", dispatchUnit("issue_triage", "o/r"))
+	merge := noticeSubject("takeover:probes_failed", dispatchUnit("merge", "o/r"))
 	if !n.claim("srv-a", review) {
 		t.Fatal("first review notice suppressed")
 	}
-	if !n.claim("srv-a", triage) {
-		t.Error("the review notice suppressed the issue-triage notice for the same repo")
+	if !n.claim("srv-a", merge) {
+		t.Error("the review notice suppressed the merge notice for the same repo")
 	}
 	if n.claim("srv-a", review) {
 		t.Error("the review notice was reported twice")
@@ -1509,9 +1374,6 @@ func TestClusterStateDispatchNilReceiverIsPermissive(t *testing.T) {
 	var cs *clusterState
 	if cs.DispatchPRReview(context.Background(), "any/repo", instances.PRDispatchRef{GithubID: 1, Repo: "any/repo"}) {
 		t.Error("nil clusterState.DispatchPRReview = true, want false (fall back to local)")
-	}
-	if cs.DispatchIssueReview(context.Background(), "any/repo", 1) {
-		t.Error("nil clusterState.DispatchIssueReview = true, want false (fall back to local)")
 	}
 }
 
@@ -1861,13 +1723,6 @@ func TestWorkerDoesNotTakeOverReposAssignedToTheHub(t *testing.T) {
 	cs := newClusterState(cfg, nil, nil)
 	if handled := cs.DispatchPRReview(context.Background(), "freepik-company/ai-platform-terraform", instances.PRDispatchRef{GithubID: 77, Repo: "freepik-company/ai-platform-terraform"}); !handled {
 		t.Error("DispatchPRReview() = false for a repo assigned to another instance, want true")
-	}
-}
-
-func TestOwnerCanHandleSkipsIssueWorkOnAnUnassignedRepo(t *testing.T) {
-	cs := dispatchWorkerAwaitingRules(t, "srv-a")
-	if !cs.OwnerCanHandle("freepik-company/ai-platform-terraform") {
-		t.Error("OwnerCanHandle() = false on a worker with no rules, want true (skip local triage)")
 	}
 }
 

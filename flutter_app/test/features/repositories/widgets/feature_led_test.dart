@@ -32,9 +32,9 @@ void main() {
     await tester.pumpWidget(
       _host(
         const FeatureLed(
-          feature: Feature.develop,
+          feature: Feature.mergeTracking,
           isOn: false,
-          sourceLine: 'Source: disabled per-repo (devEnabled = false)',
+          sourceLine: 'Source: disabled per-repo (merge_tracking.repos)',
         ),
       ),
     );
@@ -50,14 +50,14 @@ void main() {
     await tester.pumpWidget(
       _host(
         const FeatureLed(
-          feature: Feature.issueTracking,
+          feature: Feature.mergeTracking,
           isOn: true,
           sourceLine: 'Source: inherited from global monitored list',
         ),
       ),
     );
     final tip = tester.widget<Tooltip>(find.byType(Tooltip));
-    expect(tip.message, contains('Issue Tracking'));
+    expect(tip.message, contains('Merge Tracking'));
     expect(tip.message, contains('On'));
     expect(tip.message, contains('inherited from global'));
   });

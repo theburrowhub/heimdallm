@@ -23,17 +23,9 @@ type PRPublishMsg struct {
 	ReviewID int64 `json:"review_id"`
 }
 
-// IssueMsg is published on issue workflow subjects. The subject distinguishes
-// triage, refinement, and implement; the payload is the same.
-type IssueMsg struct {
-	Repo     string `json:"repo"`
-	Number   int    `json:"number"`
-	GithubID int64  `json:"github_id"`
-}
-
 // StateCheckMsg is published by the state poller on SubjStateCheck.
 type StateCheckMsg struct {
-	Type     string `json:"type"` // "pr" or "issue"
+	Type     string `json:"type"` // always "pr"
 	Repo     string `json:"repo"`
 	Number   int    `json:"number"`
 	GithubID int64  `json:"github_id"`

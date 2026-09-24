@@ -493,7 +493,7 @@ func TestETagCaching_LargeBodyServedFullButNotCached(t *testing.T) {
 // carries a Link header (cursor/offset pagination) is NOT stored in the cache.
 // Caching paginated responses would cause a later 304 re-serve to lose the
 // Link header, breaking the caller's pagination cursor. This covers endpoints
-// like FetchCollaborators that use Link: rel="next" style pagination.
+// that use Link: rel="next" style pagination.
 func TestETagCaching_LinkHeaderSkipsCaching(t *testing.T) {
 	const body1 = `[{"login":"alice"},{"login":"bob"}]`
 	callCount := 0

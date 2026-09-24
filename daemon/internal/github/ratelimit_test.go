@@ -385,8 +385,8 @@ func TestSetRateObserver_CalledAfterNonGetRequest(t *testing.T) {
 	obs := &fakeObserver{}
 	client.SetRateObserver(obs)
 
-	// Trigger doWithBody via MergePR (PUT).
-	_ = client.MergePR("org/repo", 1, "squash")
+	// Trigger doWithBody via MergePRAtSHA (PUT).
+	_, _ = client.MergePRAtSHA("org/repo", 1, "squash", "abc123")
 
 	if obs.count() < 1 {
 		t.Errorf("observer called %d times, want >= 1 (from PUT via doWithBody)", obs.count())

@@ -22,7 +22,7 @@ Authoritative token definitions are in `lib/shared/design_system/tokens.dart`:
   - text: `text`, `textMuted`, `onAccent`
   - brand/interaction: `accent`, `accentMuted`, `focus`
   - status: `success`, `warning`, `danger`, `info`
-  - feature palette roles: `featurePrReview`, `featureIssueTracking`, `featureDevelop`, `featureMergeTracking`, `featureMixed`, `featureOffFill`, `featureOffOutline`
+  - feature palette roles: `featurePrReview`, `featureMergeTracking`, `featureMixed`, `featureOffFill`, `featureOffOutline`
 - **Spacing (`AppSpace`)**: `xs`, `sm`, `md`, `lg`, `xl`, `xxl`
 - **Radii (`AppRadius`)**: `sm`, `md`, `lg`, `pill` (999 — fully rounded chips/pills)
 - **Typography (`AppTextStyles`)**: `pageTitle`, `sectionTitle`, `body`, `bodyMuted`, `label`, `mono`
@@ -111,7 +111,6 @@ Activity and Repositories each persist their view-mode choice inside their own p
 | `/instances` | Instances | Separate shell branch |
 | `/instances/routing` | Routing rules | Nested under Instances |
 | `/prs/:id` | PR detail | Preserve `?instance=` query param; empty/missing means local daemon |
-| `/issues/:id` | Issue detail | Preserve `?instance=` query param; empty/missing means local daemon |
 | `/repos/:name` | Repository detail | `:name` is URI-decoded |
 | `/orgs/:name` | Organization detail | `:name` is URI-decoded |
 | `/config` | Settings | Stays reachable outside the shell for first-run/bootstrap flows |
@@ -120,7 +119,7 @@ Activity and Repositories each persist their view-mode choice inside their own p
 
 Preserved deep-link/query-param contracts from the pre-migration UI:
 
-- `?instance=` remains the instance disambiguator for PR and issue detail routes
+- `?instance=` remains the instance disambiguator for PR detail routes
 - `/server?tab=status|events|logs` remains the server/logs deep-link contract
 - `/logs` still redirects to `/server?tab=logs`
 - `/agents` still works as a compatibility alias for `/prompts`
@@ -166,5 +165,5 @@ For any change that touches layout, `AppSurface`, or `ListTile`-family widgets n
 
 ## Justified concrete-color exceptions
 
-- `lib/features/repositories/widgets/feature_palette.dart` keeps concrete feature colors because the LEDs, switches, section accents, and bulk-action chips are a stable capability legend (`PR Review`, `Issue Tracking`, `Develop`, `Merge Tracking`), not generic theme roles.
+- `lib/features/repositories/widgets/feature_palette.dart` keeps concrete feature colors because the LEDs, switches, section accents, and bulk-action chips are a stable capability legend (`PR Review`, `Merge Tracking`), not generic theme roles.
 - `lib/features/merge_tracking/widgets/check_visuals.dart` stays partly concrete for merge-specific warning semantics, and related merge-tracking widgets keep a few fixed domain hues (for example warning-banner yellows plus phase colors such as merged purple, auto-merge teal, and neutral grey tracking states) so those states remain instantly recognizable.

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/heimdallm/daemon/internal/issues"
+	"github.com/heimdallm/daemon/internal/gitops"
 	"github.com/heimdallm/daemon/internal/mergetrack"
 )
 
@@ -56,7 +56,7 @@ func newOps(t *testing.T, git mergetrack.GitOps, exec mergetrack.CLIExecutor) (*
 func TestWorktreeOps_ResolveConflictsPassesTheAgentSpecThrough(t *testing.T) {
 	git := &fakeGit{
 		checkoutSHA:  headSHA,
-		rebase:       issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+		rebase:       gitops.RebaseOutcome{Conflicts: []string{"a.go"}},
 		changedFiles: []string{"a.go"},
 		newHeadSHA:   "newhead",
 	}
@@ -118,7 +118,7 @@ func TestWorktreeOps_RebaseAndForcePushLeasesOnTheObservedSHA(t *testing.T) {
 	git := &fakeGit{
 		checkoutSHA: headSHA,
 		baseSHA:     "basesha",
-		rebase:      issues.RebaseOutcome{Clean: true},
+		rebase:      gitops.RebaseOutcome{Clean: true},
 		newHeadSHA:  "newhead",
 	}
 	ops, repos, wt := newOps(t, git, &fakeExec{})
@@ -149,7 +149,7 @@ func TestWorktreeOps_RebaseAndForcePushLeasesOnTheObservedSHA(t *testing.T) {
 func TestWorktreeOps_RebaseStopsAtAConflictAndDoesNotPush(t *testing.T) {
 	git := &fakeGit{
 		checkoutSHA: headSHA,
-		rebase:      issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+		rebase:      gitops.RebaseOutcome{Conflicts: []string{"a.go"}},
 	}
 	ops, _, _ := newOps(t, git, &fakeExec{})
 
@@ -192,8 +192,8 @@ func TestWorktreeOps_ReportsGitFailures(t *testing.T) {
 		"checkout": {checkoutErr: errors.New("boom")},
 		"fetch":    {checkoutSHA: headSHA, fetchErr: errors.New("boom")},
 		"rebase":   {checkoutSHA: headSHA, rebaseErr: errors.New("boom")},
-		"head":     {checkoutSHA: headSHA, rebase: issues.RebaseOutcome{Clean: true}, headErr: errors.New("boom")},
-		"push":     {checkoutSHA: headSHA, rebase: issues.RebaseOutcome{Clean: true}, pushErr: errors.New("boom")},
+		"head":     {checkoutSHA: headSHA, rebase: gitops.RebaseOutcome{Clean: true}, headErr: errors.New("boom")},
+		"push":     {checkoutSHA: headSHA, rebase: gitops.RebaseOutcome{Clean: true}, pushErr: errors.New("boom")},
 	}
 	for name, git := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -213,7 +213,7 @@ func TestWorktreeOps_ReportsGitFailures(t *testing.T) {
 func TestWorktreeOps_NilAgentSpecIsSafe(t *testing.T) {
 	git := &fakeGit{
 		checkoutSHA:  headSHA,
-		rebase:       issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+		rebase:       gitops.RebaseOutcome{Conflicts: []string{"a.go"}},
 		changedFiles: []string{"a.go"},
 		newHeadSHA:   "newhead",
 	}

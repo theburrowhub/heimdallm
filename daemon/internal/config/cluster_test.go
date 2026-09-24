@@ -398,7 +398,7 @@ func TestValidateClusterAcceptsCompleteConfig(t *testing.T) {
 	c.Cluster.Routing = RoutingConfig{
 		Mode:           ModeDispatch,
 		RoundRobinPool: []string{"hub-1", "srv-a"},
-		RoundRobinOps:  []string{OpReview, OpMerge, OpIssue},
+		RoundRobinOps:  []string{OpReview, OpMerge},
 		Orgs:           map[string]string{"theburrowhub": "srv-a"},
 		Repos:          map[string]string{"theburrowhub/heimdallm": "hub-1"},
 	}
@@ -435,15 +435,12 @@ func TestRoundRobinsOp(t *testing.T) {
 	if !(RoutingConfig{}).RoundRobinsOp(OpReview) {
 		t.Error("empty RoundRobinOps should include every op")
 	}
-	r := RoutingConfig{RoundRobinOps: []string{"Review", OpMerge}}
+	r := RoutingConfig{RoundRobinOps: []string{"Review"}}
 	if !r.RoundRobinsOp(OpReview) {
 		t.Error("case-insensitive match failed for review")
 	}
-	if !r.RoundRobinsOp(OpMerge) {
-		t.Error("merge should be included")
-	}
-	if r.RoundRobinsOp(OpIssue) {
-		t.Error("issue should not be included")
+	if r.RoundRobinsOp(OpMerge) {
+		t.Error("merge should not be included")
 	}
 }
 
@@ -562,6 +559,47 @@ func TestClusterTakeoverThresholdStaysUnsetWithoutCluster(t *testing.T) {
 		t.Errorf("takeover_after_failed_probes = %v on a non-clustered config, want nil — "+
 			"a non-nil value makes ClusterConfig non-empty and writes an inert [cluster] table",
 			*c.Cluster.TakeoverAfterFailedProbes)
+	}
+}
+
+// Configs from before the issue pipeline was removed listed "issue" in
+// round_robin_ops (the documented example did). They must keep booting, and
+// the retired value must not change which live operations are round-robined.
+func TestLoad_AcceptsRetiredIssueRoundRobinOp(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ops        string
+		wantReview bool
+		wantMerge  bool
+	}{
+		{"documented example", `["review", "merge", "issue"]`, true, true},
+		{"issue only", `["issue"]`, false, false},
+		{"review and issue", `["review", "issue"]`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			contents := `
+[ai]
+primary = "claude"
+
+[cluster.routing]
+mode = "dispatch"
+round_robin_ops = ` + tc.ops + "\n"
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			r := cfg.Cluster.Routing
+			if got := r.RoundRobinsOp(OpReview); got != tc.wantReview {
+				t.Errorf("RoundRobinsOp(review) = %v, want %v", got, tc.wantReview)
+			}
+			if got := r.RoundRobinsOp(OpMerge); got != tc.wantMerge {
+				t.Errorf("RoundRobinsOp(merge) = %v, want %v", got, tc.wantMerge)
+			}
+		})
 	}
 }
 

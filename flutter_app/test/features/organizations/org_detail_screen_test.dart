@@ -29,25 +29,12 @@ Map<String, dynamic> _configJson({
   'ai_primary': 'claude',
   'ai_fallback': '',
   'review_mode': 'single',
-  'issue_tracking': {'enabled': false},
-  'triage_owner': 'global-owner',
   'clone_dir': '/work/global',
-  'auto_promote_triage': false,
-  'auto_promote_refinement': false,
-  'generate_pr_description': false,
   'org_overrides': {
     'acme': {
-      'triage_owner': 'alice',
       'clone_dir': '/work/acme',
-      'auto_promote_triage': true,
-      'auto_promote_refinement': true,
-      'generate_pr_description': true,
       'never_approve_with_issues': true,
       'never_approve_min_severity': 'high',
-      'issue_tracking': {
-        'organizations': ['acme'],
-        'assignees': ['alice'],
-      },
     },
   },
   'merge_tracking': {
@@ -108,27 +95,19 @@ Future<MockApiClient> _pumpOrgDetail(
 void main() {
   setUpAll(() => registerFallbackValue(<String, dynamic>{}));
 
-  testWidgets('OrgDetailScreen exposes pipeline and merge-tracking overrides', (
+  testWidgets('OrgDetailScreen exposes review and merge-tracking overrides', (
     tester,
   ) async {
     await _pumpOrgDetail(tester);
 
-    expect(find.text('Pipeline'), findsOneWidget);
-    expect(find.text('Triage owner'), findsOneWidget);
     expect(find.text('Clone directory'), findsOneWidget);
-    expect(find.text('Auto-promote triage'), findsOneWidget);
-    expect(find.text('Auto-promote refinement'), findsOneWidget);
-    expect(find.text('Refinement labels'), findsOneWidget);
-    expect(find.text('Generate PR description'), findsOneWidget);
     expect(find.text('Never approve PRs with issues'), findsOneWidget);
     // The severity threshold sits next to the toggle it qualifies, and renders
     // the org's stored override rather than the global default.
     expect(find.text('Never approve — minimum severity'), findsOneWidget);
     expect(find.text('high'), findsWidgets);
-    // "Organizations" now names both the review-policy section header and the
-    // Issue Tracking org filter; target the filter by its unique helper.
-    expect(find.text('GitHub org names to filter issues'), findsOneWidget);
-    expect(find.text('Assignees'), findsOneWidget);
+    expect(find.text('GitHub org names to filter issues'), findsNothing);
+    expect(find.text('Triage owner'), findsNothing);
 
     expect(find.text('Merge Tracking'), findsOneWidget);
     expect(find.text('Track my pull requests'), findsOneWidget);
@@ -268,5 +247,22 @@ void main() {
       () => mockApi.patchOrgConfig('acme', captureAny()),
     ).captured;
     expect(captured.single, {'clone_dir': '/work/custom-acme'});
+  });
+
+  testWidgets('reset deletes the org clone_dir override', (tester) async {
+    final mockApi = await _pumpOrgDetail(tester);
+    when(
+      () => mockApi.deleteOrgField('acme', any()),
+    ).thenAnswer((_) async => _configJson());
+
+    await tester.tap(
+      find.descendant(
+        of: find.widgetWithText(OverrideTextField, 'Clone directory'),
+        matching: find.text('\u00d7 reset'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    verify(() => mockApi.deleteOrgField('acme', 'clone_dir')).called(1);
   });
 }

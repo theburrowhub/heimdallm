@@ -21,10 +21,9 @@ void main() {
     aiFallback: '',
     reviewMode: 'single',
     repoConfigs: {'theburrowhub/heimdallm': RepoConfig(prEnabled: true)},
-    issueTracking: IssueTrackingConfig(),
   );
 
-  testWidgets('shows 3 LEDs with correct states', (tester) async {
+  testWidgets('shows 2 LEDs with correct states', (tester) async {
     await tester.pumpWidget(
       _host(
         RepoListTile(
@@ -38,7 +37,7 @@ void main() {
         ),
       ),
     );
-    expect(find.byType(FeatureLed), findsNWidgets(4));
+    expect(find.byType(FeatureLed), findsNWidgets(2));
   });
 
   testWidgets('tapping checkbox calls onSelectionToggle', (tester) async {

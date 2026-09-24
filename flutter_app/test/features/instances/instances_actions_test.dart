@@ -296,10 +296,7 @@ void main() {
       await tester.pumpAndSettle();
 
       final body = jsonDecode(recorder.bodies.last) as Map<String, dynamic>;
-      expect(
-        body['round_robin_ops'],
-        containsAll([RoutingOp.review, RoutingOp.issue]),
-      );
+      expect(body['round_robin_ops'], contains(RoutingOp.review));
       expect(body['round_robin_ops'], isNot(contains(RoutingOp.merge)));
     });
 

@@ -14,7 +14,6 @@ void main() {
     aiFallback: '',
     reviewMode: 'single',
     repoConfigs: {'a/b': RepoConfig(prEnabled: true)},
-    issueTracking: IssueTrackingConfig(enabled: true),
   );
 
   group('featureIsOn', () {
@@ -30,41 +29,15 @@ void main() {
       );
     });
 
-    test('Develop off when no local dir and no explicit devEnabled', () {
+    test('PR explicit false → off', () {
       expect(
         featureIsOn(
-          feature: Feature.develop,
+          feature: Feature.prReview,
           repo: 'a/b',
-          config: const RepoConfig(), // no localDir, no devEnabled
+          config: const RepoConfig(prEnabled: false),
           appConfig: appConfig,
         ),
         isFalse,
-      );
-    });
-
-    test('Develop active with both devEnabled + local dir', () {
-      expect(
-        featureIsOn(
-          feature: Feature.develop,
-          repo: 'a/b',
-          config: const RepoConfig(devEnabled: true, localDir: '/tmp/x'),
-          appConfig: appConfig,
-        ),
-        isTrue,
-      );
-    });
-
-    test('Issue tracking active with refinement labels only', () {
-      expect(
-        featureIsOn(
-          feature: Feature.issueTracking,
-          repo: 'a/b',
-          config: const RepoConfig(refinementLabels: ['needs-plan']),
-          appConfig: appConfig.copyWith(
-            issueTracking: const IssueTrackingConfig(enabled: false),
-          ),
-        ),
-        isTrue,
       );
     });
   });
@@ -80,24 +53,24 @@ void main() {
       expect(line, contains('prEnabled = true'));
     });
 
-    test('Develop without local dir shows the "Requires local dir" reason', () {
+    test('PR explicit false says it is disabled per-repo', () {
       final line = featureSourceLine(
-        feature: Feature.develop,
+        feature: Feature.prReview,
         repo: 'a/b',
-        config: const RepoConfig(devEnabled: true),
+        config: const RepoConfig(prEnabled: false),
         appConfig: appConfig,
       );
-      expect(line, contains('no local directory configured'));
+      expect(line, contains('disabled per-repo'));
     });
 
-    test('IT inherited when no per-repo override + global on', () {
+    test('PR without an override reports the monitored-list source', () {
       final line = featureSourceLine(
-        feature: Feature.issueTracking,
-        repo: 'a/b',
-        config: const RepoConfig(prEnabled: true),
+        feature: Feature.prReview,
+        repo: 'x/y',
+        config: const RepoConfig(),
         appConfig: appConfig,
       );
-      expect(line, contains('inherited from global issue tracking'));
+      expect(line, contains('not in monitored list'));
     });
   });
 }

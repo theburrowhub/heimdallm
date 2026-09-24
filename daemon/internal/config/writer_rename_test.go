@@ -36,8 +36,8 @@ func TestRenameRepoInTOML_RenamesAIRepoKey(t *testing.T) {
 [ai]
 
 [ai.repos."acme/old"]
-issue_prompt = "issue-deep"
-implement_prompt = "impl-fast"
+prompt = "review-deep"
+fallback = "gemini"
 `)
 
 	if err := config.RenameRepoInTOML(path, "acme/old", "acme/new"); err != nil {
@@ -54,7 +54,7 @@ implement_prompt = "impl-fast"
 	if !ok {
 		t.Fatalf("new key missing or wrong type: %T", repos["acme/new"])
 	}
-	if newBlock["issue_prompt"] != "issue-deep" || newBlock["implement_prompt"] != "impl-fast" {
+	if newBlock["prompt"] != "review-deep" || newBlock["fallback"] != "gemini" {
 		t.Errorf("values not preserved across rename: %+v", newBlock)
 	}
 }
@@ -101,7 +101,7 @@ func TestRenameRepoInTOML_PreservesUnrelatedTopLevelKeys(t *testing.T) {
 repositories = ["acme/old"]
 
 [ai.repos."acme/old"]
-issue_prompt = "p"
+prompt = "p"
 
 [operator_custom]
 totally_not_modeled = "value-that-must-survive"
@@ -148,10 +148,10 @@ func TestRenameRepoInTOML_RenamesAIOrgKeyWhenOrgChanged(t *testing.T) {
 	// key must also move when the org component differs.
 	path := writeConfigFile(t, `
 [ai.orgs."acme"]
-issue_prompt = "org-default"
+prompt = "org-default"
 
 [ai.repos."acme/api"]
-implement_prompt = "fast"
+fallback = "fast"
 `)
 
 	if err := config.RenameRepoInTOML(path, "acme/api", "widget/api"); err != nil {
@@ -171,7 +171,7 @@ implement_prompt = "fast"
 	if !ok {
 		t.Fatalf("new org key missing: %+v", orgs)
 	}
-	if widget["issue_prompt"] != "org-default" {
+	if widget["prompt"] != "org-default" {
 		t.Errorf("org values not preserved: %+v", widget)
 	}
 }
@@ -188,7 +188,7 @@ func TestConfig_ApplyRename_AllSurfaces(t *testing.T) {
 		"foo/bar":  {Primary: "gemini"},
 	}
 	cfg.AI.Orgs = map[string]config.OrgAI{
-		"acme": {IssuePrompt: "org-default"},
+		"acme": {Prompt: "org-default"},
 	}
 
 	// Org rename: acme/old → widget/api flips BOTH the repo key and
@@ -222,7 +222,7 @@ func TestConfig_ApplyRename_AllSurfaces(t *testing.T) {
 func TestConfig_ApplyRename_SameOrgLeavesOrgsMap(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.AI.Repos = map[string]config.RepoAI{"acme/old": {Primary: "claude"}}
-	cfg.AI.Orgs = map[string]config.OrgAI{"acme": {IssuePrompt: "p"}}
+	cfg.AI.Orgs = map[string]config.OrgAI{"acme": {Prompt: "p"}}
 
 	cfg.ApplyRename("acme/old", "acme/new")
 

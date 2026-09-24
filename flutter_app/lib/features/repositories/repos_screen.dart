@@ -96,12 +96,8 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
       return result ?? false;
     }
 
-    bool hasDir(RepoConfig c) => c.localDir != null && c.localDir!.isNotEmpty;
-
     return {
       Feature.prReview: agg((c) => c.prEnabled ?? false),
-      Feature.issueTracking: agg((c) => c.itEnabled ?? false),
-      Feature.develop: agg((c) => (c.devEnabled ?? false) && hasDir(c)),
       Feature.mergeTracking: agg((c) => c.mtEnabled ?? false),
     };
   }
@@ -111,19 +107,8 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
       for (final r in _selected) {
         final c = _repoConfigs[r];
         if (c == null) continue;
-        // Develop requires a local dir to actually run. Enabling it on a
-        // repo without one would write a flag the daemon can't act on, so
-        // skip those silently — the row LED stays grey, making it obvious
-        // the bulk apply didn't affect that repo.
-        if (f == Feature.develop &&
-            enable &&
-            (c.localDir == null || c.localDir!.isEmpty)) {
-          continue;
-        }
         _repoConfigs[r] = switch (f) {
           Feature.prReview => c.copyWith(prEnabled: enable),
-          Feature.issueTracking => c.copyWith(itEnabled: enable),
-          Feature.develop => c.copyWith(devEnabled: enable),
           Feature.mergeTracking => c.copyWith(mtEnabled: enable),
         };
         _dirtyRepos.add(r);

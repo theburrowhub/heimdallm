@@ -5,9 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/pr.dart';
-import 'package:heimdallm/core/models/tracked_issue.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
-import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/stats/stats_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 
@@ -17,13 +15,11 @@ Widget _host({
   required _MapLoader loadStats,
   required _MapLoader loadRateLimits,
   List<PR> prs = const [],
-  List<TrackedIssue> issues = const [],
 }) => ProviderScope(
   overrides: [
     statsProvider.overrideWith((ref) => loadStats()),
     githubRateLimitProvider.overrideWith((ref) => loadRateLimits()),
     prsProvider.overrideWith((ref) async => prs),
-    issuesProvider.overrideWith((ref) async => issues),
   ],
   child: const MaterialApp(
     builder: _withMixScope,
@@ -41,21 +37,6 @@ PR _pr({required int id, required String repo}) => PR(
   url: 'https://example.test/pr/$id',
   state: 'open',
   updatedAt: DateTime.utc(2026, 8, 1),
-);
-
-TrackedIssue _issue({required int id, required String repo}) => TrackedIssue(
-  id: id,
-  githubId: 2000 + id,
-  repo: repo,
-  number: id,
-  title: 'Issue $id',
-  body: 'Body',
-  author: 'octocat',
-  assignees: const [],
-  labels: const [],
-  state: 'open',
-  createdAt: DateTime.utc(2026, 8, 1),
-  fetchedAt: DateTime.utc(2026, 8, 1),
 );
 
 Finder _filterChip(String label) => find.widgetWithText(Chip, label);
@@ -290,8 +271,8 @@ void main() {
           prs: [
             _pr(id: 1, repo: 'acme/api'),
             _pr(id: 2, repo: ''),
+            _pr(id: 3, repo: 'globex/web'),
           ],
-          issues: [_issue(id: 3, repo: 'globex/web')],
         ),
       );
       await tester.pumpAndSettle();

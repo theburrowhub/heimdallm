@@ -34,14 +34,12 @@ func TestValidatePolling_RangesPerField(t *testing.T) {
 	}{
 		{"empty section is valid", PollingConfig{}, false},
 		{"typical values", PollingConfig{
-			PollInterval: "5m", MinInterval: "1m", MaxInterval: "15m",
-			DiscoveryInterval: "5m", Tier3Interval: "30s",
+			PollInterval: "5m", DiscoveryInterval: "5m", Tier3Interval: "30s",
 		}, false},
 
 		{"poll_interval below floor", PollingConfig{PollInterval: "30s"}, true},
 		{"poll_interval above ceiling", PollingConfig{PollInterval: "48h"}, true},
 		{"poll_interval unparseable", PollingConfig{PollInterval: "5"}, true},
-		{"min_interval below floor", PollingConfig{MinInterval: "1s"}, true},
 		{"discovery_interval below floor", PollingConfig{DiscoveryInterval: "10s"}, true},
 
 		// tier3_interval drives a local scan, not GitHub traffic, so sub-minute
@@ -52,8 +50,6 @@ func TestValidatePolling_RangesPerField(t *testing.T) {
 
 		{"negative threshold", PollingConfig{RateLimitSafetyThreshold: -1}, true},
 		{"zero threshold means unset", PollingConfig{RateLimitSafetyThreshold: 0}, false},
-
-		{"min above max", PollingConfig{MinInterval: "20m", MaxInterval: "10m"}, true},
 	}
 
 	for _, tt := range tests {

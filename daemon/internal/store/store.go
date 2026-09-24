@@ -34,19 +34,7 @@ CREATE TABLE IF NOT EXISTS prs (
   state                    TEXT NOT NULL,
   updated_at               DATETIME NOT NULL,
   fetched_at               DATETIME NOT NULL,
-  dismissed                INTEGER NOT NULL DEFAULT 0,
-  -- Review-state vigilance for auto_implement-created PRs (#482). The
-  -- columns are managed by Tier 3 (external_*) and the response/fix
-  -- modules (counters + last_responded_at), never by UpsertPR — see
-  -- the explicit migration block below for idempotent ADD COLUMNs that
-  -- cover existing DBs.
-  external_review_state    TEXT NOT NULL DEFAULT '',
-  external_reviewer        TEXT NOT NULL DEFAULT '',
-  external_review_at       TEXT NOT NULL DEFAULT '',
-  auto_implement_issue_id  INTEGER NOT NULL DEFAULT 0,
-  review_response_count    INTEGER NOT NULL DEFAULT 0,
-  review_fix_count         INTEGER NOT NULL DEFAULT 0,
-  last_responded_at        TEXT NOT NULL DEFAULT ''
+  dismissed                INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -78,52 +66,11 @@ CREATE TABLE IF NOT EXISTS agents (
   instructions           TEXT NOT NULL DEFAULT '',
   cli_flags              TEXT NOT NULL DEFAULT '',
   -- Legacy column, kept so the migration seed below can read from it on
-  -- existing DBs. No code writes to it after this release; the three
-  -- per-category flags below are the source of truth.
+  -- existing DBs. No code writes to it after this release; is_default_pr
+  -- is the source of truth.
   is_default             INTEGER NOT NULL DEFAULT 0,
   is_default_pr          INTEGER NOT NULL DEFAULT 0,
-  is_default_issue       INTEGER NOT NULL DEFAULT 0,
-  is_default_dev         INTEGER NOT NULL DEFAULT 0,
-  created_at             DATETIME NOT NULL,
-  issue_prompt           TEXT NOT NULL DEFAULT '',
-  issue_instructions     TEXT NOT NULL DEFAULT '',
-  implement_prompt       TEXT NOT NULL DEFAULT '',
-  implement_instructions TEXT NOT NULL DEFAULT ''
-);
-
--- Issue tracking pipeline (#24). The assignees and labels columns hold JSON
--- arrays of strings so we do not have to create a separate join table just
--- for display; the issue_reviews downstream consumers treat the whole row
--- as one record.
-CREATE TABLE IF NOT EXISTS issues (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  github_id   INTEGER UNIQUE NOT NULL,
-  repo        TEXT NOT NULL,
-  number      INTEGER NOT NULL,
-  title       TEXT NOT NULL,
-  body        TEXT NOT NULL DEFAULT '',
-  author      TEXT NOT NULL,
-  assignees   TEXT NOT NULL DEFAULT '[]',
-  labels      TEXT NOT NULL DEFAULT '[]',
-  state       TEXT NOT NULL,
-  created_at  DATETIME NOT NULL,
-  fetched_at             DATETIME NOT NULL,
-  dismissed              INTEGER NOT NULL DEFAULT 0,
-  claimed_by_autonomous  INTEGER NOT NULL DEFAULT 0,
-  autonomous_claim_until TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS issue_reviews (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  issue_id     INTEGER NOT NULL REFERENCES issues(id),
-  cli_used     TEXT NOT NULL,
-  summary      TEXT NOT NULL,
-  triage       TEXT NOT NULL,
-  refinement_data TEXT NOT NULL DEFAULT '',
-  next_steps   TEXT NOT NULL DEFAULT '[]',
-  action_taken TEXT NOT NULL DEFAULT 'review_only',
-  pr_created   INTEGER NOT NULL DEFAULT 0,
-  created_at   DATETIME NOT NULL
+  created_at             DATETIME NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS activity_log (
@@ -179,17 +126,6 @@ CREATE INDEX IF NOT EXISTS idx_review_retry_attempts_started
   ON review_retry_attempts(started_at);
 CREATE INDEX IF NOT EXISTS idx_review_retry_attempts_pr_started
   ON review_retry_attempts(pr_id, started_at);
-
--- Mirror of reviews_in_flight for the issue-triage pipeline. The updated_at
--- column stores the issue's UpdatedAt truncated to an ISO-seconds string so
--- two fetcher ticks observing the same snapshot collapse onto the same row.
--- See theburrowhub/heimdallm#292.
-CREATE TABLE IF NOT EXISTS issue_triage_in_flight (
-  issue_id    INTEGER NOT NULL,
-  updated_at  TEXT    NOT NULL,
-  started_at  DATETIME NOT NULL,
-  PRIMARY KEY (issue_id, updated_at)
-);
 
 -- Persistent per-repo review instructions captured from authorized PR
 -- comment directives (#383). Injected into every future review of the repo.
@@ -287,41 +223,11 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
 	db.Exec("ALTER TABLE prs ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
-	// Review-state vigilance (#482). Idempotent on existing DBs; the
-	// schema constant above already includes these for fresh installs.
-	db.Exec("ALTER TABLE prs ADD COLUMN external_review_state TEXT NOT NULL DEFAULT ''")
-	db.Exec("ALTER TABLE prs ADD COLUMN external_reviewer TEXT NOT NULL DEFAULT ''")
-	db.Exec("ALTER TABLE prs ADD COLUMN external_review_at TEXT NOT NULL DEFAULT ''")
-	db.Exec("ALTER TABLE prs ADD COLUMN auto_implement_issue_id INTEGER NOT NULL DEFAULT 0")
-	db.Exec("ALTER TABLE prs ADD COLUMN review_response_count INTEGER NOT NULL DEFAULT 0")
-	db.Exec("ALTER TABLE prs ADD COLUMN review_fix_count INTEGER NOT NULL DEFAULT 0")
-	db.Exec("ALTER TABLE prs ADD COLUMN last_responded_at TEXT NOT NULL DEFAULT ''")
-	db.Exec("ALTER TABLE agents ADD COLUMN issue_prompt TEXT NOT NULL DEFAULT ''")
-	db.Exec("ALTER TABLE agents ADD COLUMN issue_instructions TEXT NOT NULL DEFAULT ''")
-	db.Exec("ALTER TABLE agents ADD COLUMN implement_prompt TEXT NOT NULL DEFAULT ''")
-	db.Exec("ALTER TABLE agents ADD COLUMN implement_instructions TEXT NOT NULL DEFAULT ''")
-	// Split the single global `is_default` flag into three per-category flags
-	// so users can activate a different prompt for PR review, issue triage,
-	// and auto-implement independently. On existing DBs, seed all three from
-	// the legacy flag the first time the new columns appear — that preserves
-	// current user-visible behaviour (whichever agent was active keeps driving
-	// all three pipelines until the user re-activates per category).
+	// Seed the PR-review default from the legacy global flag the first time
+	// the column appears, so whichever agent was active keeps driving reviews.
 	if _, err := db.Exec("ALTER TABLE agents ADD COLUMN is_default_pr INTEGER NOT NULL DEFAULT 0"); err == nil {
 		db.Exec("UPDATE agents SET is_default_pr = is_default")
 	}
-	if _, err := db.Exec("ALTER TABLE agents ADD COLUMN is_default_issue INTEGER NOT NULL DEFAULT 0"); err == nil {
-		db.Exec("UPDATE agents SET is_default_issue = is_default")
-	}
-	if _, err := db.Exec("ALTER TABLE agents ADD COLUMN is_default_dev INTEGER NOT NULL DEFAULT 0"); err == nil {
-		db.Exec("UPDATE agents SET is_default_dev = is_default")
-	}
-	db.Exec("ALTER TABLE issue_reviews ADD COLUMN commented_at DATETIME NOT NULL DEFAULT ''")
-	db.Exec("ALTER TABLE issue_reviews ADD COLUMN refinement_data TEXT NOT NULL DEFAULT ''")
-	// Ubiquitous-language rename: the issue-triage "suggestions" list is
-	// semantically the reviewer's concrete next steps, so call it that. On a
-	// fresh DB the schema above already creates `next_steps` and this RENAME
-	// no-ops (no `suggestions` column → error ignored, like the ADD COLUMNs).
-	db.Exec("ALTER TABLE issue_reviews RENAME COLUMN suggestions TO next_steps")
 	// Covering index for the circuit-breaker counters (see issue #243).
 	// CREATE INDEX IF NOT EXISTS is idempotent; safe on every startup.
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_reviews_pr_created ON reviews(pr_id, created_at)")
@@ -334,20 +240,6 @@ func Open(dsn string) (*Store, error) {
 	// Hot path for PR identity fallback when GitHub's Search Issues API and
 	// Pulls API disagree on github_id for the same repo/number (#351).
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_prs_repo_number ON prs(repo, number)")
-	// Mirrors of the above for the issue-side circuit breaker added in
-	// theburrowhub/heimdallm#292. Without these, CountIssueReviewsForIssue
-	// and CountIssueTriagesForRepo table-scan issue_reviews on every
-	// triage attempt.
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_issue_reviews_issue_created ON issue_reviews(issue_id, created_at)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_issue_reviews_created ON issue_reviews(created_at)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_issues_repo ON issues(repo)")
-	// Autonomous end-to-end pipeline (#spec). Idempotent on existing DBs;
-	// the schema constant above already includes this column for fresh installs.
-	db.Exec("ALTER TABLE issues ADD COLUMN claimed_by_autonomous INTEGER NOT NULL DEFAULT 0")
-	// Time-based autonomous claim lease (#spec). Doubles as the failure/no-
-	// progress cooldown and survives crashes (expires naturally). Idempotent
-	// on existing DBs; the schema constant above includes it for fresh installs.
-	db.Exec("ALTER TABLE issues ADD COLUMN autonomous_claim_until TEXT NOT NULL DEFAULT ''")
 	// Idempotent migration for existing DBs — new installs get the table
 	// from the schema constant above. Safe on every startup.
 	db.Exec(`CREATE TABLE IF NOT EXISTS reviews_in_flight (
@@ -355,13 +247,6 @@ func Open(dsn string) (*Store, error) {
 		head_sha    TEXT    NOT NULL,
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (pr_id, head_sha)
-	)`)
-	// Same pattern for the issue-triage claim table added in #292.
-	db.Exec(`CREATE TABLE IF NOT EXISTS issue_triage_in_flight (
-		issue_id    INTEGER NOT NULL,
-		updated_at  TEXT    NOT NULL,
-		started_at  DATETIME NOT NULL,
-		PRIMARY KEY (issue_id, updated_at)
 	)`)
 	// Failed PR-review executions are rate-limited separately from the review
 	// circuit breaker. Existing databases may still have the legacy
@@ -452,7 +337,7 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_retry_attempts_started ON review_retry_attempts(started_at)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_retry_attempts_pr_started ON review_retry_attempts(pr_id, started_at)")
 	// Repo rename audit table (#489). RenameRepo writes a row here
-	// in the same TX that bulk-renames prs/issues/activity_log/
+	// in the same TX that bulk-renames prs/activity_log/
 	// watch_state. The audit table is informational — it is NOT
 	// consulted to short-circuit idempotency of the UPDATEs (those
 	// are naturally idempotent via `WHERE repo = oldRepo`), so the
@@ -521,7 +406,7 @@ func Open(dsn string) (*Store, error) {
 		processed_at DATETIME NOT NULL
 	)`)
 	// watch_state is owned by bus.NewWatchStore at runtime, but RenameRepo
-	// needs to UPDATE rows here in the same TX as the prs/issues moves.
+	// needs to UPDATE rows here in the same TX as the prs moves.
 	// Mirror the schema with IF NOT EXISTS so the rename can run from
 	// tests and migration paths that have not yet constructed a WatchStore.
 	db.Exec(`CREATE TABLE IF NOT EXISTS watch_state (
@@ -534,33 +419,58 @@ func Open(dsn string) (*Store, error) {
 		backoff_ns INTEGER NOT NULL,
 		last_seen  TEXT NOT NULL
 	)`)
-	// Enforce single-flight per issue at the schema level (#458). The
-	// claim SQL already uses INSERT ... WHERE NOT EXISTS, but a UNIQUE
-	// index lifts the invariant from a query convention to a DB
-	// guarantee so any future raw INSERT (test helpers, ad-hoc tooling)
-	// cannot create a duplicate. The composite PK above is strictly
-	// weaker than this index — it allows multiple rows per issue_id when
-	// updated_at differs — so the index supersedes it as the contention
-	// constraint; the PK remains as a row-identity convention.
-	//
-	// On daemons upgrading from pre-#458 the table may contain rows
-	// like (42, T0), (42, T1) for the same issue. CREATE UNIQUE INDEX
-	// returns "UNIQUE constraint failed" in that case (IF NOT EXISTS
-	// only suppresses the "already exists" case, not constraint
-	// failures). Dedupe first — keep the most recent claim per issue —
-	// then create the index, then log if either step still errors so
-	// silent failures are observable in operator logs.
-	if _, err := db.Exec(`DELETE FROM issue_triage_in_flight
-		WHERE rowid NOT IN (SELECT MAX(rowid) FROM issue_triage_in_flight GROUP BY issue_id)`); err != nil {
-		slog.Warn("store: dedupe issue_triage_in_flight before unique index failed",
-			"err", err)
-	}
-	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_triage_in_flight_issue ON issue_triage_in_flight(issue_id)"); err != nil {
-		slog.Warn("store: create unique index on issue_triage_in_flight(issue_id) failed; "+
-			"single-flight invariant rests on the INSERT … WHERE NOT EXISTS guard only",
-			"err", err)
-	}
+	dropIssuePipelineData(db)
 	return &Store{db: db}, nil
+}
+
+// dropIssuePipelineData removes what the issue triage / refinement /
+// auto-implement pipelines left in databases created before Heimdallm became
+// review-only. Every statement is idempotent, so this is safe on every
+// startup and a no-op on fresh installs.
+//
+// The removal is permanent: rolling back to a 0.8.x binary still boots (it
+// recreates the tables with CREATE TABLE IF NOT EXISTS) but starts with no
+// issue history. When anything is actually removed it is logged once, with
+// the counts, so an operator can tell from the log what the upgrade deleted.
+//
+// Unused columns on prs and agents are deliberately left in place: a rolled
+// back 0.8.x binary still reads and writes them, so dropping them would turn a
+// lossy rollback into a broken one. They carry defaults and nothing reads them.
+func dropIssuePipelineData(db *sql.DB) {
+	removed := []any{}
+	for _, table := range []string{"issue_reviews", "issue_triage_in_flight", "issues"} {
+		var exists int
+		if err := db.QueryRow(
+			"SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table,
+		).Scan(&exists); err != nil || exists == 0 {
+			continue
+		}
+		var rows int64
+		// The table name comes from the fixed list above, never from input.
+		_ = db.QueryRow("SELECT count(*) FROM " + table).Scan(&rows)
+		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
+			slog.Warn("store: drop legacy issue-pipeline table failed", "table", table, "err", err)
+			continue
+		}
+		removed = append(removed, table, rows)
+	}
+	for _, d := range []struct{ name, stmt string }{
+		{"watch_state_rows", "DELETE FROM watch_state WHERE type = 'issue'"},
+		{"activity_log_rows", "DELETE FROM activity_log WHERE item_type = 'issue'"},
+		{"config_rows", "DELETE FROM configs WHERE key IN ('issue_tracking', 'refinement_timeout')"},
+	} {
+		res, err := db.Exec(d.stmt)
+		if err != nil {
+			slog.Warn("store: drop legacy issue-pipeline data failed", "stmt", d.stmt, "err", err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			removed = append(removed, d.name, n)
+		}
+	}
+	if len(removed) > 0 {
+		slog.Warn("store: removed data of the retired issue pipeline (Heimdallm is review-only now)", removed...)
+	}
 }
 
 // DB returns the underlying *sql.DB for shared use by subsystems that need

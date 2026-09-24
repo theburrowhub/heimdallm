@@ -36,25 +36,6 @@ func TestParseDiscoveryIntervalUsesPollDefaultWhenBothInvalid(t *testing.T) {
 	}
 }
 
-func TestResolveRefinementTimeoutPrecedence(t *testing.T) {
-	got := resolveRefinementTimeout("30m", "20m", "5m")
-	if got != 30*time.Minute {
-		t.Fatalf("resolveRefinementTimeout(30m, 20m, 5m) = %v, want 30m", got)
-	}
-}
-
-func TestResolveRefinementTimeoutFallsBackToAgentThenGlobal(t *testing.T) {
-	got := resolveRefinementTimeout("", "20m", "5m")
-	if got != 5*time.Minute {
-		t.Fatalf("resolveRefinementTimeout(empty, 20m, 5m) = %v, want 5m", got)
-	}
-
-	got = resolveRefinementTimeout("", "20m", "")
-	if got != 20*time.Minute {
-		t.Fatalf("resolveRefinementTimeout(empty, 20m, empty) = %v, want 20m", got)
-	}
-}
-
 func TestResolveExecutionTimeoutDefaultsToTwentyMinutes(t *testing.T) {
 	if got := resolveExecutionTimeout("", ""); got != 20*time.Minute {
 		t.Fatalf("resolveExecutionTimeout(empty, empty) = %v, want 20m", got)
@@ -75,10 +56,10 @@ func TestConfigReloadRequiresPollerRestartSkipsDynamicOnlyChanges(t *testing.T) 
 	newCfg := cloneReloadRestartConfig(oldCfg)
 	newCfg.AI.Primary = "codex"
 	newCfg.AI.ReviewMode = "multi"
-	newCfg.GitHub.IssueTracking.DefaultAction = "review_only"
+	newCfg.AI.NeverApproveMinSeverity = "high"
 
 	if configReloadRequiresPollerRestart(oldCfg, newCfg) {
-		t.Fatal("dynamic AI/issue config changes should not restart pollers")
+		t.Fatal("dynamic AI config changes should not restart pollers")
 	}
 }
 
@@ -178,9 +159,6 @@ func reloadRestartBaseConfig() *config.Config {
 			DiscoveryTopic:    "heimdallm-review",
 			DiscoveryOrgs:     []string{"org"},
 			DiscoveryInterval: "5m",
-			IssueTracking: config.IssueTrackingConfig{
-				DefaultAction: "ignore",
-			},
 		},
 		AI: config.AIConfig{
 			Primary:                 "claude",

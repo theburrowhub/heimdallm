@@ -301,9 +301,6 @@ func TestClientOperations(t *testing.T) {
 	}); err != nil {
 		t.Errorf("DispatchPRReview() = %v", err)
 	}
-	if err := c.TriggerIssueReview(ctx, 7); err != nil {
-		t.Errorf("TriggerIssueReview() = %v", err)
-	}
 	if err := c.EvaluateMergeTracking(ctx, 99, true); err != nil {
 		t.Errorf("EvaluateMergeTracking() = %v", err)
 	}
@@ -311,7 +308,6 @@ func TestClientOperations(t *testing.T) {
 	seen := f.seen()
 	want := []struct{ method, path, query string }{
 		{http.MethodPost, "/cluster/prs/review", ""},
-		{http.MethodPost, "/issues/7/review", ""},
 		{http.MethodPost, "/merge-tracking/99/evaluate", "dry_run=true"},
 	}
 	if len(seen) != len(want) {

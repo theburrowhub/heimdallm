@@ -325,7 +325,7 @@ func TestFetchMergeTrackingPRs_AuthorOnlyWhenAssigneesExcluded(t *testing.T) {
 	}
 }
 
-func TestMergePR_StillWorksWithoutASHA(t *testing.T) {
+func TestMergePRAtSHA_DefaultsToSquashAndSendsTheSHA(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -335,19 +335,18 @@ func TestMergePR_StillWorksWithoutASHA(t *testing.T) {
 	defer srv.Close()
 
 	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
-	if err := c.MergePR("acme/widgets", 7, ""); err != nil {
-		t.Fatalf("MergePR: %v", err)
+	if _, err := c.MergePRAtSHA("acme/widgets", 7, "", "abc123"); err != nil {
+		t.Fatalf("MergePRAtSHA: %v", err)
 	}
-	// The autonomous gate's path is unchanged: no sha, and squash by default.
-	if _, present := gotBody["sha"]; present {
-		t.Error("MergePR must not send a sha — MergePRAtSHA is the guarded path")
+	if gotBody["sha"] != "abc123" {
+		t.Errorf("sha = %v, want the expected head sha", gotBody["sha"])
 	}
 	if gotBody["merge_method"] != "squash" {
 		t.Errorf("merge_method = %v, want the squash default", gotBody["merge_method"])
 	}
 }
 
-func TestMergePR_PropagatesRejections(t *testing.T) {
+func TestMergePRAtSHA_PropagatesRejections(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		_, _ = w.Write([]byte(`{"message":"Pull Request is not mergeable"}`))
@@ -355,7 +354,7 @@ func TestMergePR_PropagatesRejections(t *testing.T) {
 	defer srv.Close()
 
 	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
-	if err := c.MergePR("acme/widgets", 7, "squash"); err == nil {
+	if _, err := c.MergePRAtSHA("acme/widgets", 7, "squash", "abc123"); err == nil {
 		t.Fatal("a rejection must be reported")
 	}
 }

@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -60,84 +59,6 @@ func buildPRDetailLines(pr api.PR, width int) []string {
 			lines = append(lines, "")
 			lines = append(lines, headerStyle.Render("  Suggestions"))
 			for _, l := range wrapText(r.Suggestions, w-4) {
-				lines = append(lines, "    "+l)
-			}
-		}
-	}
-
-	return lines
-}
-
-func buildIssueDetailLines(issue api.Issue, width int) []string {
-	w := width - 6
-	if w < 40 {
-		w = 40
-	}
-
-	sep := strings.Repeat("─", min(w, 60))
-
-	var lines []string
-	lines = append(lines, headerStyle.Render(fmt.Sprintf("  Issue #%d — %s", issue.Number, issue.Repo)))
-	lines = append(lines, "  "+sep)
-	lines = append(lines, "")
-	lines = append(lines, fmt.Sprintf("  %-12s %s", "Title:", issue.Title))
-	lines = append(lines, fmt.Sprintf("  %-12s %s", "Author:", issue.Author))
-	lines = append(lines, fmt.Sprintf("  %-12s %s", "State:", issue.State))
-	lines = append(lines, fmt.Sprintf("  %-12s %s", "Created:", issue.CreatedAt.Format("2006-01-02 15:04")))
-	if issue.Dismissed {
-		lines = append(lines, fmt.Sprintf("  %-12s %s", "Dismissed:", "yes"))
-	}
-	if labels := parseLabels(issue.Labels); len(labels) > 0 {
-		lines = append(lines, fmt.Sprintf("  %-12s %s", "Labels:", strings.Join(labels, ", ")))
-	}
-
-	if issue.Body != "" {
-		lines = append(lines, "")
-		lines = append(lines, headerStyle.Render("  Description"))
-		body := issue.Body
-		if len([]rune(body)) > 500 {
-			body = string([]rune(body)[:500]) + "…"
-		}
-		for _, l := range wrapText(body, w-4) {
-			lines = append(lines, "    "+l)
-		}
-	}
-
-	if issue.LatestReview != nil {
-		r := issue.LatestReview
-		lines = append(lines, "")
-		lines = append(lines, headerStyle.Render("  Latest Review"))
-		lines = append(lines, "  "+sep)
-		lines = append(lines, fmt.Sprintf("  %-12s %s", "Action:", humanizeAction(r)))
-		lines = append(lines, fmt.Sprintf("  %-12s %s", "Reviewed:", r.CreatedAt.Format("2006-01-02 15:04")))
-		lines = append(lines, fmt.Sprintf("  %-12s %s", "CLI:", r.CLIUsed))
-
-		if r.PRCreated > 0 {
-			lines = append(lines, fmt.Sprintf("  %-12s #%d", "PR Created:", r.PRCreated))
-		}
-
-		if len(r.Triage) > 0 {
-			var triage map[string]any
-			if json.Unmarshal(r.Triage, &triage) == nil && len(triage) > 0 {
-				lines = append(lines, "")
-				lines = append(lines, headerStyle.Render("  Triage"))
-				if sev, ok := triage["severity"]; ok {
-					sevStr := fmt.Sprintf("%v", sev)
-					lines = append(lines, fmt.Sprintf("    %-16s %s", "severity:", severityStyle(sevStr).Render(sevStr)))
-				}
-				for k, v := range triage {
-					if k == "severity" {
-						continue
-					}
-					lines = append(lines, fmt.Sprintf("    %-16s %v", k+":", v))
-				}
-			}
-		}
-
-		if r.Summary != "" {
-			lines = append(lines, "")
-			lines = append(lines, headerStyle.Render("  Summary"))
-			for _, l := range wrapText(r.Summary, w-4) {
 				lines = append(lines, "    "+l)
 			}
 		}

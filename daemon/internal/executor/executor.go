@@ -1386,9 +1386,9 @@ func pathWithin(base, target string) bool {
 }
 
 // Execute runs the AI CLI with the given prompt and options, returning the
-// parsed PR review result. Callers that need a different output schema (e.g.
-// the issue-tracking pipeline) should use ExecuteRaw + StripToJSON instead of
-// re-implementing the subprocess plumbing.
+// parsed PR review result. Callers that need a different output schema (or
+// none — the merge-conflict resolver only wants the side effects) should use
+// ExecuteRaw instead of re-implementing the subprocess plumbing.
 func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult, error) {
 	raw, err := e.ExecuteRaw(cli, prompt, opts)
 	if err != nil {
@@ -1397,10 +1397,10 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 	return parseResult(raw)
 }
 
-// ExecuteRaw runs the AI CLI and returns stdout unchanged. Used by pipelines
-// that parse a schema other than ReviewResult (issue triage, auto_implement
-// output, etc.). Callers should pass the bytes through StripToJSON before
-// json.Unmarshal — CLIs routinely wrap JSON in code fences or surrounding text.
+// ExecuteRaw runs the AI CLI and returns stdout unchanged. Used by callers
+// that parse a schema other than ReviewResult, or none at all. Callers that
+// parse JSON should pass the bytes through StripToJSON before json.Unmarshal —
+// CLIs routinely wrap JSON in code fences or surrounding text.
 func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, error) {
 	// This is the final trust boundary before creating a subprocess. Callers
 	// validate configuration on ingress too, but legacy rows, direct TOML edits,
@@ -1446,11 +1446,11 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		defer os.RemoveAll(ws)
 		opts.WorkDir = ws
 		workDirFlags = []string{"--skip-git-repo-check"}
-		// Loud on purpose. Only the review and triage paths reach this branch
-		// today (the write-mode callers abort when repoctx fails, so they never
-		// arrive with an empty WorkDir), and an agent asked to change code would
-		// silently succeed against an empty directory here. If this ever shows
-		// up alongside a develop/refinement run, that caller needs a checkout,
+		// Loud on purpose. Only the review path reaches this branch today (the
+		// write-mode callers abort when repoctx fails, so they never arrive with
+		// an empty WorkDir), and an agent asked to change code would silently
+		// succeed against an empty directory here. If this ever shows up
+		// alongside a conflict-resolution run, that caller needs a checkout,
 		// not this workspace.
 		slog.Warn("executor: running codex without a checkout in a throwaway workspace",
 			"workspace", ws)
@@ -1808,8 +1808,8 @@ func enrichEnvWithLoginPath() []string {
 
 // StripToJSON strips common LLM output wrappers (leading/trailing whitespace,
 // markdown code fences, prose surrounding the JSON object) and returns the
-// inner JSON bytes. Exported so downstream pipelines (issue triage, etc.)
-// can reuse the same cleanup without duplicating it.
+// inner JSON bytes. Exported so any ExecuteRaw caller that parses JSON reuses
+// the same cleanup instead of duplicating it.
 //
 // The scan returns the leftmost complete, valid JSON object, honouring string
 // literals and escapes so braces inside strings — or in the surrounding prose

@@ -212,7 +212,6 @@ extension ClusterApi on ApiClient {
   Future<String> dispatch(
     String op, {
     int? prId,
-    int? issueId,
     String? repo,
     int? number,
     String? headSha,
@@ -222,7 +221,6 @@ extension ClusterApi on ApiClient {
   }) async {
     final body = <String, dynamic>{
       'pr_id': ?prId,
-      'issue_id': ?issueId,
       'repo': ?repo,
       'number': ?number,
       'head_sha': ?headSha,

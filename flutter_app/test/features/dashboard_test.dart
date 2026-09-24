@@ -16,12 +16,10 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/activity_filters.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
-import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/server/server_actions.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
-import 'package:heimdallm/core/models/tracked_issue.dart';
 import 'package:heimdallm/shared/router.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import '../core/platform/fake_platform_services.dart';
@@ -85,9 +83,6 @@ Future<void> _pumpOfflineDashboard(
         platformServicesProvider.overrideWithValue(platform),
         daemonHealthProvider.overrideWith((ref) => Future.value(false)),
         prsByInstanceProvider.overrideWith(
-          (ref) => Future.error(Exception('offline')),
-        ),
-        issuesByInstanceProvider.overrideWith(
           (ref) => Future.error(Exception('offline')),
         ),
         sseStreamProvider.overrideWith((ref) => const Stream.empty()),
@@ -557,9 +552,6 @@ void main() {
     for (final label in [
       'Priority',
       'Newest',
-      'PR',
-      'IT',
-      'DEV',
       'Open',
       'Closed',
       'Org',
@@ -588,9 +580,6 @@ void main() {
           overrides: [
             prsByInstanceProvider.overrideWith(
               (ref) => Future.value(singleInstanceResult(const [])),
-            ),
-            issuesByInstanceProvider.overrideWith(
-              (ref) async => singleInstanceResult(const <TrackedIssue>[]),
             ),
             sseStreamProvider.overrideWith((ref) => const Stream.empty()),
             // A plain single-daemon install: no instances registered at all.
@@ -649,9 +638,6 @@ void main() {
               prLoads++;
               return singleInstanceResult(<PR>[]);
             }),
-            issuesByInstanceProvider.overrideWith(
-              (ref) async => singleInstanceResult(<TrackedIssue>[]),
-            ),
             sseStreamProvider.overrideWith((ref) => const Stream.empty()),
           ],
           child: MaterialApp.router(

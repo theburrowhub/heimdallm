@@ -129,9 +129,9 @@ func (s *Service) Run(ctx context.Context, interval time.Duration, topic string,
 // ([ai.repos.*] explicit entries), then discovered (topic search results).
 //
 // Repos in nonMonitored are always excluded. Configured repos still join the
-// union when they are not explicitly disabled, preserving issue polling for
-// repos wired through [ai.repos.*] without letting an override undo the
-// operator's Not monitored choice.
+// union when they are not explicitly disabled, keeping repos wired through
+// [ai.repos.*] monitored without letting an override undo the operator's
+// Not monitored choice.
 func MergeRepos(static, configured, discovered, nonMonitored []string) []string {
 	if len(static) == 0 && len(configured) == 0 && len(discovered) == 0 {
 		return nil
@@ -142,8 +142,8 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 	// from the blacklist (to survive a stale auto-discovery non_monitored row),
 	// but that made disabling a configured repo a silent no-op — the far more
 	// common and surprising case. Configured repos still join the union when
-	// NOT listed in non_monitored (the #281 fix), so issue polling for wired-up
-	// repos with no active PRs is unaffected.
+	// NOT listed in non_monitored (the #281 fix), so wired-up repos with no
+	// active PRs stay monitored.
 	blacklist := make(map[string]struct{}, len(nonMonitored))
 	for _, r := range nonMonitored {
 		if r == "" {

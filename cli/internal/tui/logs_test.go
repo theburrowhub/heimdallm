@@ -11,7 +11,7 @@ func TestHumanize(t *testing.T) {
 		in, want string
 	}{
 		{"review_started", "Review started"},
-		{"issue_implemented", "Issue implemented"},
+		{"merge_track_merged", "Merge track merged"},
 		{"pr_detected", "Pr detected"},
 		{"DETECTED", "Detected"},
 		{"review", "Review"},
@@ -49,8 +49,6 @@ func TestSseToLogLine_HumanizedActions(t *testing.T) {
 		{"review_started", api.SSEEvent{Type: "review_started", Data: `{"repo":"acme/foo","pr_number":1}`}, "Review ▶", "PR"},
 		{"review_completed", api.SSEEvent{Type: "review_completed", Data: `{"repo":"acme/foo","pr_number":1,"severity":"high"}`}, "Review ✓", "PR"},
 		{"review_error", api.SSEEvent{Type: "review_error", Data: `{"repo":"acme/foo","pr_number":1,"error":"timeout"}`}, "Review ✗", "PR"},
-		{"issue_detected", api.SSEEvent{Type: "issue_detected", Data: `{"repo":"acme/foo","issue_number":7}`}, "Detected", "ISSUE"},
-		{"issue_promoted", api.SSEEvent{Type: "issue_promoted", Data: `{"repo":"acme/foo","issue_number":7,"from_label":"a","to_label":"b"}`}, "Promoted", "ISSUE"},
 		{"repo_discovered", api.SSEEvent{Type: "repo_discovered", Data: `{"repo":"acme/foo"}`}, "Discovered", "REPO"},
 		{"unknown_type", api.SSEEvent{Type: "polling_started", Data: `{"kind":"prs","repos":["a"]}`}, "Polling started", "EVENT"},
 	}
@@ -75,17 +73,6 @@ func TestSseToLogLine_ShowsTitle(t *testing.T) {
 	got := sseToLogLine(evt)
 	if got.Target != "acme/web #42 Fix login bug" {
 		t.Fatalf("target with title: got %q", got.Target)
-	}
-}
-
-func TestSseToLogLine_ShowsIssueTitle(t *testing.T) {
-	evt := api.SSEEvent{
-		Type: "issue_detected",
-		Data: `{"repo":"acme/web","issue_number":7,"issue_title":"Refactor auth"}`,
-	}
-	got := sseToLogLine(evt)
-	if got.Target != "acme/web #7 Refactor auth" {
-		t.Fatalf("target with issue title: got %q", got.Target)
 	}
 }
 
@@ -135,9 +122,9 @@ func TestActivityToLogLine_ShowsAuthorFromDetails(t *testing.T) {
 	entry := api.ActivityEntry{
 		TS:         "2024-01-15T10:30:00Z",
 		Repo:       "acme/web",
-		ItemType:   "issue",
+		ItemType:   "pr",
 		ItemNumber: 7,
-		Action:     "triage",
+		Action:     "review",
 		Outcome:    "completed",
 		Details:    map[string]any{"author": "carol", "severity": "medium"},
 	}

@@ -11,8 +11,6 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_screen.dart';
 import 'package:heimdallm/features/organizations/orgs_screen.dart';
-import 'package:heimdallm/features/issues/issue_detail_screen.dart';
-import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_screen.dart';
 import 'package:heimdallm/features/repositories/repos_screen.dart';
@@ -144,23 +142,5 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(requested?.instanceId, isEmpty);
-  });
-
-  testWidgets('an issue route carries the instance too', (tester) async {
-    IssueRef? requested;
-    await tester.pumpWidget(
-      _routedApp('/issues/9?instance=srv-b', [
-        sseStreamProvider.overrideWith((ref) => const Stream.empty()),
-        issueDetailProvider.overrideWith((ref, key) async {
-          requested = key;
-          throw ApiException('not needed for this test');
-        }),
-      ]),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byType(IssueDetailScreen), findsOneWidget);
-    expect(requested?.instanceId, 'srv-b');
-    expect(requested?.issueId, 9);
   });
 }

@@ -240,19 +240,14 @@ void main() {
       await tester.tap(save);
       await tester.pumpAndSettle();
 
-      final calls = verify(
-        () => api.patchConfig(captureAny()),
-      ).captured;
-      for (final c in calls) {
-        final patch = c as Map<String, dynamic>;
-        expect(
-          patch['cluster'],
-          isNot({'role': 'standalone'}),
-          reason: 'cancelling must not persist the demotion',
-        );
-      }
-    },
-  );
+    // Saving an unchanged form sends no PATCH at all; what must never be
+    // sent is the cancelled demotion.
+    verifyNever(
+      () => api.patchConfig(
+        any(that: containsPair('cluster', {'role': 'standalone'})),
+      ),
+    );
+  });
 
   testWidgets(
     'confirming the demotion persists the new role',

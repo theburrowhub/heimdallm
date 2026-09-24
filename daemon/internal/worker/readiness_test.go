@@ -59,18 +59,6 @@ func TestWorkersReportSubscriptionFailure(t *testing.T) {
 			}).Start,
 		},
 		{
-			name:  "triage",
-			start: NewTriageWorker(conn, 1, func(context.Context, bus.IssueMsg) {}).Start,
-		},
-		{
-			name:  "refinement",
-			start: NewRefinementWorker(conn, 1, func(context.Context, bus.IssueMsg) {}).Start,
-		},
-		{
-			name:  "implement",
-			start: NewImplementWorker(conn, 1, func(context.Context, bus.IssueMsg) {}).Start,
-		},
-		{
 			name: "state",
 			start: NewStateWorker(conn, 1, nil, func(context.Context, bus.StateCheckMsg) (bool, error) {
 				return false, nil

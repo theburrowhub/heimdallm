@@ -81,8 +81,6 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 			shadow.AI.Fallback = raw
 		case "review_mode":
 			shadow.AI.ReviewMode = raw
-		case "refinement_timeout":
-			shadow.AI.RefinementTimeout = raw
 		case "repositories":
 			var repos []string
 			if err := json.Unmarshal([]byte(raw), &repos); err != nil {
@@ -120,17 +118,6 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 				return fmt.Errorf("config: apply store key %q: %w", key, err)
 			}
 			shadow.ActivityLog.RetentionDays = &days
-		case "issue_tracking":
-			// Unmarshal INTO the existing struct (not a fresh zero value).
-			// Go's encoding/json only overwrites fields the JSON mentions,
-			// so fields absent from the stored payload keep whatever the
-			// TOML+env layers already put there. Without this, a row
-			// written by an older build that predates a field (e.g. pre-#93
-			// save lacks blocked_labels) would silently zero-out the
-			// env-supplied value on every reload.
-			if err := json.Unmarshal([]byte(raw), &shadow.GitHub.IssueTracking); err != nil {
-				return fmt.Errorf("config: apply store key %q: %w", key, err)
-			}
 		case "agent_configs":
 			// Per-CLI agent overrides written by the Flutter Agents tab
 			// (PUT /config). Each named CLI gets a partial JSON object;
@@ -347,7 +334,6 @@ func cloneStoreMergeConfig(c *Config) Config {
 	shadow := *c
 	shadow.GitHub.Repositories = cloneStrings(c.GitHub.Repositories)
 	shadow.GitHub.NonMonitored = cloneStrings(c.GitHub.NonMonitored)
-	shadow.GitHub.IssueTracking = cloneIssueTrackingConfig(c.GitHub.IssueTracking)
 	if c.AI.Agents != nil {
 		shadow.AI.Agents = make(map[string]CLIAgentConfig, len(c.AI.Agents))
 		for cli, agent := range c.AI.Agents {
@@ -355,18 +341,6 @@ func cloneStoreMergeConfig(c *Config) Config {
 		}
 	}
 	return shadow
-}
-
-func cloneIssueTrackingConfig(in IssueTrackingConfig) IssueTrackingConfig {
-	out := in
-	out.Organizations = cloneStrings(in.Organizations)
-	out.Assignees = cloneStrings(in.Assignees)
-	out.DevelopLabels = cloneStrings(in.DevelopLabels)
-	out.RefinementLabels = cloneStrings(in.RefinementLabels)
-	out.ReviewOnlyLabels = cloneStrings(in.ReviewOnlyLabels)
-	out.SkipLabels = cloneStrings(in.SkipLabels)
-	out.BlockedLabels = cloneStrings(in.BlockedLabels)
-	return out
 }
 
 func cloneStrings(in []string) []string {

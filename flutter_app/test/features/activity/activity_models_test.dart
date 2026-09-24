@@ -58,7 +58,7 @@ void main() {
       expect(e.outcome, 'draft');
     });
 
-    test('parses refinement action', () {
+    test('legacy issue-pipeline actions parse as unknown', () {
       final e = ActivityEntry.fromJson({
         'id': 1,
         'ts': '2026-04-20T09:34:12+02:00',
@@ -71,7 +71,7 @@ void main() {
         'outcome': 'completed',
         'details': {'post_ok': true},
       });
-      expect(e.action, ActivityAction.refinement);
+      expect(e.action, ActivityAction.unknown);
       expect(e.outcome, 'completed');
     });
 
@@ -152,15 +152,14 @@ void main() {
       const q = ActivityQuery(
         orgs: {'a', 'b'},
         repos: {'a/x'},
-        itemTypes: {'pr'},
-        actions: {ActivityAction.reviewSkipped, ActivityAction.triage},
+        actions: {ActivityAction.reviewSkipped, ActivityAction.error},
         outcomes: {'draft'},
       );
       final p = q.toQueryParameters();
       expect(p['org']!.toSet(), {'a', 'b'});
       expect(p['repo'], ['a/x']);
-      expect(p['item_type'], ['pr']);
-      expect(p['action']!.toSet(), {'review_skipped', 'triage'});
+      expect(p.containsKey('item_type'), isFalse);
+      expect(p['action']!.toSet(), {'review_skipped', 'error'});
       expect(p['outcome'], ['draft']);
     });
 

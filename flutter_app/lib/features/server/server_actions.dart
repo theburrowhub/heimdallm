@@ -8,7 +8,6 @@ import '../../shared/widgets/toast.dart';
 import '../activity/activity_providers.dart';
 import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
-import '../issues/issues_providers.dart';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -261,7 +260,6 @@ void _invalidateDashboardData(WidgetRef ref) {
   ref.invalidate(sseStreamProvider);
   ref.invalidate(daemonHealthProvider);
   ref.invalidate(prsByInstanceProvider);
-  ref.invalidate(issuesByInstanceProvider);
   ref.invalidate(statsProvider);
   ref.invalidate(githubRateLimitProvider);
   ref.invalidate(activityEntriesProvider);

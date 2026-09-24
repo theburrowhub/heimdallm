@@ -23,42 +23,13 @@ repositories = ["org/repo1", "org/repo2"]
 # Each {base}/{repo-name} is checked in order. Supports multiple workspace groups.
 # local_dir_base = ["/repos/ai-platform-workspace/workspace", "/repos"]
 
-# Issue tracking pipeline (fase-2).
-# When enabled, the daemon fetches open issues from the monitored repos,
-# classifies them by label, and — depending on the mode — posts an AI
-# review comment (review_only) or opens an implementation PR
-# (auto_implement). Label classification precedence:
-#
-#   skip_labels  >  blocked_labels  >  review_only_labels  >  refinement_labels  >  develop_labels  >  default_action
-#
-# [github.issue_tracking]
-# enabled             = false
-# filter_mode         = "exclusive"              # "exclusive" (AND) | "inclusive" (OR)
-# default_action      = "ignore"                 # "ignore" | "review_only"
-# organizations       = ["your-org"]             # empty = any org in repositories
-# assignees           = ["your-username"]        # empty defaults to authenticated GitHub login
-# develop_labels      = ["enhancement", "feature", "bug"]
-# refinement_labels   = ["refine", "needs-plan"]
-# review_only_labels  = ["question", "discussion", "analysis"]
-# skip_labels         = ["wontfix", "duplicate", "invalid"]
-
 [ai]
 # Available: claude, gemini, codex, opencode
 primary = "claude"
 # fallback = "gemini"
 review_mode = "single"   # "single" or "multi"
 # execution_timeout = "30m"   # default: 20m; exceptional override for unusually long runs
-# refinement_timeout = "30m"  # deep issue refinement
-# triage_owner = "muriano"
 # clone_dir = "/repos/worktrees"
-# auto_promote_triage = true
-# auto_promote_refinement = false
-
-# When true, auto_implement PRs get an LLM-generated title and description
-# instead of the default template. A second (cheap) LLM call analyses the
-# implementation diff and produces a conventional-commit title, summary,
-# change list, and test plan.
-# generate_pr_description = false
 
 # When true, a review that finds ANY issue is posted as a COMMENT instead of an
 # APPROVE (high-severity reviews still REQUEST_CHANGES; a clean review still
@@ -93,54 +64,19 @@ review_mode = "single"   # "single" or "multi"
 # [ai.agents.opencode]
 # model = "anthropic/claude-sonnet-4"
 
-# Global PR creation metadata defaults (used by auto_implement when per-repo/org is not set)
-# Resolution priority: per-repo > per-org > global defaults
-# Each field resolves independently.
-# pr_reviewers = ["muriano", "ivanmunozruiz", "vbuenog"]
-# pr_labels = ["auto-generated"]
-# pr_assignee = "sergiotejon"
-# pr_draft = false
-
-# Alternative: nested section (flat fields above take precedence when both are set)
-# [ai.pr_metadata]
-# reviewers = ["muriano", "ivanmunozruiz"]
-# labels = ["auto-generated", "heimdallm"]
-# assignee = "sergiotejon"
-# draft = false
-
 # Per-org overrides (optional)
 # Applied to all repos in the org unless overridden per-repo.
-# Omit fields to inherit. Empty arrays such as pr_reviewers = [] explicitly
-# clear inherited lists; enabled = false explicitly disables issue tracking.
+# Omit fields to inherit.
 # [ai.orgs."freepik-company"]
 # primary = "gemini"
 # fallback = "claude"
 # review_mode = "multi"
 # prompt = "org-pr-review-profile"
-# issue_prompt = "org-issue-triage-profile"
-# implement_prompt = "org-implementation-profile"
-# refinement_timeout = "30m"
-# triage_owner = "muriano"
 # clone_dir = "/repos/freepik-worktrees"
-# auto_promote_triage = true
-# auto_promote_refinement = false
-# generate_pr_description = true
-# pr_reviewers = ["muriano", "ivanmunozruiz"]
-# pr_labels = ["auto-generated", "ai-platform"]
-# pr_assignee = "sergiotejon"
-# pr_draft = false
-#
-# [ai.orgs."freepik-company".issue_tracking]
-# enabled = true
-# develop_labels = ["heimdallm-develop"]
-# refinement_labels = ["heimdallm-refine"]
-# review_only_labels = ["heimdallm-triage"]
-# skip_labels = ["wontfix"]
+# never_approve_with_issues = true
 
 # [ai.orgs."theburrowhub"]
 # primary = "codex"
-# pr_reviewers = ["muriano", "ivanmunozruiz", "vbuenog"]
-# pr_labels = ["auto-generated"]
 
 # Per-repo AI overrides (optional)
 # [ai.repos."org/repo1"]
@@ -148,17 +84,12 @@ review_mode = "single"   # "single" or "multi"
 # review_mode = "multi"
 # local_dir = "/repos/repo1"    # mount from host via docker-compose volumes
 # prompt          = "pr-review-agent-id"    # Agent profile for PR reviews
-# issue_prompt    = "issue-triage-agent-id" # Agent profile for issue triage
-# implement_prompt = "impl-agent-id"        # Agent profile for auto_implement code-generation prompt
-# pr_reviewers = ["reviewer1"]  # override org/global for this repo
-# pr_assignee = "assignee1"
-# pr_labels = ["team-x"]
-# pr_draft = false
+# never_approve_min_severity = "medium"
 
 # ── Merge tracking ────────────────────────────────────────────────────────────
 # Watches the PRs you authored or are assigned to and reports exactly what is
 # blocking each merge. Every automation is off by default; omitting this whole
-# section is a full no-op. See §16 of docs/configuration-guide.md.
+# section is a full no-op. See §13 of docs/configuration-guide.md.
 #
 # [merge_tracking]
 # enabled           = true    # report only — no writes to any repository

@@ -4,7 +4,6 @@ import '../models/activity.dart';
 import '../models/merge_tracking.dart';
 import '../models/pr.dart';
 import '../models/review.dart';
-import '../models/tracked_issue.dart';
 import '../platform/platform_services.dart';
 import 'daemon_endpoint.dart';
 
@@ -754,7 +753,7 @@ class ApiClient {
 
   /// Resets a per-repo override field back to the global default by
   /// removing it from the TOML file. [fieldPath] uses "/" for nested
-  /// fields (e.g. "issue_tracking/develop_labels"). Returns the full
+  /// fields (e.g. "circuit_breaker/per_pr_24h"). Returns the full
   /// config after the deletion.
   Future<Map<String, dynamic>> deleteRepoField(
     String repo,
@@ -790,121 +789,6 @@ class ApiClient {
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }
 
-  // ── Repo metadata (autocomplete) ─────────────────────────────────────
-
-  Future<List<String>> fetchRepoLabels(String repo) async {
-    final resp = await _client.get(
-      _uri('/repos/${Uri.encodeComponent(repo)}/labels'),
-      headers: await _authHeaders(),
-    );
-    if (resp.statusCode != 200) return [];
-    return (jsonDecode(resp.body) as List<dynamic>).cast<String>();
-  }
-
-  Future<List<String>> fetchRepoCollaborators(String repo) async {
-    final resp = await _client.get(
-      _uri('/repos/${Uri.encodeComponent(repo)}/collaborators'),
-      headers: await _authHeaders(),
-    );
-    if (resp.statusCode != 200) return [];
-    return (jsonDecode(resp.body) as List<dynamic>).cast<String>();
-  }
-
-  // ── Issues ────────────────────────────────────────────────────────────
-
-  Future<List<TrackedIssue>> fetchIssues({
-    List<String> states = const [],
-  }) async {
-    var path = '/issues';
-    if (states.isNotEmpty) {
-      path += '?state=${states.join(',')}';
-    }
-    final resp = await _client.get(_uri(path), headers: await _authHeaders());
-    if (resp.statusCode != 200) {
-      throw ApiException('GET /issues failed: ${resp.statusCode}');
-    }
-    final list = jsonDecode(resp.body) as List<dynamic>;
-    return list
-        .map(
-          (e) =>
-              TrackedIssue.fromJson(_parseIssueMap(e as Map<String, dynamic>)),
-        )
-        .toList();
-  }
-
-  Future<Map<String, dynamic>> fetchIssue(int id) async {
-    final resp = await _client.get(
-      _uri('/issues/$id'),
-      headers: await _authHeaders(),
-    );
-    if (resp.statusCode != 200) {
-      throw ApiException('GET /issues/$id failed: ${resp.statusCode}');
-    }
-    final body = jsonDecode(resp.body) as Map<String, dynamic>;
-    final issue = TrackedIssue.fromJson(
-      _parseIssueMap(body['issue'] as Map<String, dynamic>),
-    );
-    final reviewsRaw = body['reviews'] as List<dynamic>? ?? [];
-    final reviews = reviewsRaw
-        .map(
-          (r) => TrackedIssueReview.fromJson(
-            _parseIssueReviewMap(r as Map<String, dynamic>),
-          ),
-        )
-        .toList();
-    return {'issue': issue, 'reviews': reviews};
-  }
-
-  Future<void> triggerIssueReview(int issueId) async {
-    final resp = await _client.post(
-      _uri('/issues/$issueId/review'),
-      headers: await _authHeaders(),
-    );
-    if (resp.statusCode != 202) {
-      throw ApiException(
-        'POST /issues/$issueId/review failed: ${resp.statusCode}',
-      );
-    }
-  }
-
-  /// Moves an issue to the next configured stage by updating GitHub labels.
-  /// The daemon poller executes the new stage after it observes the label swap.
-  Future<void> promoteIssue(int issueId) async {
-    final resp = await _client.post(
-      _uri('/issues/$issueId/promote'),
-      headers: await _authHeaders(),
-    );
-    if (resp.statusCode != 202) {
-      throw ApiException(
-        'POST /issues/$issueId/promote failed: ${resp.statusCode}',
-      );
-    }
-  }
-
-  Future<void> dismissIssue(int issueId) async {
-    final resp = await _client.post(
-      _uri('/issues/$issueId/dismiss'),
-      headers: await _authHeaders(),
-    );
-    if (resp.statusCode != 200) {
-      throw ApiException(
-        'POST /issues/$issueId/dismiss failed: ${resp.statusCode}',
-      );
-    }
-  }
-
-  Future<void> undismissIssue(int issueId) async {
-    final resp = await _client.post(
-      _uri('/issues/$issueId/undismiss'),
-      headers: await _authHeaders(),
-    );
-    if (resp.statusCode != 200) {
-      throw ApiException(
-        'POST /issues/$issueId/undismiss failed: ${resp.statusCode}',
-      );
-    }
-  }
-
   PR _parsePRWithReview(Map<String, dynamic> json) {
     if (json['latest_review'] != null) {
       json = Map.from(json);
@@ -925,29 +809,6 @@ class ApiClient {
       result['issues'] = jsonDecode(result['issues'] as String);
     }
     result['issues'] ??= <dynamic>[];
-    return result;
-  }
-
-  Map<String, dynamic> _parseIssueMap(Map<String, dynamic> json) {
-    final result = Map<String, dynamic>.from(json);
-    if (result['latest_review'] != null) {
-      result['latest_review'] = _parseIssueReviewMap(
-        result['latest_review'] as Map<String, dynamic>,
-      );
-    }
-    return result;
-  }
-
-  Map<String, dynamic> _parseIssueReviewMap(Map<String, dynamic> json) {
-    final result = Map<String, dynamic>.from(json);
-    if (result['triage'] is String) {
-      result['triage'] = jsonDecode(result['triage'] as String);
-    }
-    if (result['next_steps'] is String) {
-      result['next_steps'] = jsonDecode(result['next_steps'] as String);
-    }
-    result['triage'] ??= <String, dynamic>{};
-    result['next_steps'] ??= <dynamic>[];
     return result;
   }
 }

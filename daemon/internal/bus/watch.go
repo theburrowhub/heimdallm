@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS watch_state (
 );
 `
 
-// WatchEntry represents a monitored PR or issue tracked in the watch_state table.
+// WatchEntry represents a monitored PR tracked in the watch_state table.
 type WatchEntry struct {
 	Type      string    `json:"type"`
 	Repo      string    `json:"repo"`

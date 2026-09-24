@@ -160,9 +160,9 @@ propagation. Three rules when touching it:
    inside it, so a fresh `NewRouter` on every call resets the rotation and sends
    every operation to the first instance in the pool. Update it in place via
    `Router.Update` on config reload. `server.ClusterSnapshot` documents this.
-3. **The ownership filter belongs at the three existing choke points** — the
-   Tier 2 PR loop, `tier2Adapter.ProcessRepo`, and `monitoredReposFn` (which
-   feeds both merge tracking and the autonomous runner). Discovery deliberately
+3. **The ownership filter belongs at the two existing choke points** — the
+   Tier 2 PR loop (`tier2Adapter.FetchPRsToReview`) and `monitoredReposFn`
+   (which feeds merge tracking). Discovery deliberately
    stays global: every instance learns about every repo so the UI shows the
    whole estate; only acting is narrowed.
 

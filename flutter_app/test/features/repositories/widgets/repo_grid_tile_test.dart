@@ -21,10 +21,9 @@ void main() {
     aiFallback: '',
     reviewMode: 'single',
     repoConfigs: {'a/repo': RepoConfig(prEnabled: true)},
-    issueTracking: IssueTrackingConfig(),
   );
 
-  testWidgets('shows repo name, org subtitle, 3 LEDs', (tester) async {
+  testWidgets('shows repo name, org subtitle, 2 LEDs', (tester) async {
     await tester.pumpWidget(
       _host(
         RepoGridTile(
@@ -40,7 +39,7 @@ void main() {
     );
     expect(find.text('repo'), findsOneWidget);
     expect(find.text('a'), findsOneWidget);
-    expect(find.byType(FeatureLed), findsNWidgets(4));
+    expect(find.byType(FeatureLed), findsNWidgets(2));
   });
 
   testWidgets('tapping tile (outside checkbox) calls onTap', (tester) async {

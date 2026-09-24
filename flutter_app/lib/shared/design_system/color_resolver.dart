@@ -32,12 +32,6 @@ Color resolveAppColor(BuildContext context, ColorToken token) {
     if (identical(token, AppColors.featurePrReview)) {
       return const Color(0xFF58A6FF);
     }
-    if (identical(token, AppColors.featureIssueTracking)) {
-      return const Color(0xFFA371F7);
-    }
-    if (identical(token, AppColors.featureDevelop)) {
-      return const Color(0xFFC79A87);
-    }
     if (identical(token, AppColors.featureMergeTracking)) {
       return const Color(0xFF3FB950);
     }

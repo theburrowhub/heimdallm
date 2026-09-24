@@ -40,13 +40,12 @@ class FeatureLed extends StatelessWidget {
   }
 
   static String _description(Feature f, bool on) => switch ((f, on)) {
-        (Feature.prReview, true)       => 'The daemon auto-reviews PRs in this repo.',
-        (Feature.prReview, false)      => 'The daemon will not auto-review PRs in this repo.',
-        (Feature.issueTracking, true)  => 'The daemon triages new issues in this repo.',
-        (Feature.issueTracking, false) => 'The daemon ignores new issues in this repo.',
-        (Feature.develop, true)        => 'The daemon can auto-implement issues in this repo.',
-        (Feature.develop, false)       => 'The daemon cannot auto-implement issues in this repo.',
-        (Feature.mergeTracking, true)  => 'The daemon tracks your own PRs in this repo and reports what blocks each merge.',
-        (Feature.mergeTracking, false) => 'The daemon does not track your own PRs in this repo.',
-      };
+    (Feature.prReview, true) => 'The daemon auto-reviews PRs in this repo.',
+    (Feature.prReview, false) =>
+      'The daemon will not auto-review PRs in this repo.',
+    (Feature.mergeTracking, true) =>
+      'The daemon tracks your own PRs in this repo and reports what blocks each merge.',
+    (Feature.mergeTracking, false) =>
+      'The daemon does not track your own PRs in this repo.',
+  };
 }

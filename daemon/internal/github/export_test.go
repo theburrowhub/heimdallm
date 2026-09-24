@@ -17,3 +17,11 @@ func (c *Client) DoGETForTest(path, accept string) (*http.Response, error) {
 func (c *Client) DoDELETEForTest(path, accept string) (*http.Response, error) {
 	return c.do("DELETE", path, accept)
 }
+
+// GraphQLForTest runs a query through the internal graphQL() helper so tests
+// can pin the transport behaviour (gates, breaker, rate observer, errors
+// envelope) independently of any one query built on top of it.
+func (c *Client) GraphQLForTest(query string) error {
+	var out map[string]any
+	return c.graphQL(query, nil, &out)
+}

@@ -20,7 +20,7 @@ func TestStopProducersThenAgentsCancelsProducersFirst(t *testing.T) {
 		return func() { order = append(order, name) }
 	}
 	stopProducersThenAgents(
-		[]context.CancelFunc{producer("worker"), producer("triage"), producer("state")},
+		[]context.CancelFunc{producer("worker"), producer("publish"), producer("state")},
 		func() { order = append(order, "sweep") },
 		0,
 	)
@@ -29,7 +29,7 @@ func TestStopProducersThenAgentsCancelsProducersFirst(t *testing.T) {
 	// One that is already past its context check and about to call cmd.Start()
 	// would start an execution the first sweep has snapshotted past, so a second
 	// pass after a settle delay is what catches it.
-	want := []string{"worker", "triage", "state", "sweep", "sweep"}
+	want := []string{"worker", "publish", "state", "sweep", "sweep"}
 	if len(order) != len(want) {
 		t.Fatalf("order = %v, want %v", order, want)
 	}

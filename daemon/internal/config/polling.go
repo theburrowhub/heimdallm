@@ -11,27 +11,11 @@ import (
 // rate-limit safety, and feature kill-switches for the GitHub API efficiency
 // feature (C5). Fields are all optional; applyPollingDefaults fills safe values
 // that reproduce the existing daemon behaviour when the section is absent.
-//
-// Adaptive scheduling (PollInterval → MinInterval / MaxInterval backoff) is
-// reserved for a separate task; the fields exist here so the config schema is
-// stable before the engine lands.
 type PollingConfig struct {
-	// PollInterval is the base Tier 2 (per-repo PR/issue) poll cadence.
+	// PollInterval is the base Tier 2 (per-repo PR) poll cadence.
 	// Empty string inherits from [github].poll_interval. Accepts any
 	// Go time.ParseDuration value (e.g. "5m", "1m30s").
 	PollInterval string `toml:"poll_interval"`
-
-	// MinInterval is the adaptive lower bound. The adaptive engine (separate
-	// task) will never schedule a tick faster than this. Default "1m".
-	MinInterval string `toml:"min_interval"`
-
-	// MaxInterval is the adaptive upper bound. The adaptive engine will never
-	// back off slower than this. Default "15m".
-	MaxInterval string `toml:"max_interval"`
-
-	// Adaptive enables the adaptive back-off engine (separate task). Default
-	// false — opt-in only. When false, MinInterval/MaxInterval are ignored.
-	Adaptive bool `toml:"adaptive"`
 
 	// DiscoveryInterval controls Tier 1 (topic-based repo discovery) cadence.
 	// Default "5m" — matches the current hardcoded value in startPollers.
@@ -57,17 +41,11 @@ type PollingConfig struct {
 	// full 200 responses on every GET — useful when debugging or when the
 	// upstream server doesn't honour ETags correctly.
 	UseETag *bool `toml:"use_etag,omitempty"`
-
-	// UseGraphQL is reserved for Phase 3 (GraphQL-based polling). Defaults to
-	// false. Set to true once the GraphQL engine is ready to enable it.
-	UseGraphQL *bool `toml:"use_graphql,omitempty"`
 }
 
 // Default values for [polling] — centralised so applyPollingDefaults and the
 // Resolved* helpers can't drift.
 const (
-	DefaultPollingMinInterval              = "1m"
-	DefaultPollingMaxInterval              = "15m"
 	DefaultPollingDiscoveryInterval        = "5m"
 	DefaultPollingTier3Interval            = "30s"
 	DefaultPollingRateLimitSafetyThreshold = 100
@@ -77,12 +55,6 @@ const (
 // applyDefaults so the section is always fully populated after Load/LoadOrCreate.
 func (c *Config) applyPollingDefaults() {
 	p := &c.Polling
-	if p.MinInterval == "" {
-		p.MinInterval = DefaultPollingMinInterval
-	}
-	if p.MaxInterval == "" {
-		p.MaxInterval = DefaultPollingMaxInterval
-	}
 	if p.DiscoveryInterval == "" {
 		p.DiscoveryInterval = DefaultPollingDiscoveryInterval
 	}
@@ -96,12 +68,7 @@ func (c *Config) applyPollingDefaults() {
 		v := true
 		p.UseETag = &v
 	}
-	if p.UseGraphQL == nil {
-		v := false
-		p.UseGraphQL = &v
-	}
 	// PollInterval: left as-is (empty = inherit from [github].poll_interval).
-	// Adaptive: left as-is (false = opt-in).
 }
 
 // parseDurationWithFallback parses s as a Go duration. Returns fallback when s
@@ -151,8 +118,6 @@ var pollingDurationBounds = []struct {
 	min, max time.Duration
 }{
 	{"poll_interval", func(p PollingConfig) string { return p.PollInterval }, minPollInterval, maxPollInterval},
-	{"min_interval", func(p PollingConfig) string { return p.MinInterval }, minPollInterval, maxPollInterval},
-	{"max_interval", func(p PollingConfig) string { return p.MaxInterval }, minPollInterval, maxPollInterval},
 	{"discovery_interval", func(p PollingConfig) string { return p.DiscoveryInterval }, minPollInterval, maxPollInterval},
 	{"tier3_interval", func(p PollingConfig) string { return p.Tier3Interval }, time.Second, time.Hour},
 }
@@ -183,9 +148,6 @@ func (c *Config) ValidatePolling() error {
 		return fmt.Errorf("polling.rate_limit_safety_threshold %d must not be negative",
 			c.Polling.RateLimitSafetyThreshold)
 	}
-	if min, max := c.ResolvedMinInterval(), c.ResolvedMaxInterval(); min > max {
-		return fmt.Errorf("polling.min_interval (%s) must not exceed polling.max_interval (%s)", min, max)
-	}
 	return nil
 }
 
@@ -201,16 +163,6 @@ func (c *Config) ResolvedPollInterval() time.Duration {
 	}
 	// Fall back to [github].poll_interval → 5 min default.
 	return parseDurationWithFallback(c.GitHub.PollInterval, 5*time.Minute)
-}
-
-// ResolvedMinInterval returns the adaptive lower bound for the poll interval.
-func (c *Config) ResolvedMinInterval() time.Duration {
-	return parseDurationWithFallback(c.Polling.MinInterval, time.Minute)
-}
-
-// ResolvedMaxInterval returns the adaptive upper bound for the poll interval.
-func (c *Config) ResolvedMaxInterval() time.Duration {
-	return parseDurationWithFallback(c.Polling.MaxInterval, 15*time.Minute)
 }
 
 // ResolvedDiscoveryInterval returns the Tier 1 discovery cadence.
@@ -230,13 +182,4 @@ func (c *Config) ETagEnabled() bool {
 		return true
 	}
 	return *c.Polling.UseETag
-}
-
-// GraphQLEnabled reports whether GraphQL-based polling is active.
-// Returns false unless UseGraphQL is explicitly set to true.
-func (c *Config) GraphQLEnabled() bool {
-	if c.Polling.UseGraphQL == nil {
-		return false
-	}
-	return *c.Polling.UseGraphQL
 }

@@ -156,9 +156,9 @@ func TestRunTier2PRSearchConsumesOneSearchPermitWithoutExtraCorePermit(t *testin
 	go func() {
 		defer close(done)
 		runTier2(
-			ctx, adapter, limiter, publisher, broker,
+			ctx, adapter, publisher, broker,
 			func() []string { return []string{"org/repo"} },
-			nil, nil, nil, reposCh, time.Hour, true, nil,
+			reposCh, time.Hour, true, nil,
 		)
 	}()
 	defer func() {

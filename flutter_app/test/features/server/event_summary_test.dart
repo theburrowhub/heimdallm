@@ -54,21 +54,6 @@ void main() {
       expect(ev.details.first, endsWith('…'));
     });
 
-    test('issue_promoted spells out the stage transition', () {
-      final ev = format('issue_promoted', {
-        'repo': 'acme/foo',
-        'number': 7,
-        'from_stage': 'triage',
-        'to_stage': 'refinement',
-        'trigger': 'auto-promote',
-      });
-      expect(ev.label, 'Stage promoted');
-      expect(ev.target, 'acme/foo#7');
-      expect(ev.details, contains('triage → refinement'));
-      expect(ev.details, contains('auto-promote'));
-      expect(ev.status, EventStatus.warning);
-    });
-
     test('polling_started includes kind and repo count', () {
       final ev = format('polling_started', {
         'kind': 'prs',
@@ -82,12 +67,12 @@ void main() {
 
     test('polling_completed includes kind, count, and duration', () {
       final ev = format('polling_completed', {
-        'kind': 'issues',
+        'kind': 'prs',
         'count': 5,
         'duration_ms': 800,
       });
       expect(ev.label, 'Polling completed');
-      expect(ev.details, contains('issues'));
+      expect(ev.details, contains('prs'));
       expect(ev.details, contains('5 items'));
       expect(ev.details, contains('800ms'));
       expect(ev.status, EventStatus.succeeded);
@@ -118,17 +103,6 @@ void main() {
       });
       expect(ev.label, 'PR state changed');
       expect(ev.details, contains('open → closed'));
-    });
-
-    test('issue_review_started maps to Triage started label', () {
-      // The fetcher publishes review_only as "Triage" in the staged
-      // pipeline language — keep the label aligned with how operators
-      // refer to the stage in the docs and the issue tracking UI.
-      final ev = format('issue_review_started', {
-        'repo': 'acme/foo',
-        'number': 7,
-      });
-      expect(ev.label, 'Triage started');
     });
 
     test('unknown event type degrades gracefully to its raw type', () {

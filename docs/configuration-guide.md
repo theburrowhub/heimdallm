@@ -11,20 +11,17 @@ Full reference for all settings, environment variables, and deployment options.
 3. [Repository Monitoring](#3-repository-monitoring)
 4. [Local Directory Resolution](#4-local-directory-resolution)
 5. [PR Review Pipeline](#5-pr-review-pipeline)
-6. [Issue Tracking](#6-issue-tracking)
-7. [AI Agents](#7-ai-agents)
-8. [PR Creation Metadata](#8-pr-creation-metadata)
-9. [Authentication](#9-authentication)
-10. [Docker Deployment](#10-docker-deployment)
-11. [Retention](#11-retention)
-12. [CLI](#12-cli)
-13. [Distribution Formats](#13-distribution-formats)
-14. [Circuit Breakers](#14-circuit-breakers)
-15. [Autonomous Mode](#15-autonomous-mode)
-16. [Merge Tracking](#16-merge-tracking)
-17. [Polling](#17-polling)
-18. [Multiple Instances](#18-multiple-instances)
-19. [Full config.toml Reference](#19-full-configtoml-reference)
+6. [AI Agents](#6-ai-agents)
+7. [Authentication](#7-authentication)
+8. [Docker Deployment](#8-docker-deployment)
+9. [Retention](#9-retention)
+10. [CLI](#10-cli)
+11. [Distribution Formats](#11-distribution-formats)
+12. [Circuit Breakers](#12-circuit-breakers)
+13. [Merge Tracking](#13-merge-tracking)
+14. [Polling](#14-polling)
+15. [Multiple Instances](#15-multiple-instances)
+16. [Full config.toml Reference](#16-full-configtoml-reference)
 
 ---
 
@@ -67,7 +64,7 @@ bind_addr = "0.0.0.0"   # every interface; the default is 127.0.0.1
 | TOML field | Env var | Default | Description |
 |---|---|---|---|
 | `port` | `HEIMDALLM_PORT` | `7842` | TCP port the daemon listens on |
-| `bind_addr` | `HEIMDALLM_BIND_ADDR` | `127.0.0.1` | Interface to bind. Loopback by default, so nothing on the network can reach the daemon until this is widened — set `0.0.0.0` for every interface, or one routable address. §18.8 covers what this means for a cluster |
+| `bind_addr` | `HEIMDALLM_BIND_ADDR` | `127.0.0.1` | Interface to bind. Loopback by default, so nothing on the network can reach the daemon until this is widened — set `0.0.0.0` for every interface, or one routable address. §15.8 covers what this means for a cluster |
 
 The daemon exposes a health endpoint at `GET /health` — returns `{"status":"ok"}` when running. Docker Compose uses this for its `healthcheck`.
 
@@ -169,7 +166,7 @@ poll_interval = "5m"
 
 When a repository or its parent organisation is renamed on GitHub, Heimdallm needs to flip every record keyed on the old slug — otherwise rows for the OLD slug keep accumulating in the store while new poll data lands under the NEW slug, per-repo `[ai.repos."old/name"]` overrides stop applying, and stale working dirs linger on disk.
 
-A low-frequency probe queries GitHub for each monitored repo's canonical `full_name` and dispatches a reconciler when it differs. The reconciler runs the rename through a single SQLite transaction (`prs`, `issues`, `activity_log`, `watch_state`, plus an audit row in `repo_renames`), rewrites the config TOML (including `[ai.repos."<old>"]` and `[ai.orgs."<old-org>"]` when the org changed), purges the old worktree so the next acquire clones fresh, and emits an `repo_renamed` SSE event for the dashboard.
+A low-frequency probe queries GitHub for each monitored repo's canonical `full_name` and dispatches a reconciler when it differs. The reconciler runs the rename through a single SQLite transaction (`prs`, `activity_log`, `watch_state`, plus an audit row in `repo_renames`), rewrites the config TOML (including `[ai.repos."<old>"]` and `[ai.orgs."<old-org>"]` when the org changed), purges the old worktree so the next acquire clones fresh, and emits an `repo_renamed` SSE event for the dashboard.
 
 ```toml
 [ai]
@@ -302,243 +299,11 @@ HEIMDALLM_EXECUTION_TIMEOUT=30m   # optional exceptional override; default: 20m
 execution_timeout = "30m"
 ```
 
-The per-agent override takes precedence when set (see [AI Agents](#7-ai-agents)).
+The per-agent override takes precedence when set (see [AI Agents](#6-ai-agents)).
 
 ---
 
-## 6. Issue Tracking
-
-The issue tracking pipeline fetches open GitHub issues from monitored repos, classifies them by label, and moves them through the stage sequence `triage` (`review_only`) -> `refinement` -> `development` (`develop` / `auto_implement`).
-
-### Enabling
-
-```bash
-# docker/.env
-HEIMDALLM_ISSUE_TRACKING_ENABLED=true
-```
-
-```toml
-[github.issue_tracking]
-enabled = true
-```
-
-### Filter mode
-
-Controls how the `organizations` and `assignees` filters combine:
-
-| Value | Behaviour |
-|---|---|
-| `exclusive` | Issue must match **all** configured filters (AND) |
-| `inclusive` | Issue must match **any** configured filter (OR) |
-
-```bash
-HEIMDALLM_ISSUE_FILTER_MODE=exclusive
-```
-
-```toml
-filter_mode = "exclusive"
-```
-
-### Label classification
-
-Labels are matched case-insensitively. Precedence from highest to lowest:
-
-```
-skip_labels  >  blocked_labels  >  review_only_labels  >  refinement_labels  >  develop_labels  >  default_action
-```
-
-| Field | Env var | Description |
-|---|---|---|
-| `skip_labels` | `HEIMDALLM_ISSUE_SKIP_LABELS` | Issues with these labels are ignored entirely |
-| `blocked_labels` | `HEIMDALLM_ISSUE_BLOCKED_LABELS` | Issues held until all dependencies close, then promoted |
-| `review_only_labels` | `HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS` | AI posts a triage comment, no implementation |
-| `refinement_labels` | `HEIMDALLM_ISSUE_REFINEMENT_LABELS` | AI reads the repo and posts a structured implementation plan |
-| `develop_labels` | `HEIMDALLM_ISSUE_DEVELOP_LABELS` | AI implements the issue (branch + commit + PR) |
-| `default_action` | `HEIMDALLM_ISSUE_DEFAULT_ACTION` | Applied when no label matches; `ignore` or `review_only` |
-
-```bash
-HEIMDALLM_ISSUE_DEVELOP_LABELS=enhancement,feature,bug
-HEIMDALLM_ISSUE_REFINEMENT_LABELS=needs-plan
-HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS=question,discussion,analysis
-HEIMDALLM_ISSUE_SKIP_LABELS=wontfix,duplicate,invalid
-HEIMDALLM_ISSUE_DEFAULT_ACTION=ignore
-```
-
-```toml
-[github.issue_tracking]
-develop_labels     = ["enhancement", "feature", "bug"]
-refinement_labels  = ["needs-plan"]
-review_only_labels = ["question", "discussion", "analysis"]
-skip_labels        = ["wontfix", "duplicate", "invalid"]
-default_action     = "ignore"
-```
-
-### Stage promotion
-
-Promotion changes only GitHub labels; the next poll cycle executes the newly visible stage. This keeps manual API/UI/CLI promotion, auto-promotion, and manual label swaps on GitHub on the same path.
-
-| From | To | Trigger |
-|---|---|---|
-| `triage` / `review_only` | `refinement` | Manual Promote, `auto_promote_triage = true`, or replacing the label on GitHub |
-| `refinement` | `development` | Manual Promote, `auto_promote_refinement = true`, or replacing the label on GitHub |
-
-Manual promotion from triage falls back to `develop_labels` only for legacy configs that have no `refinement_labels`. Auto-promotion does not skip stages: when `auto_promote_triage` is unset, it defaults on only if `refinement_labels` is configured; when `auto_promote_refinement` is unset, it defaults on only if `develop_labels` is configured. If an auto-promote flag is `true` but the target label is not configured, the daemon logs a warning and leaves the issue in its current stage.
-
-```toml
-[ai]
-auto_promote_triage = true       # unset = true only when refinement_labels is configured
-auto_promote_refinement = true   # unset = true only when develop_labels is configured
-```
-
-> **Warning — `default_action = "review_only"` can cause re-processing loops and excessive API costs.**
->
-> When `default_action` is set to `review_only`, **any issue that passes scope filters but does not match any label list** will be triaged by the AI on every poll cycle. The triage posts a comment, which bumps the issue's `updated_at` timestamp on GitHub, which in turn causes the daemon to consider the issue "updated" on the next cycle — creating an infinite loop.
->
-> **Recommended:** Set `default_action = "ignore"` and use **explicit labels** to control which issues are processed:
->
-> | Label | Action |
-> |---|---|
-> | A dedicated develop label (e.g. `heimdallm-develop`) | Auto-implement: creates branch + PR |
-> | A dedicated refinement label (e.g. `heimdallm-refine`) | Deep planning: AI reads the repo and posts subtasks |
-> | A dedicated triage label (e.g. `heimdallm-triage`) | Review only: AI analyses and comments once |
-> | No matching label | Ignored (safe default) |
->
-> This ensures issues are only processed when you explicitly opt them in, preventing runaway costs from repeated AI invocations. Using generic labels like `bug` or `enhancement` in `develop_labels` or `review_only_labels` is discouraged because these are commonly assigned to many issues and can trigger unintended mass processing.
->
-> **Tier 2 polling concurrency (`ai.tier2_repo_concurrency`)**
->
-> Per-repo issue polling inside a single Tier 2 issue tick runs in parallel up to `ai.tier2_repo_concurrency` repos at a time (default `5`). The GitHub API rate limiter still throttles network usage; this knob controls wall-clock parallelism. Set higher on a fast network with many monitored repos; set to `1` to force the legacy sequential behaviour. PR fetch and issue processing also run on independent tickers — each tier has its own goroutine with its own `time.Ticker`, and a `time.Ticker` drops redundant ticks when the previous run is still in flight. So a slow issue cycle never delays PR detection, and one tier never blocks the other even if its run exceeds `poll_interval`.
->
-> Newly auto-discovered repos are reviewed in the **same poll cycle**. The daemon publishes and flushes `repo_discovered` to NATS before it enqueues the corresponding PR candidate, so the UI ordering no longer costs a full polling interval.
-
-> **Example of a safe, explicit configuration:**
->
-> ```toml
-> [github.issue_tracking]
-> enabled        = true
-> filter_mode    = "exclusive"
-> default_action = "ignore"
-> organizations  = ["myorg"]
-> assignees      = ["myusername"]
-> develop_labels     = ["heimdallm-develop"]
-> refinement_labels  = ["heimdallm-refine"]
-> review_only_labels = ["heimdallm-triage"]
-> skip_labels        = ["wontfix", "duplicate", "invalid"]
-> ```
-
-> **When `auto_implement` produces no changes**
->
-> If the agent runs to completion but leaves the working tree untouched (because the issue lacks enough context, the prompt's "leave untouched if you cannot implement" escape hatch fired, etc.), the daemon reaches a terminal state rather than retrying on every poll. The fallback comment posted on the issue carries a hidden `<!-- heimdallm:done -->` marker so the fetcher's marker scan skips the issue on subsequent ticks. The SSE event surfaced to the UI is `issue_review_error` with `reason: "auto_implement_no_changes"`, rendered as a needs-attention card — not a clean success.
->
-> To reopen the issue for another auto-implement attempt, post a comment containing `<!-- heimdallm:retry -->` (or remove the develop label to stop here). The retry marker overrides the done marker and forces reprocessing. Issues stored before this behaviour landed (no marker on the comment) keep skipping with reason `auto_implement produced no changes (historical row, no done marker); add retry marker to reprocess` until you post the retry marker manually.
-
-> **Security — `auto_implement` and untrusted issue authors**
->
-> The body, title, and quoted comments of every processed issue are user-submitted input. When `auto_implement` is enabled, that input becomes part of the prompt sent to an AI CLI with **write access** to the repository checkout. A maliciously crafted issue (the classic "prompt injection" attack) could try to instruct the AI to read sensitive files from the worktree and embed them in the resulting commit.
->
-> Heimdallm applies layered defenses:
->
-> - The prompt now declares a **trust boundary**: issue title/body/comments are tagged as untrusted, wrapped in fenced regions, and the AI is told explicitly not to follow instructions found inside them. Any attempt to inject a forged closing fence is neutralised before the prompt is sent.
-> - Before pushing, `CommitAll` scans the staged file list against a **sensitive-path denylist** covering common secret shapes: dotenv files (`.env`, `.env.*`), private keys and certificates (`*.pem`, `*.key`, `*.crt`, `*.cer`, `*.p12`, `*.pfx`, `*.gpg`, `*.asc`), keystores (`*.jks`, `*.keystore`, `*.kdbx`), VPN/wallet (`*.ovpn`, `wallet.dat`), SSH private keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519` — public `.pub` variants are allowed), `credentials` / `credentials.*` / `.git-credentials`, `kubeconfig`, `.npmrc`, `.netrc`, `.pypirc`, shell history (`.bash_history`, `.zsh_history`), `service-account*.json`, `terraform.tfvars` / `.tfvars.*`. The operator's own `config.toml` is refused only when written at the repository root. Match is case-insensitive (so `.ENV` and `ID_RSA` are also caught). A hit aborts the commit, resets the index, removes the offending files from the worktree, and emits `slog.Warn` with the path and pattern so operators can audit prompt-injection attempts. Symlinks are refused outright even if their basename is innocuous.
->
-> These defenses reduce blast radius but do not eliminate it. Two operational guidelines still apply:
->
-> 1. Restrict `auto_implement` (the `develop` stage) to repositories where **all issue authors are trusted collaborators**. Public repositories accepting issues from anonymous reporters should keep `develop` disabled and rely on `triage` / `refinement` for visibility instead.
-> 2. The daemon's worktree contains only the cloned repository, so the AI cannot read files outside it. Keep operator secrets (HEIMDALLM token, GitHub PAT, etc.) outside any monitored clone.
-
-> **Review-state vigilance on `auto_implement` PRs**
->
-> Once `auto_implement` creates a PR the daemon used to stop watching it. Issue #482 fixes that: Tier 3 now observes the PR's aggregated external review state and emits the `pr_review_state_changed` SSE event when it flips between `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` and the daemon-internal `FIX_PUSHED`. The state is surfaced on the issue detail and the dashboard tile as a coloured chip, so an operator sees the moment a reviewer leaves feedback without polling GitHub manually.
->
-> The observation layer is **always on** and costs zero AI tokens — it adds one `GET /pulls/{n}/reviews` call per Tier 3 tick per PR that auto_implement created (PRs marked with a non-zero `auto_implement_issue_id` in the store).
->
-> Two opt-in flags add agentic responses on top of the observation:
->
-> ```toml
-> [ai.review_response]
-> enabled         = false   # default — off. Flip to true to opt in.
-> per_pr_lifetime = 5       # max responder runs per PR ever
-> cooldown_secs   = 300     # min seconds between two runs on the same PR
->
-> [ai.review_fix]
-> enabled         = false   # default — off. Flip to true to opt in.
-> per_pr_lifetime = 3       # max fix runs per PR ever
-> cooldown_secs   = 300
-> ```
->
-> When `ai.review_response.enabled = true`, a reviewer leaving a `COMMENTED` review triggers the Responder: the agent reads the latest non-bot comment, generates a short conversational reply, and posts it on the PR. The reply is review-only — the agent has no Edit/Write tool — and the reviewer's text passes through the same `UNTRUSTED USER COMMENTS` sanitisation fence the issue triage pipeline uses (#478). After `per_pr_lifetime` responses on the same PR, the Responder emits an `issue_review_error` with `reason="review_response_cap_exceeded"` and stops — there is no way to lift the cap from configuration; the counter is persistent on the PR row.
->
-> When `ai.review_fix.enabled = true`, a reviewer leaving a `CHANGES_REQUESTED` review triggers the FixRunner. The daemon reserves a per-execution worktree via `repoctx` (#461), fetches the PR's head ref, checks it out at the current tip, runs the agent with the same write-mode permissions as `auto_implement`, and if the working tree changes, commits and pushes back to the same head branch. The follow-up commit is announced via a PR comment so the reviewer sees what landed. After a successful push the PR's external review state flips to `FIX_PUSHED` so the runner does not re-fire on the same CR; a reviewer submitting a fresh CR after the push flips the state back to `CHANGES_REQUESTED` and the cycle can repeat. The lifetime cap (default 3) terminates the cycle for good once reached.
->
-> If the agent inspects the request and decides not to apply it (out of scope, already addressed, or unclear) the working tree stays clean — the daemon posts an advisory comment explaining the decision but does NOT push and does NOT mark `FIX_PUSHED`. A reviewer who supplies more context can re-trigger the runner within the cooldown + lifetime cap.
->
-> Cost ceiling guarantees, in plain English:
->
-> | Feature | Off-by-default | Counter persisted | Max AI invocations per PR |
-> |---|---|---|---|
-> | Observation (Tier 3 reviews fetch) | n/a (always on) | n/a | 0 |
-> | `review_response` | yes | yes (`review_response_count`) | `per_pr_lifetime` (default 5) |
-> | `review_fix` | yes | yes (`review_fix_count`) | `per_pr_lifetime` (default 3) |
->
-> A misconfigured TOML (`per_pr_lifetime = 0` or negative) falls back to the constant default rather than meaning "unlimited" — flipping `enabled` is the only way to opt in, and the caps cannot be silently uncapped. An operator who wants to retry beyond the cap zeroes the counter in SQLite (`UPDATE prs SET review_response_count = 0 WHERE id = ?`).
-
-### Scope filters
-
-Restrict which issues the pipeline processes:
-
-```bash
-HEIMDALLM_ISSUE_ORGANIZATIONS=myorg
-HEIMDALLM_ISSUE_ASSIGNEES=myusername
-```
-
-```toml
-[github.issue_tracking]
-organizations = ["myorg"]
-assignees     = ["myusername"]
-```
-
-`assignees` is owner scope, not just a sort hint. When issue tracking is
-enabled and no assignees are configured, Heimdallm uses the authenticated
-GitHub login for that machine. That means each daemon processes only issues
-assigned to its operator by default; unassigned issues are ignored even if they
-carry a Heimdallm stage label. To hand work to another operator, triage can
-assign the issue to that user and move it to `refinement`; that user's
-Heimdallm can then continue directly from `refinement` without repeating
-triage.
-
-### Dependency-based issue promotion
-
-Mark downstream issues `blocked` until their prerequisites close, then promote them automatically.
-
-```bash
-HEIMDALLM_ISSUE_BLOCKED_LABELS=blocked
-HEIMDALLM_ISSUE_PROMOTE_TO_LABEL=ready   # defaults to first develop_label when unset
-```
-
-Declare dependencies in the issue body:
-
-```markdown
-## Depends on
-- #42
-- other-org/shared-repo#57
-```
-
-Or use GitHub's native sub-issues feature. Heimdallm reads both sources and unions the results.
-
-When all dependencies are `closed`, the daemon removes the blocked label, adds the promote-to label, and leaves an audit comment.
-
-### Operator smoke test
-
-To verify the staged issue flow end-to-end against a real repository, walk a throwaway issue through `triage` → `refinement` → `development`:
-
-1. Assign the test issue to exactly one user — the current Heimdallm operator — before adding any stage label. `assignees` is owner scope (see above), so the daemon will only pick up issues assigned to its operator.
-2. Add the configured triage label (e.g. `heimdallm-triage`) to enter the flow.
-3. Let Heimdallm promote through `triage` → `refinement` → `development` using the configured stage labels. If `auto_promote_triage` or `auto_promote_refinement` is disabled in your config, promote manually between stages.
-4. If the resulting auto-implement PR is only a smoke-test artifact, close it without merging.
-
----
-
-## 7. AI Agents
+## 6. AI Agents
 
 ### Primary and fallback
 
@@ -598,23 +363,15 @@ startup or discarding unrelated stored settings. When execution falls back to a
 different CLI, provider-specific options from the unavailable primary are not
 forwarded.
 
-### Prompt categories
+### Review prompts
 
-Each repo can use different agent profiles for different pipeline stages:
-
-| Prompt field | Pipeline stage | Description |
-|---|---|---|
-| `prompt` | PR Review | The agent profile used when reviewing pull requests |
-| `issue_prompt` | Issue Triage | The agent profile used for issue classification and analysis |
-| `implement_prompt` | Development | The agent profile used for auto-implement code generation |
-
-Prompt profiles are managed in the web UI Prompts screen at `/prompts` (`/agents` remains a compatibility alias). Assign them per-repo:
+The `prompt` field picks the agent profile used when reviewing pull requests.
+Prompt profiles are managed in the web UI Prompts screen at `/prompts`
+(`/agents` remains a compatibility alias). Assign them per-repo:
 
 ```toml
 [ai.repos."myorg/api"]
-prompt           = "security-review-profile-id"
-issue_prompt     = "issue-triage-profile-id"
-implement_prompt = "backend-impl-profile-id"
+prompt = "security-review-profile-id"
 ```
 
 ### Per-repo agent assignment
@@ -630,128 +387,11 @@ review_mode = "multi"
 
 ---
 
-## 8. PR Creation Metadata
-
-When the issue pipeline creates an implementation PR (`auto_implement`), Heimdallm applies metadata — reviewers, labels, assignee, draft status — from a three-level hierarchy:
-
-```
-per-repo  >  per-org  >  global defaults
-```
-
-Each field resolves independently. A per-repo `pr_assignee` does not block the per-org `pr_reviewers` from applying.
-
-### Global defaults
-
-```bash
-# docker/.env
-HEIMDALLM_PR_REVIEWERS=alice,bob
-HEIMDALLM_PR_LABELS=auto-generated,heimdallm
-HEIMDALLM_PR_ASSIGNEE=myusername
-HEIMDALLM_PR_DRAFT=false
-```
-
-```toml
-# config.toml — flat fields under [ai]
-[ai]
-pr_reviewers = ["alice", "bob"]
-pr_labels    = ["auto-generated", "heimdallm"]
-pr_assignee  = "myusername"
-pr_draft     = false
-```
-
-Alternatively, use the nested `[ai.pr_metadata]` section (flat fields take precedence when both are set):
-
-```toml
-[ai.pr_metadata]
-reviewers = ["alice", "bob"]
-labels    = ["auto-generated"]
-assignee  = "myusername"
-draft     = false
-```
-
-### Per-org overrides
-
-Applied to all repos in the org unless a per-repo override exists. Resolution is
-field-by-field: `ai.repos."org/repo"` wins over `ai.orgs."org"`, which wins
-over global defaults.
-
-```toml
-[ai.orgs."myorg"]
-primary      = "gemini"
-fallback     = "claude"
-review_mode  = "multi"
-prompt       = "org-pr-review-profile"
-issue_prompt = "org-issue-triage-profile"
-implement_prompt = "org-implementation-profile"
-refinement_timeout = "30m"
-triage_owner = "alice"
-clone_dir = "/home/heimdallm/repos/myorg-worktrees"
-auto_promote_triage = true
-auto_promote_refinement = false
-generate_pr_description = true
-never_approve_with_issues = false      # true = comment instead of approving when a finding is raised
-never_approve_min_severity = "medium"  # findings below this severity don't trigger the downgrade (default: medium)
-
-pr_reviewers = ["alice", "bob", "carol"]
-pr_labels    = ["auto-generated", "ai-platform"]
-pr_assignee  = "myusername"
-pr_draft     = false
-
-[ai.orgs."myorg".issue_tracking]
-enabled            = true
-develop_labels     = ["heimdallm-develop"]
-refinement_labels  = ["heimdallm-refine"]
-review_only_labels = ["heimdallm-triage"]
-skip_labels        = ["wontfix"]
-
-[ai.orgs."other-org"]
-primary = "codex"
-pr_reviewers = ["dave"]
-pr_labels    = ["auto-generated"]
-```
-
-`local_dir` is also accepted at org scope because org overrides share the same
-resolution path as repo overrides, but prefer `local_dir_base` or per-repo
-`local_dir` unless every repo in the org should use the same checkout path.
-
-Scoped overrides distinguish "unset" from "set to empty/false":
-
-- Omit `enabled` under `ai.orgs.*.issue_tracking` or
-  `ai.repos.*.issue_tracking` to inherit. If labels are present and `enabled`
-  is omitted, Heimdallm still treats that scope as enabled, preserving the
-  historical labels-imply-enabled behaviour.
-- Set `enabled = false` to explicitly disable issue tracking at that scope,
-  even when labels are also present.
-- Omit list fields such as `pr_reviewers`, `pr_labels`, `develop_labels`, or
-  `review_only_labels` to inherit. Set them to `[]` to explicitly clear the
-  inherited list.
-
-### Per-repo overrides
-
-```toml
-[ai.repos."myorg/api"]
-pr_reviewers = ["carol"]
-pr_assignee  = "deploybot"
-pr_labels    = ["api-team", "auto-generated"]
-pr_draft     = true
-```
-
-### Team reviewers
-
-Request review from a GitHub team by using the `org/team-name` format:
-
-```toml
-[ai.repos."myorg/api"]
-pr_reviewers = ["myorg/backend-team", "alice"]
-```
-
----
-
-## 9. Authentication
+## 7. Authentication
 
 ### GitHub token
 
-Required. The daemon uses this token to read PRs, post reviews, and (for `auto_implement`) push branches and open PRs.
+Required. The daemon uses this token to read PRs, post reviews, and (for merge tracking) update branches, push conflict resolutions and merge.
 
 ```bash
 # docker/.env
@@ -762,8 +402,8 @@ GITHUB_TOKEN=ghp_your_token_here
 
 | Scope | Why |
 |---|---|
-| `repo` | Read private repos, post reviews, create branches and PRs |
-| `workflow` | Required when `auto_implement` pushes commits that touch `.github/workflows/` files. Without this scope, pushes to workflow files are silently rejected by GitHub |
+| `repo` | Read private repos, post reviews, update and merge PRs |
+| `workflow` | Required when merge tracking pushes a conflict resolution or branch update that touches `.github/workflows/` files. Without this scope, pushes to workflow files are silently rejected by GitHub |
 | `public_repo` | Alternative to `repo` if you only monitor public repos |
 
 **Creating a PAT:**
@@ -830,7 +470,7 @@ Leave `GEMINI_API_KEY` empty. The container reads your host's OAuth tokens read-
 
 ---
 
-## 10. Docker Deployment
+## 8. Docker Deployment
 
 ### docker-compose.yml overview
 
@@ -850,13 +490,13 @@ The `web` service depends on the daemon's healthcheck (`/health`) before accepti
 | `heimdallm-data` (named) | `/data` | SQLite database and API token |
 | `heimdallm-config` (named) | `/config` | `config.toml` (daemon-owned, web UI edits here) |
 | `$HEIMDALLM_LOCAL_DIR_BASE` | `/home/heimdallm/repos` (read-only) | Host repos root for full-repo analysis |
-| SSH agent socket | `/ssh-agent` (read-only) | SSH agent for git operations in `auto_implement` |
+| SSH agent socket | `/ssh-agent` (read-only) | SSH agent for merge-tracking git operations |
 
 The config volume is a **named volume** (not a bind mount). This is intentional — a bind mount would be owned by root on the host, which blocked the daemon from writing `config.toml`. The image chowns `/config` to the `heimdallm` user during build.
 
 ### SSH agent forwarding
 
-`auto_implement` pushes branches over SSH. Forward your host's SSH agent into the container:
+Merge tracking's `resolve_conflicts` pushes branches over SSH. Forward your host's SSH agent into the container:
 
 **macOS (Docker Desktop):**
 
@@ -905,7 +545,7 @@ make up
 
 ---
 
-## 11. Retention
+## 9. Retention
 
 Controls how long reviewed PR records are kept in the SQLite database.
 
@@ -936,9 +576,9 @@ Worst-case disk use: `(HEIMDALLM_LOG_KEEP + 1) × HEIMDALLM_LOG_MAX_MB`.
 
 ---
 
-## 12. CLI
+## 10. CLI
 
-`heimdallm-cli` is a terminal client for the Heimdallm daemon. Use it to inspect status, list PRs and issues, trigger manual reviews, and tail live events.
+`heimdallm-cli` is a terminal client for the Heimdallm daemon. Use it to inspect status, list PRs, trigger manual reviews, and tail live events.
 
 ### Installation
 
@@ -1017,9 +657,7 @@ HEIMDALLM_HOST=https://heimdallm.example.com HEIMDALLM_TOKEN=... make dev-cli
 |---|---|
 | `heimdallm-cli status` | Daemon state, uptime, monitored repos, stats summary |
 | `heimdallm-cli prs` | List reviewed PRs (filter with `--severity info\|low\|medium\|high`) |
-| `heimdallm-cli issues` | List triaged issues (filter with `--severity`) |
 | `heimdallm-cli review-pr <id>` | Trigger a manual review for a PR by its internal ID |
-| `heimdallm-cli review-issue <id>` | Trigger a manual review for an issue by its internal ID |
 | `heimdallm-cli follow` | Stream real-time SSE events (like `tail -f`; add `--json` for raw JSON) |
 | `heimdallm-cli config` | Print the daemon's running configuration as JSON |
 | `heimdallm-cli stats` | Review statistics: totals, by severity, by CLI, top repos, timing |
@@ -1027,7 +665,7 @@ HEIMDALLM_HOST=https://heimdallm.example.com HEIMDALLM_TOKEN=... make dev-cli
 
 ### TUI dashboard keybindings
 
-The dashboard tabs are Activity, PRs, Issues, Config, Stats, Logs, and Server.
+The dashboard tabs are Activity, PRs, Merges, Config, Stats, Server, and Instances.
 
 | Key | Action |
 |---|---|
@@ -1042,14 +680,13 @@ The dashboard tabs are Activity, PRs, Issues, Config, Stats, Logs, and Server.
 | `pgdn`, `pgup` | Page through long lists or detail views |
 | `g` | Jump to the top of the current list |
 | `G` | Follow the live Logs tab |
-| `enter` | Open PR or issue details |
+| `enter` | Open PR details |
 | `esc` | Close an open detail view |
-| `p` | Promote a promotable issue |
 | `y` / `n` | Confirm or cancel daemon shutdown |
 
 ---
 
-## 13. Distribution Formats
+## 11. Distribution Formats
 
 Heimdallm ships as several artifact types, each built by the tooling best
 suited for it:
@@ -1081,18 +718,15 @@ architecture.
 
 ---
 
-## 14. Circuit Breakers
+## 12. Circuit Breakers
 
-Circuit breakers cap completed PR reviews, issue triages, and development runs to prevent cost-runaway loops. Failed PR-review executions do not consume review quota because they did not produce a review. Instead, automatic retries on the same PR HEAD use a persistent exponential cooldown: 5 minutes after the first incomplete execution, doubling to a maximum of 6 hours. Failed or still-running executions are also limited to 20 starts per repository in a rolling hour by default, independently from completed reviews; reaching that limit defers automatic work without emitting a circuit-breaker trip. A manual **Re-review** bypasses both retry waits, but another failure still extends and consumes the protections for the next automatic retry. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
+Circuit breakers cap completed PR reviews to prevent cost-runaway loops. Failed PR-review executions do not consume review quota because they did not produce a review. Instead, automatic retries on the same PR HEAD use a persistent exponential cooldown: 5 minutes after the first incomplete execution, doubling to a maximum of 6 hours. Failed or still-running executions are also limited to 20 starts per repository in a rolling hour by default, independently from completed reviews; reaching that limit defers automatic work without emitting a circuit-breaker trip. A manual **Re-review** bypasses both retry waits, but another failure still extends and consumes the protections for the next automatic retry. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
 
 ```toml
 [circuit_breaker]
 per_pr_24h       = 3    # max reviews on the same PR HEAD SHA in any 24 h window
 per_repo_hr      = 20   # max PR reviews on the same repo in any 1 h window
 per_review_failure_repo_hr = 20 # max failed/in-flight review executions per repo in any 1 h window
-per_issue_24h    = 3    # max triages on the same issue in any 24 h window
-per_issue_repo_hr = 10  # max issue triages on the same repo in any 1 h window
-per_impl_repo_hr  = 5   # max auto_implement (development) runs per repo in any 1 h window
 ```
 
 | Field | Default | Description |
@@ -1100,20 +734,17 @@ per_impl_repo_hr  = 5   # max auto_implement (development) runs per repo in any 
 | `per_pr_24h` | `3` | Reviews on the same PR HEAD SHA over a 24 h window. A new commit gets its own allowance. |
 | `per_repo_hr` | `20` | PR reviews across the same repo over a 1 h window. |
 | `per_review_failure_repo_hr` | `20` | Failed or still-running PR-review executions across the same repo over a 1 h window. This retry-only limit never emits `circuit_breaker_tripped`. |
-| `per_issue_24h` | `3` | Issue triages on the same issue over a 24 h window. |
-| `per_issue_repo_hr` | `10` | Issue triages across the same repo over a 1 h window. Tighter than the PR cap because each triage is a full-context agent run. |
-| `per_impl_repo_hr` | `5` | Auto-implement (development) runs per repo in any 1 h window. The per-issue breaker only counts triages (`review_only`), leaving development uncapped at the issue level; this field is the breadth guard for autonomous mode. |
 
 All zero values are treated as "unset" and substituted with the defaults above. There is no separate env-var mapping for circuit breaker fields — set them in `config.toml`.
 
 ### Per-org and per-repo circuit breaker overrides
 
-All six fields are resolvable per org and per repo via `[ai.orgs."org".circuit_breaker]` and `[ai.repos."org/repo".circuit_breaker]`, following the same `repo > org > global` precedence as all other `[ai.*]` overrides. Only fields present in the override section are applied; absent fields inherit from the next level.
+All three fields are resolvable per org and per repo via `[ai.orgs."org".circuit_breaker]` and `[ai.repos."org/repo".circuit_breaker]`, following the same `repo > org > global` precedence as all other `[ai.*]` overrides. Only fields present in the override section are applied; absent fields inherit from the next level.
 
 ```toml
-# Tighten the development breadth guard for a high-activity repo
+# Tighten the per-PR cap for a high-activity repo
 [ai.repos."my-org/my-repo".circuit_breaker]
-per_impl_repo_hr = 3
+per_pr_24h = 2
 
 # Loosen the per-repo PR cap for an org with frequent pushes
 [ai.orgs."my-org".circuit_breaker]
@@ -1122,97 +753,9 @@ per_repo_hr = 40
 
 ---
 
-## 15. Autonomous Mode
-
-Autonomous mode turns Heimdallm into a fully-unattended end-to-end agent: it picks up issues, implements them, opens PRs, and — when configured — merges approved PRs without any human touch. Safety relies entirely on circuit breakers (see [§14 Circuit Breakers](#14-circuit-breakers)) and single-flight locks (at most one agent run per issue at a time); there is intentionally no per-day task cap. `skip_labels` and `blocked_labels` are always respected regardless of autonomous settings.
-
-> **Autonomous mode is opt-in and off by default.** Every flag defaults to `false` (or its documented string default). Flip `enabled = true` only when you are ready for unattended operation.
-
-### Configuration reference
-
-```toml
-[autonomous]
-enabled          = false    # master switch — false = autonomous mode off entirely
-auto_merge       = false    # merge gate — even approved-clean PRs are not merged unless true
-merge_method     = "squash" # squash | merge | rebase (ignored when auto_merge = false)
-take_others_tasks = false   # pick up issues assigned to other users (cascade bucket 3)
-reassign_on_take  = false   # when taking another user's task, add the bot as co-assignee
-dev_max_turns    = 0        # agent max turns for development; 0 = no practical cap
-dev_effort       = "high"   # agent effort level: low | medium | high | max
-dev_timeout      = "45m"    # timeout for the development agent run
-claim_lease      = "2h"     # per-issue claim lease + failure/no-progress cooldown
-```
-
-| Field | Default | Description |
-|---|---|---|
-| `enabled` | `false` | Master switch and kill-switch. When `false`, autonomous mode is entirely inactive regardless of all other fields. |
-| `auto_merge` | `false` | Merge gate. Built into the pipeline but **disabled by default**. Even when an approved, clean PR is detected, nothing is merged unless this is explicitly `true`. |
-| `merge_method` | `"squash"` | Merge strategy to use when `auto_merge = true`. Accepted values: `squash`, `merge`, `rebase`. |
-| `take_others_tasks` | `false` | When `false` (the default), the agent processes only issues assigned to the configured operator. Set to `true` to also pick up issues assigned to other users (cascade bucket 3 in the task resolver). |
-| `reassign_on_take` | `false` | When taking another user's task (`take_others_tasks = true`), add the bot as a co-assignee (the original assignee is kept) and post an agent-generated coordination comment on the issue. |
-| `dev_max_turns` | `0` | Maximum agent turns for the development stage. `0` means no practical cap (the underlying CLI default applies). |
-| `dev_effort` | `"high"` | Agent effort level passed to the AI CLI for the development stage. Accepted values: `low`, `medium`, `high`, `max`. |
-| `dev_timeout` | `"45m"` | Wall-clock timeout for a single development agent run. Generous by default to accommodate complex implementations. |
-| `claim_lease` | `"2h"` | Per-issue claim lease, expressed as a Go duration. When the poller picks up an issue it records a lease expiring `now + claim_lease`; the selector treats any issue with an active (un-expired) lease as ineligible. This prevents two daemon ticks (or two daemons across a restart) from driving the same issue concurrently, and — because the lease is **kept** when a Drive fails or makes no progress — it doubles as the failure/no-progress **cooldown** that prevents a retry-storm on a persistently failing issue. The lease is cleared early once a PR is created (the open-PR guard takes over re-selection) and otherwise expires on its own, so a crash mid-Drive never sticks the claim permanently and needs no manual operator step. **It must exceed the longest possible Drive** (triage + refinement + development timeouts combined); the `2h` default comfortably exceeds the `45m` `dev_timeout` plus the lighter triage/refinement stages. |
-
-**Default behaviour summary:** all bools (`enabled`, `auto_merge`, `take_others_tasks`, `reassign_on_take`) default to `false` via Go's zero value — they are not given non-zero defaults by `applyAutonomousDefaults`. The string fields (`merge_method`, `dev_effort`, `dev_timeout`, `claim_lease`) receive explicit non-zero defaults.
-
-### Per-org and per-repo overrides
-
-Every field supports the same `repo > org > global` precedence used throughout the rest of the config. Override only the fields you need to change; absent fields inherit from the parent level.
-
-```toml
-[autonomous]
-enabled          = false
-auto_merge       = false
-merge_method     = "squash"
-take_others_tasks = true
-reassign_on_take  = true
-dev_effort       = "high"
-dev_timeout      = "45m"
-
-# Enable autonomous mode for the whole org, but keep auto_merge off
-[autonomous.orgs."my-org"]
-enabled = true
-
-# Enable autonomous mode for a single repo and also allow merging
-[autonomous.repos."my-org/my-repo"]
-enabled    = true
-auto_merge = true
-```
-
-Precedence: `autonomous.repos."org/repo"` > `autonomous.orgs."org"` > global `[autonomous]`.
-
-### Worked example: enabling autonomous mode for a single repo conservatively
-
-```toml
-# Global autonomous block — keep everything off
-[autonomous]
-enabled          = false
-auto_merge       = false
-dev_effort       = "high"
-dev_timeout      = "45m"
-
-# Opt a single repo in, with a conservative implementation cap
-[autonomous.repos."my-org/my-repo"]
-enabled       = true
-auto_merge    = false    # review PRs but don't merge automatically
-dev_max_turns = 30       # cap agent turns to bound cost
-
-# Pair with a tight circuit breaker for that repo
-[ai.repos."my-org/my-repo".circuit_breaker]
-per_impl_repo_hr = 2    # at most 2 development runs per hour
-```
-
-With this setup, Heimdallm will autonomously triage issues and implement them in `my-org/my-repo`, but a human must approve and merge the resulting PRs. The circuit breaker limits development runs to 2 per hour regardless of how many issues arrive.
-
----
-
-## 16. Merge Tracking
+## 13. Merge Tracking
 
 Merge tracking watches the open pull requests **you** authored or are assigned to, works out exactly what is stopping each one from merging, and — at whatever level of automation you configure — moves them along.
-
-It is deliberately separate from [§15 Autonomous Mode](#15-autonomous-mode). Autonomous mode governs PRs the agent opened from issues; merge tracking governs your own. Sharing one section would mean enabling one dragged in the other's risks.
 
 > **Every automation is off by default.** A config that does not mention `[merge_tracking]` never touches a repository. Turning `enabled` on gives you the reporting — the four automations are separate switches on top of that.
 
@@ -1265,7 +808,7 @@ resolve_effort     = "high"  # low | medium | high | max
 | `resolve_conflicts` | `false` | Run the configured agent on merge conflicts. **This force-pushes to your branch.** |
 | `merge` | `false` | Merge directly once every requirement is met. |
 | `merge_method` | `"squash"` | `squash`, `merge` or `rebase`. Must also be enabled on the repository; if it is not, the PR is reported as blocked rather than failing on every attempt. Validated at boot — an invalid value stops the daemon rather than producing a 422 from GitHub once per cycle forever. |
-| `include_assigned` | `false` | Track PRs you did not author but are assigned to. Being an assignee usually comes from triage rather than authorship, so this is off by default. |
+| `include_assigned` | `false` | Track PRs you did not author but are assigned to. Being an assignee does not imply authorship, so this is off by default. |
 | `require_approval` | `false` | Refuse to merge without an approving review at the current commit, even where the repository requires none. Useful on personal repos with no branch protection. |
 | `poll_interval` | inherit | Cadence of the reconciler. Empty inherits `[polling].poll_interval`, then `[github].poll_interval`. Re-read every cycle, so a change takes effect without a restart. |
 | `max_prs_per_tick` | `20` | How many PRs one cycle evaluates. Each costs one GraphQL query, so this is the knob that bounds API spend. |
@@ -1300,6 +843,8 @@ These can also be set over HTTP: `PATCH /config/merge_tracking/repos/{repo}` and
 ### ⚠️ About `resolve_conflicts`
 
 This is the highest-blast-radius setting in Heimdallm: an AI agent rewrites your branch and force-pushes it.
+
+To do that the agent has to edit files without stopping to ask, so the conflict-resolution run is **put into write mode whenever you left the CLI's permission setting empty**: Claude gets `permission_mode = "acceptEdits"`, Codex `approval_mode = "never"`, Gemini `approval_mode = "auto_edit"`. A value you set in `[ai.agents.<cli>]` is kept as is. PR reviews are unaffected — only this run is promoted.
 
 What bounds it:
 
@@ -1398,58 +943,36 @@ Everything else needs the same `repo` scope the rest of Heimdallm uses.
 
 ---
 
-## 17. Polling
+## 14. Polling
 
 The `[polling]` table tunes how the daemon schedules its fetch cycles. All fields are optional — omitting the section entirely reproduces the prior behaviour with no change in how the daemon polls.
 
 ```toml
 [polling]
 poll_interval              = "5m"   # inherits [github].poll_interval when unset
-min_interval               = "1m"
-max_interval               = "15m"
-adaptive                   = false
 discovery_interval         = "5m"
 tier3_interval             = "30s"
 rate_limit_safety_threshold = 100
 use_etag                   = true
-use_graphql                = false
 ```
 
 | Field | Default | Description |
 |---|---|---|
 | `poll_interval` | inherits `[github].poll_interval` | Base poll cadence. When unset, the value from `[github].poll_interval` (or its env var `HEIMDALLM_POLL_INTERVAL`) is used. Setting `[polling].poll_interval` overrides the `[github]` field for the polling subsystem. |
-| `min_interval` | `"1m"` | Shortest interval the adaptive scheduler will use for an actively-changing repo. Has no effect when `adaptive = false`. |
-| `max_interval` | `"15m"` | Longest interval the adaptive scheduler will back off to for idle repos. Has no effect when `adaptive = false`. |
-| `adaptive` | `false` | When `true`, repos that have seen no new events for several consecutive cycles gradually back off from `min_interval` toward `max_interval`. Repos that receive new events reset to `min_interval`. This reduces rate-limit consumption when monitoring many quiet repos. |
 | `discovery_interval` | `"5m"` | How often the topic-discovery pass runs to find newly-tagged repos. Independent of `poll_interval`. |
-| `tier3_interval` | `"30s"` | Cadence of the Tier 3 observation loop (review-state polling on `auto_implement` PRs). |
-| `rate_limit_safety_threshold` | `100` | Core-remaining floor. When the GitHub core rate-limit remaining count drops below this number, non-critical polling (discovery, Tier 3 observation, adaptive back-off checks) is throttled until the rate-limit window resets. Critical paths (PR review, issue triage) are not blocked by this threshold. |
+| `tier3_interval` | `"30s"` | Cadence of the Tier 3 state-check loop that re-checks watched PRs (open/closed/merged transitions). |
+| `rate_limit_safety_threshold` | `100` | Core-remaining floor. When the GitHub core rate-limit remaining count drops below this number, non-critical polling (discovery, Tier 3 state checks) is throttled until the rate-limit window resets. The critical path (PR review) is not blocked by this threshold. |
 | `use_etag` | `true` | Send `If-None-Match` / `ETag` conditional-request headers on list endpoints. A `304 Not Modified` response reuses the cached body without counting against the rate limit. Disable only if your GitHub proxy strips ETag headers. |
-| `use_graphql` | `false` | Fetch issue lists via the GraphQL `search(type:ISSUE)` API instead of REST `/search/issues`. GraphQL requests consume from the separate GraphQL rate-limit budget (5,000 points/hour), leaving the core REST budget for other operations. Falls back to REST automatically on any GraphQL error. |
 
-> **Reload behaviour:** Every field takes effect on the next `PUT /config` or file reload, without a restart. `use_etag`, `use_graphql` and `rate_limit_safety_threshold` are re-applied to the live GitHub client and rate limiter; `tier3_interval` resets its ticker in place (the new value is picked up on the next tick, so shortening a long interval takes effect after at most one more tick at the old cadence); `min_interval`/`max_interval` update the adaptive scheduler's bounds in place, so accumulated per-repo back-off state is preserved and each repo's current interval is clamped into the new range on its next cycle.
+> **Reload behaviour:** Every field takes effect on the next `PUT /config` or file reload, without a restart. `use_etag` and `rate_limit_safety_threshold` are re-applied to the live GitHub client and rate limiter; `tier3_interval` resets its ticker in place (the new value is picked up on the next tick, so shortening a long interval takes effect after at most one more tick at the old cadence).
 
-> **Validation:** All five durations are validated at load and on reload. `poll_interval`, `min_interval`, `max_interval` and `discovery_interval` must be between `1m` and `24h` — the same floor `[github].poll_interval` enforces, since `[polling].poll_interval` takes precedence over it and would otherwise be a way around the quota guard. `tier3_interval` accepts `1s`–`1h` (it drives a local scan, not GitHub traffic). `rate_limit_safety_threshold` must not be negative, and `min_interval` must not exceed `max_interval`. An invalid value fails the reload with an error rather than silently falling back to the default.
+> **Validation:** All three durations are validated at load and on reload. `poll_interval` and `discovery_interval` must be between `1m` and `24h` — the same floor `[github].poll_interval` enforces, since `[polling].poll_interval` takes precedence over it and would otherwise be a way around the quota guard. `tier3_interval` accepts `1s`–`1h` (it drives a local scan, not GitHub traffic). `rate_limit_safety_threshold` must not be negative. An invalid value fails the reload with an error rather than silently falling back to the default.
 
 > **Unconfigured = no change:** A missing `[polling]` section is equivalent to setting every field to its default. There is no opt-in required — existing deployments that do not add this section continue to behave exactly as before.
 
-### Example: adaptive polling with GraphQL enabled (conservative)
-
-```toml
-[polling]
-min_interval               = "2m"
-max_interval               = "20m"
-adaptive                   = true
-rate_limit_safety_threshold = 200   # throttle earlier on rate-constrained installations
-use_etag                   = true
-use_graphql                = true
-```
-
-This setup lets idle repos drift to a 20-minute cycle, saving roughly 80 % of poll calls on dormant repos, while keeping active repos at the 2-minute minimum. GraphQL consumes from the separate 5,000-point budget, and ETags ensure 304s on unchanged endpoints cost zero REST points.
-
 ---
 
-## 18. Multiple Instances
+## 15. Multiple Instances
 
 An **instance** is a Heimdallm daemon running on another machine or in another
 container. One instance acts as the **hub**: it holds the registry of the
@@ -1461,12 +984,12 @@ section behaves exactly as a single-daemon install always has — the routing
 layer reports that this daemon owns every repository, and the control-plane
 endpoints are not mounted at all.
 
-### 18.1 How the work is divided
+### 15.1 How the work is divided
 
 Each daemon polls GitHub for itself, but only **acts** on the repositories
 routed to it. Discovery stays global on purpose: every instance still learns
-about every repository, so the UI shows the whole estate, and only reviewing,
-merging and issue work is narrowed. That partition — not a distributed lock —
+about every repository, so the UI shows the whole estate, and only reviewing
+and merging is narrowed. That partition — not a distributed lock —
 is what stops two daemons reviewing the same pull request.
 
 Ownership resolves in this order:
@@ -1488,10 +1011,10 @@ missing push ends up reviewing repositories that were never routed to it
 (theburrowhub/heimdallm#769). A worker sitting idle logs a WARN naming `PUT
 /cluster/partition` — that means exactly this: it has not received its
 partition yet. Trigger a reload on the hub (or "apply to all instances") to
-push it; see §18.4 for when that happens automatically and its one gap
+push it; see §15.4 for when that happens automatically and its one gap
 (a worker that was unreachable during the last reload).
 
-### 18.2 Configuration
+### 15.2 Configuration
 
 ```toml
 [cluster]
@@ -1500,7 +1023,7 @@ instance_id      = ""             # generated on first boot, kept in <data dir>/
 instance_name    = "main"         # defaults to the hostname
 default_instance = "hub-1"        # owns everything no rule claims
 probe_interval   = "30s"          # how often the hub health-checks the others
-discovery        = "off"          # off (default) | mdns; see 18.8
+discovery        = "off"          # off (default) | mdns; see 15.8
 
 # Instances are a TOML map keyed by id, not an array of tables: the config
 # schema validator rejects arrays of tables, and a map makes id uniqueness a
@@ -1525,7 +1048,7 @@ takeover_after_failed_probes = 3   # consecutive failed probes before the hub
 [cluster.routing]
 mode             = "assignment"   # assignment (default) | dispatch
 round_robin_pool = ["hub-1", "srv-a"]   # empty = every enabled instance
-round_robin_ops  = ["review", "merge", "issue"]
+round_robin_ops  = ["review", "merge"]
 
 [cluster.routing.orgs]
 theburrowhub = "srv-a"
@@ -1557,8 +1080,8 @@ from a lease. Nothing ever rewrites a stored `base_url`: it changes only when
 someone edits it. So when a laptop or any DHCP host picks up a new address, an
 entry holding a literal IP goes stale and that instance becomes permanently
 unreachable from the hub while it carries on working perfectly — which is the
-situation §18.3.1 exists to contain, and containing it is not the same as
-avoiding it. Section 18.8 covers discovering instances by name instead.
+situation §15.3.1 exists to contain, and containing it is not the same as
+avoiding it. Section 15.8 covers discovering instances by name instead.
 
 **A name is re-resolved when the connection to it breaks, not on every probe.**
 The hub's HTTP client keeps idle connections keyed by host and port as written,
@@ -1586,7 +1109,7 @@ lease that is renewed rather than released, or an address added without
 removing the old one, leaves the original reachable and the hub will never
 notice the change.
 
-### 18.3 Routing modes
+### 15.3 Routing modes
 
 | Mode | What it does |
 |---|---|
@@ -1600,7 +1123,7 @@ daemon's own `reviews_in_flight` claims remain per-daemon. If you need two
 instances acting on the same repository concurrently, this feature does not
 provide that guarantee.
 
-### 18.3.1 When an instance is unreachable but still working
+### 15.3.1 When an instance is unreachable but still working
 
 The hub decides ownership from its routing rules, and reachability from its
 health probe. Those are separate facts, and a network partition is where they
@@ -1614,7 +1137,7 @@ Two rules keep that from producing two reviews on one pull request:
 |---|---|
 | `takeover_after_failed_probes` (default 3) | The hub leaves an unreachable owner's work alone until that owner has failed this many consecutive probes. Below the threshold it defers — the owner's own poll loop covers its repositories, so nothing is lost. Raise it to defer for longer; a very large value means "never take over, alert me instead". |
 | The same threshold on rejected dispatches | The health probe is unauthenticated; the calls that hand work over are not. An instance that answers `/health` while rejecting every dispatch — cluster token rotated on the remote, the repository missing from that remote's own config, a permission error — would otherwise stay "healthy" forever and its work would be done by nobody. Consecutive rejections of the same operation on the same repository are counted separately and escalate on the same threshold, with a `dispatch_rejected` takeover that points at the token rather than at `base_url`. A daemon that is not a hub has no probe history at all, so for it a rejected dispatch always means "handle it here". |
-| The publish-boundary check | Immediately before submitting a review, a daemon asks GitHub whether a review carrying the Heimdallm footer, **published under the daemon's own GitHub login**, is already anchored to the same commit. If one is, it does not publish a second, and records the existing review against its own local row. This is the only check that survives a partition, because GitHub is the one place both instances can still reach. The login scope is what separates a peer from a colleague: two daemons sharing one account are one reviewer, and the second review is a duplicate; two operators each running a daemon as themselves are two reviewers GitHub asked for separately, and each publishes its own. A daemon that could not resolve its own login publishes rather than guess. **Consequence for clusters:** this check deduplicates a takeover only when the hub and the taken-over instance authenticate as the same GitHub account. With one account per instance (§18.4), `takeover_after_failed_probes` is the only defence against a second review. |
+| The publish-boundary check | Immediately before submitting a review, a daemon asks GitHub whether a review carrying the Heimdallm footer, **published under the daemon's own GitHub login**, is already anchored to the same commit. If one is, it does not publish a second, and records the existing review against its own local row. This is the only check that survives a partition, because GitHub is the one place both instances can still reach. The login scope is what separates a peer from a colleague: two daemons sharing one account are one reviewer, and the second review is a duplicate; two operators each running a daemon as themselves are two reviewers GitHub asked for separately, and each publishes its own. A daemon that could not resolve its own login publishes rather than guess. **Consequence for clusters:** this check deduplicates a takeover only when the hub and the taken-over instance authenticate as the same GitHub account. With one account per instance (§15.4), `takeover_after_failed_probes` is the only defence against a second review. |
 
 When the hub does take over, it logs a `WARN` naming the repository and the
 instance, and emits an `instance_takeover` SSE event, once per repository per
@@ -1642,7 +1165,7 @@ routinely. If neither is acceptable for your estate, set
 `takeover_after_failed_probes` high enough that takeover never happens on its
 own and treat `instance_takeover` as a page.
 
-### 18.3.2 How a dispatched review identifies its PR
+### 15.3.2 How a dispatched review identifies its PR
 
 A PR's local row ID (`prs.id` in each daemon's own SQLite database) is an
 autoincrement counter private to that daemon — it has no meaning on any other
@@ -1664,19 +1187,18 @@ still takes a local row ID — it is what the GUI and CLI use against an
 instance whose id space they already queried — but is never used for
 cross-instance dispatch.
 
-### 18.4 What propagates, and what does not
+### 15.4 What propagates, and what does not
 
 "Apply to all instances" pushes the settings every instance should agree on:
 `[ai]` prompts and overrides, `review_mode`, `[polling]`, `[circuit_breaker]`,
-`[merge_tracking]` (scoped overrides included), `[autonomous]`, `[retention]`
-and issue tracking.
+`[merge_tracking]` (scoped overrides included) and `[retention]`.
 
 These are **never** sent, because they describe one machine:
 
 | Key | Why it stays local |
 |---|---|
 | `server.port`, `server.bind_addr`, `server.max_concurrent_workers` | Pushing a port to another host does not fail loudly; it silently breaks that daemon |
-| `github.token` | Each instance authenticates as itself. Note that the publish-boundary duplicate check (§18.3.1) only recognises reviews published under the same login, so instances with different accounts are not deduplicated by it |
+| `github.token` | Each instance authenticates as itself. Note that the publish-boundary duplicate check (§15.3.1) only recognises reviews published under the same login, so instances with different accounts are not deduplicated by it |
 | `github.repositories`, `github.non_monitored` | Runtime discovery state, merged below the store layer — overwriting them fights the discovery loop on every push |
 | `ai.local_dir_base`, `ai.local_dirs_detected` | Filesystem paths that only exist on one host |
 | `cluster.*` | Identity and the registry itself; only the hub owns these |
@@ -1702,7 +1224,7 @@ all instances") rather than wait. The registry, tokens, `role` and every other
 `cluster.*` key remain exactly as local as the table above says.
 
 **Mixed-version clusters.** A worker running a daemon old enough to predate
-`POST /cluster/prs/review` (§18.3.2) answers it with 404, which the dispatch
+`POST /cluster/prs/review` (§15.3.2) answers it with 404, which the dispatch
 code treats as a failed hand-off: the hub logs the failure and reviews the PR
 locally instead, so review coverage is never lost, but that worker will not
 receive its routed work until it is updated. A worker running a daemon old
@@ -1717,7 +1239,7 @@ the fix is the same: update that worker. Once it runs a version that
 understands `PUT /cluster/partition`, the next push resolves both the
 identity and the rules together.
 
-The publish-boundary check (§18.3.1) also tolerates a mixed-version cluster:
+The publish-boundary check (§15.3.1) also tolerates a mixed-version cluster:
 it recognises review bodies in the format daemons older than v0.8.15 publish
 (the `🤖 Heimdallm AI Review` heading and the unlinked `· Reviewed by
 Heimdallm` footer) as well as the current footer, so a same-account instance
@@ -1733,7 +1255,7 @@ built without the `-X main.version=...` stamp (`cd daemon && make build` with
 no `VERSION`, or a bare `go build ./cmd/heimdallm`) reports the source
 default verbatim, `(dev)`, rather than a fabricated version number.
 
-### 18.5 The hub proxies; the UI talks to one origin
+### 15.5 The hub proxies; the UI talks to one origin
 
 The app never opens a connection to a remote daemon. Every read for another
 instance goes through the hub at `/instances/{id}/proxy/*`, which swaps in that
@@ -1748,14 +1270,14 @@ Only a whitelist of paths is forwarded. `POST /shutdown` is deliberately not
 among them: the desktop app can respawn the daemon it manages, but nothing
 would bring a remote one back.
 
-### 18.6 GitHub API budget
+### 15.6 GitHub API budget
 
 Rate-limit state, the ETag cache and the request breaker are **per process**.
 Several daemons sharing one GitHub token will each believe they have the full
 hourly budget. Give each instance its own token, or keep the combined poll rate
 under the shared quota.
 
-### 18.7 Running another instance with Docker
+### 15.7 Running another instance with Docker
 
 The main `docker-compose.yml` pins its container name and volume pair, so it can
 only describe one daemon. `docker-compose.instance.yml` parameterises both:
@@ -1770,7 +1292,7 @@ make down-instance NAME=b
 Each instance gets its own Compose project, hence its own containers and
 volumes. There is no second `web` service: the UI is served once, by the hub.
 
-### 18.8 Discovering instances on the local network
+### 15.8 Discovering instances on the local network
 
 Off by default. Turn it on per daemon:
 
@@ -1820,7 +1342,7 @@ resolved again once the connection behind it fails — so when that machine pick
 up a new DHCP lease, the hub follows it within about one `probe_interval` and
 with no operator action. A pinned IP never does, and a stale one means the other
 instances take over its repositories while it is still reviewing them. See
-§18.2 for what "follows it" costs and does not cover.
+§15.2 for what "follows it" costs and does not cover.
 
 The hub also notices when an *already registered* instance answers somewhere
 its `base_url` no longer points, and offers to correct it — one click, on the
@@ -1883,7 +1405,7 @@ convenience within one network, **not** a replacement for DNS, a VPN or
 Tailscale — and `base_url` accepts all of those, so a cross-site cluster is
 configured exactly as it is today.
 
-### 18.9 CLI
+### 15.9 CLI
 
 `cli.toml` gains an instance map alongside the flat `host`/`token` pair, which
 keeps working and is presented as an instance called `local`:
@@ -1913,7 +1435,7 @@ machine is worse than refusing to pick.
 
 ---
 
-## 19. Full config.toml Reference
+## 16. Full config.toml Reference
 
 ```toml
 # Heimdallm configuration
@@ -1927,13 +1449,13 @@ machine is worse than refusing to pick.
 port      = 7842        # env: HEIMDALLM_PORT
 # Default is "127.0.0.1". Shown widened because a daemon on loopback is
 # unreachable from any other machine, and declines to advertise itself for
-# discovery — see 18.8.
+# discovery — see 15.8.
 bind_addr = "0.0.0.0"   # env: HEIMDALLM_BIND_ADDR
 
 # ── GitHub ───────────────────────────────────────────────────────────────────
 
 [github]
-# Poll interval for PR/issue checks. Any time.ParseDuration value in [1m, 24h], e.g. 3m, 10m.
+# Poll interval for PR checks. Any time.ParseDuration value in [1m, 24h], e.g. 3m, 10m.
 poll_interval = "5m"   # env: HEIMDALLM_POLL_INTERVAL
 
 # Static list of repos to monitor.
@@ -1955,31 +1477,6 @@ non_monitored = []
 # env: HEIMDALLM_LOCAL_DIR_BASE (comma-separated)
 # local_dir_base = ["/home/heimdallm/repos/ai-platform/workspace", "/home/heimdallm/repos"]
 
-# ── Issue tracking ───────────────────────────────────────────────────────────
-
-# [github.issue_tracking]
-# enabled    = false                    # env: HEIMDALLM_ISSUE_TRACKING_ENABLED
-# filter_mode = "exclusive"             # "exclusive" (AND) | "inclusive" (OR)
-#                                       # env: HEIMDALLM_ISSUE_FILTER_MODE
-# default_action = "ignore"             # "ignore" | "review_only"
-#                                       # env: HEIMDALLM_ISSUE_DEFAULT_ACTION
-#                                       # WARNING: "review_only" causes re-processing loops
-#                                       # (see §6 Issue Tracking). Use "ignore" + explicit labels.
-# organizations  = ["myorg"]            # env: HEIMDALLM_ISSUE_ORGANIZATIONS
-# assignees      = ["myusername"]       # env: HEIMDALLM_ISSUE_ASSIGNEES
-#                                       # empty defaults to the authenticated GitHub login
-# develop_labels     = ["enhancement", "feature", "bug"]
-#                                       # env: HEIMDALLM_ISSUE_DEVELOP_LABELS
-# refinement_labels  = ["refine"]
-#                                       # env: HEIMDALLM_ISSUE_REFINEMENT_LABELS
-# review_only_labels = ["question", "discussion", "analysis"]
-#                                       # env: HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS
-# skip_labels        = ["wontfix", "duplicate", "invalid"]
-#                                       # env: HEIMDALLM_ISSUE_SKIP_LABELS
-# blocked_labels     = ["blocked"]      # env: HEIMDALLM_ISSUE_BLOCKED_LABELS
-# promote_to_label   = "ready"          # env: HEIMDALLM_ISSUE_PROMOTE_TO_LABEL
-#                                       # defaults to first develop_labels entry
-
 # ── AI ────────────────────────────────────────────────────────────────────────
 
 [ai]
@@ -1992,16 +1489,9 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 # Global execution timeout for AI CLI calls.
 # execution_timeout = "30m"   # default: 20m — env: HEIMDALLM_EXECUTION_TIMEOUT
-# refinement_timeout = "30m"  # deep issue refinement — env: HEIMDALLM_REFINEMENT_TIMEOUT
 
-# Issue pipeline ownership and promotion defaults.
-# triage_owner = "alice"
+# Where managed clones live when local_dir is unset (see below).
 # clone_dir = "/home/heimdallm/repos/worktrees"
-# auto_promote_triage = true      # unset = true only when refinement_labels is configured
-# auto_promote_refinement = true  # unset = true only when develop_labels is configured
-
-# Generate LLM-produced PR titles and descriptions for auto_implement PRs.
-# generate_pr_description = false
 
 # When true, a review that finds ANY issue is published as a COMMENT instead of
 # an APPROVE (a high-severity review is still REQUEST_CHANGES; a clean review
@@ -2053,17 +1543,6 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # [ai.agents.opencode]
 # model = "anthropic/claude-sonnet-4"
 
-# ── Global PR creation metadata defaults ─────────────────────────────────────
-# Applied when auto_implement creates a PR.
-# Resolution priority: per-repo > per-org > global defaults.
-# Each field resolves independently.
-# env: HEIMDALLM_PR_REVIEWERS, HEIMDALLM_PR_LABELS, HEIMDALLM_PR_ASSIGNEE, HEIMDALLM_PR_DRAFT
-
-# pr_reviewers = ["alice", "myorg/backend-team"]
-# pr_labels    = ["auto-generated", "heimdallm"]
-# pr_assignee  = "myusername"
-# pr_draft     = false
-
 # ── Per-org overrides ────────────────────────────────────────────────────────
 # Applied to all repos in the org unless overridden per-repo.
 # Each field is optional and inherits from global defaults when absent.
@@ -2073,27 +1552,9 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # fallback = "claude"
 # review_mode = "multi"
 # prompt = "org-pr-review-profile"
-# issue_prompt = "org-issue-triage-profile"
-# implement_prompt = "org-implementation-profile"
-# refinement_timeout = "30m"
-# triage_owner = "alice"
 # clone_dir = "/home/heimdallm/repos/myorg-worktrees"
-# auto_promote_triage = true
-# auto_promote_refinement = false
-# generate_pr_description = true
 # never_approve_with_issues = false
 # never_approve_min_severity = "medium"
-# pr_reviewers = ["alice", "bob"]
-# pr_labels    = ["auto-generated", "myorg-team"]
-# pr_assignee  = "myusername"
-# pr_draft     = false
-#
-# [ai.orgs."myorg".issue_tracking]
-# enabled = true
-# develop_labels = ["heimdallm-develop"]
-# refinement_labels = ["heimdallm-refine"]
-# review_only_labels = ["heimdallm-triage"]
-# skip_labels = ["wontfix"]
 #
 # # Per-org circuit breaker override (optional, fields overlay the global baseline)
 # [ai.orgs."myorg".circuit_breaker]
@@ -2101,7 +1562,6 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 # [ai.orgs."other-org"]
 # primary = "codex"
-# pr_reviewers = ["carol"]
 
 # ── Per-repo AI overrides ─────────────────────────────────────────────────────
 # Each field is optional and inherits from the org or global level when absent.
@@ -2112,60 +1572,26 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # review_mode      = "multi"
 # local_dir        = "/home/heimdallm/repos/api"  # container path; mount via HEIMDALLM_LOCAL_DIR_BASE
 # prompt           = "security-profile"   # agent profile for PR reviews
-# issue_prompt     = "triage-profile"     # agent profile for issue triage
-# implement_prompt = "impl-profile"       # agent profile for auto_implement
-# pr_reviewers     = ["carol"]
-# pr_assignee      = "deploybot"
-# pr_labels        = ["api-team"]
-# pr_draft         = false
 #
 # # Per-repo circuit breaker override (optional, fields overlay the org/global baseline)
 # [ai.repos."myorg/api".circuit_breaker]
-# per_impl_repo_hr = 3
+# per_pr_24h = 2
 
 # ── Circuit breakers ──────────────────────────────────────────────────────────
-# Caps completed reviews/triages and development runs. 0 = use the default.
+# Caps completed PR reviews. 0 = use the default.
 # There is no "unlimited" setting — use a large value (e.g. 99999) if needed.
-# See §14 Circuit Breakers in the guide for per-org/per-repo override syntax.
+# See §12 Circuit Breakers in the guide for per-org/per-repo override syntax.
 
 # [circuit_breaker]
 # per_pr_24h        = 3    # max reviews on the same PR HEAD SHA in any 24 h window
 # per_repo_hr       = 20   # max PR reviews on the same repo in any 1 h window
 # per_review_failure_repo_hr = 20 # max failed/in-flight review executions per repo in any 1 h window
-# per_issue_24h     = 3    # max triages on the same issue in any 24 h window
-# per_issue_repo_hr = 10   # max issue triages on the same repo in any 1 h window
-# per_impl_repo_hr  = 5    # max auto_implement (development) runs per repo in any 1 h window
-
-# ── Autonomous mode ───────────────────────────────────────────────────────────
-# Fully-unattended end-to-end mode. All bools default to false.
-# Safety relies on circuit breakers; there is no per-day task cap.
-# skip_labels and blocked_labels are always respected.
-# See §15 Autonomous Mode in the guide for per-org/per-repo override syntax.
-
-# [autonomous]
-# enabled           = false   # master switch / kill-switch
-# auto_merge        = false   # merge gate; built but OFF by default
-# merge_method      = "squash" # squash | merge | rebase (used only when auto_merge = true)
-# take_others_tasks = false   # enable cascade bucket 3 (others' assigned issues)
-# reassign_on_take  = false   # add bot as co-assignee when taking another user's task
-# dev_max_turns     = 0       # 0 = no practical cap
-# dev_effort        = "high"  # low | medium | high | max
-# dev_timeout       = "45m"   # wall-clock timeout for a development agent run
-
-# Per-org override example:
-# [autonomous.orgs."my-org"]
-# enabled = true
-
-# Per-repo override example:
-# [autonomous.repos."my-org/my-repo"]
-# enabled    = true
-# auto_merge = true
 
 # ── Merge tracking ────────────────────────────────────────────────────────────
 # Watches the PRs you authored or are assigned to, reports exactly what is
 # blocking each merge, and — at whatever level you configure — moves them along.
 # Every automation defaults to false; omitting this section is a full no-op.
-# See §16 Merge Tracking in the guide for the block-reason reference and the
+# See §13 Merge Tracking in the guide for the block-reason reference and the
 # per-org/per-repo override syntax.
 
 # [merge_tracking]
@@ -2200,7 +1626,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 [retention]
 max_days = 90   # env: HEIMDALLM_RETENTION_DAYS; set to 0 to disable purging
 
-# ── Multiple instances (see section 18) ───────────────────────────────────────
+# ── Multiple instances (see section 15) ───────────────────────────────────────
 #
 # Omit this section entirely for a single-daemon install: with no [cluster] the
 # routing layer reports that this daemon owns every repository and the
@@ -2229,7 +1655,7 @@ max_days = 90   # env: HEIMDALLM_RETENTION_DAYS; set to 0 to disable purging
 # [cluster.routing]
 # mode             = "assignment"          # assignment | dispatch
 # round_robin_pool = ["hub-1", "srv-a"]    # empty = every enabled instance
-# round_robin_ops  = ["review", "merge", "issue"]
+# round_robin_ops  = ["review", "merge"]
 
 # [cluster.routing.orgs]
 # "my-org" = "srv-a"

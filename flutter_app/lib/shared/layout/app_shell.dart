@@ -9,7 +9,6 @@ import '../../features/circuit_breaker/circuit_breaker_banner.dart';
 import '../../features/config/config_providers.dart';
 import '../../features/dashboard/dashboard_providers.dart';
 import '../../features/instances/widgets/instance_selector.dart';
-import '../../features/issues/issues_providers.dart';
 import '../../features/merge_tracking/merge_tracking_providers.dart';
 import '../../features/server/server_actions.dart' as server_actions;
 import '../../features/updates/check_for_updates_button.dart';
@@ -204,7 +203,6 @@ class AppShell extends ConsumerWidget {
               // the same cached fan-out.
               ref.invalidate(daemonInstancesProvider);
               ref.invalidate(prsByInstanceProvider);
-              ref.invalidate(issuesByInstanceProvider);
               ref.invalidate(mergeTrackingByInstanceProvider);
               ref.invalidate(statsByInstanceProvider);
               ref.invalidate(githubRateLimitProvider);

@@ -19,11 +19,6 @@ type Kind string
 
 const (
 	KindReview              Kind = "reviews"
-	KindIssue               Kind = "issue_runs"
-	KindImplementation      Kind = "implementations"
-	KindReviewResponse      Kind = "review_responses"
-	KindReviewFix           Kind = "review_fixes"
-	KindAutonomous          Kind = "autonomous_runs"
 	KindPublish             Kind = "review_publications"
 	KindState               Kind = "state_checks"
 	KindMaintenance         Kind = "maintenance"
@@ -35,7 +30,7 @@ const (
 
 var (
 	// ErrDraining means an updater owns the admission gate. Callers should treat
-	// it as an expected pause, not as a failed review or implementation.
+	// it as an expected pause, not as a failed review.
 	ErrDraining = errors.New("workgate: update drain in progress")
 	// ErrLeaseIDRequired means an updater did not identify its drain lease.
 	ErrLeaseIDRequired = errors.New("workgate: update lease id required")

@@ -73,8 +73,6 @@ class HeimdallmTheme {
             // as tokens (not literals) so a future per-theme tweak is a
             // one-line change here, not a search across every feature.
             AppColors.featurePrReview: const Color(0xFF58A6FF),
-            AppColors.featureIssueTracking: const Color(0xFFA371F7),
-            AppColors.featureDevelop: const Color(0xFFC79A87),
             AppColors.featureMergeTracking: const Color(0xFF3FB950),
             AppColors.featureMixed: const Color(0xFFE3B341),
             AppColors.featureOffFill: const Color(0xFF2E333B),

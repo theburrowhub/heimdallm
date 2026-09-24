@@ -5,7 +5,7 @@ import 'models.dart';
 
 /// A value paired with the instance it came from.
 ///
-/// A wrapper rather than an `instanceId` field on [PR], [TrackedIssue] and
+/// A wrapper rather than an `instanceId` field on [PR], the merge-tracking entries and
 /// friends: those models are serialised, compared and covered by their own
 /// tests, and threading a transport-level concern through all of them would be
 /// a much larger change for the same result.

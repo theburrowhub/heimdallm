@@ -273,9 +273,7 @@ void main() {
 
       await client.patchOrgConfig('acme-org', {
         'primary': 'gemini',
-        'issue_tracking': {
-          'review_only_labels': ['needs-review'],
-        },
+        'merge_tracking': {'merge_method': 'rebase'},
       });
 
       expect(captured!.method, 'PATCH');
@@ -286,9 +284,7 @@ void main() {
       expect(captured!.headers['X-Heimdallm-Token'], 'abc-123');
       expect(jsonDecode(captured!.body), {
         'primary': 'gemini',
-        'issue_tracking': {
-          'review_only_labels': ['needs-review'],
-        },
+        'merge_tracking': {'merge_method': 'rebase'},
       });
     });
 
@@ -304,12 +300,12 @@ void main() {
       });
       final client = ApiClient(httpClient: mockClient, platform: platform);
 
-      await client.deleteOrgField('acme-org', 'issue_tracking/develop_labels');
+      await client.deleteOrgField('acme-org', 'merge_tracking/merge_method');
 
       expect(captured!.method, 'DELETE');
       expect(
         captured!.url.toString(),
-        'http://127.0.0.1:7842/config/orgs/acme-org/issue_tracking/develop_labels',
+        'http://127.0.0.1:7842/config/orgs/acme-org/merge_tracking/merge_method',
       );
     });
   });

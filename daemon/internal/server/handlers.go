@@ -32,10 +32,6 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// ErrPromoteConflict is returned by the promote callback when the request is
-// syntactically valid but the issue is not currently in a promotable stage.
-var ErrPromoteConflict = errors.New("issue promotion conflict")
-
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
 type Server struct {
 	store      *store.Store
@@ -87,12 +83,9 @@ type Server struct {
 	// addPRFn fetches a PR from GitHub by (repo, number), upserts it into the
 	// store, and returns the stored row. Wired by main (needs the GitHub
 	// client + store). Nil disables POST /prs/add.
-	addPRFn              func(repo string, number int) (*store.PR, error)
-	triggerIssueReviewFn func(issueID int64) error
-	triggerIssueRefineFn func(issueID int64, force bool) error
-	triggerPromoteFn     func(issueID int64) error
-	cleanCloneFn         func(ctx context.Context, repo string) error
-	cleanClonesFn        func(ctx context.Context) (int, error)
+	addPRFn       func(repo string, number int) (*store.PR, error)
+	cleanCloneFn  func(ctx context.Context, repo string) error
+	cleanClonesFn func(ctx context.Context) (int, error)
 	// repoRenameFn drives the manual rename trigger at
 	// POST /admin/repo-rename (#489). Wired by main; nil when the
 	// daemon was constructed without the rename reconciler (e.g. in
@@ -126,9 +119,6 @@ type Server struct {
 	// mergeTrackEvaluateFn re-evaluates one tracked PR on demand. Nil until
 	// main wires it, in which case the endpoint answers 503.
 	mergeTrackEvaluateFn func(ctx context.Context, prID int64, dryRun bool) error
-	// repoMetaFns fetch repo metadata from GitHub for autocomplete.
-	fetchLabelsFn        func(repo string) ([]string, error)
-	fetchCollaboratorsFn func(repo string) ([]string, error)
 	// apiToken is required on all state-mutating requests (POST/PUT/DELETE).
 	// Empty string disables authentication (should not happen in production).
 	apiToken  string
@@ -292,8 +282,6 @@ var sensitiveGETPaths = []string{
 	"/me",     // exposes GitHub username
 	"/prs",    // exposes PR titles, repos, authors
 	"/stats",  // exposes review activity metadata
-	"/issues", // covers /issues and /issues/{id}
-	"/repos",  // covers /repos/{name}/labels and /repos/{name}/collaborators
 	"/github", // covers /github/rate_limit (live GitHub API usage)
 	// exposes PR titles, repos, block reasons and check names
 	"/merge-tracking",
@@ -373,23 +361,6 @@ func (srv *Server) SetMergeTrackEvaluateFn(fn func(ctx context.Context, prID int
 	srv.mergeTrackEvaluateFn = fn
 }
 
-// SetTriggerIssueReviewFn wires the issue-review-trigger callback called by POST /issues/{id}/review.
-func (srv *Server) SetTriggerIssueReviewFn(fn func(issueID int64) error) {
-	srv.triggerIssueReviewFn = fn
-}
-
-// SetTriggerIssueRefineFn wires the refinement trigger called by POST /issues/{id}/refine.
-func (srv *Server) SetTriggerIssueRefineFn(fn func(issueID int64, force bool) error) {
-	srv.triggerIssueRefineFn = fn
-}
-
-// SetTriggerPromoteFn wires the promote callback called by POST /issues/{id}/promote.
-// The callback validates and applies a stage-label transition only. The poll
-// cycle executes the new stage after it observes the updated GitHub labels.
-func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
-	srv.triggerPromoteFn = fn
-}
-
 // SetRepoRenameFn wires the manual rename trigger called by
 // POST /admin/repo-rename (#489). The callback runs the same
 // reconciler the rename probe uses, so a manual rename is fully
@@ -454,12 +425,6 @@ func (srv *Server) SetUpdateConfirmFn(
 	confirm func(leaseID string) (UpdatePreparationStatus, error),
 ) {
 	srv.confirmUpdateFn = confirm
-}
-
-// SetRepoMetaFns wires GitHub metadata fetchers for autocomplete endpoints.
-func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs func(string) ([]string, error)) {
-	srv.fetchLabelsFn = labels
-	srv.fetchCollaboratorsFn = collabs
 }
 
 // SetConfigPath sets the path to config.toml for PATCH/DELETE handlers.
@@ -691,15 +656,6 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Post("/prs/{id}/cancel", srv.handleCancelReview)
 	r.Post("/prs/{id}/dismiss", srv.handleDismissPR)
 	r.Post("/prs/{id}/undismiss", srv.handleUndismissPR)
-	r.Get("/issues", srv.handleListIssues)
-	r.Get("/issues/{id}", srv.handleGetIssue)
-	r.Post("/issues/{id}/review", srv.handleTriggerIssueReview)
-	r.Post("/issues/{id}/refine", srv.handleTriggerIssueRefine)
-	r.Post("/issues/{id}/promote", srv.handlePromoteIssue)
-	r.Post("/issues/{id}/dismiss", srv.handleDismissIssue)
-	r.Post("/issues/{id}/undismiss", srv.handleUndismissIssue)
-	r.Get("/repos/{name}/labels", srv.handleRepoLabels)
-	r.Get("/repos/{name}/collaborators", srv.handleRepoCollaborators)
 	r.Get("/activity", srv.handleActivity)
 	r.Get("/stats", srv.handleStats)
 	r.Get("/github/rate_limit", srv.handleGitHubRateLimit)
@@ -713,8 +669,6 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/repos/{repo}/*", srv.handleDeleteRepoField)
 	r.Patch("/config/orgs/{org}", srv.handlePatchOrgConfig)
 	r.Delete("/config/orgs/{org}/*", srv.handleDeleteOrgField)
-	r.Patch("/config/autonomous/repos/{repo}", srv.handlePatchAutonomousRepoConfig)
-	r.Patch("/config/autonomous/orgs/{org}", srv.handlePatchAutonomousOrgConfig)
 	r.Post("/merge-tracking/add", srv.handleAddMergeTracking)
 	r.Patch("/config/merge_tracking/repos/{repo}", srv.handlePatchMergeTrackingRepoConfig)
 	r.Delete("/config/merge_tracking/repos/{repo}/*", srv.handleDeleteMergeTrackingRepoConfigField)
@@ -1295,14 +1249,12 @@ func (srv *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // readOnlyConfigKeys below) is rejected with HTTP 400 to prevent arbitrary
 // data injection into the configs table (security issue #4).
 var validConfigKeys = map[string]struct{}{
-	"poll_interval":      {},
-	"ai_primary":         {},
-	"ai_fallback":        {},
-	"review_mode":        {},
-	"refinement_timeout": {},
-	"retention_days":     {},
-	"issue_tracking":     {},
-	"agent_configs":      {},
+	"poll_interval":  {},
+	"ai_primary":     {},
+	"ai_fallback":    {},
+	"review_mode":    {},
+	"retention_days": {},
+	"agent_configs":  {},
 }
 
 // readOnlyConfigKeys are keys that GET /config returns (so the web UI can
@@ -1406,37 +1358,6 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, valid := validReviewModes[s]; !valid {
 			http.Error(w, "review_mode must be one of: single, multi", http.StatusBadRequest)
-			return
-		}
-	}
-	if v, ok := body["refinement_timeout"]; ok {
-		s, isStr := v.(string)
-		if !isStr {
-			http.Error(w, "refinement_timeout must be a string", http.StatusBadRequest)
-			return
-		}
-		if d, err := time.ParseDuration(s); err != nil || d <= 0 {
-			http.Error(w, "refinement_timeout must be a positive duration, e.g. 30m", http.StatusBadRequest)
-			return
-		}
-	}
-	if v, ok := body["issue_tracking"]; ok {
-		// Round-trip through JSON to decode into the typed struct. This
-		// rejects malformed payloads (e.g. the client sent a string or
-		// array by mistake) before we ever hit the store, so a single bad
-		// request cannot persist a value that breaks the next reload.
-		raw, err := json.Marshal(v)
-		if err != nil {
-			http.Error(w, "issue_tracking must be a JSON object", http.StatusBadRequest)
-			return
-		}
-		var it config.IssueTrackingConfig
-		if err := json.Unmarshal(raw, &it); err != nil {
-			http.Error(w, fmt.Sprintf("issue_tracking: %v", err), http.StatusBadRequest)
-			return
-		}
-		if err := config.ValidateIssueTracking(it); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
@@ -1675,33 +1596,6 @@ func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (srv *Server) handlePatchAutonomousRepoConfig(w http.ResponseWriter, r *http.Request) {
-	repo, err := url.PathUnescape(chi.URLParam(r, "repo"))
-	if err != nil || repo == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo parameter"})
-		return
-	}
-	srv.patchAutonomousSubKey(w, r, "repos", repo)
-}
-
-func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http.Request) {
-	org, err := url.PathUnescape(chi.URLParam(r, "org"))
-	if err != nil || org == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid org parameter"})
-		return
-	}
-	if err := config.ValidateOrgSlug(org); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	srv.patchAutonomousSubKey(w, r, "orgs", org)
-}
-
-// patchAutonomousSubKey merges a PATCH body into autonomous.<subKey>.<id>.
-func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request, subKey, id string) {
-	srv.patchSectionSubKey(w, r, "autonomous", subKey, id)
-}
-
 // patchSectionSubKey merges a PATCH body into <section>.<subKey>.<id>
 // (subKey is "repos" or "orgs"), pruning keys that the merge removed, the same
 // way the global config PATCH handlers do. Callers are responsible for
@@ -1717,7 +1611,7 @@ func (srv *Server) patchSectionSubKey(w http.ResponseWriter, r *http.Request, se
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if err := rejectAutonomousAgentPatch(patch, section+"."+subKey+"."+id); err != nil {
+	if err := rejectSectionAgentPatch(patch, section+"."+subKey+"."+id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2321,316 +2215,6 @@ func (srv *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"login": login})
 }
 
-// ── Issue endpoints ──────────────────────────────────────────────────────────
-
-// issueResponse wraps a store.Issue for JSON serialization, parsing the
-// Assignees/Labels JSON strings into proper arrays so the API consumer
-// receives []string instead of a JSON-encoded string.
-type issueResponse struct {
-	ID           int64                `json:"id"`
-	GithubID     int64                `json:"github_id"`
-	Repo         string               `json:"repo"`
-	Number       int                  `json:"number"`
-	Title        string               `json:"title"`
-	Body         string               `json:"body"`
-	Author       string               `json:"author"`
-	Assignees    json.RawMessage      `json:"assignees"`
-	Labels       json.RawMessage      `json:"labels"`
-	State        string               `json:"state"`
-	CreatedAt    time.Time            `json:"created_at"`
-	FetchedAt    time.Time            `json:"fetched_at"`
-	Dismissed    bool                 `json:"dismissed"`
-	LatestReview *issueReviewResponse `json:"latest_review,omitempty"`
-	// LinkedPR carries the external review state of the PR
-	// auto_implement created for this issue (#482 phase 1). Populated
-	// only when the issue's latest review action is `auto_implement`
-	// and the PR row carries a non-zero `auto_implement_issue_id`;
-	// triage-only flows leave this nil.
-	LinkedPR *issueLinkedPRResponse `json:"linked_pr,omitempty"`
-}
-
-// issueLinkedPRResponse is the slim PR-side view embedded on the
-// issue response so a single issue endpoint hit gives Flutter
-// everything it needs to render the "PR Changes Requested" /
-// "PR Approved" chip.
-type issueLinkedPRResponse struct {
-	Number              int       `json:"number"`
-	URL                 string    `json:"url"`
-	State               string    `json:"state"`
-	ExternalReviewState string    `json:"external_review_state"`
-	ExternalReviewer    string    `json:"external_reviewer"`
-	ExternalReviewAt    time.Time `json:"external_review_at,omitempty"`
-}
-
-// issueReviewResponse wraps a store.IssueReview, parsing Triage/NextSteps
-// JSON strings into structured objects.
-type issueReviewResponse struct {
-	ID             int64           `json:"id"`
-	IssueID        int64           `json:"issue_id"`
-	CLIUsed        string          `json:"cli_used"`
-	Summary        string          `json:"summary"`
-	Triage         json.RawMessage `json:"triage"`
-	RefinementData json.RawMessage `json:"refinement_data,omitempty"`
-	NextSteps      json.RawMessage `json:"next_steps"`
-	ActionTaken    string          `json:"action_taken"`
-	PRCreated      int             `json:"pr_created"`
-	CreatedAt      time.Time       `json:"created_at"`
-}
-
-func toIssueResponse(iss *store.Issue, rev *store.IssueReview) issueResponse {
-	resp := issueResponse{
-		ID: iss.ID, GithubID: iss.GithubID, Repo: iss.Repo,
-		Number: iss.Number, Title: iss.Title, Body: iss.Body,
-		Author: iss.Author, State: iss.State,
-		Assignees: json.RawMessage(iss.Assignees),
-		Labels:    json.RawMessage(iss.Labels),
-		CreatedAt: iss.CreatedAt, FetchedAt: iss.FetchedAt,
-		Dismissed: iss.Dismissed,
-	}
-	if rev != nil {
-		resp.LatestReview = toIssueReviewResponse(rev)
-	}
-	return resp
-}
-
-// attachLinkedPR hydrates the linked_pr block on the response when the
-// latest review created a PR AND that PR carries the
-// auto_implement_issue_id back-link (#482). Both conditions are
-// required: a PR created by auto_implement before this PR landed in
-// production stays unmarked and falls through cleanly.
-func (srv *Server) attachLinkedPR(resp *issueResponse, iss *store.Issue, rev *store.IssueReview) {
-	if rev == nil || rev.PRCreated <= 0 {
-		return
-	}
-	pr, err := srv.store.GetPRByRepoNumber(iss.Repo, rev.PRCreated)
-	if err != nil || pr == nil || pr.AutoImplementIssueID == 0 {
-		return
-	}
-	resp.LinkedPR = &issueLinkedPRResponse{
-		Number:              pr.Number,
-		URL:                 pr.URL,
-		State:               pr.State,
-		ExternalReviewState: pr.ExternalReviewState,
-		ExternalReviewer:    pr.ExternalReviewer,
-		ExternalReviewAt:    pr.ExternalReviewAt,
-	}
-}
-
-func toIssueReviewResponse(r *store.IssueReview) *issueReviewResponse {
-	resp := &issueReviewResponse{
-		ID: r.ID, IssueID: r.IssueID, CLIUsed: r.CLIUsed,
-		Summary:     r.Summary,
-		Triage:      json.RawMessage(r.Triage),
-		NextSteps:   json.RawMessage(r.NextSteps),
-		ActionTaken: r.ActionTaken, PRCreated: r.PRCreated,
-		CreatedAt: r.CreatedAt,
-	}
-	if r.RefinementData != "" {
-		resp.RefinementData = json.RawMessage(r.RefinementData)
-	}
-	return resp
-}
-
-func (srv *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
-	var states []string
-	if s := r.URL.Query().Get("state"); s != "" {
-		states = strings.Split(s, ",")
-	}
-	issues, err := srv.store.ListIssues(states...)
-	if err != nil {
-		slog.Error("handleListIssues: store error", "err", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	result := make([]issueResponse, 0, len(issues))
-	for _, iss := range issues {
-		rev, _ := srv.store.LatestIssueReview(iss.ID)
-		resp := toIssueResponse(iss, rev)
-		srv.attachLinkedPR(&resp, iss, rev)
-		result = append(result, resp)
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-func (srv *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	iss, err := srv.store.GetIssue(id)
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	reviews, _ := srv.store.ListIssueReviews(id)
-	reviewResps := make([]*issueReviewResponse, 0, len(reviews))
-	for _, rev := range reviews {
-		reviewResps = append(reviewResps, toIssueReviewResponse(rev))
-	}
-	latestRev, _ := srv.store.LatestIssueReview(id)
-	issResp := toIssueResponse(iss, latestRev)
-	srv.attachLinkedPR(&issResp, iss, latestRev)
-	writeJSON(w, http.StatusOK, map[string]any{"issue": issResp, "reviews": reviewResps})
-}
-
-func (srv *Server) handleDismissIssue(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	if err := srv.store.DismissIssue(id); err != nil {
-		slog.Error("handleDismissIssue: store error", "id", id, "err", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "dismissed"})
-}
-
-func (srv *Server) handleUndismissIssue(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	if err := srv.store.UndismissIssue(id); err != nil {
-		slog.Error("handleUndismissIssue: store error", "id", id, "err", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "undismissed"})
-}
-
-func (srv *Server) handleTriggerIssueReview(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	if srv.triggerIssueReviewFn == nil {
-		http.Error(w, "issue review trigger not configured", http.StatusServiceUnavailable)
-		return
-	}
-	// Shared semaphore with PR reviews — intentional. Both review types spawn
-	// AI CLI processes, which are the real concurrency bottleneck. A single
-	// global cap prevents overloading the machine with concurrent CLI invocations.
-	select {
-	case srv.reviewSem <- struct{}{}:
-	default:
-		http.Error(w, `{"error":"too many concurrent reviews — try again later"}`, http.StatusTooManyRequests)
-		return
-	}
-	go func() {
-		defer func() { <-srv.reviewSem }()
-		if err := srv.triggerIssueReviewFn(id); err != nil {
-			slog.Error("trigger issue review failed", "issue_id", id, "err", err)
-		}
-	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "review queued"})
-}
-
-func (srv *Server) handleTriggerIssueRefine(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	if srv.triggerIssueRefineFn == nil {
-		http.Error(w, "issue refinement trigger not configured", http.StatusServiceUnavailable)
-		return
-	}
-	if _, err := srv.store.GetIssue(id); err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	force := strings.EqualFold(r.URL.Query().Get("force"), "true") || r.URL.Query().Get("force") == "1"
-	// Shared semaphore with PR reviews and issue triage because refinement
-	// also launches an AI CLI process.
-	select {
-	case srv.reviewSem <- struct{}{}:
-	default:
-		http.Error(w, `{"error":"too many concurrent reviews — try again later"}`, http.StatusTooManyRequests)
-		return
-	}
-	go func() {
-		defer func() { <-srv.reviewSem }()
-		if err := srv.triggerIssueRefineFn(id, force); err != nil {
-			slog.Error("trigger issue refinement failed", "issue_id", id, "force", force, "err", err)
-		}
-	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "refinement queued"})
-}
-
-// handlePromoteIssue moves an issue to its next configured stage by updating
-// GitHub labels. It does not run AI work directly; the next poll sees the new
-// labels and dispatches refinement/development through the normal workers.
-func (srv *Server) handlePromoteIssue(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-	if srv.triggerPromoteFn == nil {
-		http.Error(w, "promote trigger not configured", http.StatusServiceUnavailable)
-		return
-	}
-	if _, err := srv.store.GetIssue(id); err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	if err := srv.triggerPromoteFn(id); err != nil {
-		if errors.Is(err, pipeline.ErrUpdateDraining) {
-			writeUpdateDrainConflict(w)
-			return
-		}
-		slog.Error("promote issue failed", "issue_id", id, "err", err)
-		if errors.Is(err, ErrPromoteConflict) {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
-		http.Error(w, "promote failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "promotion applied"})
-}
-
-func (srv *Server) handleRepoLabels(w http.ResponseWriter, r *http.Request) {
-	repo, _ := url.PathUnescape(chi.URLParam(r, "name"))
-	if srv.fetchLabelsFn == nil {
-		http.Error(w, "not configured", http.StatusServiceUnavailable)
-		return
-	}
-	labels, err := srv.fetchLabelsFn(repo)
-	if err != nil {
-		slog.Error("handleRepoLabels: fetch error", "repo", repo, "err", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	if labels == nil {
-		labels = []string{}
-	}
-	writeJSON(w, http.StatusOK, labels)
-}
-
-func (srv *Server) handleRepoCollaborators(w http.ResponseWriter, r *http.Request) {
-	repo, _ := url.PathUnescape(chi.URLParam(r, "name"))
-	if srv.fetchCollaboratorsFn == nil {
-		http.Error(w, "not configured", http.StatusServiceUnavailable)
-		return
-	}
-	collabs, err := srv.fetchCollaboratorsFn(repo)
-	if err != nil {
-		slog.Error("handleRepoCollaborators: fetch error", "repo", repo, "err", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	if collabs == nil {
-		collabs = []string{}
-	}
-	writeJSON(w, http.StatusOK, collabs)
-}
-
 func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	var repos, orgs []string
 	if raw := r.URL.Query().Get("repos"); raw != "" {
@@ -2682,8 +2266,8 @@ func (srv *Server) handleGitHubRateLimit(w http.ResponseWriter, r *http.Request)
 //	from=YYYY-MM-DD & to=YYYY-MM-DD  — inclusive range in daemon local TZ
 //	org=... (repeatable)             — org filter
 //	repo=... (repeatable)            — repo filter (full slug "org/name")
-//	item_type=pr|issue (repeatable)  — item type filter
-//	action=review|review_skipped|triage|implement|promote|error (repeatable)
+//	item_type=pr (repeatable)        — item type filter
+//	action=review|review_skipped|error (repeatable)
 //	outcome=... (repeatable)         — exact outcome filter
 //	limit=N (default 500, max 5000)
 //
@@ -2846,16 +2430,12 @@ const maxActivityFilterValues = 50
 const maxActivityFilterValueLen = 512
 
 var validActivityItemTypes = map[string]bool{
-	"pr":    true,
-	"issue": true,
+	"pr": true,
 }
 
 var validActivityActions = map[string]bool{
 	"review":         true,
 	"review_skipped": true,
-	"triage":         true,
-	"implement":      true,
-	"promote":        true,
 	"error":          true,
 }
 
@@ -3315,39 +2895,10 @@ func validateCanonicalConfigPatchKeys(patch map[string]any) error {
 			}
 		}
 	}
-	return validateCanonicalAutonomousPatchKeys(patch)
-}
-
-func validateCanonicalAutonomousPatchKeys(patch map[string]any) error {
-	autonomous, present, err := canonicalMapChild(patch, "autonomous", "config")
-	if err != nil || !present {
-		return err
-	}
-	if err := rejectAutonomousAgentPatch(autonomous, "autonomous"); err != nil {
-		return err
-	}
-	for _, scope := range []string{"repos", "orgs"} {
-		overrides, scoped, childErr := canonicalMapChild(autonomous, scope, "autonomous")
-		if childErr != nil {
-			return childErr
-		}
-		if !scoped {
-			continue
-		}
-		for id, raw := range overrides {
-			override, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if err := rejectAutonomousAgentPatch(override, "autonomous."+scope+"."+id); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
 }
 
-func rejectAutonomousAgentPatch(patch map[string]any, path string) error {
+func rejectSectionAgentPatch(patch map[string]any, path string) error {
 	agents, present, err := canonicalMapChild(patch, "agents", path)
 	if err != nil || !present {
 		return err

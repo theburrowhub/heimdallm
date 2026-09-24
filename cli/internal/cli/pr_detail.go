@@ -17,12 +17,6 @@ var (
 			Padding(0, 1).
 			Bold(true)
 
-	detailBoxIssue = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#F59E0B")).
-			Padding(0, 1).
-			Bold(true)
-
 	detailLabel = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6B7280"))
 
@@ -156,29 +150,5 @@ func printJSONArray(title, raw string) {
 			b, _ := json.MarshalIndent(v, "     ", "  ")
 			fmt.Printf("  %d. %s\n", i+1, string(b))
 		}
-	}
-}
-
-func printTriageMap(raw string) {
-	if raw == "" || raw == "{}" || raw == "null" {
-		return
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil || len(m) == 0 {
-		return
-	}
-	fmt.Println()
-	fmt.Println(detailSection.Render("  Classification"))
-	fmt.Println("  " + strings.Repeat("─", 40))
-	if sev, ok := m["severity"]; ok {
-		sevStr := fmt.Sprintf("%v", sev)
-		fmt.Printf("  %-14s %s\n", "severity:",
-			detailSeverity(sevStr).Render(sevStr))
-	}
-	for k, v := range m {
-		if k == "severity" {
-			continue
-		}
-		fmt.Printf("  %-14s %v\n", k+":", v)
 	}
 }

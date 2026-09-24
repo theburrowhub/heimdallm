@@ -28,21 +28,6 @@ services:
       - HEIMDALLM_PORT=${HEIMDALLM_PORT:-7842}
       - HEIMDALLM_BIND_ADDR=0.0.0.0
 
-      # ── Issue tracking pipeline ────────────────────────────────────────
-      # All optional. The daemon's applyIssueTrackingEnv reads these at
-      # startup; without forwarding them here the operator's docker/.env
-      # values stay outside the container and silently get defaults.
-      - HEIMDALLM_ISSUE_TRACKING_ENABLED=${HEIMDALLM_ISSUE_TRACKING_ENABLED:-}
-      - HEIMDALLM_ISSUE_FILTER_MODE=${HEIMDALLM_ISSUE_FILTER_MODE:-}
-      - HEIMDALLM_ISSUE_DEFAULT_ACTION=${HEIMDALLM_ISSUE_DEFAULT_ACTION:-}
-      - HEIMDALLM_ISSUE_ORGANIZATIONS=${HEIMDALLM_ISSUE_ORGANIZATIONS:-}
-      - HEIMDALLM_ISSUE_ASSIGNEES=${HEIMDALLM_ISSUE_ASSIGNEES:-}
-      - HEIMDALLM_ISSUE_DEVELOP_LABELS=${HEIMDALLM_ISSUE_DEVELOP_LABELS:-}
-      - HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS=${HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS:-}
-      - HEIMDALLM_ISSUE_SKIP_LABELS=${HEIMDALLM_ISSUE_SKIP_LABELS:-}
-      - HEIMDALLM_ISSUE_BLOCKED_LABELS=${HEIMDALLM_ISSUE_BLOCKED_LABELS:-}
-      - HEIMDALLM_ISSUE_PROMOTE_TO_LABEL=${HEIMDALLM_ISSUE_PROMOTE_TO_LABEL:-}
-
       # ── Topic-based repository discovery ───────────────────────────────
       - HEIMDALLM_DISCOVERY_TOPIC=${HEIMDALLM_DISCOVERY_TOPIC:-}
       - HEIMDALLM_DISCOVERY_ORGS=${HEIMDALLM_DISCOVERY_ORGS:-}
@@ -67,7 +52,7 @@ services:
       - CI=true
       - OPENCODE_DISABLE_AUTOUPDATE=true
 
-      # ── SSH agent forwarding for git operations (auto_implement) ──────
+      # ── SSH agent forwarding for git operations (merge tracking) ──────
       - SSH_AUTH_SOCK=/ssh-agent
     volumes:
       # Persistent data (SQLite DB + API token)
@@ -120,7 +105,7 @@ services:
       # the UI — opt-in without breaking the default `make up-build`.
       - ${HEIMDALLM_LOCAL_DIR_BASE:-./repos-placeholder}:/home/heimdallm/repos:ro
       #
-      # SSH agent forwarding for git operations (auto_implement).
+      # SSH agent forwarding for git operations (merge tracking).
       # macOS: Docker Desktop exposes the host agent at a fixed path.
       # Linux: set SSH_AUTH_SOCK in docker/.env.
       - ${HEIMDALLM_SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}:/ssh-agent:ro

@@ -65,7 +65,7 @@ func TestListActivity_FilterByOrgAndAction(t *testing.T) {
 		}
 	}
 	must(base.Add(-3*time.Minute), "acme", "acme/api", "review")
-	must(base.Add(-2*time.Minute), "acme", "acme/api", "triage")
+	must(base.Add(-2*time.Minute), "acme", "acme/api", "error")
 	must(base.Add(-1*time.Minute), "globex", "globex/web", "review")
 
 	entries, _, err := s.ListActivity(store.ActivityQuery{
@@ -95,7 +95,7 @@ func TestListActivity_FilterByItemTypeAndOutcome(t *testing.T) {
 	}
 	must("pr", "review_skipped", "draft", 1)
 	must("pr", "review_skipped", "not_open", 2)
-	must("issue", "triage", "draft", 3)
+	must("issue", "error", "draft", 3)
 
 	entries, _, err := s.ListActivity(store.ActivityQuery{
 		ItemTypes: []string{"pr"},

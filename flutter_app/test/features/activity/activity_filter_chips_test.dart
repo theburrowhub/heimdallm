@@ -68,7 +68,7 @@ void main() {
 
     expect(tester.widget<CheckboxListTile>(reviewTile).value, isTrue);
 
-    expect(find.text('Refinement'), findsOneWidget);
+    expect(find.text('Skipped reviews'), findsOneWidget);
   });
 
   testWidgets('string picker shows an empty state instead of a blank sheet', (
@@ -83,9 +83,7 @@ void main() {
     expect(find.text('No options available'), findsOneWidget);
   });
 
-  testWidgets('quick chips update type, action, and outcome filters', (
-    tester,
-  ) async {
+  testWidgets('quick chips update action and outcome filters', (tester) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
 
@@ -106,12 +104,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('PRs'));
     await tester.tap(find.text('Draft skips'));
     await tester.pumpAndSettle();
 
     final q = container.read(activityQueryProvider);
-    expect(q.itemTypes, {'pr'});
     expect(q.actions, {ActivityAction.reviewSkipped});
     expect(q.outcomes, {'draft'});
   });

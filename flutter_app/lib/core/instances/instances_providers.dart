@@ -257,9 +257,3 @@ String prDetailRoute(int prId, String instanceId) =>
     instanceId.isEmpty
     ? '/prs/$prId'
     : '/prs/$prId?instance=${Uri.encodeQueryComponent(instanceId)}';
-
-/// The issue-side equivalent of [prDetailRoute].
-String issueDetailRoute(int issueId, String instanceId) =>
-    instanceId.isEmpty
-    ? '/issues/$issueId'
-    : '/issues/$issueId?instance=${Uri.encodeQueryComponent(instanceId)}';

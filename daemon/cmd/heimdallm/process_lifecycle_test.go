@@ -36,7 +36,6 @@ type lifecycleFixture struct {
 	remoteRequest    <-chan string
 	pollersRestarted <-chan struct{}
 	prID             int64
-	issueID          int64
 	releaseUser      func()
 	done             <-chan struct{}
 }
@@ -76,7 +75,7 @@ max_days = 1
 	return configPath, body
 }
 
-func seedLifecycleStore(t *testing.T, dataDir string) (int64, int64) {
+func seedLifecycleStore(t *testing.T, dataDir string) int64 {
 	t.Helper()
 	s, err := store.Open(filepath.Join(dataDir, "heimdallm.db"))
 	if err != nil {
@@ -98,24 +97,10 @@ func seedLifecycleStore(t *testing.T, dataDir string) (int64, int64) {
 		s.Close()
 		t.Fatalf("seed PR: %v", err)
 	}
-	issueID, err := s.UpsertIssue(&store.Issue{
-		GithubID:  202,
-		Repo:      "org/repo",
-		Number:    2,
-		Title:     "test issue",
-		Author:    "alice",
-		State:     "open",
-		CreatedAt: now,
-		FetchedAt: now,
-	})
-	if err != nil {
-		s.Close()
-		t.Fatalf("seed issue: %v", err)
-	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("close lifecycle store: %v", err)
 	}
-	return prID, issueID
+	return prID
 }
 
 func startLifecycleFixture(t *testing.T, blockAuthenticatedUser bool) (*lifecycleFixture, <-chan struct{}) {
@@ -127,7 +112,7 @@ func startLifecycleFixture(t *testing.T, blockAuthenticatedUser bool) (*lifecycl
 		t.Fatalf("create local repository marker: %v", err)
 	}
 	configPath, configBody := writeLifecycleConfig(t, dataDir, localDirBase, "1h")
-	prID, issueID := seedLifecycleStore(t, dataDir)
+	prID := seedLifecycleStore(t, dataDir)
 
 	userRequested := make(chan struct{})
 	releaseUser := make(chan struct{})
@@ -210,7 +195,6 @@ func startLifecycleFixture(t *testing.T, blockAuthenticatedUser bool) (*lifecycl
 		remoteRequest:    remoteRequests,
 		pollersRestarted: pollersRestarted,
 		prID:             prID,
-		issueID:          issueID,
 		releaseUser:      releaseUserFn,
 		done:             done,
 	}
@@ -627,25 +611,6 @@ func TestRunProcessFullLifecycleStartingReloadManualOperationsAndAPIShutdown(t *
 	}
 	waitForRemoteRequest(t, fixture.remoteRequest, "/repos/org/repo/pulls/1")
 
-	response = postWhenReviewSlotIsFree(t, fixture.apiBaseURL+"/issues/999999/review", apiToken)
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("manual issue review status = %d, want 202", response.StatusCode)
-	}
-
-	response = postWhenReviewSlotIsFree(t,
-		fmt.Sprintf("%s/issues/%d/refine?force=true", fixture.apiBaseURL, fixture.issueID), apiToken)
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("manual issue refinement status = %d, want 202", response.StatusCode)
-	}
-	waitForRemoteRequest(t, fixture.remoteRequest, "/repos/org/repo/issues/2")
-
-	response = doLifecycleRequest(t, http.MethodPost,
-		fmt.Sprintf("%s/issues/%d/promote", fixture.apiBaseURL, fixture.issueID), apiToken)
-	if response.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("manual issue promotion status = %d, want 500 from fake GitHub", response.StatusCode)
-	}
-	waitForRemoteRequest(t, fixture.remoteRequest, "/repos/org/repo/issues/2")
-
 	// Exercise the complete live-daemon update protocol and every main-layer
 	// mutation guard. Once prepare closes admission, these endpoints must defer
 	// before touching repositories, GitHub, or an AI process.
@@ -695,25 +660,10 @@ func TestRunProcessFullLifecycleStartingReloadManualOperationsAndAPIShutdown(t *
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("guarded repo rename status = %d, want 409", response.StatusCode)
 	}
-	response = doLifecycleRequest(t, http.MethodPost,
-		fmt.Sprintf("%s/issues/%d/promote", fixture.apiBaseURL, fixture.issueID), apiToken)
-	if response.StatusCode != http.StatusConflict {
-		t.Fatalf("guarded promotion status = %d, want 409", response.StatusCode)
-	}
 	response = postWhenReviewSlotIsFree(t,
 		fmt.Sprintf("%s/prs/%d/review", fixture.apiBaseURL, fixture.prID), apiToken)
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("guarded PR review status = %d, want 202", response.StatusCode)
-	}
-	response = postWhenReviewSlotIsFree(t,
-		fmt.Sprintf("%s/issues/%d/review", fixture.apiBaseURL, fixture.issueID), apiToken)
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("guarded issue review status = %d, want 202", response.StatusCode)
-	}
-	response = postWhenReviewSlotIsFree(t,
-		fmt.Sprintf("%s/issues/%d/refine?force=true", fixture.apiBaseURL, fixture.issueID), apiToken)
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("guarded issue refinement status = %d, want 202", response.StatusCode)
 	}
 	// The async callbacks return immediately on the closed admission gate. Let
 	// the final goroutine release the shared review semaphore before reopening.

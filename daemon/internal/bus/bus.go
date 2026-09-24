@@ -97,3 +97,31 @@ func (b *Bus) Conn() *nats.Conn {
 func (b *Bus) MaxConcurrentWorkers() int {
 	return b.cfg.MaxConcurrentWorkers
 }
+
+// NATS subject constants for the Heimdallm event bus.
+// Organized by functional domain: discovery, PR workflow,
+// state checking, and events (SSE bridge).
+
+const (
+	// Discovery
+	SubjDiscoveryRepos = "heimdallm.discovery.repos"
+
+	// PR workflow
+	SubjPRReview  = "heimdallm.pr.review"
+	SubjPRPublish = "heimdallm.pr.publish"
+
+	// State checking
+	SubjStateCheck = "heimdallm.state.check"
+
+	// Events (SSE bridge) — publishers use specific sub-subjects,
+	// consumers subscribe to the wildcard "heimdallm.events.>".
+	SubjEventPrefix          = "heimdallm.events."
+	SubjEventReviewStarted   = "heimdallm.events.review_started"
+	SubjEventReviewCompleted = "heimdallm.events.review_completed"
+	SubjEventReviewError     = "heimdallm.events.review_error"
+	SubjEventReviewSkipped   = "heimdallm.events.review_skipped"
+	SubjEventBreakerTripped  = "heimdallm.events.circuit_breaker_tripped"
+	SubjEventPRStateChanged  = "heimdallm.events.pr_state_changed"
+	SubjEventPRDetected      = "heimdallm.events.pr_detected"
+	SubjEventRepoDiscovered  = "heimdallm.events.repo_discovered"
+)

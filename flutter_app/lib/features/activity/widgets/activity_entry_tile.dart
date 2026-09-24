@@ -174,10 +174,8 @@ class ActivityItemTypeBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final isIssue = itemType == 'issue';
-    final color = isIssue ? scheme.tertiary : scheme.primary;
-    final label = isIssue ? 'Issue' : 'PR';
+    final color = Theme.of(context).colorScheme.primary;
+    final label = itemType == 'pr' ? 'PR' : itemType.toUpperCase();
     return Box(
       style: BoxStyler()
           .color(color.withValues(alpha: 0.10))
@@ -202,10 +200,6 @@ class ActivityItemTypeBadge extends StatelessWidget {
 IconData activityIconFor(ActivityAction action) => switch (action) {
   ActivityAction.review => Icons.rate_review,
   ActivityAction.reviewSkipped => Icons.visibility_off_outlined,
-  ActivityAction.triage => Icons.label,
-  ActivityAction.refinement => Icons.fact_check,
-  ActivityAction.implement => Icons.build,
-  ActivityAction.promote => Icons.swap_horiz,
   ActivityAction.error => Icons.error_outline,
   ActivityAction.unknown => Icons.help_outline,
 };
@@ -213,10 +207,6 @@ IconData activityIconFor(ActivityAction action) => switch (action) {
 String activityActionLabel(ActivityAction action) => switch (action) {
   ActivityAction.review => 'Review',
   ActivityAction.reviewSkipped => 'Skipped',
-  ActivityAction.triage => 'Triage',
-  ActivityAction.refinement => 'Refinement',
-  ActivityAction.implement => 'Implement',
-  ActivityAction.promote => 'Promote',
   ActivityAction.error => 'Error',
   ActivityAction.unknown => 'Unknown',
 };
@@ -225,10 +215,6 @@ Color activityActionColor(ColorScheme scheme, ActivityAction action) =>
     switch (action) {
       ActivityAction.error => scheme.error,
       ActivityAction.reviewSkipped => scheme.outline,
-      ActivityAction.triage => scheme.tertiary,
-      ActivityAction.refinement => scheme.tertiary,
-      ActivityAction.implement => scheme.secondary,
-      ActivityAction.promote => scheme.primary,
       ActivityAction.review => scheme.primary,
       ActivityAction.unknown => scheme.outline,
     };
@@ -242,10 +228,6 @@ String activityEntryTitle(ActivityEntry entry) {
 String activityOutcomeText(ActivityEntry entry) => switch (entry.action) {
   ActivityAction.review => _reviewOutcome(entry),
   ActivityAction.reviewSkipped => _skippedOutcome(entry),
-  ActivityAction.triage => _triageOutcome(entry),
-  ActivityAction.refinement => _refinementOutcome(entry),
-  ActivityAction.implement => _implementOutcome(entry),
-  ActivityAction.promote => 'Promoted: ${entry.outcome}',
   ActivityAction.error => entry.outcome.isEmpty ? 'Error' : entry.outcome,
   ActivityAction.unknown =>
     entry.outcome.isEmpty
@@ -289,26 +271,6 @@ String _peerPublishedLabel(ActivityEntry entry) {
   ];
   final tail = parts.isEmpty ? '' : ' (${parts.join(', ')})';
   return 'another instance running as @$login already reviewed this commit$tail';
-}
-
-String _triageOutcome(ActivityEntry entry) {
-  final cat = entry.details['category'];
-  final catStr = (cat is String && cat.isNotEmpty) ? ' ($cat)' : '';
-  return 'Triaged${entry.outcome.isEmpty ? '' : ': ${entry.outcome}'}$catStr';
-}
-
-String _refinementOutcome(ActivityEntry entry) {
-  final posted = entry.details['post_ok'];
-  final base = posted == false
-      ? 'Refinement stored locally'
-      : 'Refinement completed';
-  return entry.details['truncated'] == true ? '$base (truncated)' : base;
-}
-
-String _implementOutcome(ActivityEntry entry) {
-  final n = entry.details['pr_number'];
-  if (n is num && n > 0) return 'Opened PR #${n.toInt()}';
-  return 'Implementation failed';
 }
 
 String _skipReasonLabel(String reason) => switch (reason) {

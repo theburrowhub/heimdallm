@@ -72,81 +72,39 @@ class RepoListTile extends StatelessWidget {
                       child: _CheckboxIcon(selected: selected),
                     ),
                   ),
-                  Column(
+                  Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          FeatureLed(
-                            feature: Feature.prReview,
-                            isOn: featureIsOn(
-                              feature: Feature.prReview,
-                              repo: repo,
-                              config: config,
-                              appConfig: appConfig,
-                            ),
-                            sourceLine: featureSourceLine(
-                              feature: Feature.prReview,
-                              repo: repo,
-                              config: config,
-                              appConfig: appConfig,
-                            ),
-                          ),
-                          const SizedBox(width: 3),
-                          FeatureLed(
-                            feature: Feature.issueTracking,
-                            isOn: featureIsOn(
-                              feature: Feature.issueTracking,
-                              repo: repo,
-                              config: config,
-                              appConfig: appConfig,
-                            ),
-                            sourceLine: featureSourceLine(
-                              feature: Feature.issueTracking,
-                              repo: repo,
-                              config: config,
-                              appConfig: appConfig,
-                            ),
-                          ),
-                        ],
+                      FeatureLed(
+                        feature: Feature.prReview,
+                        isOn: featureIsOn(
+                          feature: Feature.prReview,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                        sourceLine: featureSourceLine(
+                          feature: Feature.prReview,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
                       ),
-                      const SizedBox(height: 3),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          FeatureLed(
-                            feature: Feature.develop,
-                            isOn: featureIsOn(
-                              feature: Feature.develop,
-                              repo: repo,
-                              config: config,
-                              appConfig: appConfig,
-                            ),
-                            sourceLine: featureSourceLine(
-                              feature: Feature.develop,
-                              repo: repo,
-                              config: config,
-                              appConfig: appConfig,
-                            ),
-                          ),
-                          const SizedBox(width: 3),
-                          FeatureLed(
-                            feature: Feature.mergeTracking,
-                            isOn: featureIsOn(
-                              feature: Feature.mergeTracking,
-                              repo: repo,
-                              config: config,
-                              appConfig: appConfig,
-                            ),
-                            sourceLine: featureSourceLine(
-                              feature: Feature.mergeTracking,
-                              repo: repo,
-                              config: config,
-                              appConfig: appConfig,
-                            ),
-                          ),
-                        ],
+                      const SizedBox(width: 3),
+                      FeatureLed(
+                        feature: Feature.mergeTracking,
+                        isOn: featureIsOn(
+                          feature: Feature.mergeTracking,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                        sourceLine: featureSourceLine(
+                          feature: Feature.mergeTracking,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
                       ),
                     ],
                   ),

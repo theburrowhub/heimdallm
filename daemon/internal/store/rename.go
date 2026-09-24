@@ -19,7 +19,7 @@ var ErrInvalidRepoSlug = errors.New("store: invalid repo slug")
 // in a single SQLite transaction, and writes an audit row to
 // `repo_renames`. Tables touched:
 //
-//   - prs.repo, issues.repo, watch_state.repo, merge_tracking.repo:
+//   - prs.repo, watch_state.repo, merge_tracking.repo:
 //     straight UPDATE.
 //   - activity_log: UPDATEs both repo AND org (when the org
 //     component differs between oldRepo and newRepo) so the
@@ -27,8 +27,8 @@ var ErrInvalidRepoSlug = errors.New("store: invalid repo slug")
 //     under the new org name after an org-rename. The invariant
 //     org == repoOrg(repo) is preserved.
 //
-// In-flight tables (`reviews_in_flight`, `issue_triage_in_flight`)
-// are keyed on numeric IDs and do not need renaming.
+// The in-flight table (`reviews_in_flight`) is keyed on numeric IDs
+// and does not need renaming.
 //
 // Idempotency for the UPDATEs is derived from the data, not the
 // audit table: each UPDATE matches `WHERE repo = oldRepo`, so on a
@@ -71,7 +71,7 @@ func (s *Store) RenameRepo(oldRepo, newRepo string) (applied bool, err error) {
 	}()
 
 	var totalMoved int64
-	for _, table := range []string{"prs", "issues", "watch_state", "merge_tracking"} {
+	for _, table := range []string{"prs", "watch_state", "merge_tracking"} {
 		res, err := tx.Exec(
 			`UPDATE `+table+` SET repo = ? WHERE repo = ?`,
 			newRepo, oldRepo,
