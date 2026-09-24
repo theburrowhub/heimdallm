@@ -426,22 +426,50 @@ func Open(dsn string) (*Store, error) {
 // dropIssuePipelineData removes what the issue triage / refinement /
 // auto-implement pipelines left in databases created before Heimdallm became
 // review-only. Every statement is idempotent, so this is safe on every
-// startup and a no-op on fresh installs. Unused columns on prs and agents are
-// left in place: they carry NOT NULL defaults, nothing reads them, and
-// ALTER TABLE ... DROP COLUMN needs a newer SQLite than we can assume.
+// startup and a no-op on fresh installs.
+//
+// The removal is permanent: rolling back to a 0.8.x binary still boots (it
+// recreates the tables with CREATE TABLE IF NOT EXISTS) but starts with no
+// issue history. When anything is actually removed it is logged once, with
+// the counts, so an operator can tell from the log what the upgrade deleted.
+//
+// Unused columns on prs and agents are deliberately left in place: a rolled
+// back 0.8.x binary still reads and writes them, so dropping them would turn a
+// lossy rollback into a broken one. They carry defaults and nothing reads them.
 func dropIssuePipelineData(db *sql.DB) {
-	stmts := []string{
-		"DROP TABLE IF EXISTS issue_reviews",
-		"DROP TABLE IF EXISTS issue_triage_in_flight",
-		"DROP TABLE IF EXISTS issues",
-		"DELETE FROM watch_state WHERE type = 'issue'",
-		"DELETE FROM activity_log WHERE item_type = 'issue'",
-		"DELETE FROM configs WHERE key IN ('issue_tracking', 'refinement_timeout')",
-	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			slog.Warn("store: drop legacy issue-pipeline data failed", "stmt", stmt, "err", err)
+	removed := []any{}
+	for _, table := range []string{"issue_reviews", "issue_triage_in_flight", "issues"} {
+		var exists int
+		if err := db.QueryRow(
+			"SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table,
+		).Scan(&exists); err != nil || exists == 0 {
+			continue
 		}
+		var rows int64
+		// The table name comes from the fixed list above, never from input.
+		_ = db.QueryRow("SELECT count(*) FROM " + table).Scan(&rows)
+		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
+			slog.Warn("store: drop legacy issue-pipeline table failed", "table", table, "err", err)
+			continue
+		}
+		removed = append(removed, table, rows)
+	}
+	for _, d := range []struct{ name, stmt string }{
+		{"watch_state_rows", "DELETE FROM watch_state WHERE type = 'issue'"},
+		{"activity_log_rows", "DELETE FROM activity_log WHERE item_type = 'issue'"},
+		{"config_rows", "DELETE FROM configs WHERE key IN ('issue_tracking', 'refinement_timeout')"},
+	} {
+		res, err := db.Exec(d.stmt)
+		if err != nil {
+			slog.Warn("store: drop legacy issue-pipeline data failed", "stmt", d.stmt, "err", err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			removed = append(removed, d.name, n)
+		}
+	}
+	if len(removed) > 0 {
+		slog.Warn("store: removed data of the retired issue pipeline (Heimdallm is review-only now)", removed...)
 	}
 }
 

@@ -1,9 +1,11 @@
 package store_test
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -657,11 +659,37 @@ func TestStore_Open_DropsLegacyIssuePipelineData(t *testing.T) {
 	}
 	legacy.Close()
 
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	s, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
+
+	// The removal is permanent, so it must be visible in the log with what
+	// it deleted — and only when something was actually there.
+	got := logs.String()
+	for _, want := range []string{
+		"removed data of the retired issue pipeline",
+		"issues=1", "issue_reviews=0", "watch_state_rows=1", "config_rows=1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("upgrade log missing %q:\n%s", want, got)
+		}
+	}
+	logs.Reset()
+	again, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("second open: %v", err)
+	}
+	again.Close()
+	if strings.Contains(logs.String(), "retired issue pipeline") {
+		t.Errorf("an already-clean database must not log a removal:\n%s", logs.String())
+	}
 
 	for _, table := range []string{"issues", "issue_reviews", "issue_triage_in_flight"} {
 		var n int
