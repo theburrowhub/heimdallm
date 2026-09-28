@@ -263,12 +263,15 @@ After `make down && make up`, any repo at `/Users/you/projects/api` is automatic
 
 ### Review mode
 
-Controls how the AI's findings are posted back to GitHub:
+Controls how the AI's findings are posted back to GitHub. Both modes submit
+the same GitHub review verdict — `APPROVE` or `REQUEST_CHANGES`, decided by
+severity and, if enabled, `never_approve_with_issues` (see below); `multi`
+additionally posts one plain comment per issue ahead of the summary review.
 
 | Mode | Behaviour |
 |---|---|
 | `single` | One consolidated review body (default) |
-| `multi` | One GitHub comment per issue, plus a summary |
+| `multi` | One GitHub comment per issue, plus a summary review carrying the same verdict |
 
 ```bash
 HEIMDALLM_REVIEW_MODE=single
@@ -1493,17 +1496,18 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # Where managed clones live when local_dir is unset (see below).
 # clone_dir = "/home/heimdallm/repos/worktrees"
 
-# When true, a review that finds ANY issue is published as a COMMENT instead of
-# an APPROVE (a high-severity review is still REQUEST_CHANGES; a clean review
-# still approves). Overridable per org ([ai.orgs.*]) and per repo ([ai.repos.*]).
-# Default: false.
+# When true, a review that finds ANY issue at or above never_approve_min_severity
+# requests changes instead of approving (a high-severity review already requests
+# changes regardless of this setting; a clean review still approves). Overridable
+# per org ([ai.orgs.*]) and per repo ([ai.repos.*]). Default: false.
 # never_approve_with_issues = false
 
 # Minimum finding severity that triggers the never_approve_with_issues
-# downgrade: "low", "medium" or "high". Unset/empty = "medium", so reviews
-# whose findings are all low-severity nits still approve and the findings
-# stay visible in the review body. Set "low" to downgrade on any finding at
-# all. Overridable per org ([ai.orgs.*]) and per repo ([ai.repos.*]).
+# request-changes gate: "low", "medium" or "high". Unset/empty = "medium", so
+# reviews whose findings are all low-severity nits still approve and the
+# findings stay visible in the review body. Set "low" to request changes on
+# any finding at all. Overridable per org ([ai.orgs.*]) and per repo
+# ([ai.repos.*]).
 # never_approve_min_severity = "medium"
 
 # When local_dir is unset, Heimdallm prepares a managed shallow clone for agent

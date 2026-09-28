@@ -820,10 +820,10 @@ class AppConfig {
   final String globalCloneDir;
   final bool globalNeverApproveWithIssues;
 
-  /// Minimum finding severity that triggers the never-approve downgrade:
-  /// 'low', 'medium' or 'high'. The daemon resolves an empty value to
-  /// [defaultNeverApproveMinSeverity], so the UI seeds the dropdown with that
-  /// same default rather than showing a blank selection.
+  /// Minimum finding severity that triggers the never-approve
+  /// request-changes gate: 'low', 'medium' or 'high'. The daemon resolves an
+  /// empty value to [defaultNeverApproveMinSeverity], so the UI seeds the
+  /// dropdown with that same default rather than showing a blank selection.
   final String globalNeverApproveMinSeverity;
 
   final MergeTrackingConfig mergeTracking;

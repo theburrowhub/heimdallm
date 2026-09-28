@@ -31,17 +31,17 @@ review_mode = "single"   # "single" or "multi"
 # execution_timeout = "30m"   # default: 20m; exceptional override for unusually long runs
 # clone_dir = "/repos/worktrees"
 
-# When true, a review that finds ANY issue is posted as a COMMENT instead of an
-# APPROVE (high-severity reviews still REQUEST_CHANGES; a clean review still
-# approves). Overridable per org ([ai.orgs.*]) and per repo ([ai.repos.*]).
-# Default: false.
+# When true, a review that finds ANY issue at or above never_approve_min_severity
+# requests changes instead of approving (high-severity reviews already request
+# changes regardless of this setting; a clean review still approves).
+# Overridable per org ([ai.orgs.*]) and per repo ([ai.repos.*]). Default: false.
 # never_approve_with_issues = false
 
 # Minimum finding severity that triggers the never_approve_with_issues
-# downgrade: "low", "medium" or "high". Unset/empty = "low" (any finding
-# downgrades). With "medium", reviews whose findings are all low-severity nits
-# still approve. Overridable per org and per repo.
-# never_approve_min_severity = "low"
+# request-changes gate: "low", "medium" or "high". Unset/empty = "medium", so
+# reviews whose findings are all low-severity nits still approve. Set "low" to
+# request changes on any finding at all. Overridable per org and per repo.
+# never_approve_min_severity = "medium"
 
 # Per-CLI settings (optional)
 # [ai.agents.claude]

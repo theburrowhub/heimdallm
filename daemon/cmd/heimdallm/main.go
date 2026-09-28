@@ -1587,10 +1587,10 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			return fmt.Errorf("rate limit cancelled: %w", err)
 		}
 
-		// Use the event decided and persisted at review time so a COMMENT
-		// (never_approve_with_issues) is never resubmitted as APPROVE on retry;
-		// legacy rows without a stored event fall back to severity. Mirrors the
-		// pipeline's Run / PublishPending paths.
+		// Use the event decided and persisted at review time so a
+		// REQUEST_CHANGES (never_approve_with_issues) is never resubmitted as
+		// APPROVE on retry; legacy rows without a stored event fall back to
+		// severity. Mirrors the pipeline's Run / PublishPending paths.
 		publishEvent := pipeline.PublishEventFor(rev)
 		deferForMonitoringChange := func(stage string) bool {
 			if !deferPublishIfUnmonitored(pr.Repo, repoCurrentlyMonitored) {
@@ -1676,7 +1676,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			}
 			return nil // ack — the review that matters is already on the PR
 		}
-		reviewBody := pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent, len(result.Issues))
+		reviewBody := pipeline.BuildGitHubBody(result)
 		var ghID int64
 		var ghState string
 		if rev.HeadSHA != "" {

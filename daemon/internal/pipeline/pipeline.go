@@ -796,12 +796,15 @@ type RunOptions struct {
 	// to set persistent per-repo instructions via comment directives (#383).
 	// Empty disables the comment-driven path for this repo.
 	InstructionAuthors []string
-	// NeverApproveWithIssues, when true, publishes the review as COMMENT
-	// instead of APPROVE whenever the review found any issue (see ReviewEvent).
+	// NeverApproveWithIssues, when true, requests changes instead of
+	// approving whenever the review found any issue at or above
+	// NeverApproveMinSeverity (see ReviewEvent). A final severity of "high"
+	// always requests changes regardless of this setting.
 	NeverApproveWithIssues bool
 	// NeverApproveMinSeverity is the minimum finding severity that triggers
-	// the NeverApproveWithIssues downgrade ("low"|"medium"|"high"). Empty is
-	// equivalent to "low": any finding downgrades (see ReviewEvent).
+	// the NeverApproveWithIssues request-changes gate ("low"|"medium"|"high").
+	// Empty resolves to DefaultNeverApproveMinSeverity ("medium"), not "low"
+	// (see ReviewEvent).
 	NeverApproveMinSeverity string
 	// ReviewFailureRepoHourlyLimit bounds failed/in-flight review executions
 	// across this repository in a rolling hour. It is resolved independently
@@ -1452,18 +1455,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// to the new HEAD. With commit_id pinned, that worst case degrades from
 	// "findings misattributed to code they were not written about" to "review
 	// shows as outdated", which is what the deferred publish path already does.
-	annotatedBody := AnnotateBodyForEvent(reviewBody, reviewEvent, len(result.Issues))
 	var ghReviewID int64
 	var ghReviewState string
 	var publishErr error
 	if anchored, ok := p.gh.(CommitAnchoredReviewer); ok && pr.Head.SHA != "" {
 		ghReviewID, ghReviewState, publishErr = anchored.SubmitReviewForCommit(
-			pr.Repo, pr.Number, annotatedBody, reviewEvent, pr.Head.SHA,
+			pr.Repo, pr.Number, reviewBody, reviewEvent, pr.Head.SHA,
 		)
 	} else {
 		// Test doubles and any adapter that predates the anchored method.
 		ghReviewID, ghReviewState, publishErr = p.gh.SubmitReview(
-			pr.Repo, pr.Number, annotatedBody, reviewEvent,
+			pr.Repo, pr.Number, reviewBody, reviewEvent,
 		)
 	}
 	if publishErr != nil {
@@ -1700,7 +1702,7 @@ func (p *Pipeline) PublishPending() {
 		// rows without a stored event fall back to SeverityToEvent via
 		// publishEventFor.
 		retryEvent := PublishEventFor(rev)
-		annotatedBody := AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent, len(result.Issues))
+		retryBody := BuildGitHubBody(result)
 		var ghID int64
 		var ghState string
 		// Anchor to the commit this row was actually reviewed against, same as
@@ -1710,9 +1712,9 @@ func (p *Pipeline) PublishPending() {
 		// was publishing every retry unanchored and letting its own review's
 		// commit_id silently drift off rev.HeadSHA.
 		if anchored, ok := p.gh.(CommitAnchoredReviewer); ok && rev.HeadSHA != "" {
-			ghID, ghState, err = anchored.SubmitReviewForCommit(pr.Repo, pr.Number, annotatedBody, retryEvent, rev.HeadSHA)
+			ghID, ghState, err = anchored.SubmitReviewForCommit(pr.Repo, pr.Number, retryBody, retryEvent, rev.HeadSHA)
 		} else {
-			ghID, ghState, err = p.gh.SubmitReview(pr.Repo, pr.Number, annotatedBody, retryEvent)
+			ghID, ghState, err = p.gh.SubmitReview(pr.Repo, pr.Number, retryBody, retryEvent)
 		}
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock
@@ -1987,10 +1989,12 @@ func ApplySignalEscalation(severity string, signals CommentSignals) string {
 	return severity
 }
 
-// SeverityToEvent maps severity to a GitHub review event type.
-// Only high-severity issues block a PR — Heimdallm must not be a blocker
-// for medium/low issues. Signal-driven escalation is applied upstream via
-// ApplySignalEscalation before the severity reaches this function.
+// SeverityToEvent maps severity to a GitHub review event type. A high final
+// severity always blocks. Medium/low severities block only when
+// never_approve_with_issues additionally applies (see ReviewEvent) — this
+// function alone treats them as non-blocking. Signal-driven escalation is
+// applied upstream via ApplySignalEscalation before the severity reaches
+// this function.
 func SeverityToEvent(severity string) string {
 	if severity == "high" {
 		return "REQUEST_CHANGES"
@@ -2019,11 +2023,11 @@ func MaxIssueSeverity(issues []executor.Issue) string {
 //
 // It is "medium", not "low": a strong review model reports low-severity nits
 // (naming, doc-comment placement, cosmetic refactors) on essentially every
-// real diff, so a "low" threshold made the never-approve downgrade fire on
+// real diff, so a "low" threshold made the never-approve gate fire on
 // reviews that had nothing merge-relevant to say — the PR never converged on
 // an approval no matter how many fix commits landed. With "medium", all-low
 // reviews still approve and the findings stay visible in the review body;
-// only a finding the model rated medium or higher withholds the approval.
+// only a finding the model rated medium or higher requests changes.
 //
 // Operators who want the old behavior set never_approve_min_severity = "low"
 // explicitly.
@@ -2043,9 +2047,12 @@ func resolveNeverApproveMinSeverity(minSeverity string) string {
 // ReviewEvent decides the GitHub review event, honoring the
 // never-approve-with-issues setting. It builds on SeverityToEvent: when the
 // base decision would be APPROVE, the setting is on, and the review found at
-// least one issue of severity >= minSeverity, it downgrades APPROVE to
-// COMMENT. REQUEST_CHANGES is never altered, and a clean review (no issues)
-// still approves.
+// least one issue of severity >= minSeverity, the event is raised to
+// REQUEST_CHANGES instead. A final severity of "high" already yields
+// REQUEST_CHANGES from SeverityToEvent regardless of the setting, and a
+// clean review (no issues) always approves. The COMMENT event is never
+// produced here — plain per-issue comments (not review events) are how
+// "multi" feedback mode surfaces individual findings.
 //
 // maxIssueSeverity is MaxIssueSeverity(issues): "" means no findings.
 // minSeverity is the never_approve_min_severity setting; empty resolves to
@@ -2055,7 +2062,7 @@ func ReviewEvent(finalSeverity, maxIssueSeverity string, neverApproveWithIssues 
 	event := SeverityToEvent(finalSeverity)
 	if event == "APPROVE" && neverApproveWithIssues && maxIssueSeverity != "" &&
 		severityRank(maxIssueSeverity) >= severityRank(resolveNeverApproveMinSeverity(minSeverity)) {
-		return "COMMENT"
+		return "REQUEST_CHANGES"
 	}
 	return event
 }
@@ -2065,48 +2072,19 @@ func ReviewEvent(finalSeverity, maxIssueSeverity string, neverApproveWithIssues 
 // before the event column existed — the severity-derived fallback. Exported so
 // every publish path (Run, PublishPending, the NATS publish-worker) reproduces
 // the persisted decision with the same legacy fallback.
+//
+// A legacy stored event of "COMMENT" (written before this behavior changed)
+// is remapped to REQUEST_CHANGES: COMMENT was only ever produced by the
+// never-approve-with-issues gate, which now requests changes for that exact
+// case, so this reproduces what the same decision would yield today.
 func PublishEventFor(rev *store.Review) string {
+	if rev.Event == "COMMENT" {
+		return "REQUEST_CHANGES"
+	}
 	if rev.Event != "" {
 		return rev.Event
 	}
 	return SeverityToEvent(rev.Severity)
-}
-
-// downgradeNoteFor is appended to a review body when the event was downgraded
-// to COMMENT, so PR authors understand why Heimdallm commented instead of
-// approving. COMMENT is only ever produced by ReviewEvent's
-// never-approve-with-issues downgrade, so keying on the event is sufficient.
-// It deliberately says "review finding(s)", not "issues": "issues were found"
-// was misread as "no GitHub issue is linked to this PR" (#597).
-//
-// findingCount is the TOTAL number of findings listed above the note, not
-// just those at or above never_approve_min_severity. The retry publish paths
-// (PublishPending, the NATS publish-worker) rebuild the note from the stored
-// review, which persists the decided event but not the threshold in effect
-// at decision time — re-reading the live config there could drift from the
-// original decision. The total matches the visible list, so it is always
-// accurate; "the blocking findings" carries the threshold nuance instead.
-func downgradeNoteFor(findingCount int) string {
-	findings := "findings"
-	if findingCount == 1 {
-		findings = "finding"
-	}
-	return fmt.Sprintf("\n\n---\n_Not approving: this review raised %d %s "+
-		"above, and `never_approve_with_issues` is enabled for this repo, so "+
-		"it is posted as a comment instead of an approval. Address or dispute "+
-		"the blocking findings and re-request a review to get an approval._",
-		findingCount, findings)
-}
-
-// AnnotateBodyForEvent appends an explanatory note to the review body when the
-// event is COMMENT (the never-approve-with-issues downgrade); otherwise the
-// body is returned unchanged. findingCount is the number of findings the
-// review raised, quoted in the note.
-func AnnotateBodyForEvent(body, event string, findingCount int) string {
-	if event == "COMMENT" {
-		return body + downgradeNoteFor(findingCount)
-	}
-	return body
 }
 
 // maxCommentsBytes limits the total formatted PR comments included in the prompt.

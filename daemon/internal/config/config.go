@@ -242,18 +242,20 @@ type AIConfig struct {
 	// POST /admin/repo-rename.
 	RepoRenameCheckInterval string `toml:"repo_rename_check_interval"`
 
-	// NeverApproveWithIssues, when true, downgrades an otherwise-APPROVE review
-	// to COMMENT whenever the review found any issue. REQUEST_CHANGES (high
-	// severity) is unaffected. Default: false (backwards compat). Overridable
-	// per-org and per-repo.
+	// NeverApproveWithIssues, when true, requests changes instead of
+	// approving whenever the review found any issue at or above
+	// NeverApproveMinSeverity. A final severity of "high" already requests
+	// changes regardless of this setting. Default: false (backwards compat).
+	// Overridable per-org and per-repo.
 	NeverApproveWithIssues bool `toml:"never_approve_with_issues"`
 
 	// NeverApproveMinSeverity is the minimum finding severity that triggers
-	// the NeverApproveWithIssues downgrade: "low", "medium" or "high".
-	// Empty resolves to pipeline.DefaultNeverApproveMinSeverity ("medium"),
-	// so reviews whose findings are all low-severity nits still approve; set
-	// "low" explicitly to downgrade on any finding at all. Only meaningful
-	// when NeverApproveWithIssues is on. Overridable per-org and per-repo.
+	// the NeverApproveWithIssues request-changes gate: "low", "medium" or
+	// "high". Empty resolves to pipeline.DefaultNeverApproveMinSeverity
+	// ("medium"), so reviews whose findings are all low-severity nits still
+	// approve; set "low" explicitly to request changes on any finding at
+	// all. Only meaningful when NeverApproveWithIssues is on. Overridable
+	// per-org and per-repo.
 	NeverApproveMinSeverity string `toml:"never_approve_min_severity"`
 }
 

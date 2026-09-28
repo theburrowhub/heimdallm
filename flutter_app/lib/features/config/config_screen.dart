@@ -814,7 +814,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         decoration: const InputDecoration(
           labelText: 'Feedback mode',
           helperText:
-              'single = one consolidated review; multi = one comment per issue',
+              'single = one consolidated review; multi = one comment per '
+              'issue plus a summary review. Both approve or request changes.',
           border: OutlineInputBorder(),
           isDense: true,
         ),
@@ -828,8 +829,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       _globalSwitchTile(
         'Never approve PRs with issues',
         'If the review raises a finding at or above the threshold below, '
-            "it's posted as a comment on the PR instead of an approval "
-            '(high severity still requests changes)',
+            'Heimdallm requests changes instead of approving '
+            '(high severity always requests changes)',
         _globalNeverApproveWithIssues,
         (v) => _globalNeverApproveWithIssues = v,
       ),
@@ -839,9 +840,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         decoration: const InputDecoration(
           labelText: 'Never approve — minimum severity',
           helperText:
-              'Findings below this severity keep the approval; they are still '
-              'listed in the review body. Default: medium (all-low reviews '
-              'approve).',
+              'Findings at or above this severity request changes; findings '
+              'below it keep the approval and stay listed in the review '
+              'body. Default: medium.',
           border: OutlineInputBorder(),
           isDense: true,
         ),
