@@ -38,6 +38,7 @@ type fakeGH struct {
 	comments       []github.Comment
 	submittedBody  string
 	submittedEvent string
+	postedComments []string // bodies passed to PostComment, in call order
 }
 
 func (f *fakeGH) FetchDiff(repo string, number int) (string, error) {
@@ -61,6 +62,7 @@ func (f *fakeGH) SubmitReview(repo string, number int, body, event string) (int6
 }
 
 func (f *fakeGH) PostComment(repo string, number int, body string) (time.Time, error) {
+	f.postedComments = append(f.postedComments, body)
 	return time.Now().UTC(), nil
 }
 
@@ -1989,6 +1991,46 @@ func TestPipeline_PublishPending_RetiresStaleCommitInsteadOfRetryingForever(t *t
 	}
 }
 
+// TestPipeline_PublishPending_LegacyCommentEventRequestsChanges covers a row
+// persisted before this behavior changed, with the retired COMMENT event
+// still stored: PublishEventFor must remap it to REQUEST_CHANGES so a
+// deferred/retried publish reproduces what the same decision yields today,
+// not the retired COMMENT event.
+func TestPipeline_PublishPending_LegacyCommentEventRequestsChanges(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 4010, Repo: "org/repo", Number: 4010, Title: "t",
+		Author: "alice", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpsertPR: %v", err)
+	}
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now().Add(-time.Hour),
+		HeadSHA: "legacy-head-sha", Event: "COMMENT",
+	}); err != nil {
+		t.Fatalf("InsertReview: %v", err)
+	}
+
+	gh := &snapshotGH{diff: "+line", state: "open", sha: "legacy-head-sha"}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	p.PublishPending()
+
+	if gh.submits != 1 {
+		t.Fatalf("submits = %d, want 1", gh.submits)
+	}
+	if gh.lastEvent != "REQUEST_CHANGES" {
+		t.Errorf("lastEvent = %q, want REQUEST_CHANGES (legacy COMMENT remapped)", gh.lastEvent)
+	}
+}
+
 // TestPipeline_PublishPending_CachesLiveHEADPerPR is the PR #774 review
 // regression guard for the resolveLivePR call added to PublishPending's
 // peer-review anchor (#772): a backlog with several pending rows for the SAME
@@ -2498,19 +2540,24 @@ func TestReviewEvent(t *testing.T) {
 		// flag ON, default threshold ("" = medium: all-low reviews keep the
 		// approval, so a nit-only pass no longer blocks convergence)
 		{"low", "low", true, "", "APPROVE"},
-		{"medium", "medium", true, "", "COMMENT"},
+		{"medium", "medium", true, "", "REQUEST_CHANGES"},
 		{"", "low", true, "", "APPROVE"},
-		{"high", "high", true, "", "REQUEST_CHANGES"}, // high never downgraded
+		{"high", "high", true, "", "REQUEST_CHANGES"}, // high always requests changes
 		{"low", "", true, "", "APPROVE"},              // clean review still approves
 		{"medium", "", true, "", "APPROVE"},
-		{"medium", "high", true, "", "COMMENT"}, // above the default threshold
+		{"medium", "high", true, "", "REQUEST_CHANGES"}, // above the default threshold
+		// safety net: a high final severity requests changes even with no
+		// findings at all (fail-safe non-canonical severity, or comment-signal
+		// escalation), whether or not the never-approve flag is set
+		{"high", "", false, "", "REQUEST_CHANGES"},
+		{"high", "", true, "", "REQUEST_CHANGES"},
 		// whitespace-only threshold resolves to the default, not to "low"
 		{"low", "low", true, "   ", "APPROVE"},
 		// flag ON, explicit "low" threshold — same as default
-		{"low", "low", true, "low", "COMMENT"},
+		{"low", "low", true, "low", "REQUEST_CHANGES"},
 		// flag ON, "medium" threshold: low-only findings keep the approval
 		{"low", "low", true, "medium", "APPROVE"},
-		{"medium", "medium", true, "medium", "COMMENT"},
+		{"medium", "medium", true, "medium", "REQUEST_CHANGES"},
 		{"medium", "low", true, "medium", "APPROVE"}, // escalated top-level, low findings
 		// flag ON, "high" threshold: medium findings keep the approval
 		{"medium", "medium", true, "high", "APPROVE"},
@@ -2521,6 +2568,10 @@ func TestReviewEvent(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ReviewEvent(%q, %q, %v, %q) = %q, want %q",
 				tc.sev, tc.maxIss, tc.never, tc.minSev, got, tc.want)
+		}
+		if got == "COMMENT" {
+			t.Errorf("ReviewEvent(%q, %q, %v, %q) returned COMMENT; the COMMENT event must never be produced",
+				tc.sev, tc.maxIss, tc.never, tc.minSev)
 		}
 	}
 }
@@ -2550,7 +2601,7 @@ func TestPublishEventFor(t *testing.T) {
 		rev  store.Review
 		want string
 	}{
-		{"stored COMMENT used verbatim", store.Review{Event: "COMMENT", Severity: "low"}, "COMMENT"},
+		{"legacy stored COMMENT remaps to REQUEST_CHANGES", store.Review{Event: "COMMENT", Severity: "low"}, "REQUEST_CHANGES"},
 		{"stored REQUEST_CHANGES used verbatim", store.Review{Event: "REQUEST_CHANGES", Severity: "low"}, "REQUEST_CHANGES"},
 		{"stored APPROVE used verbatim", store.Review{Event: "APPROVE", Severity: "high"}, "APPROVE"},
 		{"legacy empty high falls back to severity", store.Review{Event: "", Severity: "high"}, "REQUEST_CHANGES"},
@@ -2561,6 +2612,177 @@ func TestPublishEventFor(t *testing.T) {
 		if got := pipeline.PublishEventFor(&rev); got != tc.want {
 			t.Errorf("%s: PublishEventFor = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestPipeline_Run_NeverApproveRequestsChangesInSingleMode: with the
+// never-approve-with-issues gate on and a medium finding at/above the
+// threshold, single mode must submit REQUEST_CHANGES — not COMMENT, and not
+// a downgrade note — and must not post any per-issue comments.
+func TestPipeline_Run_NeverApproveRequestsChangesInSingleMode(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGH{diff: "+new line"}
+	exec := &fakeExecCapture{result: &executor.ReviewResult{
+		Summary:  "One thing to fix.",
+		Severity: "low",
+		Issues: []executor.Issue{
+			{File: "main.go", Line: 1, Description: "unclear naming", Severity: "medium"},
+		},
+	}}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 50, Number: 50, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/50",
+		Head: github.Branch{SHA: "sha50"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{
+		Primary:                 "claude",
+		ReviewMode:              "single",
+		NeverApproveWithIssues:  true,
+		NeverApproveMinSeverity: "medium",
+	}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+	if gh.submittedEvent != "REQUEST_CHANGES" {
+		t.Fatalf("submitted event = %q, want REQUEST_CHANGES", gh.submittedEvent)
+	}
+	if len(gh.postedComments) != 0 {
+		t.Fatalf("single mode should not post per-issue comments, got %d", len(gh.postedComments))
+	}
+	if strings.Contains(gh.submittedBody, "Not approving") || strings.Contains(gh.submittedBody, "posted as a comment") {
+		t.Fatalf("body should not carry the retired downgrade note: %q", gh.submittedBody)
+	}
+}
+
+// TestPipeline_Run_NeverApproveKeepsApprovalBelowThreshold: a low-only
+// finding stays below the default (medium) threshold, so the review still
+// approves even with the gate on.
+func TestPipeline_Run_NeverApproveKeepsApprovalBelowThreshold(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGH{diff: "+new line"}
+	exec := &fakeExecCapture{result: &executor.ReviewResult{
+		Summary:  "A cosmetic nit.",
+		Severity: "low",
+		Issues: []executor.Issue{
+			{File: "main.go", Line: 1, Description: "naming nit", Severity: "low"},
+		},
+	}}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 51, Number: 51, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/51",
+		Head: github.Branch{SHA: "sha51"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{
+		Primary:                 "claude",
+		ReviewMode:              "single",
+		NeverApproveWithIssues:  true,
+		NeverApproveMinSeverity: "", // resolves to the default, "medium"
+	}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+	if gh.submittedEvent != "APPROVE" {
+		t.Fatalf("submitted event = %q, want APPROVE", gh.submittedEvent)
+	}
+}
+
+// TestPipeline_Run_MultiModePostsCommentsAndRequestsChanges: multi mode
+// still posts one plain comment per issue, and the summary review carries
+// the same REQUEST_CHANGES verdict single mode would produce — the gate's
+// verdict, not a COMMENT event, is what distinguishes multi mode.
+func TestPipeline_Run_MultiModePostsCommentsAndRequestsChanges(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGH{diff: "+new line"}
+	exec := &fakeExecCapture{result: &executor.ReviewResult{
+		Summary:  "Two things to fix.",
+		Severity: "low",
+		Issues: []executor.Issue{
+			{File: "a.go", Line: 1, Description: "issue one", Severity: "medium"},
+			{File: "b.go", Line: 2, Description: "issue two", Severity: "medium"},
+		},
+	}}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 52, Number: 52, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/52",
+		Head: github.Branch{SHA: "sha52"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{
+		Primary:                 "claude",
+		ReviewMode:              "multi",
+		NeverApproveWithIssues:  true,
+		NeverApproveMinSeverity: "medium",
+	}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+	if len(gh.postedComments) != 2 {
+		t.Fatalf("multi mode should post one comment per issue, got %d", len(gh.postedComments))
+	}
+	if gh.submittedEvent != "REQUEST_CHANGES" {
+		t.Fatalf("summary review event = %q, want REQUEST_CHANGES", gh.submittedEvent)
+	}
+}
+
+// TestPipeline_Run_MultiModeApprovesWithGateOff: multi mode still posts the
+// per-issue comments even when the never-approve gate is off, and the
+// summary review approves since no finding is high severity.
+func TestPipeline_Run_MultiModeApprovesWithGateOff(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGH{diff: "+new line"}
+	exec := &fakeExecCapture{result: &executor.ReviewResult{
+		Summary:  "Two things to fix.",
+		Severity: "low",
+		Issues: []executor.Issue{
+			{File: "a.go", Line: 1, Description: "issue one", Severity: "medium"},
+			{File: "b.go", Line: 2, Description: "issue two", Severity: "medium"},
+		},
+	}}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 53, Number: 53, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/53",
+		Head: github.Branch{SHA: "sha53"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{
+		Primary:                "claude",
+		ReviewMode:             "multi",
+		NeverApproveWithIssues: false,
+	}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+	if len(gh.postedComments) != 2 {
+		t.Fatalf("multi mode should post one comment per issue, got %d", len(gh.postedComments))
+	}
+	if gh.submittedEvent != "APPROVE" {
+		t.Fatalf("summary review event = %q, want APPROVE", gh.submittedEvent)
 	}
 }
 
@@ -2613,43 +2835,6 @@ func TestBuildGitHubBodyUsesLGTMOnlyForCleanResult(t *testing.T) {
 	for _, r := range []*executor.ReviewResult{clean, medium, withFinding, highSeverity} {
 		if got := pipeline.BuildGitHubBody(r); strings.Contains(got, "## 🤖 Heimdallm AI Review") {
 			t.Errorf("body should not carry the old heading: %q", got)
-		}
-	}
-}
-
-func TestAnnotateBodyForEvent(t *testing.T) {
-	const body = "## Review\nlgtm"
-	// A zero-finding blocker can result from comment-signal escalation, so it
-	// must retain the explanation instead of claiming that everything is good.
-	if got := pipeline.AnnotateBodyForEvent(body, "REQUEST_CHANGES", 0); got != body {
-		t.Errorf("clean REQUEST_CHANGES body should be unchanged, got %q", got)
-	}
-	// COMMENT keeps the original body and appends the downgrade note.
-	got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 2)
-	if !strings.Contains(got, body) || !strings.Contains(got, "never_approve_with_issues") {
-		t.Errorf("COMMENT body should keep body and add the note, got %q", got)
-	}
-	// The note quotes the finding count and says "findings", not the
-	// GitHub-ambiguous "issues were found" (#597).
-	if !strings.Contains(got, "raised 2 findings") {
-		t.Errorf("note should quote the finding count, got %q", got)
-	}
-	// The action sentence says "the blocking findings" — with a min-severity
-	// threshold, not every listed finding withholds the approval.
-	if !strings.Contains(got, "Address or dispute the blocking findings") {
-		t.Errorf("note should point at the blocking findings, got %q", got)
-	}
-	if strings.Contains(got, "issues were found") {
-		t.Errorf("note must not use the ambiguous \"issues were found\" wording, got %q", got)
-	}
-	// Singular form for a single finding.
-	if got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 1); !strings.Contains(got, "raised 1 finding above") {
-		t.Errorf("single-finding note should be singular, got %q", got)
-	}
-	// Non-downgrade events leave the body untouched.
-	for _, ev := range []string{"APPROVE", "REQUEST_CHANGES"} {
-		if got := pipeline.AnnotateBodyForEvent(body, ev, 2); got != body {
-			t.Errorf("event %s: body should be unchanged, got %q", ev, got)
 		}
 	}
 }

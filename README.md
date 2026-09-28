@@ -27,7 +27,7 @@ A Flutter Web UI (`:3000`) with responsive sidebar/rail/drawer navigation for Ac
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
 - **Per-repo overrides** — different AI agent, prompt, and feedback mode per repository
 - **Topic-based auto-discovery** — tag repos with a GitHub topic and Heimdallm monitors them without editing config
-- **Severity gating** — only `high` severity triggers `REQUEST_CHANGES`; everything else approves with informational notes
+- **Severity gating** — `high` severity always triggers `REQUEST_CHANGES`; with `never_approve_with_issues` enabled, any finding at or above the configured threshold does too, otherwise the review approves
 - **Native desktop** — macOS menu-bar app, system notifications, dark mode, no Electron
 - **Web UI** — Flutter Web app shell served by Nginx with responsive sidebar/rail/drawer navigation, system / light / dark theme toggle, and live SSE updates
 - **Docker mode** — single `make up` spins up daemon + web UI for server/team deployments

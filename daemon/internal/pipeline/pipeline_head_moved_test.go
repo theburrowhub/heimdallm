@@ -280,6 +280,8 @@ type snapshotGH struct {
 	// the whole point of preferring SubmitReviewForCommit.
 	anchoredCommit string
 	usedUnanchored bool
+	// lastEvent records the GitHub review event of the most recent submit.
+	lastEvent string
 }
 
 func (f *snapshotGH) FetchDiff(string, int) (string, error) { return f.diff, nil }
@@ -301,15 +303,17 @@ func (f *snapshotGH) GetPRSnapshot(string, int) (*github.PRSnapshot, error) {
 	return &github.PRSnapshot{State: f.state, HeadSHA: f.sha}, nil
 }
 
-func (f *snapshotGH) SubmitReview(_ string, _ int, _, _ string) (int64, string, error) {
+func (f *snapshotGH) SubmitReview(_ string, _ int, _, event string) (int64, string, error) {
 	f.submits++
 	f.usedUnanchored = true
+	f.lastEvent = event
 	return 1, "COMMENTED", nil
 }
 
-func (f *snapshotGH) SubmitReviewForCommit(_ string, _ int, _, _, commitID string) (int64, string, error) {
+func (f *snapshotGH) SubmitReviewForCommit(_ string, _ int, _, event, commitID string) (int64, string, error) {
 	f.submits++
 	f.anchoredCommit = commitID
+	f.lastEvent = event
 	return 1, "COMMENTED", nil
 }
 
