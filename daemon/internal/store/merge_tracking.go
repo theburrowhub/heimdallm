@@ -108,7 +108,19 @@ type MergeTracking struct {
 	EvaluatedAt    time.Time `json:"evaluated_at,omitempty"`
 	MergedAt       time.Time `json:"merged_at,omitempty"`
 	TerminalReason string    `json:"terminal_reason,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	// TerminalAt is when the row became merged or abandoned. Unlike UpdatedAt
+	// it never moves afterwards, so retention is measured from it.
+	TerminalAt time.Time `json:"terminal_at,omitempty"`
+	// LastActivityAt is GitHub's own last-activity time for the PR, the input
+	// to stale detection.
+	LastActivityAt time.Time `json:"last_activity_at,omitempty"`
+	// Attention is who the PR is waiting on (none|action|ready|waiting), as
+	// classified by the last evaluation.
+	Attention string `json:"attention,omitempty"`
+	// StaleNotifiedAt is when the PR was last announced as stale. Activity after
+	// it re-arms the announcement.
+	StaleNotifiedAt time.Time `json:"stale_notified_at,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // InFlight reports whether an action is currently running for this PR.
@@ -159,7 +171,8 @@ const mergeTrackingColumns = "pr_id, repo, number, node_id, phase, head_sha, bas
 	"checks_required_failing, checks_required_pending, " +
 	"unknown_waits, arm_attempts, update_attempts, conflict_attempts, merge_attempts, " +
 	"pre_rebase_sha, last_attempt_at, cooldown_until, last_error, " +
-	"evaluated_at, merged_at, terminal_reason, updated_at"
+	"evaluated_at, merged_at, terminal_reason, " +
+	"terminal_at, last_activity_at, attention, stale_notified_at, updated_at"
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -173,6 +186,7 @@ func scanMergeTracking(row rowScanner) (*MergeTracking, error) {
 		blockReason, blockDetail, decisionJSON         sql.NullString
 		preRebase, lastAttempt, cooldown, lastErr      sql.NullString
 		evaluatedAt, mergedAt, terminalReason, updated sql.NullString
+		terminalAt, lastActivity, attention, staleAt   sql.NullString
 		isAuthor, isAssignee, excluded                 int
 	)
 	err := row.Scan(
@@ -183,7 +197,8 @@ func scanMergeTracking(row rowScanner) (*MergeTracking, error) {
 		&m.ChecksRequiredFailing, &m.ChecksRequiredPending,
 		&m.UnknownWaits, &m.ArmAttempts, &m.UpdateAttempts, &m.ConflictAttempts, &m.MergeAttempts,
 		&preRebase, &lastAttempt, &cooldown, &lastErr,
-		&evaluatedAt, &mergedAt, &terminalReason, &updated,
+		&evaluatedAt, &mergedAt, &terminalReason,
+		&terminalAt, &lastActivity, &attention, &staleAt, &updated,
 	)
 	if err != nil {
 		return nil, err
@@ -208,6 +223,10 @@ func scanMergeTracking(row rowScanner) (*MergeTracking, error) {
 	m.EvaluatedAt = parseStoredTime(evaluatedAt.String)
 	m.MergedAt = parseStoredTime(mergedAt.String)
 	m.TerminalReason = terminalReason.String
+	m.TerminalAt = parseStoredTime(terminalAt.String)
+	m.LastActivityAt = parseStoredTime(lastActivity.String)
+	m.Attention = attention.String
+	m.StaleNotifiedAt = parseStoredTime(staleAt.String)
 	m.UpdatedAt = parseStoredTime(updated.String)
 	return &m, nil
 }
@@ -258,6 +277,8 @@ func (s *Store) EnsureMergeTracking(prID int64, repo string, number int) (*Merge
 		                 THEN 'idle' ELSE merge_tracking.phase END,
 		    terminal_reason = CASE WHEN merge_tracking.phase = 'abandoned'
 		                          THEN '' ELSE merge_tracking.terminal_reason END,
+		    terminal_at = CASE WHEN merge_tracking.phase = 'abandoned'
+		                       THEN '' ELSE merge_tracking.terminal_at END,
 		    cooldown_until = CASE WHEN merge_tracking.phase = 'abandoned'
 		                          THEN '' ELSE merge_tracking.cooldown_until END,
 		    last_error = CASE WHEN merge_tracking.phase = 'abandoned'
@@ -532,11 +553,17 @@ func (s *Store) RecordMergeTrackingDecision(prID int64, d MergeDecisionRecord) e
 		    evaluated_at = ?,
 		    cooldown_until = CASE WHEN phase IN ('updating','resolving','merging')
 		                          THEN cooldown_until ELSE ? END,
+		    attention = ?,
+		    last_activity_at = CASE WHEN ? = '' THEN last_activity_at ELSE ? END,
+		    stale_notified_at = CASE WHEN ? = '' THEN stale_notified_at ELSE ? END,
 		    updated_at = ?
 		WHERE pr_id = ?
 	`, d.Phase, d.HeadSHA, d.BlockReason, d.BlockDetail, d.DecisionJSON,
 		d.ChecksRequiredFailing, d.ChecksRequiredPending,
 		d.At.UTC().Format(sqliteTimeFormat), formatStoredTime(d.CooldownUntil),
+		d.Attention,
+		formatStoredTime(d.LastActivityAt), formatStoredTime(d.LastActivityAt),
+		formatStoredTime(d.StaleNotifiedAt), formatStoredTime(d.StaleNotifiedAt),
 		d.At.UTC().Format(sqliteTimeFormat), prID)
 	if err != nil {
 		return fmt.Errorf("store: record merge tracking decision: %w", err)
@@ -557,6 +584,12 @@ type MergeDecisionRecord struct {
 	ChecksRequiredPending int
 	CooldownUntil         time.Time
 	At                    time.Time
+	// Attention is written as given (empty clears it).
+	Attention string
+	// LastActivityAt and StaleNotifiedAt are written only when non-zero, so an
+	// evaluation that did not learn them keeps what is stored.
+	LastActivityAt  time.Time
+	StaleNotifiedAt time.Time
 }
 
 // BumpMergeTrackingAttempt increments one attempt counter and applies a
@@ -618,14 +651,19 @@ func (s *Store) SetMergeTrackingPreRebaseSHA(prID int64, sha string) error {
 	return nil
 }
 
-// MarkMergeTrackingMerged sets the terminal merged state.
+// MarkMergeTrackingMerged sets the terminal merged state. at is GitHub's merge
+// time, which also anchors retention: a PR merged weeks ago while nothing was
+// watching it is pruned on the next cycle instead of lingering another day.
 func (s *Store) MarkMergeTrackingMerged(prID int64, at time.Time) error {
 	_, err := s.db.Exec(`
 		UPDATE merge_tracking
 		SET phase = ?, merged_at = ?, block_reason = '', block_detail = '', last_error = '',
-		    cooldown_until = '', updated_at = ?
+		    cooldown_until = '', attention = '',
+		    terminal_at = CASE WHEN phase = 'merged' AND terminal_at != '' THEN terminal_at ELSE ? END,
+		    updated_at = ?
 		WHERE pr_id = ?
 	`, MergePhaseMerged, at.UTC().Format(sqliteTimeFormat),
+		at.UTC().Format(sqliteTimeFormat),
 		at.UTC().Format(sqliteTimeFormat), prID)
 	if err != nil {
 		return fmt.Errorf("store: mark merge tracking merged: %w", err)
@@ -637,9 +675,12 @@ func (s *Store) MarkMergeTrackingMerged(prID int64, at time.Time) error {
 func (s *Store) MarkMergeTrackingAbandoned(prID int64, reason string, at time.Time) error {
 	_, err := s.db.Exec(`
 		UPDATE merge_tracking
-		SET phase = ?, terminal_reason = ?, cooldown_until = '', updated_at = ?
+		SET phase = ?, terminal_reason = ?, cooldown_until = '', attention = '',
+		    terminal_at = CASE WHEN phase = 'abandoned' AND terminal_at != '' THEN terminal_at ELSE ? END,
+		    updated_at = ?
 		WHERE pr_id = ?
-	`, MergePhaseAbandoned, reason, at.UTC().Format(sqliteTimeFormat), prID)
+	`, MergePhaseAbandoned, reason, at.UTC().Format(sqliteTimeFormat),
+		at.UTC().Format(sqliteTimeFormat), prID)
 	if err != nil {
 		return fmt.Errorf("store: mark merge tracking abandoned: %w", err)
 	}
@@ -670,13 +711,18 @@ func (s *Store) ClearMergeTrackingCooldown(prID int64) error {
 	return nil
 }
 
-// PruneMergeTracking deletes rows whose PR is gone or which reached a terminal
-// state before the cutoff. Keeps the table bounded without an extra scheduler.
+// PruneMergeTracking deletes rows whose PR is gone or which became terminal
+// before the cutoff. Keeps the table bounded without an extra scheduler.
+//
+// The age is measured from terminal_at, which nothing moves after the fact.
+// Measuring it from updated_at let every Re-check or Exclude restart the clock,
+// so a merged PR someone kept looking at never went away.
 func (s *Store) PruneMergeTracking(before time.Time) (int, error) {
 	res, err := s.db.Exec(`
 		DELETE FROM merge_tracking
 		WHERE pr_id NOT IN (SELECT id FROM prs)
-		   OR (phase IN ('merged','abandoned') AND updated_at != '' AND updated_at <= ?)
+		   OR (phase IN ('merged','abandoned')
+		       AND CASE WHEN terminal_at != '' THEN terminal_at ELSE updated_at END <= ?)
 	`, before.UTC().Format(sqliteTimeFormat))
 	if err != nil {
 		return 0, fmt.Errorf("store: prune merge tracking: %w", err)
@@ -684,6 +730,34 @@ func (s *Store) PruneMergeTracking(before time.Time) (int, error) {
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("store: prune merge tracking rowsaffected: %w", err)
+	}
+	return int(n), nil
+}
+
+// DeleteUntrackedMergeTracking removes the live (non-terminal) rows of repos
+// that are no longer tracked or watched: merge tracking and [my_prs] both off
+// for the repo, or the repo is not monitored by this daemon any more.
+//
+// Nothing re-evaluates such a row, so without this it would sit in the tab
+// forever with whatever it last said — "merge_tracking.enabled = false" on a PR
+// that was merged weeks ago. Terminal rows are left to PruneMergeTracking so a
+// merge that just happened stays visible for its retention window.
+func (s *Store) DeleteUntrackedMergeTracking(active []string) (int, error) {
+	query := "DELETE FROM merge_tracking WHERE phase NOT IN ('merged','abandoned')"
+	args := make([]any, 0, len(active))
+	if len(active) > 0 {
+		query += " AND repo NOT IN (" + strings.TrimSuffix(strings.Repeat("?,", len(active)), ",") + ")"
+		for _, r := range active {
+			args = append(args, r)
+		}
+	}
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete untracked merge tracking: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: delete untracked merge tracking rowsaffected: %w", err)
 	}
 	return int(n), nil
 }

@@ -109,6 +109,65 @@ void main() {
     expect(entry.decision, isNull);
     expect(entry.autoMergeArmedAt, isNull);
     expect(entry.mergedAt, isNull);
+    expect(entry.attention, 'none');
+    expect(entry.stale, isFalse);
+    expect(entry.lastActivityAt, isNull);
+    expect(entry.terminalAt, isNull);
+    expect(entry.needsOperator, isFalse);
+  });
+
+  test('MergeTrackingEntry reads the My PRs fields', () {
+    final entry = MergeTrackingEntry.fromJson({
+      'pr_id': 1,
+      'repo': 'acme/widgets',
+      'number': 1,
+      'phase': 'blocked',
+      'attention': 'action',
+      'stale': true,
+      'last_activity_at': '2026-09-26T09:00:00Z',
+      'terminal_at': '2026-09-30T10:00:00Z',
+    });
+    expect(entry.attention, 'action');
+    expect(entry.stale, isTrue);
+    expect(entry.lastActivityAt, DateTime.utc(2026, 9, 26, 9));
+    expect(entry.terminalAt, DateTime.utc(2026, 9, 30, 10));
+    expect(entry.needsAction, isTrue);
+    expect(entry.needsOperator, isTrue);
+
+    final round = MergeTrackingEntry.fromJson(entry.toJson());
+    expect(round.attention, 'action');
+    expect(round.stale, isTrue);
+    expect(round.lastActivityAt, entry.lastActivityAt);
+  });
+
+  test('needsOperator ignores finished and excluded PRs', () {
+    const base = MergeTrackingEntry(prId: 1, repo: 'a/b', number: 1);
+    expect(
+      const MergeTrackingEntry(prId: 1, repo: 'a/b', number: 1, attention: 'ready')
+          .needsOperator,
+      isTrue,
+    );
+    expect(
+      const MergeTrackingEntry(
+        prId: 1,
+        repo: 'a/b',
+        number: 1,
+        phase: 'merged',
+        attention: 'ready',
+      ).needsOperator,
+      isFalse,
+    );
+    expect(
+      const MergeTrackingEntry(
+        prId: 1,
+        repo: 'a/b',
+        number: 1,
+        excluded: true,
+        stale: true,
+      ).needsOperator,
+      isFalse,
+    );
+    expect(base.needsOperator, isFalse);
   });
 
   test('MergeCheck round-trips and classifies its state', () {

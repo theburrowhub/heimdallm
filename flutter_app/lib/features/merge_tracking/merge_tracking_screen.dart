@@ -4,6 +4,8 @@ import 'package:mix/mix.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/models/merge_tracking.dart';
+import '../../core/models/my_prs_summary.dart';
+import '../../shared/design_system/color_resolver.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/type_badge.dart';
@@ -14,13 +16,50 @@ import 'widgets/check_visuals.dart';
 import 'widgets/checks_table.dart';
 import 'widgets/merge_phase_badge.dart';
 
-/// The Merge tab: every PR the user authored or is assigned to, and what is
-/// stopping each one from merging.
-class MergeTrackingScreen extends ConsumerWidget {
+/// The My PRs tab: every open PR the user authored or is assigned to, grouped
+/// by who it is waiting on, plus the ones merged or closed in the last day.
+class MergeTrackingScreen extends ConsumerStatefulWidget {
   const MergeTrackingScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MergeTrackingScreen> createState() =>
+      _MergeTrackingScreenState();
+}
+
+/// One row of the flattened listing: a section header or a PR card.
+sealed class _ListItem {
+  const _ListItem();
+}
+
+class _HeaderItem extends _ListItem {
+  final MyPrsSection section;
+  final int count;
+  const _HeaderItem(this.section, this.count);
+}
+
+class _EntryItem extends _ListItem {
+  final MergeTrackingEntry entry;
+  const _EntryItem(this.entry);
+}
+
+class _MergeTrackingScreenState extends ConsumerState<MergeTrackingScreen> {
+  /// Finished PRs are history, not work: collapsed unless asked for.
+  bool _showRecent = false;
+
+  List<_ListItem> _items(MyPrsGroups groups) {
+    final items = <_ListItem>[];
+    for (final section in MyPrsSection.values) {
+      final list = groups.of(section);
+      if (list.isEmpty) continue;
+      items.add(_HeaderItem(section, list.length));
+      if (section == MyPrsSection.recent && !_showRecent) continue;
+      items.addAll(list.map(_EntryItem.new));
+    }
+    return items;
+  }
+
+  @override
+  Widget build(BuildContext context) {
     ref.watch(mergeTrackingSseListenerProvider);
     final async = ref.watch(mergeTrackingProvider);
 
@@ -38,28 +77,114 @@ class MergeTrackingScreen extends ConsumerWidget {
           textAlign: TextAlign.center,
         ),
       ),
-      data: (entries) => Column(
-        children: [
-          const _TrackPRBar(),
-          Expanded(
-            child: entries.isEmpty
-                ? const _EmptyState()
-                : ListView.builder(
-                    // Survives the rebuilds the refresh counter causes.
-                    key: const PageStorageKey('merge-tracking-list'),
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    itemCount: entries.length,
-                    itemBuilder: (context, i) => _MergeTrackingCard(
-                      // Keyed by PR so a row keeps its expanded state when the
-                      // daemon reorders the list under the reader.
-                      key: ValueKey(entries[i].prId),
-                      entry: entries[i],
+      data: (entries) {
+        final items = _items(groupMyPrs(entries));
+        return Column(
+          children: [
+            const _TrackPRBar(),
+            Expanded(
+              child: entries.isEmpty
+                  ? const _EmptyState()
+                  : ListView.builder(
+                      // Survives the rebuilds the refresh counter causes.
+                      key: const PageStorageKey('merge-tracking-list'),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      itemCount: items.length,
+                      itemBuilder: (context, i) => switch (items[i]) {
+                        _HeaderItem(:final section, :final count) =>
+                          _SectionHeader(
+                            key: ValueKey('section-${section.name}'),
+                            section: section,
+                            count: count,
+                            expanded:
+                                section != MyPrsSection.recent || _showRecent,
+                            onToggle: section == MyPrsSection.recent
+                                ? () =>
+                                      setState(() => _showRecent = !_showRecent)
+                                : null,
+                          ),
+                        _EntryItem(:final entry) => _MergeTrackingCard(
+                          // Keyed by PR so a row keeps its expanded state when
+                          // the daemon reorders the list under the reader.
+                          key: ValueKey(entry.prId),
+                          entry: entry,
+                        ),
+                      },
                     ),
-                  ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// A section title with its count. The recently-finished section is a toggle.
+class _SectionHeader extends StatelessWidget {
+  final MyPrsSection section;
+  final int count;
+  final bool expanded;
+  final VoidCallback? onToggle;
+
+  const _SectionHeader({
+    super.key,
+    required this.section,
+    required this.count,
+    required this.expanded,
+    this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final (title, icon, color) = switch (section) {
+      MyPrsSection.action => (
+        'Needs your action',
+        Icons.error_outline,
+        scheme.error,
+      ),
+      MyPrsSection.ready => (
+        'Ready to merge',
+        Icons.check_circle_outline,
+        const Color(0xFF3FB950),
+      ),
+      MyPrsSection.waiting => (
+        'Waiting on others',
+        Icons.hourglass_empty,
+        scheme.onSurfaceVariant,
+      ),
+      MyPrsSection.recent => (
+        'Recently merged or closed',
+        Icons.history,
+        scheme.onSurfaceVariant,
+      ),
+    };
+    final row = Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          StyledText(
+            '$title · $count',
+            style: TextStyler()
+                .style(AppTextStyles.bodyMuted.mix())
+                .fontWeight(FontWeight.w700)
+                .color(color),
           ),
+          if (onToggle != null) ...[
+            const SizedBox(width: 4),
+            Icon(
+              expanded ? Icons.expand_less : Icons.expand_more,
+              size: 18,
+              color: color,
+            ),
+          ],
         ],
       ),
     );
+    if (onToggle == null) return row;
+    return InkWell(onTap: onToggle, child: row);
   }
 }
 
@@ -108,14 +233,13 @@ class _EmptyState extends StatelessWidget {
               color: theme.colorScheme.onSurfaceVariant,
             ),
             const SizedBox(height: 12),
-            AppText.sectionTitle(
-              'No pull requests tracked yet',
-            ),
+            AppText.sectionTitle('No open pull requests of yours'),
             const SizedBox(height: 6),
             AppText.muted(
-              'Heimdallm tracks the open PRs you authored or are assigned to, '
-              'in the repositories it monitors. Turn merge tracking on in '
-              'Settings, or paste a PR link with "Track a PR" above.',
+              'Heimdallm watches the open PRs you authored or are assigned to, '
+              'in the repositories it monitors, and tells you which ones need '
+              'you. Check "My PRs" in Settings, or paste a PR link with '
+              '"Track a PR" above.',
               textAlign: TextAlign.center,
             ),
           ],
@@ -205,6 +329,10 @@ class _MergeTrackingCardState extends ConsumerState<_MergeTrackingCard> {
                         ],
                       ),
                     ),
+                    if (entry.stale && !entry.isTerminal) ...[
+                      const SizedBox(width: 12),
+                      _StaleChip(entry: entry),
+                    ],
                     const SizedBox(width: 12),
                     CheckCountChips(
                       failing: entry.checksRequiredFailing,
@@ -351,6 +479,40 @@ class _MergeTrackingCardState extends ConsumerState<_MergeTrackingCard> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+}
+
+/// "Stale · 4d": no activity on GitHub for longer than the configured
+/// threshold. The duration is the part that makes it actionable.
+class _StaleChip extends StatelessWidget {
+  final MergeTrackingEntry entry;
+
+  const _StaleChip({required this.entry});
+
+  @override
+  Widget build(BuildContext context) {
+    final idle = idleFor(entry, DateTime.now());
+    final label = idle == null ? 'Stale' : 'Stale · ${formatIdle(idle)}';
+    final color = resolveAppColor(context, AppColors.warning);
+    final since = entry.lastActivityAt?.toLocal().toString().split('.').first;
+    return Tooltip(
+      message: since == null
+          ? 'No recent activity on GitHub'
+          : 'No activity on GitHub since $since',
+      child: AppBadge(
+        key: const Key('stale-chip'),
+        label: label,
+        foreground: color,
+        background: color.withValues(alpha: 0.12),
+        border: color.withValues(alpha: 0.4),
+        icon: const Icon(Icons.snooze, size: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        radius: 4,
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 0,
+      ),
+    );
   }
 }
 

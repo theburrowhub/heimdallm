@@ -13,15 +13,16 @@ Heimdallm runs in the background and does three things, in parallel, at your con
 ### 1. PR reviews
 Watches the PRs where you're requested as a reviewer, runs an AI code review, and submits it to GitHub as your account. No copy-pasting, no manual prompting.
 
-### 2. Merge tracking
-Watches the PRs **you** authored or are assigned to and works out exactly what is stopping each one from merging — which check is failing, which reviewer is waiting, which conversation is unresolved — and says so where you cannot miss it. Optionally moves them along too: arm GitHub's auto-merge, update branches that fall behind, have the agent resolve conflicts, and merge when everything is green. Every automation is off by default.
+### 2. My PRs and merge tracking
+Watches the PRs **you** authored or are assigned to and works out exactly what is stopping each one from merging — which check is failing, which reviewer is waiting, which conversation is unresolved. The **My PRs** tab groups them into *needs your action*, *ready to merge* and *waiting on others*, flags the ones that went quiet, and drops merged ones after a day. It nudges you without getting in the way: a badge, a tray section and one digest notification a day (per-PR alerts are opt-in). Watching never writes to GitHub. Optionally, merge tracking moves them along too: arm GitHub's auto-merge, update branches that fall behind, have the agent resolve conflicts, and merge when everything is green. Every automation is off by default.
 
 ### 3. Self-monitoring UI
-A Flutter Web UI (`:3000`) with responsive sidebar/rail/drawer navigation for Activity, Merge, Repositories, Organizations, Prompts, Agents, Stats, and Instances, plus live Settings and Server/Logs screens. Opens alongside the daemon in Docker mode.
+A Flutter Web UI (`:3000`) with responsive sidebar/rail/drawer navigation for Activity, My PRs, Repositories, Organizations, Prompts, Agents, Stats, and Instances, plus live Settings and Server/Logs screens. Opens alongside the daemon in Docker mode.
 
 ### Headline features
 
 - **Automatic reviews** — polls `review-requested:@me` on GitHub and submits reviews as your account
+- **My PRs** — groups your own open PRs by who they are waiting on, flags stale ones, and nudges quietly (badge, tray, daily digest) so none stays in limbo
 - **Merge tracking** — tells you which check is blocking each of your own PRs, and can arm auto-merge, update stale branches, resolve conflicts and merge, each behind its own switch
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/prompts` (`/agents` remains a compatibility alias)
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
@@ -513,7 +514,7 @@ heimdallm/
 │   ├── lib/
 │   │   ├── features/
 │   │   │   ├── dashboard/   Reviews tab (My Reviews / My PRs)
-│   │   │   ├── merge_tracking/ Merge tab and per-check breakdown
+│   │   │   ├── merge_tracking/ My PRs tab and per-check breakdown
 │   │   │   ├── repositories/Repo management + per-repo config
 │   │   │   ├── agents/      Review prompt library
 │   │   │   └── stats/       Review statistics

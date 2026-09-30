@@ -119,6 +119,10 @@ type Server struct {
 	// mergeTrackEvaluateFn re-evaluates one tracked PR on demand. Nil until
 	// main wires it, in which case the endpoint answers 503.
 	mergeTrackEvaluateFn func(ctx context.Context, prID int64, dryRun bool) error
+
+	// myPRsStaleAfterFn returns the [my_prs] inactivity threshold used to
+	// flag stale PRs in the merge-tracking listing. Nil disables the flag.
+	myPRsStaleAfterFn func() time.Duration
 	// apiToken is required on all state-mutating requests (POST/PUT/DELETE).
 	// Empty string disables authentication (should not happen in production).
 	apiToken  string
@@ -353,6 +357,12 @@ func (srv *Server) SetAddPRFn(fn func(repo string, number int) (*store.PR, error
 // pipeline.
 func (srv *Server) SetMergeTrackEnrolFn(fn func(prID int64, repo string, number int) error) {
 	srv.mergeTrackEnrolFn = fn
+}
+
+// SetMyPRsStaleAfterFn wires the [my_prs].stale_after accessor behind the
+// "stale" flag of GET /merge-tracking.
+func (srv *Server) SetMyPRsStaleAfterFn(fn func() time.Duration) {
+	srv.myPRsStaleAfterFn = fn
 }
 
 // SetMergeTrackEvaluateFn wires the on-demand merge-tracking evaluation used by

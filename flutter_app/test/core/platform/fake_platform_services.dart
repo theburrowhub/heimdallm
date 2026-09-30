@@ -3,6 +3,7 @@ import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
+import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 
@@ -14,7 +15,8 @@ class FakePlatformServices
         PlatformServices,
         AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
-        DuplicateInstancePlatformCapability {
+        DuplicateInstancePlatformCapability,
+        TrayMyPrsPlatformCapability {
   FakePlatformServices({
     this.apiBaseUrl = 'http://127.0.0.1:7842',
     this.token,
@@ -236,6 +238,13 @@ class FakePlatformServices
     required String me,
   }) async {
     trayRebuilds.add((prs: prs, me: me));
+  }
+
+  final List<List<MergeTrackingEntry>> trayMyPrs = [];
+
+  @override
+  Future<void> setTrayMyPrs(List<MergeTrackingEntry> entries) async {
+    trayMyPrs.add(entries);
   }
 
   List<String> discoveredRepos = const [];

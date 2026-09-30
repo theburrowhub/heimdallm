@@ -231,6 +231,24 @@ class MergeTrackingEntry {
   @JsonKey(name: 'merged_at', includeIfNull: false)
   final DateTime? mergedAt;
 
+  /// When the PR was merged or closed. The daemon drops the row one retention
+  /// window (24h) after it.
+  @JsonKey(name: 'terminal_at', includeIfNull: false)
+  final DateTime? terminalAt;
+
+  /// Who the PR is waiting on: `none` | `action` (the operator) | `ready`
+  /// (one click from merged) | `waiting` (reviewers, CI, GitHub, automation).
+  @JsonKey(defaultValue: 'none')
+  final String attention;
+
+  /// No activity on GitHub for longer than `[my_prs].stale_after`.
+  @JsonKey(defaultValue: false)
+  final bool stale;
+
+  /// GitHub's last-activity time for the PR.
+  @JsonKey(name: 'last_activity_at', includeIfNull: false)
+  final DateTime? lastActivityAt;
+
   /// Only populated by the detail endpoint.
   @JsonKey(includeIfNull: false)
   final MergeDecision? decision;
@@ -259,6 +277,10 @@ class MergeTrackingEntry {
     this.lastError = '',
     this.evaluatedAt,
     this.mergedAt,
+    this.terminalAt,
+    this.attention = 'none',
+    this.stale = false,
+    this.lastActivityAt,
     this.decision,
   });
 
@@ -289,4 +311,13 @@ class MergeTrackingEntry {
   bool get isMerged => phase == 'merged';
   bool get isTerminal => phase == 'merged' || phase == 'abandoned';
   bool get autoMergeArmed => phase == 'auto_merge_armed';
+
+  bool get needsAction => !isTerminal && attention == 'action';
+  bool get isReadyToMerge => !isTerminal && attention == 'ready';
+
+  /// Whether the PR asks for the operator: something to fix, a merge to click,
+  /// or it has gone quiet. This is what the badge, the tray and the digest
+  /// count.
+  bool get needsOperator =>
+      !isTerminal && !excluded && (needsAction || isReadyToMerge || stale);
 }

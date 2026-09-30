@@ -8,6 +8,7 @@ import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/core/models/activity.dart';
 import 'package:heimdallm/core/models/merge_tracking.dart';
+import 'package:heimdallm/core/models/my_prs_summary.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/core/state/local_state_notifier.dart';
@@ -176,7 +177,10 @@ List<dynamic> _baseOverrides({
     daemonStartingProvider.overrideWith(
       () => LocalStateNotifier<bool>(daemonStarting),
     ),
-    mergeTrackingCheckProblemCountProvider.overrideWith((ref) => mergeCount),
+    myPrsSummaryProvider.overrideWith(
+      (ref) => MyPrsSummary(needAction: mergeCount, total: mergeCount),
+    ),
+    myPrsDigestProvider.overrideWith(_NoDigest.new),
     sseStreamProvider.overrideWith((ref) => const Stream.empty()),
     if (connection != null)
       daemonConnectionProvider.overrideWith(
@@ -214,6 +218,13 @@ Future<void> _pumpShell(
     ),
   );
   await tester.pumpAndSettle();
+}
+
+/// The digest reads the daemon config and runs a minute timer; neither
+/// belongs in a shell layout test.
+class _NoDigest extends MyPrsDigestNotifier {
+  @override
+  String? build() => null;
 }
 
 void main() {
@@ -305,7 +316,7 @@ void main() {
     expect(find.text('Dashboard content'), findsOneWidget);
     expect(find.text('3'), findsOneWidget);
 
-    await tester.tap(find.text('Merge'));
+    await tester.tap(find.text('My PRs'));
     await tester.pumpAndSettle();
 
     expect(find.text('Merge content'), findsOneWidget);
@@ -493,7 +504,7 @@ void main() {
     });
 
     testWidgets(
-      'cycles extended -> hidden -> icons -> extended at a wide width',
+      'toggles extended <-> icons from the foot of the rail at a wide width',
       (tester) async {
         final platform = FakePlatformServices();
         final api = _MockApiClient();
@@ -505,38 +516,38 @@ void main() {
 
         // auto at 1400px starts extended, matching the shell's pre-toggle
         // width-derived behavior.
-        expect(find.byType(NavigationRail), findsOneWidget);
+        final rail = find.byType(NavigationRail);
+        expect(rail, findsOneWidget);
         expect(find.text('Dashboard content'), findsOneWidget);
         expect(find.byTooltip('Collapse sidebar'), findsOneWidget);
 
-        await tester.tap(find.byKey(const Key('sidebar-toggle')));
-        await tester.pumpAndSettle();
-
-        expect(find.byType(NavigationRail), findsNothing);
-        expect(find.text('Dashboard content'), findsOneWidget);
-        expect(find.byTooltip('Show sidebar'), findsOneWidget);
-
-        await tester.tap(find.byKey(const Key('sidebar-toggle')));
-        await tester.pumpAndSettle();
-
-        expect(find.byType(NavigationRail), findsOneWidget);
+        // The toggle lives inside the rail, pinned to its bottom, and no
+        // longer in the app bar.
+        final toggle = find.byKey(const Key('sidebar-toggle'));
+        expect(find.descendant(of: rail, matching: toggle), findsOneWidget);
         expect(
-          tester.widget<NavigationRail>(find.byType(NavigationRail)).extended,
-          isFalse,
+          find.descendant(of: find.byType(AppBar), matching: toggle),
+          findsNothing,
         );
+        expect(tester.widget<NavigationRail>(rail).trailingAtBottom, isTrue);
+
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+
+        // Collapsing never hides the rail: icons only, toggle still there.
+        expect(rail, findsOneWidget);
+        expect(tester.widget<NavigationRail>(rail).extended, isFalse);
         expect(find.byTooltip('Expand sidebar'), findsOneWidget);
 
-        await tester.tap(find.byKey(const Key('sidebar-toggle')));
+        await tester.tap(toggle);
         await tester.pumpAndSettle();
 
-        expect(
-          tester.widget<NavigationRail>(find.byType(NavigationRail)).extended,
-          isTrue,
-        );
+        expect(tester.widget<NavigationRail>(rail).extended, isTrue);
+        expect(find.byTooltip('Collapse sidebar'), findsOneWidget);
       },
     );
 
-    testWidgets('a persisted hidden preference starts with no rail', (
+    testWidgets('a persisted hidden preference now starts icons-only', (
       tester,
     ) async {
       SharedPreferences.setMockInitialValues({'sidebar_mode': 'hidden'});
@@ -548,7 +559,9 @@ void main() {
         overrides: _baseOverrides(platform: platform, api: api),
       );
 
-      expect(find.byType(NavigationRail), findsNothing);
+      final rail = find.byType(NavigationRail);
+      expect(rail, findsOneWidget);
+      expect(tester.widget<NavigationRail>(rail).extended, isFalse);
       expect(find.byKey(const Key('sidebar-toggle')), findsOneWidget);
       expect(find.text('Dashboard content'), findsOneWidget);
     });

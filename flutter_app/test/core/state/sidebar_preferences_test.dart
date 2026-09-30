@@ -87,9 +87,11 @@ void main() {
   });
 
   group('effectiveSidebarMode', () {
-    test('always resolves to hidden below the compact breakpoint', () {
-      for (final pref in AppSidebarMode.values) {
-        expect(effectiveSidebarMode(pref, 600), AppSidebarMode.hidden);
+    test('never resolves to auto: the shell always draws a concrete rail', () {
+      for (final width in [600.0, 900.0, 1400.0]) {
+        for (final pref in AppSidebarMode.values) {
+          expect(effectiveSidebarMode(pref, width), isNot(AppSidebarMode.auto));
+        }
       }
     });
 
@@ -107,11 +109,7 @@ void main() {
       );
     });
 
-    test('an explicit preference wins above the compact breakpoint', () {
-      expect(
-        effectiveSidebarMode(AppSidebarMode.hidden, 1400),
-        AppSidebarMode.hidden,
-      );
+    test('an explicit preference wins over the width', () {
       expect(
         effectiveSidebarMode(AppSidebarMode.icons, 1400),
         AppSidebarMode.icons,
@@ -124,14 +122,13 @@ void main() {
   });
 
   group('nextSidebarMode', () {
-    test('cycles hidden -> icons -> extended -> hidden', () {
-      expect(nextSidebarMode(AppSidebarMode.hidden), AppSidebarMode.icons);
+    test('toggles icons <-> extended, never hiding the rail', () {
       expect(nextSidebarMode(AppSidebarMode.icons), AppSidebarMode.extended);
-      expect(nextSidebarMode(AppSidebarMode.extended), AppSidebarMode.hidden);
+      expect(nextSidebarMode(AppSidebarMode.extended), AppSidebarMode.icons);
     });
 
-    test('cycling from auto starts the cycle at hidden', () {
-      expect(nextSidebarMode(AppSidebarMode.auto), AppSidebarMode.hidden);
+    test('an unresolved auto collapses to icons', () {
+      expect(nextSidebarMode(AppSidebarMode.auto), AppSidebarMode.icons);
     });
   });
 
@@ -142,13 +139,23 @@ void main() {
   });
 
   test('loads a persisted preference asynchronously', () async {
+    SharedPreferences.setMockInitialValues({'sidebar_mode': 'extended'});
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.read(sidebarModeProvider);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    expect(container.read(sidebarModeProvider), AppSidebarMode.extended);
+  });
+
+  test('a legacy persisted hidden preference migrates to icons', () async {
     SharedPreferences.setMockInitialValues({'sidebar_mode': 'hidden'});
     final container = ProviderContainer();
     addTearDown(container.dispose);
     container.read(sidebarModeProvider);
     await Future<void>.delayed(Duration.zero);
     await Future<void>.delayed(Duration.zero);
-    expect(container.read(sidebarModeProvider), AppSidebarMode.hidden);
+    expect(container.read(sidebarModeProvider), AppSidebarMode.icons);
   });
 
   test('set() persists the new mode for the next launch', () async {
@@ -168,7 +175,7 @@ void main() {
     container
         .read(sidebarModeProvider.notifier)
         .cycleFrom(AppSidebarMode.extended);
-    expect(container.read(sidebarModeProvider), AppSidebarMode.hidden);
+    expect(container.read(sidebarModeProvider), AppSidebarMode.icons);
   });
 
   test(
@@ -192,8 +199,8 @@ void main() {
 
       // set() does not depend on that pending read: it assigns `state`
       // synchronously before firing its own (also-gated) persist call.
-      container.read(sidebarModeProvider.notifier).set(AppSidebarMode.hidden);
-      expect(container.read(sidebarModeProvider), AppSidebarMode.hidden);
+      container.read(sidebarModeProvider.notifier).set(AppSidebarMode.extended);
+      expect(container.read(sidebarModeProvider), AppSidebarMode.extended);
 
       // Now let the load that was already in flight when set() ran
       // actually resolve, and give it a chance to run.
@@ -214,7 +221,7 @@ void main() {
       // depend on that scheduling detail — this test protects the
       // observable contract (state matches the last explicit choice), not
       // that specific internal race.
-      expect(container.read(sidebarModeProvider), AppSidebarMode.hidden);
+      expect(container.read(sidebarModeProvider), AppSidebarMode.extended);
     },
   );
 

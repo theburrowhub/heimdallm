@@ -451,3 +451,37 @@ func TestHumanMergeReason_CoversEveryCheckReason(t *testing.T) {
 		}
 	}
 }
+
+// My PRs: the table says who each PR waits on, and groups the ones that need
+// the operator first.
+func TestPrintMergeTable_ShowsWhoEachPRWaitsOn(t *testing.T) {
+	out := capture(t, func() {
+		printMergeTable([]api.MergeTrackingEntry{
+			entry(func(e *api.MergeTrackingEntry) { e.Attention = "action"; e.BlockReason = "changes_requested" }),
+			entry(func(e *api.MergeTrackingEntry) { e.Number = 8; e.Phase = "idle"; e.Attention = "ready" }),
+			entry(func(e *api.MergeTrackingEntry) { e.Number = 9; e.Attention = "waiting"; e.Stale = true }),
+			entry(func(e *api.MergeTrackingEntry) { e.Number = 10; e.Phase = "merged"; e.Attention = "none" }),
+		})
+	})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if !strings.Contains(lines[0], "NEEDS") {
+		t.Errorf("header should carry the NEEDS column: %q", lines[0])
+	}
+	checks := []struct {
+		line   string
+		prefix string
+		label  string
+	}{
+		{lines[1], "! ", "needs you"},
+		{lines[2], "✓ ", "ready to merge"},
+		{lines[3], "z ", "waiting, stale"},
+	}
+	for _, c := range checks {
+		if !strings.HasPrefix(c.line, c.prefix) || !strings.Contains(c.line, c.label) {
+			t.Errorf("row %q should start with %q and say %q", c.line, c.prefix, c.label)
+		}
+	}
+	if strings.HasPrefix(lines[4], "!") || strings.Contains(lines[4], "waiting") {
+		t.Errorf("a merged PR carries no marker and no attention: %q", lines[4])
+	}
+}

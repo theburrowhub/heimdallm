@@ -85,6 +85,27 @@ String? validatePollInterval(String? raw) {
   return null;
 }
 
+/// Form validator for `my_prs.stale_after`: a Go duration or a number of
+/// days ("90m", "12h", "3d"), or "0" to turn stale detection off.
+String? myPrsStaleAfterError(String? raw) {
+  final s = (raw ?? '').trim();
+  if (s.isEmpty) return 'Required (e.g. 12h, 3d, or 0 to disable)';
+  if (s == '0') return null;
+  if (parseHumanDuration(s) == null) {
+    return 'Invalid duration (e.g. 90m, 12h, 3d)';
+  }
+  return null;
+}
+
+/// Form validator for `my_prs.digest_time`: 24h "HH:MM".
+String? myPrsDigestTimeError(String? raw) {
+  final value = (raw ?? '').trim();
+  if (MyPrsConfig(digestTime: value).digestHourMinute == null) {
+    return 'Use 24h HH:MM, e.g. 10:00';
+  }
+  return null;
+}
+
 enum _ConfigSectionId {
   appearance,
   token,
@@ -92,6 +113,7 @@ enum _ConfigSectionId {
   retention,
   ai,
   polling,
+  myPrs,
   mergeTracking,
   circuitBreaker,
   cluster,
@@ -149,6 +171,12 @@ const _configSections = <_ConfigSectionMeta>[
     icon: Icons.tune_outlined,
   ),
   _ConfigSectionMeta(
+    id: _ConfigSectionId.myPrs,
+    title: 'My PRs',
+    summary: 'Keep an eye on your own open PRs so none stays in limbo.',
+    icon: Icons.assignment_ind_outlined,
+  ),
+  _ConfigSectionMeta(
     id: _ConfigSectionId.mergeTracking,
     title: 'Merge Tracking',
     summary: 'Tracking and automation for your pull requests.',
@@ -197,6 +225,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   Map<String, RepoConfig> _repoConfigs = {};
 
   MergeTrackingConfig _mergeTracking = const MergeTrackingConfig();
+  MyPrsConfig _myPrs = const MyPrsConfig();
+  late TextEditingController _myPrsStaleAfterController;
+  late TextEditingController _myPrsDigestTimeController;
   CircuitBreakerConfig _circuitBreaker = const CircuitBreakerConfig();
   String _clusterRole = ClusterRole.standalone;
   late TextEditingController _mtPollIntervalController;
@@ -212,6 +243,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     super.initState();
     _mtPollIntervalController = TextEditingController();
     _mtResolveTimeoutController = TextEditingController();
+    _myPrsStaleAfterController = TextEditingController();
+    _myPrsDigestTimeController = TextEditingController();
     _perPr24hController = TextEditingController();
     _perRepoHrController = TextEditingController();
     _detectToken();
@@ -225,6 +258,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _formScrollController.dispose();
     _mtPollIntervalController.dispose();
     _mtResolveTimeoutController.dispose();
+    _myPrsStaleAfterController.dispose();
+    _myPrsDigestTimeController.dispose();
     _perPr24hController.dispose();
     _perRepoHrController.dispose();
     super.dispose();
@@ -268,6 +303,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     if (_sectionControllersInitialized) return;
     _sectionControllersInitialized = true;
     _mergeTracking = config.mergeTracking;
+    _myPrs = config.myPrs;
+    _myPrsStaleAfterController.text = config.myPrs.staleAfter;
+    _myPrsDigestTimeController.text = config.myPrs.digestTime;
     _circuitBreaker = config.circuitBreaker;
     _mtPollIntervalController.text = config.mergeTracking.pollInterval;
     _mtResolveTimeoutController.text = config.mergeTracking.resolveTimeout;
@@ -347,6 +385,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               _retentionSection(),
               _aiSection(config),
               _pollingSection(),
+              _myPrsSection(),
               _mergeTrackingSection(),
               _circuitBreakerSection(),
               if (_showClusterSection()) _clusterSection(config),
@@ -415,6 +454,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     'Retention' => _ConfigSectionId.retention,
     'AI defaults' => _ConfigSectionId.ai,
     'Polling / Rate Limit' => _ConfigSectionId.polling,
+    'My PRs' => _ConfigSectionId.myPrs,
     'Merge Tracking' => _ConfigSectionId.mergeTracking,
     'Circuit Breaker' => _ConfigSectionId.circuitBreaker,
     'Cluster' => _ConfigSectionId.cluster,
@@ -922,6 +962,122 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   /// says what Heimdallm will actually do — "Resolve conflicts" in particular
   /// means an agent force-pushes to your branch, and that has to be stated on
   /// the switch rather than buried in the docs.
+  // ── My PRs ─────────────────────────────────────────────────────────────────
+
+  Widget _myPrsSection() {
+    return _settingsCard('My PRs', [
+      SwitchListTile(
+        key: const Key('my-prs-enabled'),
+        title: const Text(
+          'Watch my pull requests',
+          style: TextStyle(fontSize: 13),
+        ),
+        subtitle: const Text(
+          'Show what each of your open PRs in the monitored repositories is '
+          'waiting on. Observation only: nothing is ever written to GitHub.',
+          style: TextStyle(fontSize: 11),
+        ),
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        value: _myPrs.enabled,
+        onChanged: (v) => setState(() => _myPrs = _myPrs.copyWith(enabled: v)),
+      ),
+      if (_myPrs.enabled) ...[
+        SwitchListTile(
+          title: const Text(
+            'Include PRs assigned to me',
+            style: TextStyle(fontSize: 13),
+          ),
+          subtitle: const Text(
+            'Also watch PRs someone else opened but assigned to you',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _myPrs.includeAssigned,
+          onChanged: (v) =>
+              setState(() => _myPrs = _myPrs.copyWith(includeAssigned: v)),
+        ),
+        const SizedBox(height: 8),
+        TextFormField(
+          key: const Key('my-prs-stale-after'),
+          controller: _myPrsStaleAfterController,
+          autovalidateMode: AutovalidateMode.onUserInteraction,
+          decoration: const InputDecoration(
+            labelText: 'Flag a PR as stale after',
+            helperText:
+                'No activity on GitHub for this long, e.g. 90m, 12h, 3d. '
+                '0 turns it off.',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          validator: myPrsStaleAfterError,
+          onChanged: (v) =>
+              setState(() => _myPrs = _myPrs.copyWith(staleAfter: v.trim())),
+        ),
+        const Divider(height: 20),
+        const Padding(
+          padding: EdgeInsets.only(bottom: 4),
+          child: Text(
+            'Nudges',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+          ),
+        ),
+        SwitchListTile(
+          key: const Key('my-prs-digest-enabled'),
+          title: const Text('Daily digest', style: TextStyle(fontSize: 13)),
+          subtitle: const Text(
+            'One notification a day summarising the PRs that need you. '
+            'Nothing is sent on a day when none do.',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _myPrs.digestEnabled,
+          onChanged: (v) =>
+              setState(() => _myPrs = _myPrs.copyWith(digestEnabled: v)),
+        ),
+        if (_myPrs.digestEnabled)
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 8),
+            child: TextFormField(
+              key: const Key('my-prs-digest-time'),
+              controller: _myPrsDigestTimeController,
+              autovalidateMode: AutovalidateMode.onUserInteraction,
+              decoration: const InputDecoration(
+                labelText: 'Digest time',
+                helperText: 'Local time, 24h HH:MM',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              validator: myPrsDigestTimeError,
+              onChanged: (v) => setState(
+                () => _myPrs = _myPrs.copyWith(digestTime: v.trim()),
+              ),
+            ),
+          ),
+        SwitchListTile(
+          key: const Key('my-prs-notify-transitions'),
+          title: const Text(
+            'Notify when a PR needs me',
+            style: TextStyle(fontSize: 13),
+          ),
+          subtitle: const Text(
+            'A notification the moment one of your PRs gets changes '
+            'requested, fails CI, hits a conflict, becomes ready to merge or '
+            'goes stale. Off by default.',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _myPrs.notifyTransitions,
+          onChanged: (v) =>
+              setState(() => _myPrs = _myPrs.copyWith(notifyTransitions: v)),
+        ),
+      ],
+    ]);
+  }
+
   Widget _mergeTrackingSection() {
     return _settingsCard('Merge Tracking', [
       SwitchListTile(
@@ -1336,7 +1492,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     bool daemonRunning,
   ) {
     final isLoading = ref.watch(configNotifierProvider).isLoading;
-    final pollInvalid = validatePollInterval(_pollInterval) != null;
+    final formInvalid =
+        validatePollInterval(_pollInterval) != null ||
+        myPrsStaleAfterError(_myPrs.staleAfter) != null ||
+        (_myPrs.digestEnabled &&
+            myPrsDigestTimeError(_myPrs.digestTime) != null);
     final multiInstance =
         ref.watch(daemonInstancesProvider).value?.isMultiInstance ?? false;
 
@@ -1358,7 +1518,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                   base,
                   daemonRunning,
                   isLoading,
-                  pollInvalid,
+                  formInvalid,
                   multiInstance,
                 );
 
@@ -1406,7 +1566,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     AppConfig base,
     bool daemonRunning,
     bool isLoading,
-    bool pollInvalid,
+    bool formInvalid,
     bool multiInstance,
   ) {
     if (daemonRunning) {
@@ -1423,7 +1583,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: pollInvalid
+                onPressed: formInvalid
                     ? null
                     : () => _saveDaemonSettings(context, base),
                 child: const Text('Save'),
@@ -1481,7 +1641,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               label: Text(
                 isLoading ? 'Starting…' : 'Save and start Heimdallm',
               ),
-              onPressed: (isLoading || pollInvalid)
+              onPressed: (isLoading || formInvalid)
                   ? null
                   : () => _saveAndStartDaemon(context, base),
             ),
@@ -1500,6 +1660,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     globalNeverApproveMinSeverity: _globalNeverApproveMinSeverity,
     globalCloneDir: _globalCloneDir,
     mergeTracking: _mergeTracking,
+    myPrs: _myPrs,
     circuitBreaker: _circuitBreaker,
     aiPrimary: _aiPrimary,
     aiFallback: _aiFallback,

@@ -276,7 +276,9 @@ func TestMergeTrackingOverride_CoversEveryOverridableField(t *testing.T) {
 	ct := reflect.TypeOf(config.MergeTrackingConfig{})
 	for i := 0; i < ct.NumField(); i++ {
 		tag := strings.Split(ct.Field(i).Tag.Get("toml"), ",")[0]
-		if tag == "" || exempt[tag] {
+		// toml "-" marks derived runtime state (WatchOnly), never read from
+		// the file, so there is nothing to override.
+		if tag == "" || tag == "-" || exempt[tag] {
 			continue
 		}
 		if !overrideTags[tag] {

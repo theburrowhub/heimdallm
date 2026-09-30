@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 
 import 'fake_platform_services.dart';
@@ -26,6 +27,21 @@ void main() {
   );
 
   group('optional platform capabilities', () {
+    test('the tray My PRs section is a no-op without a tray', () async {
+      final PlatformServices platform = _PlatformOnly();
+      await platform.setTrayMyPrs(const [
+        MergeTrackingEntry(prId: 1, repo: 'a/b', number: 1),
+      ]);
+    });
+
+    test('a platform with a tray receives the My PRs section', () async {
+      final fake = FakePlatformServices();
+      final PlatformServices platform = fake;
+      const entry = MergeTrackingEntry(prId: 1, repo: 'a/b', number: 1);
+      await platform.setTrayMyPrs(const [entry]);
+      expect(fake.trayMyPrs.single.single.number, 1);
+    });
+
     test('deployment-managed platforms get safe updater defaults', () async {
       final PlatformServices platform = _PlatformOnly();
 

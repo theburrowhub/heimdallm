@@ -89,18 +89,26 @@ Future<void> main() async {
 /// Public entry point for features to fire notifications.
 /// Takes the [PlatformServices] (from a `ref.read(platformServicesProvider)`)
 /// so the caller controls platform availability.
+///
+/// A click focuses the window and opens [location] when given, otherwise the
+/// PR detail for [prId].
 void sendPRNotification({
   required PlatformServices platform,
   required String title,
   required String body,
   int? prId,
+  String? location,
 }) {
   platform.showNotification(
     title: title,
     body: body,
     onClick: () async {
       await platform.showAndFocusWindow();
-      if (prId != null) _appRouter.go('/prs/$prId');
+      if (location != null) {
+        _appRouter.go(location);
+      } else if (prId != null) {
+        _appRouter.go('/prs/$prId');
+      }
     },
   );
 }

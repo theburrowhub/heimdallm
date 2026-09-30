@@ -23,8 +23,9 @@ func newMergesCmd() *cobra.Command {
 		Short: "List your PRs and what is blocking each merge",
 		Long: "Lists the open pull requests you authored or are assigned to, " +
 			"with the merge-readiness state Heimdallm recorded for each.\n\n" +
-			"PRs blocked by CI are listed first and marked, because those are " +
-			"the ones that need you.",
+			"PRs that need you come first (something to fix, then ready to " +
+			"merge), then the ones waiting on others, then those merged or " +
+			"closed in the last day.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := clientFromContext(cmd.Context())
 			entries, err := c.ListMergeTracking()
@@ -51,6 +52,7 @@ func newMergesCmd() *cobra.Command {
 				entries = filtered
 			}
 
+			api.SortMyPRs(entries)
 			if jsonOutput {
 				return json.NewEncoder(os.Stdout).Encode(entries)
 			}
@@ -112,14 +114,19 @@ func newMergeDetailCmd() *cobra.Command {
 // their full detail text, untruncated: the whole value of the line is the name
 // of the check that is failing.
 func printMergeTable(entries []api.MergeTrackingEntry) {
-	fmt.Printf("%-44s %-18s %s\n", "PULL REQUEST", "STATE", "BLOCKED BY")
+	fmt.Printf("%-44s %-18s %-22s %s\n", "PULL REQUEST", "STATE", "NEEDS", "BLOCKED BY")
 	for _, e := range entries {
 		marker := "  "
 		switch {
-		case e.ChecksRequiredFailing > 0:
+		case e.Terminal():
+		case e.ChecksRequiredFailing > 0 || e.Attention == "action":
 			marker = "! "
+		case e.Attention == "ready":
+			marker = "✓ "
 		case e.ChecksRequiredPending > 0:
 			marker = "~ "
+		case e.Stale:
+			marker = "z "
 		}
 		blocked := e.BlockDetail
 		if blocked == "" {
@@ -128,11 +135,12 @@ func printMergeTable(entries []api.MergeTrackingEntry) {
 		if e.Terminal() {
 			blocked = ""
 		}
-		fmt.Printf("%s%-42s %-18s %s\n",
-			marker, truncate(fmt.Sprintf("%s#%d", e.Repo, e.Number), 42), mergePhaseLabelCLI(e.Phase), blocked)
+		fmt.Printf("%s%-42s %-18s %-22s %s\n",
+			marker, truncate(fmt.Sprintf("%s#%d", e.Repo, e.Number), 42), mergePhaseLabelCLI(e.Phase),
+			e.AttentionLabel(), blocked)
 	}
 	fmt.Println()
-	fmt.Println("  ! required check failing    ~ required check running")
+	fmt.Println("  ! needs you (a required check failing, changes requested…)    ✓ ready to merge    ~ required check running    z stale")
 }
 
 // printMergeDetail renders one PR's full breakdown.

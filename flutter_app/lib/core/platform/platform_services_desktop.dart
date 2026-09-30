@@ -12,6 +12,7 @@ import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
 import '../daemon/daemon_lifecycle.dart';
 import '../models/config_model.dart';
+import '../models/merge_tracking.dart';
 import '../models/pr.dart';
 import '../setup/desktop_repo_discovery.dart';
 import '../setup/first_run_setup.dart';
@@ -93,7 +94,8 @@ class DesktopPlatformServices
         PlatformServices,
         AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
-        DuplicateInstancePlatformCapability {
+        DuplicateInstancePlatformCapability,
+        TrayMyPrsPlatformCapability {
   DesktopPlatformServices({
     int apiPort = 7842,
     String? tokenPath,
@@ -956,6 +958,10 @@ class DesktopPlatformServices
   @override
   Future<void> rebuildTrayMenu({required List<PR> prs, required String me}) =>
       TrayMenu.instance.rebuild(prs: prs, me: me);
+
+  @override
+  Future<void> setTrayMyPrs(List<MergeTrackingEntry> entries) =>
+      TrayMenu.instance.setMyPrs(entries);
 
   @override
   Future<List<String>> discoverReposFromPRs(String token) =>

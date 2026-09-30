@@ -189,6 +189,10 @@ CREATE TABLE IF NOT EXISTS merge_tracking (
   evaluated_at            TEXT     NOT NULL DEFAULT '',
   merged_at               TEXT     NOT NULL DEFAULT '',
   terminal_reason         TEXT     NOT NULL DEFAULT '',
+  terminal_at             TEXT     NOT NULL DEFAULT '',
+  last_activity_at        TEXT     NOT NULL DEFAULT '',
+  attention               TEXT     NOT NULL DEFAULT '',
+  stale_notified_at       TEXT     NOT NULL DEFAULT '',
   updated_at              DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_merge_tracking_repo ON merge_tracking(repo);
@@ -300,6 +304,18 @@ func Open(dsn string) (*Store, error) {
 		updated_at              DATETIME NOT NULL
 	)`)
 	db.Exec("ALTER TABLE merge_tracking ADD COLUMN arm_attempts INTEGER NOT NULL DEFAULT 0")
+	// My PRs watch. terminal_at anchors the retention of merged/closed rows:
+	// updated_at moved on every Re-check or Exclude, so a finished PR someone
+	// kept clicking never aged out. The backfill runs only when the column is
+	// created, so it cannot rewrite a value the reconciler later set.
+	if _, err := db.Exec("ALTER TABLE merge_tracking ADD COLUMN terminal_at TEXT NOT NULL DEFAULT ''"); err == nil {
+		db.Exec(`UPDATE merge_tracking
+			SET terminal_at = CASE WHEN merged_at != '' THEN merged_at ELSE updated_at END
+			WHERE phase IN ('merged','abandoned')`)
+	}
+	db.Exec("ALTER TABLE merge_tracking ADD COLUMN last_activity_at TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE merge_tracking ADD COLUMN attention TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE merge_tracking ADD COLUMN stale_notified_at TEXT NOT NULL DEFAULT ''")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_merge_tracking_repo ON merge_tracking(repo)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_merge_tracking_due ON merge_tracking(phase, cooldown_until)")
 	// A process that died mid-action leaves a row parked in an in-flight phase

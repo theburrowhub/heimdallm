@@ -18,7 +18,7 @@ Full reference for all settings, environment variables, and deployment options.
 10. [CLI](#10-cli)
 11. [Distribution Formats](#11-distribution-formats)
 12. [Circuit Breakers](#12-circuit-breakers)
-13. [Merge Tracking](#13-merge-tracking)
+13. [Merge Tracking and My PRs](#13-merge-tracking-and-my-prs)
 14. [Polling](#14-polling)
 15. [Multiple Instances](#15-multiple-instances)
 16. [Full config.toml Reference](#16-full-configtoml-reference)
@@ -756,21 +756,62 @@ per_repo_hr = 40
 
 ---
 
-## 13. Merge Tracking
+## 13. Merge Tracking and My PRs
 
-Merge tracking watches the open pull requests **you** authored or are assigned to, works out exactly what is stopping each one from merging, and — at whatever level of automation you configure — moves them along.
+Heimdallm watches the open pull requests **you** authored or are assigned to in the repositories it monitors, works out exactly what is stopping each one from merging, and tells you which ones need you. With merge tracking enabled it can also — at whatever level of automation you configure — move them along.
 
-> **Every automation is off by default.** A config that does not mention `[merge_tracking]` never touches a repository. Turning `enabled` on gives you the reporting — the four automations are separate switches on top of that.
+> **Watching is on by default; every automation is off by default.** `[my_prs]` (below) observes your PRs and never writes to GitHub. A config that does not mention `[merge_tracking]` never touches a repository. Turning `merge_tracking.enabled` on for a repo hands that repo to the automation switches instead.
+
+### My PRs: keeping your own PRs out of limbo
+
+The **My PRs** tab groups your open PRs by who they are waiting on:
+
+| Section | Meaning |
+|---|---|
+| **Needs your action** | Something only you can fix: a failing or missing required check, requested changes, unresolved conversations, conflicts or an out-of-date branch (unless the matching automation handles it), a draft. |
+| **Ready to merge** | Every requirement is met and nothing is going to merge it on its own — one click left. |
+| **Waiting on others** | Reviewers, CI still running, GitHub computing, or Heimdallm's own automation working on it. |
+| **Recently merged or closed** | Collapsed. A finished PR stays here for **24 hours** from the moment it was merged or closed, then disappears. |
+
+A PR with no activity on GitHub (pushes, reviews, comments…) for longer than `stale_after` carries a **Stale · 4d** chip, whichever section it is in.
+
+The nudges are deliberately quiet:
+
+- the tab's badge counts the PRs that need you — needs action, ready to merge, or stale — and is red only when something needs fixing; PRs merely waiting on CI or reviewers do not light it;
+- the tray menu gets a **Your PRs** section with the same summary and the most urgent five;
+- a **daily digest** notification at `digest_time` summarises them, once a day. If the app was closed at that time it arrives on the next launch that day; a day with nothing to report sends nothing;
+- per-PR **transition** notifications (a PR newly needs you, becomes ready, or goes stale) are available but **off by default** (`notify_transitions`).
+
+```toml
+[my_prs]
+enabled            = true     # watch your PRs in monitored repos (observation only)
+include_assigned   = true     # also PRs assigned to you but authored by someone else
+stale_after        = "3d"     # no GitHub activity for this long = stale; 90m, 12h, 3d…; "0" disables
+notify_transitions = false    # a notification the moment a PR needs you
+digest_enabled     = true     # one summary notification a day
+digest_time        = "10:00"  # local time, 24h HH:MM
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Watch your PRs in every monitored repository where merge tracking is off. Such a repo is evaluated in **watch-only** mode: the same readiness decision, no write action ever, and the automation-only rules (write permission, a head branch in someone else's fork, the allowed merge method) are skipped so they cannot hide the real state. |
+| `include_assigned` | `true` | Also watch PRs you are assigned to but did not author. Applies to watched repos; repos with merge tracking enabled keep `merge_tracking.include_assigned`. |
+| `stale_after` | `"3d"` | Inactivity threshold. Go durations (`90m`, `1h30m`) or days (`3d`, `1.5d`). `"0"` turns stale detection off. |
+| `notify_transitions` | `false` | Desktop notification when one of your PRs moves to *needs your action* or *ready to merge*, or first goes stale (once per idle stretch; new activity re-arms it). |
+| `digest_enabled` | `true` | The daily digest notification. |
+| `digest_time` | `"10:00"` | When the digest is due, in the app's local time. |
+
+Watching only covers **monitored** repositories. To watch a PR elsewhere, add its repository (or use **Track a PR**, which adds it for you).
 
 ### What it reports
 
-For every tracked PR, Heimdallm records an explainable decision and shows it in the Merge screen in the app shell, on the PR detail view, in `heimdallm-cli merges`, and in the TUI:
+For every tracked PR, Heimdallm records an explainable decision and shows it in the My PRs screen in the app shell, on the PR detail view, in `heimdallm-cli merges`, and in the TUI:
 
 - whether the PR is ready to merge, and if not, **why** — named specifically, not as a code;
 - the full list of CI checks with state, whether each one gates the merge, the app that ran it and a link to its log;
 - required checks that branch protection demands but which **never reported** — invisible in GitHub's own UI, and a common cause of a PR that seems stuck for no reason.
 
-A PR blocked by CI is called out prominently: a coloured band on its row naming the failing check, a count badge on the tab, and the affected rows sorted to the top.
+A PR blocked by CI is called out prominently: a coloured band on its row naming the failing check, and the affected rows sorted to the top of their section.
 
 ### The four automations
 
@@ -805,7 +846,7 @@ resolve_effort     = "high"  # low | medium | high | max
 
 | Field | Default | Description |
 |---|---|---|
-| `enabled` | `false` | Master switch and kill-switch. When `false` a poll cycle makes **zero** GitHub calls. |
+| `enabled` | `false` | Master switch and kill-switch for the automation. A repo with it off is still *watched* (observation only) while `[my_prs].enabled` is on; with both off a poll cycle makes **zero** GitHub calls. Either way, local housekeeping runs every cycle: finished PRs are dropped 24 hours after they merged or closed, and PRs of repos nobody tracks or watches any more are removed. |
 | `enable_auto_merge` | `false` | Arm GitHub's native auto-merge on PRs that do not have it. |
 | `update_branch` | `false` | Update a branch that has fallen behind its base. When disabled, an independently detected stale base does not by itself stop `enable_auto_merge` or `merge`; GitHub can still block them when branch protection requires an up-to-date branch. |
 | `resolve_conflicts` | `false` | Run the configured agent on merge conflicts. **This force-pushes to your branch.** |
@@ -885,7 +926,7 @@ require_approval  = true   # never merge this one without a human approval
 
 ### What blocks a merge
 
-The Merge screen in the app shell and `heimdallm-cli merges` report one of these reasons. They are stable identifiers, and the UI renders each as a sentence.
+The My PRs screen in the app shell and `heimdallm-cli merges` report one of these reasons. They are stable identifiers, and the UI renders each as a sentence.
 
 | Reason | Meaning | What to do |
 |---|---|---|
@@ -912,7 +953,7 @@ The Merge screen in the app shell and `heimdallm-cli merges` report one of these
 
 ### Adding your own PR
 
-The **Merge** screen in the sidebar/rail/drawer has its own **Track a PR** button. Use that one, not the Add PR
+The **My PRs** screen in the sidebar/rail/drawer has its own **Track a PR** button. Use that one, not the Add PR
 action in Activity: that action routes through the review pipeline, which
 refuses any pull request the authenticated account authored — and Heimdallm
 authenticates as *you*, so that is every PR you open. Pasting your own PR there
@@ -920,7 +961,8 @@ records a `self_authored` skip and nothing else.
 
 `POST /merge-tracking/add` stores the PR, verifies the repository's effective
 merge-tracking configuration by enrolling it, adds the repository to the
-monitored list and stops. A disabled repository is rejected before that list is
+monitored list and stops. A repository with merge tracking off is accepted
+while `[my_prs]` watches it; with both off it is rejected before that list is
 changed. No review is triggered. Whether the PR is really yours is settled by
 the next evaluation, against GitHub's own view of author and assignees.
 
@@ -1624,6 +1666,20 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # [merge_tracking.repos."my-org/my-repo"]
 # merge            = true
 # require_approval = true
+
+# ── My PRs (see section 13) ───────────────────────────────────────────────────
+#
+# Watches your own open PRs in the monitored repos where merge tracking is off —
+# observation only, never a write — and nudges you about the ones that need you.
+# On by default.
+
+# [my_prs]
+# enabled            = true     # watch your PRs (observation only)
+# include_assigned   = true     # also PRs assigned to you
+# stale_after        = "3d"     # 90m, 12h, 3d…; "0" disables stale detection
+# notify_transitions = false    # notify the moment a PR needs you
+# digest_enabled     = true     # one summary notification a day
+# digest_time        = "10:00"  # local time, 24h HH:MM
 
 # ── Retention ─────────────────────────────────────────────────────────────────
 

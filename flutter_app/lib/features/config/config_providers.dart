@@ -517,6 +517,28 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   }
   if (mtDiff.isNotEmpty) diff['merge_tracking'] = mtDiff;
 
+  // My PRs
+  final myDiff = <String, dynamic>{};
+  final oldMy = old.myPrs;
+  final newMy = updated.myPrs;
+  if (oldMy.enabled != newMy.enabled) myDiff['enabled'] = newMy.enabled;
+  if (oldMy.includeAssigned != newMy.includeAssigned) {
+    myDiff['include_assigned'] = newMy.includeAssigned;
+  }
+  if (oldMy.staleAfter != newMy.staleAfter) {
+    myDiff['stale_after'] = newMy.staleAfter;
+  }
+  if (oldMy.notifyTransitions != newMy.notifyTransitions) {
+    myDiff['notify_transitions'] = newMy.notifyTransitions;
+  }
+  if (oldMy.digestEnabled != newMy.digestEnabled) {
+    myDiff['digest_enabled'] = newMy.digestEnabled;
+  }
+  if (oldMy.digestTime != newMy.digestTime) {
+    myDiff['digest_time'] = newMy.digestTime;
+  }
+  if (myDiff.isNotEmpty) diff['my_prs'] = myDiff;
+
   // Circuit breaker
   final cbDiff = <String, dynamic>{};
   if (old.circuitBreaker.perPr24h != updated.circuitBreaker.perPr24h) {

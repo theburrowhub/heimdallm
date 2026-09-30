@@ -362,7 +362,9 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			sort.Slice(d.prs, func(i, j int) bool {
 				return d.prs[i].LatestReview.CreatedAt.After(d.prs[j].LatestReview.CreatedAt)
 			})
-			// Kept in the daemon's order: it sorts PRs blocked by CI first.
+			// Grouped like the GUI's My PRs tab; inside each group the daemon's
+			// order (PRs blocked by CI first) is kept.
+			api.SortMyPRs(msg.merges)
 			d.merges = msg.merges
 			d.config = msg.config
 			d.stats = msg.stats
