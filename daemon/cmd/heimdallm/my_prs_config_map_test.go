@@ -11,7 +11,9 @@ func boolRef(b bool) *bool { return &b }
 // Same trap as merge_tracking: without the projection the settings screen
 // reads [my_prs] back as defaults and the toggles reset themselves.
 func TestMyPRsConfigMap_ResolvesDefaults(t *testing.T) {
-	got := myPRsConfigMap(&config.Config{MyPRs: config.MyPRsConfig{StaleAfter: "3d", DigestTime: "10:00"}})
+	// A Config that never went through applyDefaults: the projection must
+	// still report the values the daemon runs with.
+	got := myPRsConfigMap(&config.Config{})
 	want := map[string]any{
 		"enabled": true, "include_assigned": true, "stale_after": "3d",
 		"notify_transitions": false, "digest_enabled": true, "digest_time": "10:00",

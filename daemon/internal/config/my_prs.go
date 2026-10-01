@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -119,7 +120,14 @@ func ParseHumanDuration(raw string) (time.Duration, error) {
 		if err != nil {
 			return 0, err
 		}
-		return time.Duration(days * float64(24*time.Hour)), nil
+		// Converting an out-of-range float to an integer is implementation-
+		// defined in Go, so an absurd value like "999999999d" could come back
+		// negative on one platform and as positive garbage on another.
+		ns := days * float64(24*time.Hour)
+		if ns > math.MaxInt64 {
+			return 0, fmt.Errorf("duration %q is too large", raw)
+		}
+		return time.Duration(ns), nil
 	}
 	return time.ParseDuration(raw)
 }

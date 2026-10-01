@@ -229,3 +229,20 @@ func TestBuildMergeDetailLines_SaysWhatThePRNeeds(t *testing.T) {
 		t.Errorf("detail should say how long it has been idle:\n%s", joined)
 	}
 }
+
+func TestRenderMerges_StaleBeatsPendingAndExcludedIsQuiet(t *testing.T) {
+	d := &Dashboard{
+		width: 140,
+		merges: []api.MergeTrackingEntry{
+			{Repo: "acme/widgets", Number: 7, Phase: "blocked", Attention: "waiting", Stale: true, ChecksRequiredPending: 1},
+			{Repo: "acme/widgets", Number: 8, Phase: "blocked", Attention: "action", Excluded: true},
+		},
+	}
+	lines := strings.Split(strings.TrimRight(d.renderMerges(10), "\n"), "\n")
+	if !strings.Contains(lines[0], "z") || strings.Contains(lines[0], "~") {
+		t.Errorf("stale should win over pending: %q", lines[0])
+	}
+	if strings.Contains(lines[1], "!") || !strings.Contains(lines[1], "excluded") {
+		t.Errorf("excluded row should be quiet and say so: %q", lines[1])
+	}
+}

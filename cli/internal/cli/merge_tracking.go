@@ -52,10 +52,12 @@ func newMergesCmd() *cobra.Command {
 				entries = filtered
 			}
 
-			api.SortMyPRs(entries)
+			// --json keeps the daemon's own order: grouping is presentation,
+			// and scripts reading the JSON should not have it change under them.
 			if jsonOutput {
 				return json.NewEncoder(os.Stdout).Encode(entries)
 			}
+			api.SortMyPRs(entries)
 			if len(entries) == 0 {
 				fmt.Println("No pull requests tracked.")
 				return nil
@@ -118,15 +120,17 @@ func printMergeTable(entries []api.MergeTrackingEntry) {
 	for _, e := range entries {
 		marker := "  "
 		switch {
-		case e.Terminal():
+		case e.Terminal() || e.Excluded:
 		case e.ChecksRequiredFailing > 0 || e.Attention == "action":
 			marker = "! "
 		case e.Attention == "ready":
 			marker = "✓ "
-		case e.ChecksRequiredPending > 0:
-			marker = "~ "
+		// Stale before pending: a check stuck pending for days is the typical
+		// stale PR, and "~" would hide that it has gone quiet.
 		case e.Stale:
 			marker = "z "
+		case e.ChecksRequiredPending > 0:
+			marker = "~ "
 		}
 		blocked := e.BlockDetail
 		if blocked == "" {

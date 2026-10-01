@@ -989,7 +989,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             style: TextStyle(fontSize: 13),
           ),
           subtitle: const Text(
-            'Also watch PRs someone else opened but assigned to you',
+            'Also watch PRs someone else opened but assigned to you. Repos '
+            'with merge tracking on use its own "Include PRs assigned to me" '
+            'instead.',
             style: TextStyle(fontSize: 11),
           ),
           dense: true,

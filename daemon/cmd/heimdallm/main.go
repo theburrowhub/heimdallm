@@ -4466,10 +4466,10 @@ func myPRsConfigMap(c *config.Config) map[string]any {
 	return map[string]any{
 		"enabled":            c.MyPRsEnabled(),
 		"include_assigned":   c.MyPRsIncludeAssigned(),
-		"stale_after":        c.MyPRs.StaleAfter,
+		"stale_after":        stringOr(c.MyPRs.StaleAfter, config.DefaultMyPRsStaleAfter),
 		"notify_transitions": c.MyPRs.NotifyTransitions,
 		"digest_enabled":     c.MyPRsDigestEnabled(),
-		"digest_time":        c.MyPRs.DigestTime,
+		"digest_time":        stringOr(c.MyPRs.DigestTime, config.DefaultMyPRsDigestTime),
 	}
 }
 
@@ -4580,6 +4580,16 @@ func ptrIntOr(p *int, defaultV int) int {
 		return defaultV
 	}
 	return *p
+}
+
+// stringOr returns s, or defaultV when s is empty. Used to serialize string
+// config fields whose empty value means "use the built-in default", so the
+// projection is right even for a Config that never went through defaults.
+func stringOr(s, defaultV string) string {
+	if strings.TrimSpace(s) == "" {
+		return defaultV
+	}
+	return s
 }
 
 func repoAIOverrideMap(ai config.RepoAI) map[string]any {

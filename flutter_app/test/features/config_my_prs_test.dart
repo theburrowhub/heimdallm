@@ -45,6 +45,8 @@ void main() {
     expect(parseHumanDuration('3'), isNull);
     expect(parseHumanDuration('3 days'), isNull);
     expect(parseHumanDuration('3w'), isNull);
+    expect(parseHumanDuration('999999999d'), isNull);
+    expect(parseHumanDuration('99999999999h'), isNull);
   });
 
   test('digestHourMinute validates 24h HH:MM', () {
@@ -58,6 +60,7 @@ void main() {
     expect(myPrsStaleAfterError('0'), isNull);
     expect(myPrsStaleAfterError(''), isNotNull);
     expect(myPrsStaleAfterError('soon'), isNotNull);
+    expect(myPrsStaleAfterError('999999999d'), isNotNull);
     expect(myPrsDigestTimeError('10:00'), isNull);
     expect(myPrsDigestTimeError('10'), isNotNull);
   });

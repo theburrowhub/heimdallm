@@ -72,18 +72,20 @@ func (d *Dashboard) renderMergeRow(e api.MergeTrackingEntry, selected bool) stri
 	marker := "  "
 	markerStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	switch {
-	case e.Terminal():
+	case e.Terminal() || e.Excluded:
 	case e.ChecksRequiredFailing > 0 || e.Attention == "action":
 		marker = "! "
 		markerStyle = dangerStyle
 	case e.Attention == "ready":
 		marker = "✓ "
 		markerStyle = successStyle
-	case e.ChecksRequiredPending > 0:
-		marker = "~ "
-		markerStyle = warningStyle
+	// Stale before pending: a check stuck pending for days is the typical
+	// stale PR, and "~" would hide that it has gone quiet.
 	case e.Stale:
 		marker = "z "
+		markerStyle = warningStyle
+	case e.ChecksRequiredPending > 0:
+		marker = "~ "
 		markerStyle = warningStyle
 	}
 

@@ -826,13 +826,16 @@ class MyPrsConfig {
 /// ("3d", "1.5d"), mirroring the daemon's `config.ParseHumanDuration`.
 /// Returns null for "0", an empty string or anything unparseable.
 Duration? parseHumanDuration(String raw) {
+  // The daemon rejects anything past Go's time.Duration range (~292 years);
+  // anything that long is not a threshold anyone means, so treat it the same.
+  const maxMs = 292 * 365 * Duration.millisecondsPerDay;
   final value = raw.trim();
   if (value.isEmpty || value == '0') return null;
   final days = RegExp(r'^(\d+(?:\.\d+)?)d$').firstMatch(value);
   if (days != null) {
-    final d = double.parse(days.group(1)!);
-    final ms = (d * Duration.millisecondsPerDay).round();
-    return ms > 0 ? Duration(milliseconds: ms) : null;
+    final ms = double.parse(days.group(1)!) * Duration.millisecondsPerDay;
+    if (ms <= 0 || ms > maxMs) return null;
+    return Duration(milliseconds: ms.round());
   }
   final part = RegExp(r'(\d+(?:\.\d+)?)(h|ms|m|s)');
   var total = 0.0;
@@ -848,7 +851,7 @@ Duration? parseHumanDuration(String raw) {
       _ => n,
     };
   }
-  if (consumed != value.length || total <= 0) return null;
+  if (consumed != value.length || total <= 0 || total > maxMs) return null;
   return Duration(milliseconds: total.round());
 }
 

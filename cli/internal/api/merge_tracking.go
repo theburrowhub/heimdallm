@@ -115,10 +115,14 @@ func (e MergeTrackingEntry) NeedsOperator() bool {
 }
 
 // AttentionLabel is a short phrase for who the PR is waiting on, with the stale
-// flag appended. Empty for finished PRs, whose phase says it all.
+// flag appended. Empty for finished PRs, whose phase says it all; "excluded"
+// for a PR the operator opted out of, which asks nothing of them.
 func (e MergeTrackingEntry) AttentionLabel() string {
 	if e.Terminal() {
 		return ""
+	}
+	if e.Excluded {
+		return "excluded"
 	}
 	label := "waiting"
 	switch e.Attention {

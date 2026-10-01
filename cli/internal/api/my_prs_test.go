@@ -40,7 +40,7 @@ func TestMergeTrackingEntry_AttentionLabelAndNeedsOperator(t *testing.T) {
 		{api.MergeTrackingEntry{Phase: "blocked", Attention: "waiting", Stale: true}, "waiting, stale", true},
 		{api.MergeTrackingEntry{Phase: "blocked", Attention: "waiting"}, "waiting", false},
 		{api.MergeTrackingEntry{Phase: "blocked"}, "waiting", false},
-		{api.MergeTrackingEntry{Phase: "blocked", Attention: "action", Excluded: true}, "needs you", false},
+		{api.MergeTrackingEntry{Phase: "blocked", Attention: "action", Excluded: true}, "excluded", false},
 		{api.MergeTrackingEntry{Phase: "merged", Attention: "ready"}, "", false},
 	}
 	for _, c := range cases {

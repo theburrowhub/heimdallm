@@ -485,3 +485,56 @@ func TestPrintMergeTable_ShowsWhoEachPRWaitsOn(t *testing.T) {
 		t.Errorf("a merged PR carries no marker and no attention: %q", lines[4])
 	}
 }
+
+// --json is for scripts: it keeps the daemon's order instead of the grouped
+// order the table uses.
+func TestMergesCmd_JSONKeepsTheDaemonOrder(t *testing.T) {
+	srv := newMergeTestServer(t, []api.MergeTrackingEntry{
+		entry(func(e *api.MergeTrackingEntry) { e.Number = 1; e.Phase = "merged" }),
+		entry(func(e *api.MergeTrackingEntry) { e.Number = 2; e.Attention = "action" }),
+	}, nil)
+	out, err := runCmd(t, srv, "merges", "--json")
+	if err != nil {
+		t.Fatalf("merges --json: %v", err)
+	}
+	var decoded []api.MergeTrackingEntry
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(decoded) != 2 || decoded[0].Number != 1 || decoded[1].Number != 2 {
+		t.Errorf("JSON must keep the daemon's order, got %+v", decoded)
+	}
+
+	table, err := runCmd(t, srv, "merges")
+	if err != nil {
+		t.Fatalf("merges: %v", err)
+	}
+	if strings.Index(table, "#2") > strings.Index(table, "#1 ") {
+		t.Errorf("the table groups the PR that needs you first:\n%s", table)
+	}
+}
+
+func TestPrintMergeTable_StaleBeatsPendingAndExcludedIsQuiet(t *testing.T) {
+	out := capture(t, func() {
+		printMergeTable([]api.MergeTrackingEntry{
+			entry(func(e *api.MergeTrackingEntry) {
+				e.Attention = "waiting"
+				e.Stale = true
+				e.ChecksRequiredPending = 1
+				e.BlockReason = "checks_pending"
+			}),
+			entry(func(e *api.MergeTrackingEntry) {
+				e.Number = 8
+				e.Attention = "action"
+				e.Excluded = true
+			}),
+		})
+	})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if !strings.HasPrefix(lines[1], "z ") {
+		t.Errorf("a stale PR stuck on a pending check is marked stale: %q", lines[1])
+	}
+	if strings.HasPrefix(lines[2], "!") || !strings.Contains(lines[2], "excluded") {
+		t.Errorf("an excluded PR carries no marker and says excluded: %q", lines[2])
+	}
+}

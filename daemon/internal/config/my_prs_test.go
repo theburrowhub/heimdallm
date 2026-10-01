@@ -41,7 +41,7 @@ func TestParseHumanDuration(t *testing.T) {
 			t.Errorf("ParseHumanDuration(%q) = %v, want %v", in, got, want)
 		}
 	}
-	for _, bad := range []string{"", "3", "d", "3days", "3w", "-d"} {
+	for _, bad := range []string{"", "3", "d", "3days", "3w", "-d", "999999999d"} {
 		if _, err := config.ParseHumanDuration(bad); err == nil {
 			t.Errorf("ParseHumanDuration(%q) should fail", bad)
 		}
@@ -135,15 +135,16 @@ include_assigned = false
 
 func TestMyPRs_ValidationRejectsBadValues(t *testing.T) {
 	for name, body := range map[string]string{
-		"stale_after": "[my_prs]\nstale_after = \"three days\"\n",
-		"digest_time": "[my_prs]\ndigest_time = \"25:00\"\n",
+		"stale_after":          "[my_prs]\nstale_after = \"three days\"\n",
+		"stale_after_overflow": "[my_prs]\nstale_after = \"999999999d\"\n",
+		"digest_time":          "[my_prs]\ndigest_time = \"25:00\"\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := loadTOML(t, body)
 			if err == nil {
 				t.Fatal("invalid value must fail at load")
 			}
-			if !strings.Contains(err.Error(), "my_prs."+name) {
+			if field := strings.TrimSuffix(name, "_overflow"); !strings.Contains(err.Error(), "my_prs."+field) {
 				t.Errorf("error should name the field: %v", err)
 			}
 		})
