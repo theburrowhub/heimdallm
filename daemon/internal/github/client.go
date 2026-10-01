@@ -28,6 +28,14 @@ const maxBodyBytes = 1 * 1024 * 1024 // 1 MB for most API responses
 // maxDiffBodyBytes allows a larger limit for PR diffs, which can be legitimately large.
 const maxDiffBodyBytes = 10 * 1024 * 1024 // 10 MB for diffs
 
+// maxSearchPageBytes is the body ceiling for one page of the Search issues
+// API (per_page=100). Every item carries the PR's full description — up to
+// 65,536 characters each — so a page for someone assigned to many PRs with
+// long descriptions passes the generic 1 MiB easily (1.25 MB observed for a
+// real `assignee:` search). Truncated at 1 MiB the JSON failed to decode and
+// every assigned PR silently dropped out of merge tracking and My PRs.
+const maxSearchPageBytes = 10 * 1024 * 1024 // 10 MB
+
 // maxPaginatedPageBytes is the body ceiling for the paginated endpoints
 // (fetchReviewComments, fetchIssueComments, GetPRTimelineEventsForReviewer).
 // These request per_page=100 items per call, and a single comment can
@@ -555,10 +563,16 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 	if err != nil {
 		return nil, fmt.Errorf("github: search PRs (%s): %w", qualifier, err)
 	}
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	// One byte past the ceiling tells a page that exceeds it from one that
+	// fits exactly, so an oversized page is reported as such instead of as a
+	// confusing JSON decode error on a silently truncated body.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSearchPageBytes+1))
 	resp.Body.Close()
 	if readErr != nil {
 		return nil, fmt.Errorf("github: read PR search (%s): %w", qualifier, readErr)
+	}
+	if len(body) > maxSearchPageBytes {
+		return nil, fmt.Errorf("github: PR search (%s): response exceeds %d bytes", qualifier, maxSearchPageBytes)
 	}
 
 	if resp.StatusCode != http.StatusOK {

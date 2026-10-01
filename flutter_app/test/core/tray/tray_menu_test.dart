@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/models/merge_tracking.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/tray/tray_menu.dart';
@@ -255,6 +256,88 @@ void main() {
         ),
       ),
     );
+  });
+
+  group('Your PRs', () {
+    MergeTrackingEntry pr(int n, String attention, {String reason = ''}) =>
+        MergeTrackingEntry(
+          prId: n,
+          repo: 'acme/widgets',
+          number: n,
+          title: 'PR $n',
+          url: 'https://github.com/acme/widgets/pull/$n',
+          attention: attention,
+          blockReason: reason,
+        );
+
+    setUp(() {
+      TrayMenu.instance.init(
+        apiClient: _MockApiClient(),
+        onNavigate: (_) {},
+        onQuit: () {},
+      );
+    });
+    tearDown(() => TrayMenu.instance.setMyPrs(const []));
+
+    test('lists the PRs that need the operator with a summary line', () async {
+      await TrayMenu.instance.setMyPrs([
+        pr(1, 'action', reason: 'checks_failing'),
+        pr(2, 'ready'),
+      ]);
+
+      final labels = _latestMenuItems(trayCalls).map((i) => i['label']).toList();
+      expect(labels, contains('⚑  Your PRs: 1 needs your action · 1 ready to merge'));
+      expect(labels, contains('●   #1  widgets  —  CI failing'));
+      expect(labels, contains('●   #2  widgets  —  ready to merge'));
+    });
+
+    test('caps the list and offers the tab for the rest', () async {
+      final navigated = <String>[];
+      TrayMenu.instance.init(
+        apiClient: _MockApiClient(),
+        onNavigate: navigated.add,
+        onQuit: () {},
+      );
+      await TrayMenu.instance.setMyPrs([
+        for (var i = 1; i <= 7; i++) pr(i, 'action'),
+      ]);
+
+      final items = _latestMenuItems(trayCalls);
+      expect(items.where((i) => '${i['key']}'.startsWith('mypr_')), hasLength(5));
+      expect(items.map((i) => i['label']), contains('   + 2 more…'));
+
+      TrayMenu.instance.onTrayMenuItemClick(MenuItem(key: 'open_my_prs'));
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(navigated, ['/merge']);
+    });
+
+    test('no section when nothing needs the operator', () async {
+      await TrayMenu.instance.setMyPrs(const []);
+      final labels = _latestMenuItems(trayCalls).map((i) => '${i['label']}');
+      expect(labels.where((l) => l.contains('Your PRs')), isEmpty);
+    });
+
+    test('clicking a PR opens it on GitHub', () async {
+      const channel = MethodChannel('plugins.flutter.io/url_launcher');
+      final launched = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'launch') {
+              launched.add((call.arguments as Map)['url'] as String);
+            }
+            return true;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      await TrayMenu.instance.setMyPrs([pr(9, 'ready')]);
+
+      TrayMenu.instance.onTrayMenuItemClick(MenuItem(key: 'mypr_0'));
+      TrayMenu.instance.onTrayMenuItemClick(MenuItem(key: 'mypr_5'));
+      await Future<void>.delayed(Duration.zero);
+      expect(launched, ['https://github.com/acme/widgets/pull/9']);
+    });
   });
 
   test('Open shows and focuses the desktop window', () async {

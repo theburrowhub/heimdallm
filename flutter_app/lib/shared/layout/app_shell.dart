@@ -46,14 +46,17 @@ final appDestinations = <AppDestination>[
   ),
   AppDestination(
     branchIndex: 2,
-    label: 'Merge',
+    label: 'My PRs',
     icon: Icons.merge_type,
     badgedIcon: (context, ref) {
-      final count = ref.watch(mergeTrackingCheckProblemCountProvider);
-      if (count == 0) return const Icon(Icons.merge_type);
+      final summary = ref.watch(myPrsSummaryProvider);
+      if (summary.isEmpty) return const Icon(Icons.merge_type);
+      final scheme = Theme.of(context).colorScheme;
+      // Red only when something is broken on the operator's side; a PR that
+      // is ready to merge or has merely gone quiet is a nudge, not an alarm.
       return Badge.count(
-        count: count,
-        backgroundColor: Theme.of(context).colorScheme.error,
+        count: summary.total,
+        backgroundColor: summary.needAction > 0 ? scheme.error : scheme.primary,
         child: const Icon(Icons.merge_type),
       );
     },
@@ -90,6 +93,9 @@ final appDestinations = <AppDestination>[
 /// - `< AppBreakpoints.medium`: a collapsed [NavigationRail].
 /// - `>= AppBreakpoints.medium`: an extended (labeled) [NavigationRail].
 ///
+/// A toggle at the foot of the rail switches between the two rail modes and
+/// the choice is remembered (see `sidebar_preferences.dart`).
+///
 /// Each destination is a [StatefulShellBranch] (see `shared/router.dart`),
 /// so switching sections preserves that branch's navigation stack and
 /// widget state — the same guarantee the old `KeepAliveTab` worked around
@@ -108,6 +114,11 @@ class AppShell extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // My PRs nudges live here, in the one widget that is always mounted, so
+    // they fire whichever tab is open.
+    ref.watch(mergeTrackingSseListenerProvider);
+    ref.watch(myPrsDigestProvider);
+    ref.watch(myPrsTraySyncProvider);
     final cbMessage = ref.watch(circuitBreakerProvider);
     final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
     final daemonStarting = ref.watch(daemonStartingProvider);
@@ -119,7 +130,6 @@ class AppShell extends ConsumerWidget {
     final isCompact = width < AppBreakpoints.compact;
     final sidebarPreference = ref.watch(sidebarModeProvider);
     final effectiveSidebar = effectiveSidebarMode(sidebarPreference, width);
-    final showRail = !isCompact && effectiveSidebar != AppSidebarMode.hidden;
     final isRailExtended = effectiveSidebar == AppSidebarMode.extended;
 
     final body = Column(
@@ -151,22 +161,6 @@ class AppShell extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Heimdallm'),
         actions: [
-          if (!isCompact)
-            AppIconButton(
-              key: const Key('sidebar-toggle'),
-              icon: effectiveSidebar == AppSidebarMode.hidden
-                  ? Icons.menu
-                  : Icons.menu_open,
-              tooltip: switch (effectiveSidebar) {
-                AppSidebarMode.hidden => 'Show sidebar',
-                AppSidebarMode.icons => 'Expand sidebar',
-                AppSidebarMode.extended => 'Collapse sidebar',
-                AppSidebarMode.auto => 'Toggle sidebar',
-              },
-              onPressed: () => ref
-                  .read(sidebarModeProvider.notifier)
-                  .cycleFrom(effectiveSidebar),
-            ),
           const InstanceSelector(),
           const CheckForUpdatesButton(),
           IconButton(
@@ -215,8 +209,7 @@ class AppShell extends ConsumerWidget {
       drawer: isCompact ? _NavDrawer(navigationShell: navigationShell) : null,
       body: isCompact
           ? body
-          : showRail
-          ? Row(
+          : Row(
               children: [
                 NavigationRail(
                   extended: isRailExtended,
@@ -229,12 +222,27 @@ class AppShell extends ConsumerWidget {
                         label: Text(d.label),
                       ),
                   ],
+                  // The toggle sits at the foot of the rail it controls, not
+                  // in the app bar at the far end of the window.
+                  trailingAtBottom: true,
+                  trailing: Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: AppIconButton(
+                      key: const Key('sidebar-toggle'),
+                      icon: isRailExtended ? Icons.menu_open : Icons.menu,
+                      tooltip: isRailExtended
+                          ? 'Collapse sidebar'
+                          : 'Expand sidebar',
+                      onPressed: () => ref
+                          .read(sidebarModeProvider.notifier)
+                          .cycleFrom(effectiveSidebar),
+                    ),
+                  ),
                 ),
                 const VerticalDivider(width: 1),
                 Expanded(child: body),
               ],
-            )
-          : body,
+            ),
     );
   }
 }

@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/theburrowhub/heimdallm/cli/internal/api"
 )
@@ -184,5 +185,64 @@ func TestTabNames_MatchTheEnum(t *testing.T) {
 	}
 	if tabNames[tabInstances] != "Instances" {
 		t.Errorf("tabNames[tabInstances] = %q", tabNames[tabInstances])
+	}
+}
+
+func TestRenderMerges_ShowsWhoEachPRWaitsOn(t *testing.T) {
+	d := &Dashboard{
+		width: 140,
+		merges: []api.MergeTrackingEntry{
+			{Repo: "acme/widgets", Number: 7, Title: "Broken", Phase: "blocked", Attention: "action"},
+			{Repo: "acme/widgets", Number: 8, Title: "Ready", Phase: "idle", Attention: "ready"},
+			{Repo: "acme/widgets", Number: 9, Title: "Quiet", Phase: "blocked", Attention: "waiting", Stale: true},
+			{Repo: "acme/widgets", Number: 10, Title: "Done", Phase: "merged"},
+		},
+	}
+	lines := strings.Split(strings.TrimRight(d.renderMerges(10), "\n"), "\n")
+	want := []struct{ marker, label string }{
+		{"!", "needs you"},
+		{"✓", "ready to merge"},
+		{"z", "waiting, stale"},
+		{"", "merged"},
+	}
+	for i, w := range want {
+		if !strings.Contains(lines[i], w.label) {
+			t.Errorf("row %d should say %q: %q", i, w.label, lines[i])
+		}
+		if w.marker != "" && !strings.Contains(lines[i], w.marker) {
+			t.Errorf("row %d should be marked %q: %q", i, w.marker, lines[i])
+		}
+	}
+}
+
+func TestBuildMergeDetailLines_SaysWhatThePRNeeds(t *testing.T) {
+	last := time.Date(2026, 9, 26, 9, 0, 0, 0, time.UTC)
+	lines := buildMergeDetailLines(api.MergeTrackingEntry{
+		Repo: "acme/widgets", Number: 7, Phase: "blocked",
+		Attention: "action", Stale: true, LastActivityAt: &last,
+	}, 120)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "needs you, stale") {
+		t.Errorf("detail should say what the PR needs:\n%s", joined)
+	}
+	if !strings.Contains(joined, "no activity on GitHub since") {
+		t.Errorf("detail should say how long it has been idle:\n%s", joined)
+	}
+}
+
+func TestRenderMerges_StaleBeatsPendingAndExcludedIsQuiet(t *testing.T) {
+	d := &Dashboard{
+		width: 140,
+		merges: []api.MergeTrackingEntry{
+			{Repo: "acme/widgets", Number: 7, Phase: "blocked", Attention: "waiting", Stale: true, ChecksRequiredPending: 1},
+			{Repo: "acme/widgets", Number: 8, Phase: "blocked", Attention: "action", Excluded: true},
+		},
+	}
+	lines := strings.Split(strings.TrimRight(d.renderMerges(10), "\n"), "\n")
+	if !strings.Contains(lines[0], "z") || strings.Contains(lines[0], "~") {
+		t.Errorf("stale should win over pending: %q", lines[0])
+	}
+	if strings.Contains(lines[1], "!") || !strings.Contains(lines[1], "excluded") {
+		t.Errorf("excluded row should be quiet and say so: %q", lines[1])
 	}
 }

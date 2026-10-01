@@ -3,6 +3,7 @@ import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
 import '../models/config_model.dart';
+import '../models/merge_tracking.dart';
 import '../models/pr.dart';
 
 import 'platform_services_stub.dart'
@@ -229,6 +230,14 @@ abstract interface class AppUpdatePlatformCapability {
   Future<void> finalizeAppUpdate();
 }
 
+/// Optional "Your PRs" section of the system tray, implemented only where a
+/// tray exists.
+abstract interface class TrayMyPrsPlatformCapability {
+  /// Replaces the section with [entries]: the operator's PRs that need them,
+  /// most urgent first.
+  Future<void> setTrayMyPrs(List<MergeTrackingEntry> entries);
+}
+
 /// Optional termination path for a process that has already disproved desktop
 /// singleton ownership.
 abstract interface class DuplicateInstancePlatformCapability {
@@ -241,6 +250,14 @@ abstract interface class DuplicateInstancePlatformCapability {
 /// stays independent of the macOS updater and remains covered by its existing
 /// browser-only contract.
 extension OptionalPlatformCapabilities on PlatformServices {
+  /// No-op where there is no tray (web).
+  Future<void> setTrayMyPrs(List<MergeTrackingEntry> entries) async {
+    final platform = this;
+    if (platform is TrayMyPrsPlatformCapability) {
+      await (platform as TrayMyPrsPlatformCapability).setTrayMyPrs(entries);
+    }
+  }
+
   Future<AppVersionInfo> loadAppVersion() async {
     final platform = this;
     return platform is AppVersionPlatformCapability

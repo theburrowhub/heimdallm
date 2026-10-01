@@ -1285,10 +1285,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			return clusterSt.FilterOwned(repos)
 		}
 		// Merge tracking: reconciles the PRs the operator authored or is
-		// assigned to towards merge. It is always started and gates itself per
-		// repo, so a cycle with the feature off
-		// everywhere costs nothing — AnyEnabled short-circuits before the first
-		// GitHub call.
+		// assigned to towards merge, and watches them (observation only) in
+		// repos where merge tracking is off but [my_prs] is on. It is always
+		// started and gates itself per repo, so a cycle with both off
+		// everywhere costs no GitHub call — AnyEnabled short-circuits after
+		// the local housekeeping.
 		// *gitops.GitExec, *executor.Executor and *gh.Client satisfy the
 		// mergetrack interfaces directly — no adapters, so there is no
 		// untestable delegation layer sitting in main.
@@ -1307,15 +1308,22 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			Publisher: broker,
 			Gate:      updateWorkGate,
 			Worktree:  mergeTrackRunner,
+			// Effective config: a repo without merge tracking is still watched
+			// (observation only, never written to) while [my_prs] is on.
 			ConfigForRepo: func(repo string) config.MergeTrackingConfig {
 				cfgMu.Lock()
 				defer cfgMu.Unlock()
-				return cfg.MergeTrackingForRepo(repo)
+				return cfg.EffectiveMergeTrackingForRepo(repo)
 			},
 			GlobalConfig: func() config.MergeTrackingConfig {
 				cfgMu.Lock()
 				defer cfgMu.Unlock()
-				return cfg.MergeTracking
+				return cfg.EffectiveMergeTrackingGlobal()
+			},
+			StaleAfter: func() time.Duration {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.MyPRsStaleAfter()
 			},
 			Viewer:          botLoginAccessor,
 			DefaultCooldown: pollInterval,
@@ -1326,6 +1334,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// operator's own PRs — the very ones merge tracking exists for.
 		srv.SetMergeTrackEnrolFn(func(prID int64, repo string, number int) error {
 			return mergeTrackReconciler.EnrolExistingPR(prID, repo, number)
+		})
+
+		srv.SetMyPRsStaleAfterFn(func() time.Duration {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			return cfg.MyPRsStaleAfter()
 		})
 
 		// The on-demand evaluation behind POST /merge-tracking/{prID}/evaluate.
@@ -2025,6 +2039,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// reads it back as defaults on the next load — the toggle silently
 		// resets itself in front of the operator.
 		result["merge_tracking"] = mergeTrackingConfigMap(c.MergeTracking)
+		result["my_prs"] = myPRsConfigMap(c)
 		result["circuit_breaker"] = map[string]any{
 			"per_pr_24h":                 c.CircuitBreaker.PerPR24h,
 			"per_repo_hr":                c.CircuitBreaker.PerRepoHr,
@@ -4445,6 +4460,19 @@ func mergeTrackingConfigMap(c config.MergeTrackingConfig) map[string]any {
 	}
 }
 
+// myPRsConfigMap renders [my_prs] for GET /config with its defaults resolved,
+// so the settings screen shows the values the daemon actually runs with.
+func myPRsConfigMap(c *config.Config) map[string]any {
+	return map[string]any{
+		"enabled":            c.MyPRsEnabled(),
+		"include_assigned":   c.MyPRsIncludeAssigned(),
+		"stale_after":        stringOr(c.MyPRs.StaleAfter, config.DefaultMyPRsStaleAfter),
+		"notify_transitions": c.MyPRs.NotifyTransitions,
+		"digest_enabled":     c.MyPRsDigestEnabled(),
+		"digest_time":        stringOr(c.MyPRs.DigestTime, config.DefaultMyPRsDigestTime),
+	}
+}
+
 // clusterConfigMap renders the [cluster] section's own-identity fields for
 // GET /config.
 //
@@ -4552,6 +4580,16 @@ func ptrIntOr(p *int, defaultV int) int {
 		return defaultV
 	}
 	return *p
+}
+
+// stringOr returns s, or defaultV when s is empty. Used to serialize string
+// config fields whose empty value means "use the built-in default", so the
+// projection is right even for a Config that never went through defaults.
+func stringOr(s, defaultV string) string {
+	if strings.TrimSpace(s) == "" {
+		return defaultV
+	}
+	return s
 }
 
 func repoAIOverrideMap(ai config.RepoAI) map[string]any {

@@ -729,6 +729,132 @@ class MergeTrackingConfig {
   };
 }
 
+/// `[my_prs]`: the watch over the operator's own open PRs in the monitored
+/// repositories — who each one is waiting on, which went quiet, and how the
+/// app nudges about them. Observation only; it never writes to GitHub.
+class MyPrsConfig {
+  final bool enabled;
+  final bool includeAssigned;
+
+  /// Inactivity threshold ("90m", "12h", "3d"); "0" disables stale detection.
+  final String staleAfter;
+  final bool notifyTransitions;
+  final bool digestEnabled;
+
+  /// Local time of day of the daily digest, "HH:MM".
+  final String digestTime;
+
+  const MyPrsConfig({
+    this.enabled = true,
+    this.includeAssigned = true,
+    this.staleAfter = '3d',
+    this.notifyTransitions = false,
+    this.digestEnabled = true,
+    this.digestTime = '10:00',
+  });
+
+  MyPrsConfig copyWith({
+    bool? enabled,
+    bool? includeAssigned,
+    String? staleAfter,
+    bool? notifyTransitions,
+    bool? digestEnabled,
+    String? digestTime,
+  }) => MyPrsConfig(
+    enabled: enabled ?? this.enabled,
+    includeAssigned: includeAssigned ?? this.includeAssigned,
+    staleAfter: staleAfter ?? this.staleAfter,
+    notifyTransitions: notifyTransitions ?? this.notifyTransitions,
+    digestEnabled: digestEnabled ?? this.digestEnabled,
+    digestTime: digestTime ?? this.digestTime,
+  );
+
+  factory MyPrsConfig.fromJson(Map<String, dynamic> json) => MyPrsConfig(
+    enabled: json['enabled'] as bool? ?? true,
+    includeAssigned: json['include_assigned'] as bool? ?? true,
+    staleAfter: _nonEmpty(json['stale_after']) ?? '3d',
+    notifyTransitions: json['notify_transitions'] as bool? ?? false,
+    digestEnabled: json['digest_enabled'] as bool? ?? true,
+    digestTime: _nonEmpty(json['digest_time']) ?? '10:00',
+  );
+
+  Map<String, dynamic> toJson() => {
+    'enabled': enabled,
+    'include_assigned': includeAssigned,
+    'stale_after': staleAfter,
+    'notify_transitions': notifyTransitions,
+    'digest_enabled': digestEnabled,
+    'digest_time': digestTime,
+  };
+
+  /// Parses [staleAfter] the way the daemon does (Go durations plus a `d`
+  /// suffix). Null when detection is off or the value is not understood.
+  Duration? get staleAfterDuration => parseHumanDuration(staleAfter);
+
+  /// The digest's hour and minute, or null when [digestTime] is malformed.
+  ({int hour, int minute})? get digestHourMinute {
+    final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(digestTime.trim());
+    if (m == null) return null;
+    final h = int.parse(m.group(1)!);
+    final min = int.parse(m.group(2)!);
+    if (h > 23 || min > 59) return null;
+    return (hour: h, minute: min);
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is MyPrsConfig &&
+      other.enabled == enabled &&
+      other.includeAssigned == includeAssigned &&
+      other.staleAfter == staleAfter &&
+      other.notifyTransitions == notifyTransitions &&
+      other.digestEnabled == digestEnabled &&
+      other.digestTime == digestTime;
+
+  @override
+  int get hashCode => Object.hash(
+    enabled,
+    includeAssigned,
+    staleAfter,
+    notifyTransitions,
+    digestEnabled,
+    digestTime,
+  );
+}
+
+/// Parses a Go-style duration ("1h30m", "90m", "45s") or a number of days
+/// ("3d", "1.5d"), mirroring the daemon's `config.ParseHumanDuration`.
+/// Returns null for "0", an empty string or anything unparseable.
+Duration? parseHumanDuration(String raw) {
+  // The daemon rejects anything past Go's time.Duration range (~292 years);
+  // anything that long is not a threshold anyone means, so treat it the same.
+  const maxMs = 292 * 365 * Duration.millisecondsPerDay;
+  final value = raw.trim();
+  if (value.isEmpty || value == '0') return null;
+  final days = RegExp(r'^(\d+(?:\.\d+)?)d$').firstMatch(value);
+  if (days != null) {
+    final ms = double.parse(days.group(1)!) * Duration.millisecondsPerDay;
+    if (ms <= 0 || ms > maxMs) return null;
+    return Duration(milliseconds: ms.round());
+  }
+  final part = RegExp(r'(\d+(?:\.\d+)?)(h|ms|m|s)');
+  var total = 0.0;
+  var consumed = 0;
+  for (final m in part.allMatches(value)) {
+    if (m.start != consumed) return null;
+    consumed = m.end;
+    final n = double.parse(m.group(1)!);
+    total += switch (m.group(2)) {
+      'h' => n * Duration.millisecondsPerHour,
+      'm' => n * Duration.millisecondsPerMinute,
+      's' => n * Duration.millisecondsPerSecond,
+      _ => n,
+    };
+  }
+  if (consumed != value.length || total <= 0 || total > maxMs) return null;
+  return Duration(milliseconds: total.round());
+}
+
 /// Circuit-breaker rate limits for PR reviews.
 class CircuitBreakerConfig {
   final int perPr24h;
@@ -827,6 +953,7 @@ class AppConfig {
   final String globalNeverApproveMinSeverity;
 
   final MergeTrackingConfig mergeTracking;
+  final MyPrsConfig myPrs;
   final CircuitBreakerConfig circuitBreaker;
   final PollingConfig polling;
 
@@ -862,6 +989,7 @@ class AppConfig {
     this.orgConfigs = const {},
     this.globalCloneDir = '',
     this.mergeTracking = const MergeTrackingConfig(),
+    this.myPrs = const MyPrsConfig(),
     this.circuitBreaker = const CircuitBreakerConfig(),
     this.globalNeverApproveWithIssues = false,
     this.globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity,
@@ -902,6 +1030,7 @@ class AppConfig {
     Map<String, OrgConfig>? orgConfigs,
     String? globalCloneDir,
     MergeTrackingConfig? mergeTracking,
+    MyPrsConfig? myPrs,
     CircuitBreakerConfig? circuitBreaker,
     bool? globalNeverApproveWithIssues,
     String? globalNeverApproveMinSeverity,
@@ -923,6 +1052,7 @@ class AppConfig {
       orgConfigs: orgConfigs ?? this.orgConfigs,
       globalCloneDir: globalCloneDir ?? this.globalCloneDir,
       mergeTracking: mergeTracking ?? this.mergeTracking,
+      myPrs: myPrs ?? this.myPrs,
       circuitBreaker: circuitBreaker ?? this.circuitBreaker,
       globalNeverApproveWithIssues:
           globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
@@ -1033,6 +1163,9 @@ class AppConfig {
               json['merge_tracking'] as Map<String, dynamic>,
             )
           : const MergeTrackingConfig(),
+      myPrs: json['my_prs'] is Map<String, dynamic>
+          ? MyPrsConfig.fromJson(json['my_prs'] as Map<String, dynamic>)
+          : const MyPrsConfig(),
       circuitBreaker: json['circuit_breaker'] != null
           ? CircuitBreakerConfig.fromJson(
               json['circuit_breaker'] as Map<String, dynamic>,

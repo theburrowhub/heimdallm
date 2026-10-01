@@ -8,54 +8,54 @@ import '../../shared/design_system/tokens.dart';
 
 const _sidebarModeKey = 'sidebar_mode';
 
-/// The sidebar's navigation chrome.
+/// The sidebar's navigation chrome: labelled ([extended]) or icons only.
 ///
 /// [auto] is the state before the user has ever touched the toggle: the
 /// sidebar falls back to the width-derived behavior the shell always had
-/// (extended when wide, collapsed to icons otherwise, a [Drawer] below
-/// [AppBreakpoints.compact]). Once the user cycles the toggle, the app
-/// remembers an explicit [hidden]/[icons]/[extended] choice instead.
-enum AppSidebarMode { auto, hidden, icons, extended }
+/// (extended when wide, collapsed to icons otherwise). Once the user flips
+/// the toggle, the app remembers an explicit [icons]/[extended] choice.
+///
+/// There is deliberately no hidden mode: the toggle lives at the foot of the
+/// rail, so a hidden rail would take its own way back with it. Below
+/// [AppBreakpoints.compact] the shell shows a [Drawer] instead of a rail,
+/// whatever the preference.
+enum AppSidebarMode { auto, icons, extended }
 
 String _encode(AppSidebarMode mode) => switch (mode) {
   AppSidebarMode.auto => 'auto',
-  AppSidebarMode.hidden => 'hidden',
   AppSidebarMode.icons => 'icons',
   AppSidebarMode.extended => 'extended',
 };
 
 AppSidebarMode _decode(String? value) => switch (value) {
-  'hidden' => AppSidebarMode.hidden,
-  'icons' => AppSidebarMode.icons,
+  // 'hidden' was a mode until the toggle moved into the rail. Someone who had
+  // hidden the sidebar wanted it out of the way, and icons-only is the closest
+  // thing that still leaves them a way back.
+  'hidden' || 'icons' => AppSidebarMode.icons,
   'extended' => AppSidebarMode.extended,
   _ => AppSidebarMode.auto,
 };
 
-/// Resolves the [preference] against the window [width] the shell actually
-/// has to render into.
+/// Resolves the [preference] against the window [width] into the rail the
+/// shell draws: never [AppSidebarMode.auto].
 ///
-/// Below [AppBreakpoints.compact] the shell only has room for a [Drawer],
-/// so the preference is overridden there regardless of what the user chose
-/// — the window is simply too narrow for a rail. Above that, an explicit
-/// [AppSidebarMode.hidden]/[icons]/[extended] preference always wins;
+/// An explicit [AppSidebarMode.icons]/[extended] preference always wins;
 /// [AppSidebarMode.auto] keeps the shell's original width-derived behavior
-/// (extended at/above [AppBreakpoints.medium], icons-only below it).
+/// (extended at/above [AppBreakpoints.medium], icons-only below it). The
+/// compact [Drawer] layout is the shell's call, not this function's.
 AppSidebarMode effectiveSidebarMode(AppSidebarMode preference, double width) {
-  if (width < AppBreakpoints.compact) return AppSidebarMode.hidden;
   if (preference != AppSidebarMode.auto) return preference;
   return width >= AppBreakpoints.medium
       ? AppSidebarMode.extended
       : AppSidebarMode.icons;
 }
 
-/// hidden -> icons -> extended -> hidden. Cycling from [AppSidebarMode.auto]
-/// (which only happens once, before the first toggle) starts from whatever
-/// [auto] currently resolves to, so the first click always visibly changes
-/// something.
+/// icons <-> extended. [effective] is what is on screen (see
+/// [effectiveSidebarMode]), so the first click always visibly changes
+/// something; an unresolved [AppSidebarMode.auto] is treated as extended.
 AppSidebarMode nextSidebarMode(AppSidebarMode effective) => switch (effective) {
-  AppSidebarMode.hidden => AppSidebarMode.icons,
   AppSidebarMode.icons => AppSidebarMode.extended,
-  AppSidebarMode.extended || AppSidebarMode.auto => AppSidebarMode.hidden,
+  AppSidebarMode.extended || AppSidebarMode.auto => AppSidebarMode.icons,
 };
 
 /// Persists the user's sidebar preference across launches.

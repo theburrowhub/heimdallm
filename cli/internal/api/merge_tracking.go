@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"time"
 )
 
@@ -77,6 +78,14 @@ type MergeTrackingEntry struct {
 	PreRebaseSHA    string `json:"pre_rebase_sha,omitempty"`
 	LastError       string `json:"last_error,omitempty"`
 
+	// My PRs. Attention is who the PR is waiting on: none | action (you) |
+	// ready (one click from merged) | waiting (reviewers, CI, automation).
+	// Stale means no activity on GitHub for longer than [my_prs].stale_after.
+	Attention      string     `json:"attention,omitempty"`
+	Stale          bool       `json:"stale"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
+	TerminalAt     *time.Time `json:"terminal_at,omitempty"`
+
 	// Decision is only populated by the detail endpoint.
 	Decision *MergeDecision `json:"decision,omitempty"`
 }
@@ -94,6 +103,59 @@ func (e MergeTrackingEntry) BlockedByChecks() bool {
 // Terminal reports whether the PR has reached a state it will not leave.
 func (e MergeTrackingEntry) Terminal() bool {
 	return e.Phase == "merged" || e.Phase == "abandoned"
+}
+
+// NeedsOperator reports whether the PR asks for its owner: something to fix,
+// a merge to click, or it has gone quiet.
+func (e MergeTrackingEntry) NeedsOperator() bool {
+	if e.Terminal() || e.Excluded {
+		return false
+	}
+	return e.Attention == "action" || e.Attention == "ready" || e.Stale
+}
+
+// AttentionLabel is a short phrase for who the PR is waiting on, with the stale
+// flag appended. Empty for finished PRs, whose phase says it all; "excluded"
+// for a PR the operator opted out of, which asks nothing of them.
+func (e MergeTrackingEntry) AttentionLabel() string {
+	if e.Terminal() {
+		return ""
+	}
+	if e.Excluded {
+		return "excluded"
+	}
+	label := "waiting"
+	switch e.Attention {
+	case "action":
+		label = "needs you"
+	case "ready":
+		label = "ready to merge"
+	}
+	if e.Stale {
+		label += ", stale"
+	}
+	return label
+}
+
+// SortMyPRs orders entries the way the My PRs tab groups them: needs you,
+// ready to merge, waiting, then merged or closed. Stable, so the daemon's own
+// order (CI problems first) survives inside each group.
+func SortMyPRs(entries []MergeTrackingEntry) {
+	rank := func(e MergeTrackingEntry) int {
+		switch {
+		case e.Terminal():
+			return 3
+		case e.Excluded:
+			return 2
+		case e.Attention == "action":
+			return 0
+		case e.Attention == "ready":
+			return 1
+		default:
+			return 2
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return rank(entries[i]) < rank(entries[j]) })
 }
 
 // ListMergeTracking fetches the tracked PRs, ordered by the daemon so the ones

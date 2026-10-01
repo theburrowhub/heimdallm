@@ -23,6 +23,10 @@ MergeTrackingEntry _entry({
   int pending = 0,
   String title = 'Add widget cache',
   bool isAuthor = true,
+  String attention = 'none',
+  bool stale = false,
+  DateTime? lastActivityAt,
+  DateTime? terminalAt,
 }) => MergeTrackingEntry(
   prId: prId,
   repo: 'acme/widgets',
@@ -36,6 +40,10 @@ MergeTrackingEntry _entry({
   isAuthor: isAuthor,
   checksRequiredFailing: failing,
   checksRequiredPending: pending,
+  attention: attention,
+  stale: stale,
+  lastActivityAt: lastActivityAt,
+  terminalAt: terminalAt,
 );
 
 Widget _host(List<MergeTrackingEntry> entries, {ApiClient? api}) =>
@@ -58,7 +66,7 @@ void main() {
     await tester.pumpWidget(_host(const []));
     await tester.pumpAndSettle();
 
-    expect(_text('No pull requests tracked yet'), findsOneWidget);
+    expect(_text('No open pull requests of yours'), findsOneWidget);
     expect(_textContaining('authored or are assigned to'), findsOneWidget);
   });
 
@@ -202,6 +210,9 @@ void main() {
       _host([_entry(phase: 'merged', blockReason: 'already_merged')]),
     );
     await tester.pumpAndSettle();
+    // Finished PRs sit in the collapsed "recently merged" section.
+    await tester.tap(_textContaining('Recently merged or closed'));
+    await tester.pumpAndSettle();
 
     expect(_text('Merged'), findsOneWidget);
     expect(find.text('Already merged'), findsNothing);
@@ -225,17 +236,23 @@ void main() {
     expect(_textContaining('assigned to you'), findsOneWidget);
   });
 
-  testWidgets('the check-problem count only counts live PRs', (tester) async {
+  testWidgets('the badge counts PRs that need the operator, once each', (
+    tester,
+  ) async {
     final container = ProviderContainer(
       overrides: [
         mergeTrackingProvider.overrideWith(
           (ref) async => [
-            _entry(prId: 1, failing: 1),
-            _entry(prId: 2, pending: 3),
+            _entry(prId: 1, attention: 'action', failing: 1),
+            // Needs action AND stale: one PR, counted once.
+            _entry(prId: 2, attention: 'action', stale: true),
+            _entry(prId: 3, attention: 'ready'),
+            _entry(prId: 4, attention: 'waiting', stale: true),
+            // Waiting on CI is not the operator's problem: no badge for it.
+            _entry(prId: 5, attention: 'waiting', pending: 3),
             // Terminal rows are history; badging them would keep the tab red
             // forever after a merge.
-            _entry(prId: 3, phase: 'merged', failing: 5),
-            _entry(prId: 4),
+            _entry(prId: 6, phase: 'merged', attention: 'action', failing: 5),
           ],
         ),
       ],
@@ -243,7 +260,77 @@ void main() {
     addTearDown(container.dispose);
 
     await container.read(mergeTrackingProvider.future);
-    expect(container.read(mergeTrackingCheckProblemCountProvider), 2);
+    expect(container.read(myPrsAttentionCountProvider), 4);
+    final summary = container.read(myPrsSummaryProvider);
+    expect(summary.needAction, 2);
+    expect(summary.ready, 1);
+    expect(summary.stale, 2);
+  });
+
+  testWidgets('PRs are grouped by who they are waiting on', (tester) async {
+    await tester.pumpWidget(
+      _host([
+        _entry(prId: 1, title: 'Waiting one', attention: 'waiting'),
+        _entry(prId: 2, title: 'Broken one', attention: 'action'),
+        _entry(prId: 3, title: 'Ready one', attention: 'ready'),
+      ]),
+    );
+    await tester.pumpAndSettle();
+
+    final action = tester.getTopLeft(_textContaining('Needs your action')).dy;
+    final ready = tester.getTopLeft(_textContaining('Ready to merge')).dy;
+    final waiting = tester.getTopLeft(_textContaining('Waiting on others')).dy;
+    expect(action < ready && ready < waiting, isTrue);
+    expect(
+      tester.getTopLeft(_text('Broken one')).dy <
+          tester.getTopLeft(_text('Ready one')).dy,
+      isTrue,
+    );
+    expect(_textContaining('Recently merged'), findsNothing);
+  });
+
+  testWidgets('recently merged PRs are collapsed until asked for', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host([
+        _entry(prId: 1, title: 'Live one', attention: 'action'),
+        _entry(
+          prId: 2,
+          title: 'Merged one',
+          phase: 'merged',
+          terminalAt: DateTime.now().subtract(const Duration(hours: 2)),
+        ),
+      ]),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_textContaining('Recently merged or closed · 1'), findsOneWidget);
+    expect(_text('Merged one'), findsNothing);
+
+    await tester.tap(_textContaining('Recently merged or closed'));
+    await tester.pumpAndSettle();
+    expect(_text('Merged one'), findsOneWidget);
+
+    await tester.tap(_textContaining('Recently merged or closed'));
+    await tester.pumpAndSettle();
+    expect(_text('Merged one'), findsNothing);
+  });
+
+  testWidgets('a stale PR shows how long it has been idle', (tester) async {
+    await tester.pumpWidget(
+      _host([
+        _entry(
+          attention: 'waiting',
+          stale: true,
+          lastActivityAt: DateTime.now().subtract(const Duration(days: 4)),
+        ),
+      ]),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('stale-chip')), findsOneWidget);
+    expect(_textContaining('Stale · 4d'), findsOneWidget);
   });
 
   testWidgets('a re-check shows a busy spinner while the request is running', (

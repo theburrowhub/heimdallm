@@ -77,6 +77,7 @@ type Config struct {
 	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
 	Polling        PollingConfig        `toml:"polling"`
 	MergeTracking  MergeTrackingConfig  `toml:"merge_tracking"`
+	MyPRs          MyPRsConfig          `toml:"my_prs"`
 	Cluster        ClusterConfig        `toml:"cluster,omitempty"`
 }
 
@@ -564,6 +565,7 @@ func (c *Config) applyDefaults() {
 		c.CircuitBreaker.PerReviewFailureRepoHr = 20
 	}
 	c.applyMergeTrackingDefaults()
+	c.applyMyPRsDefaults()
 	c.applyPollingDefaults()
 }
 
@@ -723,6 +725,9 @@ func (c *Config) Validate() error {
 	// invalid merge_method or duration must stop the daemon at boot rather
 	// than fail once per poll cycle against GitHub.
 	if err := c.validateMergeTracking(); err != nil {
+		return err
+	}
+	if err := c.validateMyPRs(); err != nil {
 		return err
 	}
 	// [cluster] decides which daemon owns which repo. A bad instance id or a

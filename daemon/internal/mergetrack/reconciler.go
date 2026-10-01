@@ -49,6 +49,7 @@ type StateStore interface {
 	ClearMergeTrackingUnknownWaits(prID int64) error
 	ClearMergeTrackingCooldown(prID int64) error
 	PruneMergeTracking(before time.Time) (int, error)
+	DeleteUntrackedMergeTracking(active []string) (int, error)
 	SetMergeTrackingPreRebaseSHA(prID int64, sha string) error
 	BlockMergeTracking(prID int64, reason, detail string, cooldownUntil time.Time) error
 	MarkMergeTrackingMerged(prID int64, at time.Time) error
@@ -101,6 +102,9 @@ type Reconciler struct {
 	now func() time.Time
 	// defaultCooldown is applied when a decision offers no hint.
 	defaultCooldown time.Duration
+	// staleAfter returns the [my_prs] inactivity threshold; zero disables
+	// stale detection.
+	staleAfter func() time.Duration
 }
 
 // ReconcilerOptions bundles the Reconciler's dependencies. A struct rather than
@@ -116,6 +120,9 @@ type ReconcilerOptions struct {
 	Viewer          func() string
 	Now             func() time.Time
 	DefaultCooldown time.Duration
+	// StaleAfter is the inactivity threshold after which an open PR is
+	// announced as stale. Nil or zero disables it.
+	StaleAfter func() time.Duration
 }
 
 // NewReconciler builds a Reconciler, filling in safe defaults for the optional
@@ -132,6 +139,7 @@ func NewReconciler(o ReconcilerOptions) *Reconciler {
 		viewer:          o.Viewer,
 		now:             o.Now,
 		defaultCooldown: o.DefaultCooldown,
+		staleAfter:      o.StaleAfter,
 	}
 	if r.now == nil {
 		r.now = func() time.Time { return time.Now().UTC() }
@@ -168,18 +176,16 @@ func (r *Reconciler) AnyEnabled(repos []string) bool {
 // Tick runs one reconciliation cycle over the given monitored repos.
 func (r *Reconciler) Tick(ctx context.Context, repos []string) TickStats {
 	var stats TickStats
-	if len(repos) == 0 || !r.AnyEnabled(repos) {
-		return stats
-	}
 	tickStart := r.now()
 
-	// Terminal rows are kept for a week so a merge stays visible in the tab
-	// after the fact, then dropped. Without this the table — and the listing
-	// built from it — would grow for the life of the install.
-	if n, err := r.st.PruneMergeTracking(tickStart.Add(-terminalRetention)); err != nil {
-		slog.Warn("mergetrack: prune terminal rows", "err", err)
-	} else if n > 0 {
-		slog.Debug("mergetrack: pruned terminal rows", "count", n)
+	// Housekeeping runs before the enabled check, and costs no GitHub call.
+	// Returning first is how merged PRs used to stay in the tab forever: with
+	// the feature off everywhere nothing was ever pruned, and the live rows of
+	// repos nobody tracks any more were never re-evaluated or removed.
+	r.prune(tickStart, repos)
+
+	if len(repos) == 0 || !r.AnyEnabled(repos) {
+		return stats
 	}
 
 	stats.Discovered = r.discover(ctx, repos)
@@ -220,6 +226,32 @@ func (r *Reconciler) Tick(ctx context.Context, repos []string) TickStats {
 		}
 	}
 	return stats
+}
+
+// prune drops terminal rows past their retention window and the live rows of
+// repos that are no longer tracked or watched.
+func (r *Reconciler) prune(now time.Time, repos []string) {
+	if r == nil || r.st == nil {
+		return
+	}
+	if n, err := r.st.PruneMergeTracking(now.Add(-terminalRetention)); err != nil {
+		slog.Warn("mergetrack: prune terminal rows", "err", err)
+	} else if n > 0 {
+		slog.Debug("mergetrack: pruned terminal rows", "count", n)
+	}
+	active := make([]string, 0, len(repos))
+	if r.cfgFor != nil {
+		for _, repo := range repos {
+			if r.cfgFor(repo).Enabled {
+				active = append(active, repo)
+			}
+		}
+	}
+	if n, err := r.st.DeleteUntrackedMergeTracking(active); err != nil {
+		slog.Warn("mergetrack: drop untracked rows", "err", err)
+	} else if n > 0 {
+		slog.Info("mergetrack: dropped rows of repos no longer tracked", "count", n)
+	}
 }
 
 // anyIncludesAssigned reports whether the assignee qualifier belongs in the
@@ -418,9 +450,11 @@ func (r *Reconciler) ReconcilePR(ctx context.Context, prID int64, tickStart time
 	}
 
 	d := Decide(Evaluate(st, in), st, in)
-	r.persistDecision(prID, row, d)
+	r.persistDecision(prID, row, st, cfg, d)
 
-	if dryRun || !d.Action.Mutating() {
+	// WatchOnly is checked here as well as in Decide: a watched repo must never
+	// be written to, whatever a future rule in Decide returns.
+	if dryRun || cfg.WatchOnly || !d.Action.Mutating() {
 		r.handleNonMutating(prID, row, st, d)
 		return false, nil
 	}
@@ -474,7 +508,7 @@ func (r *Reconciler) syncRow(prID int64, row *store.MergeTracking, st *gh.MergeS
 
 // persistDecision writes the evaluation outcome, including the check
 // breakdown, so the UI can explain a blocked merge without calling GitHub.
-func (r *Reconciler) persistDecision(prID int64, row *store.MergeTracking, d Decision) {
+func (r *Reconciler) persistDecision(prID int64, row *store.MergeTracking, st *gh.MergeStatus, cfg config.MergeTrackingConfig, d Decision) {
 	payload, err := json.Marshal(d)
 	if err != nil {
 		slog.Warn("mergetrack: marshal decision", "pr_id", prID, "err", err)
@@ -505,12 +539,23 @@ func (r *Reconciler) persistDecision(prID int64, row *store.MergeTracking, d Dec
 		ChecksRequiredPending: d.ChecksSummary.RequiredPending,
 		CooldownUntil:         cooldown,
 		At:                    r.now(),
+		LastActivityAt:        st.UpdatedAt,
 	}
 	// A mutating action claims its own phase moments from now; writing the
 	// resting phase here would fight that claim.
 	if d.Action.Mutating() {
 		rec.Phase = row.Phase
 		rec.CooldownUntil = row.CooldownUntil
+	}
+	attention := ComputeAttention(d, cfg, rec.Phase)
+	if d.Action.Mutating() {
+		// The action is Heimdallm's to perform; until it lands the PR waits.
+		attention = AttentionWaiting
+	}
+	rec.Attention = string(attention)
+	staleFor, announceStale := r.staleness(row, st, rec.Phase)
+	if announceStale {
+		rec.StaleNotifiedAt = r.now()
 	}
 	if err := r.st.RecordMergeTrackingDecision(prID, rec); err != nil {
 		slog.Warn("mergetrack: record decision", "pr_id", prID, "err", err)
@@ -529,6 +574,31 @@ func (r *Reconciler) persistDecision(prID int64, row *store.MergeTracking, d Dec
 		"headline": d.Headline(),
 	})
 
+	// My PRs: announce a PR that newly needs the operator, once per change.
+	if (attention == AttentionAction || attention == AttentionReady) && string(attention) != row.Attention {
+		r.emit(sse.EventMyPRAttention, map[string]any{
+			"pr_id":     prID,
+			"repo":      row.Repo,
+			"number":    row.Number,
+			"title":     st.Title,
+			"url":       st.URL,
+			"attention": string(attention),
+			"reason":    string(d.PrimaryReason()),
+			"detail":    d.PrimaryDetail(),
+		})
+	}
+	if announceStale {
+		r.emit(sse.EventMyPRStale, map[string]any{
+			"pr_id":         prID,
+			"repo":          row.Repo,
+			"number":        row.Number,
+			"title":         st.Title,
+			"url":           st.URL,
+			"idle_seconds":  int64(staleFor / time.Second),
+			"last_activity": st.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+
 	// Only announce a block when the reason CHANGED. A PR waiting an hour on CI
 	// would otherwise produce one activity-log row per cycle.
 	if reason := string(d.PrimaryReason()); reason != "" && reason != row.BlockReason {
@@ -540,6 +610,32 @@ func (r *Reconciler) persistDecision(prID int64, row *store.MergeTracking, d Dec
 			"detail": d.PrimaryDetail(),
 		})
 	}
+}
+
+// staleness reports how long the PR has been idle and whether it has just
+// crossed the stale threshold and should be announced.
+//
+// An announcement is made once per idle stretch: StaleNotifiedAt records it,
+// and any activity on GitHub after that moment re-arms the next one.
+func (r *Reconciler) staleness(row *store.MergeTracking, st *gh.MergeStatus, phase string) (time.Duration, bool) {
+	if r.staleAfter == nil || st == nil || st.UpdatedAt.IsZero() {
+		return 0, false
+	}
+	threshold := r.staleAfter()
+	if threshold <= 0 {
+		return 0, false
+	}
+	if phase == store.MergePhaseMerged || phase == store.MergePhaseAbandoned || row.Excluded {
+		return 0, false
+	}
+	idle := r.now().Sub(st.UpdatedAt)
+	if idle <= threshold {
+		return idle, false
+	}
+	if !row.StaleNotifiedAt.IsZero() && !row.StaleNotifiedAt.Before(st.UpdatedAt) {
+		return idle, false
+	}
+	return idle, true
 }
 
 // handleNonMutating applies the terminal transitions that need no GitHub call.

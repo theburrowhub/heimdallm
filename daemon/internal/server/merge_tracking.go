@@ -50,6 +50,16 @@ type mergeTrackingEntry struct {
 	CooldownUntil    string `json:"cooldown_until,omitempty"`
 	EvaluatedAt      string `json:"evaluated_at,omitempty"`
 	MergedAt         string `json:"merged_at,omitempty"`
+	// TerminalAt is when the PR was merged or closed; the row disappears one
+	// retention window after it.
+	TerminalAt string `json:"terminal_at,omitempty"`
+
+	// My PRs. Attention is who the PR is waiting on (none|action|ready|waiting).
+	// Stale is computed here, at read time, against [my_prs].stale_after, so a
+	// threshold change shows up on the next refresh without a re-evaluation.
+	Attention      string `json:"attention"`
+	Stale          bool   `json:"stale"`
+	LastActivityAt string `json:"last_activity_at,omitempty"`
 
 	// Decision is the full explainable decision, including every check with its
 	// state, whether it is required, the app that ran it and a link to the log.
@@ -83,6 +93,13 @@ func (srv *Server) buildMergeTrackingEntry(row *store.MergeTracking, withDecisio
 	e.CooldownUntil = formatOptionalTime(row.CooldownUntil)
 	e.EvaluatedAt = formatOptionalTime(row.EvaluatedAt)
 	e.MergedAt = formatOptionalTime(row.MergedAt)
+	e.TerminalAt = formatOptionalTime(row.TerminalAt)
+	e.LastActivityAt = formatOptionalTime(row.LastActivityAt)
+	e.Attention = row.Attention
+	if e.Attention == "" {
+		e.Attention = "none"
+	}
+	e.Stale = srv.isStale(row)
 
 	if pr, err := srv.store.GetPR(row.PRID); err == nil && pr != nil {
 		e.Title = pr.Title
@@ -98,6 +115,19 @@ func (srv *Server) buildMergeTrackingEntry(row *store.MergeTracking, withDecisio
 		}
 	}
 	return e
+}
+
+// isStale reports whether an open tracked PR has gone longer than
+// [my_prs].stale_after without activity on GitHub.
+func (srv *Server) isStale(row *store.MergeTracking) bool {
+	if srv.myPRsStaleAfterFn == nil || row.Terminal() || row.Excluded || row.LastActivityAt.IsZero() {
+		return false
+	}
+	threshold := srv.myPRsStaleAfterFn()
+	if threshold <= 0 {
+		return false
+	}
+	return time.Since(row.LastActivityAt) > threshold
 }
 
 // handleListMergeTracking serves GET /merge-tracking.

@@ -26,7 +26,7 @@ var (
 func (d *Dashboard) renderMerges(height int) string {
 	if len(d.merges) == 0 {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render(
-			"  No pull requests tracked. Enable [merge_tracking] in the daemon config.")
+			"  No open pull requests of yours. Enable [my_prs] (or [merge_tracking]) in the daemon config.")
 	}
 
 	var b strings.Builder
@@ -72,9 +72,18 @@ func (d *Dashboard) renderMergeRow(e api.MergeTrackingEntry, selected bool) stri
 	marker := "  "
 	markerStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	switch {
-	case e.ChecksRequiredFailing > 0:
+	case e.Terminal() || e.Excluded:
+	case e.ChecksRequiredFailing > 0 || e.Attention == "action":
 		marker = "! "
 		markerStyle = dangerStyle
+	case e.Attention == "ready":
+		marker = "✓ "
+		markerStyle = successStyle
+	// Stale before pending: a check stuck pending for days is the typical
+	// stale PR, and "~" would hide that it has gone quiet.
+	case e.Stale:
+		marker = "z "
+		markerStyle = warningStyle
 	case e.ChecksRequiredPending > 0:
 		marker = "~ "
 		markerStyle = warningStyle
@@ -85,12 +94,16 @@ func (d *Dashboard) renderMergeRow(e api.MergeTrackingEntry, selected bool) stri
 		title = fmt.Sprintf("%s#%d", e.Repo, e.Number)
 	}
 
-	line := fmt.Sprintf("%s%s%-30s %-14s %s",
+	status := e.AttentionLabel()
+	if status == "" {
+		status = mergePhaseLabel(e.Phase)
+	}
+	line := fmt.Sprintf("%s%s%-30s %-21s %s",
 		cursor,
 		markerStyle.Render(marker),
 		truncateRunes(fmt.Sprintf("%s#%d", e.Repo, e.Number), 30),
-		mergePhaseLabel(e.Phase),
-		truncateRunes(title, maxInt(d.width-56, 20)),
+		truncateRunes(status, 21),
+		truncateRunes(title, maxInt(d.width-63, 20)),
 	)
 	if selected {
 		return lipgloss.NewStyle().Bold(true).Render(line)
@@ -130,6 +143,13 @@ func buildMergeDetailLines(e api.MergeTrackingEntry, width int) []string {
 		lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("%s#%d  %s", e.Repo, e.Number, e.Title)),
 		"",
 		keyStyle.Render("State:   ") + mergePhaseLabel(e.Phase),
+	}
+	if label := e.AttentionLabel(); label != "" {
+		lines = append(lines, keyStyle.Render("Needs:   ")+label)
+	}
+	if e.Stale && e.LastActivityAt != nil {
+		lines = append(lines, keyStyle.Render("Idle:    ")+
+			warningStyle.Render("no activity on GitHub since "+e.LastActivityAt.Local().Format("2006-01-02 15:04")))
 	}
 	if e.HeadRef != "" {
 		lines = append(lines, keyStyle.Render("Branch:  ")+e.HeadRef+" -> "+e.BaseRef)

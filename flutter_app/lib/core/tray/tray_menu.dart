@@ -3,6 +3,8 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
+import '../models/merge_tracking.dart';
+import '../models/my_prs_summary.dart';
 import '../models/pr.dart';
 import '../platform/platform_services.dart';
 
@@ -21,6 +23,7 @@ class TrayMenu with TrayListener {
   ApiClient? _api;
   List<PR> _prs = [];
   String _me = '';
+  List<MergeTrackingEntry> _myPrs = const [];
   void Function(String location)? _onNavigate;
   void Function()? _onQuit;
   void Function()? _onCheckForUpdates;
@@ -57,6 +60,13 @@ class TrayMenu with TrayListener {
   /// router is initialized.
   void rebindNavigation(void Function(String location) handler) {
     _onNavigate = handler;
+  }
+
+  /// Replaces the operator's own PRs shown in the "Your PRs" section and
+  /// rebuilds the menu.
+  Future<void> setMyPrs(List<MergeTrackingEntry> entries) async {
+    _myPrs = entries;
+    if (_api != null) await rebuild(prs: _prs, me: _me);
   }
 
   /// Rebuilds the tray context menu with current data.
@@ -114,6 +124,27 @@ class TrayMenu with TrayListener {
           MenuItem(
             key: 'open',
             label: '   + ${pending.length - maxShown} more…',
+          ),
+        );
+      }
+      items.add(MenuItem.separator());
+    }
+
+    // ── Your PRs ────────────────────────────────────────────────────────
+    // Only the ones that need the operator; a PR quietly waiting on a
+    // reviewer is not tray material.
+    if (_myPrs.isNotEmpty) {
+      final summary = summarizeMyPrs(_myPrs);
+      items.add(_info('⚑  Your PRs: ${summary.describe()}'));
+      const maxShown = 5;
+      for (var i = 0; i < _myPrs.length && i < maxShown; i++) {
+        items.add(_myPrItem(i, _myPrs[i]));
+      }
+      if (_myPrs.length > maxShown) {
+        items.add(
+          MenuItem(
+            key: 'open_my_prs',
+            label: '   + ${_myPrs.length - maxShown} more…',
           ),
         );
       }
@@ -198,6 +229,18 @@ class TrayMenu with TrayListener {
     );
   }
 
+  MenuItem _myPrItem(int index, MergeTrackingEntry e) {
+    final label = shortAttentionLabel(e);
+    return MenuItem(
+      // Indexed rather than keyed by pr_id: ids are per instance, and the
+      // listing aggregates every instance.
+      key: 'mypr_$index',
+      label: '●   #${e.number}  ${_shortRepo(e.repo)}'
+          '${label.isEmpty ? '' : '  —  $label'}',
+      toolTip: e.title,
+    );
+  }
+
   MenuItem _info(String label) =>
       MenuItem(key: '_i_${label.hashCode}', label: label, disabled: true);
 
@@ -250,6 +293,22 @@ class TrayMenu with TrayListener {
 
     if (key == 'update_now') {
       _onInstallUpdate?.call();
+      return;
+    }
+
+    if (key == 'open_my_prs') {
+      _showApp();
+      Future.delayed(const Duration(milliseconds: 200), () {
+        _onNavigate?.call('/merge');
+      });
+      return;
+    }
+
+    if (key.startsWith('mypr_')) {
+      final index = int.tryParse(key.substring(5));
+      if (index != null && index >= 0 && index < _myPrs.length) {
+        _launchGitHubUrl(_myPrs[index].url);
+      }
       return;
     }
 

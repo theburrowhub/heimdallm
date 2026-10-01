@@ -42,7 +42,7 @@ void main() {
 
     expect(find.byKey(const Key('track-pr-button')), findsOneWidget);
     // Present with an empty listing too: that is exactly when it is needed.
-    expect(_text('No pull requests tracked yet'), findsOneWidget);
+    expect(_text('No open pull requests of yours'), findsOneWidget);
   });
 
   testWidgets('adding a PR calls the merge-tracking endpoint, not the review one', (

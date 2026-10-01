@@ -28,6 +28,14 @@ func Decide(d Decision, st *gh.MergeStatus, in Input) Decision {
 		return d
 	}
 
+	// A watch-only repo is observed, never acted on. Returning before the
+	// automation rules also keeps their bookkeeping blocks ("merge = false",
+	// the cooldown) out of a PR that is simply waiting or ready.
+	if in.Cfg.WatchOnly {
+		d.Action = ActionNone
+		return d
+	}
+
 	primary := d.PrimaryReason()
 
 	// A reason that cannot change on its own gets no action, whatever the

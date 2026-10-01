@@ -84,6 +84,13 @@ const (
 	EventMergeTrackConflictResolved = "merge_track_conflict_resolved" // {pr_id, repo, number, pushed, files, pre_rebase_sha}
 	EventMergeTrackMerged           = "merge_track_merged"            // {pr_id, repo, number, method, sha}
 	EventMergeTrackError            = "merge_track_error"             // {pr_id, repo, number, action, err}
+
+	// My PRs. EventMyPRAttention fires when one of the operator's PRs newly
+	// needs them (attention moved to "action" or "ready"); EventMyPRStale fires
+	// once per idle stretch when a PR crosses [my_prs].stale_after. Both are
+	// what the GUI turns into desktop notifications, so neither repeats.
+	EventMyPRAttention = "my_pr_attention" // {pr_id, repo, number, title, url, attention, reason, detail}
+	EventMyPRStale     = "my_pr_stale"     // {pr_id, repo, number, title, url, idle_seconds, last_activity}
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent

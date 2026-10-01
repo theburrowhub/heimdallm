@@ -17,10 +17,11 @@ const unknownRecheck = 45 * time.Second
 // resolve does not consume a query every cycle forever.
 const maxUnknownWaits = 5
 
-// terminalRetention is how long a merged or abandoned row stays in the table
-// before it is pruned. Long enough that the Merge tab still shows what happened
-// yesterday, short enough that the table does not grow without bound.
-const terminalRetention = 7 * 24 * time.Hour
+// terminalRetention is how long a merged or closed row stays in the table
+// before it is pruned, counted from the moment it became terminal. The My PRs
+// tab shows these rows in a collapsed "recently merged" section; a finished PR
+// is not something to act on, so a day is enough to notice it went through.
+const terminalRetention = 24 * time.Hour
 
 // stableBlockRecheck is the cooldown for blocks that will not change without a
 // human doing something.
@@ -91,10 +92,15 @@ func Evaluate(st *gh.MergeStatus, in Input) Decision {
 		return d
 	}
 
-	// 4. Permission. Without write access every action below would 403.
+	// 4. Permission. Without write access every action below would 403. A
+	// watch-only repo never acts, so the rule does not apply: the operator
+	// still wants to know what their PR is waiting on.
 	switch st.ViewerPermission {
 	case "ADMIN", "MAINTAIN", "WRITE":
 	default:
+		if in.Cfg.WatchOnly {
+			break
+		}
 		d.Blocks = []Block{{
 			Reason: ReasonInsufficientPermission,
 			Detail: fmt.Sprintf("viewer permission is %s", strings.ToLower(orUnknown(st.ViewerPermission))),
@@ -112,7 +118,7 @@ func Evaluate(st *gh.MergeStatus, in Input) Decision {
 	// 6. A head branch on someone else's fork is readable but not writable, so
 	// no update, rebase or conflict resolution can land. Evaluate and show it;
 	// never try to write.
-	if st.HeadIsFork && !sameLogin(st.HeadRepoOwner, in.ViewerLogin) {
+	if !in.Cfg.WatchOnly && st.HeadIsFork && !sameLogin(st.HeadRepoOwner, in.ViewerLogin) {
 		d.Blocks = []Block{{
 			Reason: ReasonCrossFork,
 			Detail: fmt.Sprintf("head branch lives in %s", orUnknown(st.HeadRepo)),
@@ -206,7 +212,8 @@ func Evaluate(st *gh.MergeStatus, in Input) Decision {
 
 	// 12. The repo has to allow the method we would use, or every merge attempt
 	// is a guaranteed 422.
-	if !st.AllowedMergeMethods.Allows(in.Cfg.MergeMethod) {
+	// Watch-only repos never merge, so the method is irrelevant there.
+	if !in.Cfg.WatchOnly && !st.AllowedMergeMethods.Allows(in.Cfg.MergeMethod) {
 		blocks = append(blocks, Block{
 			Reason: ReasonMergeMethodNotAllowed,
 			Detail: fmt.Sprintf("%s merges are disabled for %s", in.Cfg.MergeMethod, st.Repo),

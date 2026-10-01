@@ -57,6 +57,11 @@ type MergeTrackingConfig struct {
 
 	Orgs  map[string]MergeTrackingOverride `toml:"orgs"`  // [merge_tracking.orgs."org"]
 	Repos map[string]MergeTrackingOverride `toml:"repos"` // [merge_tracking.repos."org/repo"]
+
+	// WatchOnly is never read from TOML. EffectiveMergeTrackingForRepo sets it
+	// when a repo is only watched through [my_prs]: the PR is evaluated and
+	// shown, and nothing is ever written to GitHub.
+	WatchOnly bool `toml:"-"`
 }
 
 // MergeTrackingOverride is the per-org / per-repo override shape. Pointer

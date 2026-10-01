@@ -9,6 +9,7 @@ import 'package:heimdallm/features/config/config_providers.dart'
     show ConfigNotifier, configNotifierProvider;
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/shared/design_system/components/components.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -60,6 +61,18 @@ Future<_MockApiClient> _mount(
   return mockApi;
 }
 
+/// Scopes a finder to the Merge Tracking card: "My PRs" has an "Include PRs
+/// assigned to me" switch of its own.
+Finder _inMergeTrackingCard(Finder finder) => find.descendant(
+  of: find
+      .ancestor(
+        of: find.text('Track my pull requests'),
+        matching: find.byType(AppSurface),
+      )
+      .first,
+  matching: finder,
+);
+
 Future<void> _reveal(WidgetTester tester, Finder finder) async {
   final scrollable = find.byType(Scrollable).first;
   await tester.scrollUntilVisible(finder, 200, scrollable: scrollable);
@@ -79,7 +92,10 @@ void main() {
 
     expect(find.text('Track my pull requests'), findsOneWidget);
     expect(find.text('Turn on auto-merge'), findsNothing);
-    expect(find.text('Include PRs assigned to me'), findsNothing);
+    expect(
+      _inMergeTrackingCard(find.text('Include PRs assigned to me')),
+      findsNothing,
+    );
   });
 
   testWidgets('turning tracking on reveals the four automations', (
@@ -92,7 +108,10 @@ void main() {
     await tester.pumpAndSettle();
 
     await _reveal(tester, find.text('Automations'));
-    expect(find.text('Include PRs assigned to me'), findsOneWidget);
+    expect(
+      _inMergeTrackingCard(find.text('Include PRs assigned to me')),
+      findsOneWidget,
+    );
     expect(find.text('Turn on auto-merge'), findsOneWidget);
   });
 

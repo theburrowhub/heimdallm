@@ -106,5 +106,17 @@ review_mode = "single"   # "single" or "multi"
 # merge            = true
 # require_approval = true
 
+# ── My PRs ────────────────────────────────────────────────────────────────────
+# Watches your own open PRs in monitored repos where merge tracking is off —
+# observation only — and nudges you about the ones that need you. On by default.
+#
+# [my_prs]
+# enabled            = true
+# include_assigned   = true
+# stale_after        = "3d"     # 90m, 12h, 3d…; "0" disables
+# notify_transitions = false    # notify the moment a PR needs you
+# digest_enabled     = true
+# digest_time        = "10:00"  # local time, 24h HH:MM
+
 [retention]
 max_days = 90

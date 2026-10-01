@@ -132,6 +132,14 @@ MergeTrackingEntry _$MergeTrackingEntryFromJson(Map<String, dynamic> json) =>
       mergedAt: json['merged_at'] == null
           ? null
           : DateTime.parse(json['merged_at'] as String),
+      terminalAt: json['terminal_at'] == null
+          ? null
+          : DateTime.parse(json['terminal_at'] as String),
+      attention: json['attention'] as String? ?? 'none',
+      stale: json['stale'] as bool? ?? false,
+      lastActivityAt: json['last_activity_at'] == null
+          ? null
+          : DateTime.parse(json['last_activity_at'] as String),
       decision: json['decision'] == null
           ? null
           : MergeDecision.fromJson(json['decision'] as Map<String, dynamic>),
@@ -162,5 +170,9 @@ Map<String, dynamic> _$MergeTrackingEntryToJson(MergeTrackingEntry instance) =>
       'last_error': instance.lastError,
       'evaluated_at': ?instance.evaluatedAt?.toIso8601String(),
       'merged_at': ?instance.mergedAt?.toIso8601String(),
+      'terminal_at': ?instance.terminalAt?.toIso8601String(),
+      'attention': instance.attention,
+      'stale': instance.stale,
+      'last_activity_at': ?instance.lastActivityAt?.toIso8601String(),
       'decision': ?instance.decision?.toJson(),
     };
