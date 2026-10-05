@@ -207,6 +207,8 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
           String source(bool hasOrgValue) =>
               hasOrgValue ? 'org: $orgName' : 'global';
 
+          final warning = AppColors.warning.resolve(context);
+
           return SingleChildScrollView(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -216,8 +218,8 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     padding: const EdgeInsets.only(bottom: 12),
                     child: Box(
                       style: BoxStyler()
-                          .color(AppColors.warning().withValues(alpha: 0.12))
-                          .borderAll(color: AppColors.warning(), width: 1)
+                          .color(warning.withValues(alpha: 0.12))
+                          .borderAll(color: warning, width: 1)
                           .borderRadiusAll(AppRadius.lg())
                           .padding(
                             EdgeInsetsGeometryMix.value(
@@ -229,7 +231,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                         children: [
                           Icon(
                             Icons.warning_amber_rounded,
-                            color: AppColors.warning().resolve(context),
+                            color: warning,
                             size: 20,
                           ),
                           const SizedBox(width: 10),
@@ -248,9 +250,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                                   ),
                                   child: AppText.label(
                                     'Open org settings',
-                                    color: AppColors.warning().resolve(
-                                      context,
-                                    ),
+                                    color: warning,
                                   ),
                                 ),
                               ],
