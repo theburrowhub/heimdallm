@@ -1047,6 +1047,14 @@ class AppConfig {
     return orgs.where((o) => o.trim().isNotEmpty).toList()..sort();
   }
 
+  /// Whether [org] has a bare entry in `non_monitored` (theburrowhub/heimdallm#828).
+  /// Case-insensitive — GitHub org/user names are, matching the daemon's
+  /// discovery.BuildNonMonitoredOrgs.
+  bool isOrgNonMonitored(String org) {
+    final lower = org.toLowerCase();
+    return nonMonitoredOrgs.any((o) => o.toLowerCase() == lower);
+  }
+
   /// The raw `github.non_monitored` list as the daemon expects it back on a
   /// `patchConfig` write: bare org entries first, then exact "owner/repo"
   /// entries for individually-disabled repos. Any writer that mutates one
@@ -1175,11 +1183,13 @@ class AppConfig {
     // isMonitored (which still drives what gets written to
     // github.repositories).
     if (nonMonitoredOrgs.isNotEmpty) {
-      final orgSet = nonMonitoredOrgs.toSet();
+      // GitHub org/user names are case-insensitive, matching the daemon's
+      // discovery.BuildNonMonitoredOrgs.
+      final orgSet = nonMonitoredOrgs.map((o) => o.toLowerCase()).toSet();
       for (final key in configs.keys.toList()) {
         final slash = key.indexOf('/');
         if (slash <= 0) continue;
-        if (orgSet.contains(key.substring(0, slash))) {
+        if (orgSet.contains(key.substring(0, slash).toLowerCase())) {
           configs[key] = configs[key]!.copyWith(excludedByOrg: true);
         }
       }

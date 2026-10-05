@@ -43,7 +43,7 @@ class OrgsScreen extends ConsumerWidget {
           itemBuilder: (context, i) {
             final org = orgs[i];
             final overridden = config.orgConfigs[org]?.hasOverride ?? false;
-            final monitoringDisabled = config.nonMonitoredOrgs.contains(org);
+            final monitoringDisabled = config.isOrgNonMonitored(org);
             return AppSurface(
               child: Material(
                 type: MaterialType.transparency,

@@ -109,4 +109,17 @@ void main() {
       expect(notMonitored.isEffectivelyMonitored, isFalse);
     });
   });
+
+  group('AppConfig.isOrgNonMonitored', () {
+    test('matches case-insensitively', () {
+      final config = AppConfig.fromJson({
+        'repositories': <String>[],
+        'non_monitored': ['MyOrg'],
+      });
+
+      expect(config.isOrgNonMonitored('myorg'), isTrue);
+      expect(config.isOrgNonMonitored('MYORG'), isTrue);
+      expect(config.isOrgNonMonitored('otherorg'), isFalse);
+    });
+  });
 }

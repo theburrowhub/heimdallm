@@ -106,10 +106,11 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
   // too. Mirrors RepoDetailScreen's monitoring-toggle write, but for the org
   // entry rather than a per-repo one.
   Future<void> _toggleOrgMonitoring(AppConfig appConfig) async {
-    final disabled = appConfig.nonMonitoredOrgs.contains(widget.orgName);
+    final disabled = appConfig.isOrgNonMonitored(widget.orgName);
+    final orgLower = widget.orgName.toLowerCase();
     final nonMonitoredOrgs = disabled
         ? appConfig.nonMonitoredOrgs
-              .where((o) => o != widget.orgName)
+              .where((o) => o.toLowerCase() != orgLower)
               .toList()
         : [...appConfig.nonMonitoredOrgs, widget.orgName];
     final nonMonitored = appConfig
@@ -233,9 +234,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
             final prompts = ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
             final promptOptions = prompts.map((p) => p.id).toList();
 
-            final orgDisabled = appConfig.nonMonitoredOrgs.contains(
-              widget.orgName,
-            );
+            final orgDisabled = appConfig.isOrgNonMonitored(widget.orgName);
             return SingleChildScrollView(
               padding: const EdgeInsets.all(16),
               child: Column(
