@@ -10,6 +10,7 @@ import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
+import 'package:heimdallm/main.dart' show applyNotificationPreferences;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/platform/fake_platform_services.dart';
@@ -76,8 +77,17 @@ void main() {
       bool enabled = true,
       NotificationMode mode = NotificationMode.sound,
     }) async {
-      final platform = FakePlatformServices()
-        ..setNotificationModes(NotificationPreferences(activity: mode));
+      final platform = FakePlatformServices();
+      applyNotificationPreferences(
+        platform,
+        NotificationPreferences(activity: mode),
+      );
+      addTearDown(
+        () => applyNotificationPreferences(
+          platform,
+          const NotificationPreferences(),
+        ),
+      );
       final controller = StreamController<SseEvent>();
       addTearDown(controller.close);
       final container = _container(
@@ -140,10 +150,6 @@ void main() {
       );
       final silent = await deliver(event, mode: NotificationMode.silent);
       expect(silent.notifications.single.silent, isTrue);
-      expect(
-        silent.notifications.single.category,
-        NotificationCategory.activity,
-      );
       expect(
         (await deliver(event, mode: NotificationMode.off)).notifications,
         isEmpty,

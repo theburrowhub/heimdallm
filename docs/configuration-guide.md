@@ -826,7 +826,7 @@ How notifications are presented is an **app setting on each device**, not part o
 | **Reviews & My PRs** | review started / complete / failed, My PRs transitions and the daily digest | **Sound** (default), **Silent** (banner, no sound), **Off** (nothing) |
 | **App updates** | "Heimdallm update available" | same three modes |
 
-The `[my_prs]` switches above still decide *whether* a My PRs notification exists; this setting decides *how* it is shown. An update announcement skipped while **App updates** is Off is shown once it is turned back on. On the web build, Silent asks the browser for a silent notification, and Off never triggers the browser's permission prompt.
+The `[my_prs]` switches above still decide *whether* a My PRs notification exists; this setting decides *how* it is shown. An update announcement skipped while **App updates** is Off is shown once it is turned back on. On the web build, Off is honoured (and never triggers the browser's permission prompt), but Silent behaves like Sound: whether a browser notification plays a sound is decided by the browser and OS settings.
 
 ### What it reports
 

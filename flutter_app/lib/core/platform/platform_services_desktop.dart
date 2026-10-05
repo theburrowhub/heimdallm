@@ -95,6 +95,7 @@ class DesktopPlatformServices
         AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability,
+        NotificationModePlatformCapability,
         TrayMyPrsPlatformCapability {
   DesktopPlatformServices({
     int apiPort = 7842,
@@ -586,7 +587,18 @@ class DesktopPlatformServices
     required String title,
     required String body,
     VoidCallback? onClick,
-    NotificationCategory category = NotificationCategory.activity,
+  }) => _showNotification(
+    title: title,
+    body: body,
+    onClick: onClick,
+    category: NotificationCategory.activity,
+  );
+
+  void _showNotification({
+    required String title,
+    required String body,
+    required VoidCallback? onClick,
+    required NotificationCategory category,
   }) {
     final details = notificationDetailsFor(
       _notificationPreferences.modeFor(category),
@@ -819,7 +831,7 @@ class DesktopPlatformServices
       return;
     }
     _notifiedUpdateVersion = status.version;
-    showNotification(
+    _showNotification(
       title: 'Heimdallm update available',
       body: 'Version ${status.version ?? 'new'} is ready to install.',
       onClick: () => unawaited(showAndFocusWindow()),

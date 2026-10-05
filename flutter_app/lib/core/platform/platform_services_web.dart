@@ -54,42 +54,22 @@ class WebPlatformServices implements PlatformServices {
     // reason to care, which browsers (and users) treat as spammy.
   }
 
-  NotificationPreferences _notificationPreferences =
-      const NotificationPreferences();
-
-  @override
-  void setNotificationModes(NotificationPreferences preferences) {
-    _notificationPreferences = preferences;
-  }
-
   @override
   void showNotification({
     required String title,
     required String body,
     VoidCallback? onClick,
-    NotificationCategory category = NotificationCategory.activity,
   }) {
-    final mode = _notificationPreferences.modeFor(category);
-    // Off returns before the permission prompt: a muted user is never asked.
-    if (mode == NotificationMode.off) return;
     // Fire-and-forget: the Notification API's permission check is async
     // but the interface method is sync.
-    unawaited(
-      _showNotification(
-        title,
-        body,
-        onClick,
-        silent: mode == NotificationMode.silent,
-      ),
-    );
+    unawaited(_showNotification(title, body, onClick));
   }
 
   Future<void> _showNotification(
     String title,
     String body,
-    VoidCallback? onClick, {
-    required bool silent,
-  }) async {
+    VoidCallback? onClick,
+  ) async {
     // `permission` is a static string; `requestPermission()` returns a
     // JSPromise<String> resolving to the updated state. Every browser
     // new enough to run a Flutter Web build exposes the Notification
@@ -118,7 +98,6 @@ class WebPlatformServices implements PlatformServices {
           body: body,
           icon: '/icons/Icon-192.png',
           tag: body,
-          silent: silent,
         ),
       );
       // onclick fires when the user clicks the notification in the OS

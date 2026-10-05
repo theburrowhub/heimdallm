@@ -164,21 +164,13 @@ abstract class PlatformServices {
   /// Initializes the notifier (local_notifier on desktop). No-op on web.
   Future<void> setupNotifier({required String appName});
 
-  /// Fires a notification, honouring the [NotificationMode] last set for
-  /// [category] via [setNotificationModes]: `off` drops it, `silent` shows it
-  /// without sound. On desktop: flutter_local_notifications. On web: the
-  /// browser Notification API. `onClick` is invoked when the user clicks it.
+  /// Fires a notification. On desktop: `LocalNotification`. On web: no-op.
+  /// `onClick` is invoked when the user clicks the notification.
   void showNotification({
     required String title,
     required String body,
     VoidCallback? onClick,
-    NotificationCategory category = NotificationCategory.activity,
   });
-
-  /// Applies the user's per-category notification modes. Every notification
-  /// raised afterwards — including ones the platform raises on its own, like
-  /// "update available" — follows them. Defaults to [NotificationMode.sound].
-  void setNotificationModes(NotificationPreferences preferences);
 
   /// Prevent the OS from closing the window (we intercept to hide to tray).
   /// No-op on web.
@@ -249,6 +241,17 @@ abstract interface class TrayMyPrsPlatformCapability {
   Future<void> setTrayMyPrs(List<MergeTrackingEntry> entries);
 }
 
+/// Optional per-category notification presentation (sound / silent / off),
+/// implemented where the platform controls the notification sound itself.
+/// Platforms without it still honour [NotificationMode.off] for activity
+/// notifications, because `sendPRNotification` drops those before they reach
+/// the platform.
+abstract interface class NotificationModePlatformCapability {
+  /// Applies [preferences] to every notification raised afterwards, including
+  /// ones the platform raises on its own, like "update available".
+  void setNotificationModes(NotificationPreferences preferences);
+}
+
 /// Optional termination path for a process that has already disproved desktop
 /// singleton ownership.
 abstract interface class DuplicateInstancePlatformCapability {
@@ -261,6 +264,16 @@ abstract interface class DuplicateInstancePlatformCapability {
 /// stays independent of the macOS updater and remains covered by its existing
 /// browser-only contract.
 extension OptionalPlatformCapabilities on PlatformServices {
+  /// No-op where the platform does not control notification sound (web).
+  void setNotificationModes(NotificationPreferences preferences) {
+    final platform = this;
+    if (platform is NotificationModePlatformCapability) {
+      (platform as NotificationModePlatformCapability).setNotificationModes(
+        preferences,
+      );
+    }
+  }
+
   /// No-op where there is no tray (web).
   Future<void> setTrayMyPrs(List<MergeTrackingEntry> entries) async {
     final platform = this;

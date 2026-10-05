@@ -1094,6 +1094,16 @@ else:
       services.showNotification(title: 't', body: 'b', onClick: () {});
     });
 
+    test('re-enabling update notifications re-checks the pending update', () {
+      final services = DesktopPlatformServices();
+      services.setNotificationModes(
+        const NotificationPreferences(update: NotificationMode.off),
+      );
+      // Notifier not initialised in a unit test: the re-check must bail out
+      // through shouldAnnounceAppUpdate instead of reaching the plugin.
+      services.setNotificationModes(const NotificationPreferences());
+    });
+
     const available = AppUpdateStatus(
       phase: AppUpdatePhase.available,
       version: '2.0.0',

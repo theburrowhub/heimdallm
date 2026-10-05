@@ -106,6 +106,37 @@ void main() {
     },
   );
 
+  test(
+    'platform initialization applies the saved notification modes',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        notificationActivityModeKey: 'off',
+        notificationUpdateModeKey: 'silent',
+      });
+      final platform = FakePlatformServices();
+      addTearDown(
+        () => applyNotificationPreferences(
+          platform,
+          const NotificationPreferences(),
+        ),
+      );
+
+      expect(await initializePlatformForApp(platform), isTrue);
+      expect(
+        platform.notificationPreferences,
+        const NotificationPreferences(
+          activity: NotificationMode.off,
+          update: NotificationMode.silent,
+        ),
+      );
+
+      // Activity Off is enforced before the platform, so it also holds where
+      // the platform cannot control notifications (web).
+      sendPRNotification(platform: platform, title: 't', body: 'b');
+      expect(platform.notifications, isEmpty);
+    },
+  );
+
   testWidgets('reachable daemon enters the application without spawning', (
     tester,
   ) async {
@@ -167,6 +198,7 @@ void main() {
         update: NotificationMode.off,
       ),
     );
+    applyNotificationPreferences(platform, const NotificationPreferences());
   });
 
   testWidgets('completed native update requires matching daemon version', (

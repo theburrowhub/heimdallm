@@ -30,7 +30,30 @@ Future<bool> initializePlatformForApp(PlatformServices platform) async {
     // Update infrastructure must never delay or prevent daemon startup.
     debugPrint('app updater init failed: $e');
   }
+
+  // Apply the saved notification modes before the notifier exists, so even
+  // the first notification (e.g. a pending "update available") honours them.
+  // Later changes flow in through _BootstrapAppState's provider listener.
+  try {
+    applyNotificationPreferences(platform, await readNotificationPreferences());
+  } catch (e) {
+    debugPrint('notification preferences load failed: $e');
+  }
   return true;
+}
+
+NotificationPreferences _notificationPreferences =
+    const NotificationPreferences();
+
+/// Records [preferences] for [sendPRNotification] and hands them to platforms
+/// that control the notification sound themselves.
+@visibleForTesting
+void applyNotificationPreferences(
+  PlatformServices platform,
+  NotificationPreferences preferences,
+) {
+  _notificationPreferences = preferences;
+  platform.setNotificationModes(preferences);
 }
 
 Future<void> main() async {
@@ -73,15 +96,6 @@ Future<void> main() async {
     debugPrint('tray init failed: $e');
   }
 
-  // Apply the saved notification modes before the notifier exists, so even
-  // the first notification (e.g. a pending "update available") honours them.
-  // Later changes flow in through _BootstrapAppState's provider listener.
-  try {
-    platform.setNotificationModes(await readNotificationPreferences());
-  } catch (e) {
-    debugPrint('notification preferences load failed: $e');
-  }
-
   try {
     await platform.setupNotifier(appName: 'Heimdallm');
   } catch (e) {
@@ -109,6 +123,9 @@ void sendPRNotification({
   int? prId,
   String? location,
 }) {
+  // Dropped here rather than in the platform so Off also works where the
+  // platform cannot control notifications itself (web).
+  if (_notificationPreferences.activity == NotificationMode.off) return;
   platform.showNotification(
     title: title,
     body: body,
@@ -184,7 +201,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     // keeps the platform's notification modes in sync with the settings UI.
     ref.listenManual<NotificationPreferences>(
       notificationPreferencesProvider,
-      (_, next) => _platform.setNotificationModes(next),
+      (_, next) => applyNotificationPreferences(_platform, next),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _platform.setPreventWindowClose(true);
