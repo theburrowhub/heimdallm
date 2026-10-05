@@ -112,14 +112,9 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
               .where((o) => o != widget.orgName)
               .toList()
         : [...appConfig.nonMonitoredOrgs, widget.orgName];
-    final nonMonitored =
-        <String>{
-            ...nonMonitoredOrgs,
-            ...appConfig.repoConfigs.entries
-                .where((e) => !e.value.isMonitored)
-                .map((e) => e.key),
-          }.toList()
-          ..sort();
+    final nonMonitored = appConfig
+        .copyWith(nonMonitoredOrgs: nonMonitoredOrgs)
+        .nonMonitoredList;
     if (mounted) setState(() => _togglingMonitoring = true);
     try {
       final freshJson = await ref.read(apiClientProvider).patchConfig({

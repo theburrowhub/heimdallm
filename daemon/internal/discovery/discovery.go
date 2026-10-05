@@ -154,6 +154,7 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 		}
 		blacklist[r] = struct{}{}
 	}
+	orgBlacklist := BuildNonMonitoredOrgs(nonMonitored)
 	seen := make(map[string]struct{}, len(static)+len(configured)+len(discovered))
 	out := make([]string, 0, len(static)+len(configured)+len(discovered))
 	add := func(r string) {
@@ -163,10 +164,8 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 		if _, blocked := blacklist[r]; blocked {
 			return
 		}
-		if org, _, found := strings.Cut(r, "/"); found {
-			if _, blocked := blacklist[org]; blocked {
-				return
-			}
+		if orgBlacklist.Blocks(r) {
+			return
 		}
 		if _, dup := seen[r]; dup {
 			return
@@ -187,6 +186,37 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 		return nil
 	}
 	return out
+}
+
+// NonMonitoredOrgs is a case-insensitive set of the bare org entries found in
+// a non_monitored list (theburrowhub/heimdallm#828). GitHub org/user names
+// are case-insensitive, so comparisons normalize to lowercase the same way
+// discovery_orgs already does (see upsertDiscoveredRepos' allowedOrgs set).
+type NonMonitoredOrgs map[string]struct{}
+
+// BuildNonMonitoredOrgs extracts the bare (no "/") entries from nonMonitored
+// into a reusable lookup. Build once per batch of candidate repos rather than
+// per repo.
+func BuildNonMonitoredOrgs(nonMonitored []string) NonMonitoredOrgs {
+	orgs := make(NonMonitoredOrgs, len(nonMonitored))
+	for _, r := range nonMonitored {
+		if r == "" || strings.Contains(r, "/") {
+			continue
+		}
+		orgs[strings.ToLower(r)] = struct{}{}
+	}
+	return orgs
+}
+
+// Blocks reports whether repo ("owner/name") falls under one of the set's
+// excluded orgs.
+func (o NonMonitoredOrgs) Blocks(repo string) bool {
+	org, _, found := strings.Cut(repo, "/")
+	if !found {
+		return false
+	}
+	_, blocked := o[strings.ToLower(org)]
+	return blocked
 }
 
 // ArchivedChecker verifies whether a single repository is archived or deleted.

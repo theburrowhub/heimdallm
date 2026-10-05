@@ -67,6 +67,44 @@ func TestUpsertDiscoveredFromTopics_SkipsKnownRepos(t *testing.T) {
 	}
 }
 
+// theburrowhub/heimdallm#829 review feedback: a bare org entry in
+// non_monitored must block topic-discovered repos from that org too, not
+// just an exact slug already present in the known set.
+func TestUpsertDiscoveredFromTopics_NonMonitoredOrgBlocksDiscovery(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.NonMonitored = []string{"myorg"}
+
+	s := newMemStore(t)
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+
+	var mu sync.Mutex
+	a := &tier2Adapter{
+		cfgMu:  &mu,
+		cfg:    &cfg,
+		store:  s,
+		broker: broker,
+	}
+
+	a.upsertDiscoveredFromTopics([]string{"myorg/new", "otherorg/new"})
+
+	for _, r := range cfg.GitHub.Repositories {
+		if r == "myorg/new" {
+			t.Fatalf("myorg/new must not be persisted into Repositories, got %v", cfg.GitHub.Repositories)
+		}
+	}
+	found := false
+	for _, r := range cfg.GitHub.Repositories {
+		if r == "otherorg/new" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("otherorg/new should still be discovered, got %v", cfg.GitHub.Repositories)
+	}
+}
+
 func TestUpsertDiscoveredFromTopics_IdempotentOnSecondCall(t *testing.T) {
 	cfg := &config.Config{}
 

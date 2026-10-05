@@ -59,4 +59,54 @@ void main() {
       );
     });
   });
+
+  group('RepoConfig.excludedByOrg / isEffectivelyMonitored', () {
+    test('a repo in a bare-excluded org is flagged, even if isMonitored', () {
+      final config = AppConfig.fromJson({
+        'repositories': ['myorg/repo1', 'otherorg/repo1'],
+        'non_monitored': ['myorg'],
+      });
+
+      final excluded = config.repoConfigs['myorg/repo1']!;
+      expect(excluded.isMonitored, isTrue);
+      expect(excluded.excludedByOrg, isTrue);
+      expect(excluded.isEffectivelyMonitored, isFalse);
+
+      final unaffected = config.repoConfigs['otherorg/repo1']!;
+      expect(unaffected.excludedByOrg, isFalse);
+      expect(unaffected.isEffectivelyMonitored, isTrue);
+    });
+
+    test('org matching for the exclusion flag is case-insensitive', () {
+      final config = AppConfig.fromJson({
+        'repositories': ['MyOrg/repo1'],
+        'non_monitored': ['myorg'],
+      });
+
+      expect(config.repoConfigs['MyOrg/repo1']!.excludedByOrg, isTrue);
+    });
+
+    test('copyWith preserves excludedByOrg unless explicitly overridden', () {
+      final config = AppConfig.fromJson({
+        'repositories': ['myorg/repo1'],
+        'non_monitored': ['myorg'],
+      });
+      final original = config.repoConfigs['myorg/repo1']!;
+
+      final edited = original.copyWith(prEnabled: false);
+      expect(edited.excludedByOrg, isTrue);
+    });
+
+    test('a repo not monitored at all is unaffected by excludedByOrg', () {
+      final config = AppConfig.fromJson({
+        'repositories': <String>[],
+        'non_monitored': ['myorg', 'otherorg/repo1'],
+      });
+
+      final notMonitored = config.repoConfigs['otherorg/repo1']!;
+      expect(notMonitored.isMonitored, isFalse);
+      expect(notMonitored.excludedByOrg, isFalse);
+      expect(notMonitored.isEffectivelyMonitored, isFalse);
+    });
+  });
 }

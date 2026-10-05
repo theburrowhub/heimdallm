@@ -121,12 +121,12 @@ class RepoListTile extends StatelessWidget {
                                 style: TextStyler()
                                     .style(AppTextStyles.body.mix())
                                     .fontWeight(
-                                      config.isMonitored
+                                      config.isEffectivelyMonitored
                                           ? FontWeight.w600
                                           : FontWeight.normal,
                                     )
                                     .color(
-                                      config.isMonitored
+                                      config.isEffectivelyMonitored
                                           ? AppColors.text()
                                           : AppColors.textMuted(),
                                     )

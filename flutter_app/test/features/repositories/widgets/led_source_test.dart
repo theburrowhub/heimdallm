@@ -73,6 +73,49 @@ void main() {
       expect(line, contains('not in monitored list'));
     });
   });
+
+  // theburrowhub/heimdallm#828/#829: a bare org entry in non_monitored is
+  // resolved by the daemon's MergeRepos ahead of every feature, so the LED
+  // must be off regardless of the repo's own prEnabled/mtEnabled settings.
+  group('excludedByOrg', () {
+    test('PR review LED is off even when prEnabled is true', () {
+      expect(
+        featureIsOn(
+          feature: Feature.prReview,
+          repo: 'myorg/repo',
+          config: const RepoConfig(prEnabled: true, excludedByOrg: true),
+          appConfig: appConfig,
+        ),
+        isFalse,
+      );
+    });
+
+    test('merge tracking LED is off even when mtEnabled is true', () {
+      expect(
+        featureIsOn(
+          feature: Feature.mergeTracking,
+          repo: 'myorg/repo',
+          config: const RepoConfig(
+            prEnabled: true,
+            mtEnabled: true,
+            excludedByOrg: true,
+          ),
+          appConfig: appConfig,
+        ),
+        isFalse,
+      );
+    });
+
+    test('the tooltip names the org exclusion as the reason', () {
+      final line = featureSourceLine(
+        feature: Feature.prReview,
+        repo: 'myorg/repo',
+        config: const RepoConfig(prEnabled: true, excludedByOrg: true),
+        appConfig: appConfig,
+      );
+      expect(line, contains('org excluded'));
+    });
+  });
 }
 
 // Merge tracking resolves repo > org > global, the same precedence the daemon

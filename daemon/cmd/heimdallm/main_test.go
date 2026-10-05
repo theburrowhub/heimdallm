@@ -341,6 +341,20 @@ func TestAIReposInNonMonitoredDetectsOrgLevelConflict(t *testing.T) {
 	}
 }
 
+// GitHub org names are case-insensitive (theburrowhub/heimdallm#829 review
+// feedback): a bare org entry must flag a conflict regardless of casing.
+func TestAIReposInNonMonitoredOrgConflictIsCaseInsensitive(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.Repos = map[string]config.RepoAI{"MyOrg/repo1": {}}
+	cfg.GitHub.NonMonitored = []string{"myorg"}
+
+	got := aiReposInNonMonitored(cfg)
+	want := []string{"MyOrg/repo1"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("aiReposInNonMonitored = %v, want %v", got, want)
+	}
+}
+
 func TestRepoMonitoringConflictWarnerDeduplicatesAndResets(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.AI.Repos = map[string]config.RepoAI{"a/repo": {}, "b/repo": {}}

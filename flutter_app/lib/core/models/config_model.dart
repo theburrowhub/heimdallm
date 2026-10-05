@@ -365,6 +365,14 @@ class RepoConfig {
   final bool? neverApproveWithIssues;
   final String? neverApproveMinSeverity;
 
+  /// True when this repo's org has a bare entry in `non_monitored`
+  /// (theburrowhub/heimdallm#828). Derived by `AppConfig.fromJson` from
+  /// `nonMonitoredOrgs`, never set directly by the UI — it is not part of
+  /// `isMonitored`/`hasAiOverride` so the TOML-write path (which computes
+  /// `github.repositories` from per-repo settings alone) is unaffected; use
+  /// [isEffectivelyMonitored] for display.
+  final bool excludedByOrg;
+
   const RepoConfig({
     this.prEnabled,
     bool? mtEnabled,
@@ -378,18 +386,26 @@ class RepoConfig {
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
     this.firstSeenAt,
+    this.excludedByOrg = false,
   }) : _legacyMtEnabled = mtEnabled,
        _mergeTracking = mergeTracking;
 
   /// True if any feature is actively enabled (per-repo or inherited).
-  /// Used by the repo list to classify monitored vs not-monitored,
-  /// and by the TOML writer to decide which repos go in `repositories`.
+  /// Used by the TOML writer to decide which repos go in `repositories`.
+  /// Deliberately blind to [excludedByOrg] — see its doc comment. Use
+  /// [isEffectivelyMonitored] to classify monitored vs not-monitored for
+  /// display.
   bool get isMonitored {
     // Merge tracking discovery intersects with github.repositories just like
     // PR review. A repo-level merge-tracking opt-in therefore keeps the repo
     // monitored even when PR review is off.
     return (prEnabled ?? false) || mtEnabled == true;
   }
+
+  /// What the daemon actually does with this repo right now: [isMonitored]
+  /// unless the whole org is excluded, in which case MergeRepos filters the
+  /// repo out regardless of its own settings (theburrowhub/heimdallm#828).
+  bool get isEffectivelyMonitored => isMonitored && !excludedByOrg;
 
   /// Legacy getter — repos with any override need to be written to TOML.
   bool get hasAiOverride =>
@@ -424,6 +440,7 @@ class RepoConfig {
     Object? neverApproveWithIssues = _sentinel,
     Object? neverApproveMinSeverity = _sentinel,
     Object? firstSeenAt = _sentinel,
+    bool? excludedByOrg,
   }) {
     final requestedMergeTracking = mergeTracking == _sentinel
         ? this.mergeTracking
@@ -454,6 +471,9 @@ class RepoConfig {
       firstSeenAt: firstSeenAt == _sentinel
           ? this.firstSeenAt
           : firstSeenAt as DateTime?,
+      // Derived, not user-editable — carried forward unless this specific
+      // call is the one marking it (see doc comment).
+      excludedByOrg: excludedByOrg ?? this.excludedByOrg,
     );
   }
 }
@@ -1148,6 +1168,20 @@ class AppConfig {
           neverApproveMinSeverity: _nonEmpty(ov['never_approve_min_severity']),
           firstSeenAt: firstSeen,
         );
+      }
+    }
+    // Flag repos whose org is bare-excluded (theburrowhub/heimdallm#828) so
+    // the UI can show them as not-really-monitored without touching
+    // isMonitored (which still drives what gets written to
+    // github.repositories).
+    if (nonMonitoredOrgs.isNotEmpty) {
+      final orgSet = nonMonitoredOrgs.toSet();
+      for (final key in configs.keys.toList()) {
+        final slash = key.indexOf('/');
+        if (slash <= 0) continue;
+        if (orgSet.contains(key.substring(0, slash))) {
+          configs[key] = configs[key]!.copyWith(excludedByOrg: true);
+        }
       }
     }
     final orgOverrides = json['org_overrides'] as Map<String, dynamic>?;

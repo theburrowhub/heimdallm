@@ -16,6 +16,11 @@ bool featureIsOn({
   required RepoConfig config,
   required AppConfig appConfig,
 }) {
+  // A bare org entry in non_monitored (theburrowhub/heimdallm#828) is
+  // resolved by MergeRepos ahead of both the PR-review poll and the merge
+  // tracking repo set — neither feature can be "on" for an excluded repo
+  // regardless of its own settings.
+  if (config.excludedByOrg) return false;
   final inGlobalList = appConfig.repositories.contains(repo);
   final org = _orgForRepo(repo);
   final orgConfig = org != null ? appConfig.orgConfigs[org] : null;
@@ -34,6 +39,9 @@ String featureSourceLine({
   required RepoConfig config,
   required AppConfig appConfig,
 }) {
+  if (config.excludedByOrg) {
+    return 'Reason: org excluded from monitoring (non_monitored)';
+  }
   final inGlobalList = appConfig.repositories.contains(repo);
   final org = _orgForRepo(repo);
   final orgConfig = org != null ? appConfig.orgConfigs[org] : null;

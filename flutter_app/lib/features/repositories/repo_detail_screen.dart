@@ -200,7 +200,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
             orgMergeTracking,
           );
           final editorInherited = inheritedMergeTracking.copyWith(
-            enabled: _config.isMonitored
+            enabled: _config.isEffectivelyMonitored
                 ? inheritedMergeTracking.enabled
                 : false,
           );
@@ -211,6 +211,55 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
             padding: const EdgeInsets.all(16),
             child: Column(
               children: [
+                if (_config.excludedByOrg)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Box(
+                      style: BoxStyler()
+                          .color(AppColors.warning().withValues(alpha: 0.12))
+                          .borderAll(color: AppColors.warning(), width: 1)
+                          .borderRadiusAll(AppRadius.lg())
+                          .padding(
+                            EdgeInsetsGeometryMix.value(
+                              const EdgeInsets.all(14),
+                            ),
+                          ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.warning_amber_rounded,
+                            color: AppColors.warning().resolve(context),
+                            size: 20,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                AppText(
+                                  'Every repo in $orgName is excluded from monitoring. '
+                                  'The settings below have no effect until the org is re-enabled.',
+                                ),
+                                const SizedBox(height: 6),
+                                GestureDetector(
+                                  onTap: () => context.push(
+                                    '/orgs/${Uri.encodeComponent(orgName)}',
+                                  ),
+                                  child: AppText.label(
+                                    'Open org settings',
+                                    color: AppColors.warning().resolve(
+                                      context,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 // ── Section 1: General ─────────────────────────────────
                 _sectionCard('General', [
                   const AppText.label('Local directory'),
@@ -341,7 +390,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     inherited: editorInherited,
                     parentOverride: orgMergeTracking,
                     parentLabel: 'org: $orgName',
-                    enabledInheritedLabel: !_config.isMonitored
+                    enabledInheritedLabel: !_config.isEffectivelyMonitored
                         ? 'repository monitoring'
                         : null,
                     onChanged: (mergeTracking) =>

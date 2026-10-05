@@ -118,12 +118,12 @@ class RepoGridTile extends StatelessWidget {
                             .style(AppTextStyles.body.mix())
                             .fontSize(13)
                             .fontWeight(
-                              config.isMonitored
+                              config.isEffectivelyMonitored
                                   ? FontWeight.w600
                                   : FontWeight.w500,
                             )
                             .color(
-                              config.isMonitored
+                              config.isEffectivelyMonitored
                                   ? AppColors.text()
                                   : AppColors.textMuted(),
                             )

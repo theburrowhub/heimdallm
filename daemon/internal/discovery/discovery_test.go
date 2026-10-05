@@ -268,6 +268,23 @@ func TestMergeRepos_NonMonitoredOrgWinsAcrossAllSources(t *testing.T) {
 	}
 }
 
+// GitHub org/user names are case-insensitive (theburrowhub/heimdallm#829
+// review feedback): an operator-typed "MyOrg" must still exclude repos that
+// the GitHub API reports as "myorg/repo", matching how discovery_orgs is
+// already compared (strings.ToLower in upsertDiscoveredRepos).
+func TestMergeRepos_NonMonitoredOrgCaseInsensitive(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"MyOrg/repo1", "otherorg/repo1"},
+		nil,
+		nil,
+		[]string{"myorg"},
+	)
+	want := []string{"otherorg/repo1"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("got %v, want %v (org match must be case-insensitive)", got, want)
+	}
+}
+
 // ── FilterArchived ──────────────────────────────────────────────────────────
 
 type fakeArchivedChecker struct {

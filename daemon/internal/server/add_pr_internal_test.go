@@ -86,3 +86,50 @@ func TestAddRepoToTOMLMap(t *testing.T) {
 		t.Errorf("non_monitored must be empty after moving org/x, got %v", gh["non_monitored"])
 	}
 }
+
+// theburrowhub/heimdallm#829 review feedback: adopting a PR for a repo under
+// a bare-org-excluded org used to report success while MergeRepos silently
+// kept filtering the repo out. Surface an explicit error instead.
+func TestAddRepoToTOMLMap_BlockedByNonMonitoredOrg(t *testing.T) {
+	m := map[string]any{"github": map[string]any{
+		"non_monitored": []any{"myorg"},
+	}}
+	err := addRepoToTOMLMap(m, "myorg/repo")
+	if err == nil {
+		t.Fatal("expected error when the repo's org is excluded via a bare non_monitored entry")
+	}
+
+	gh := m["github"].(map[string]any)
+	if repos, ok := gh["repositories"].([]any); ok && len(repos) != 0 {
+		t.Errorf("repositories must not be mutated when blocked, got %v", repos)
+	}
+	nonMon := gh["non_monitored"].([]any)
+	if len(nonMon) != 1 || nonMon[0] != "myorg" {
+		t.Errorf("non_monitored must be unchanged when blocked, got %v", nonMon)
+	}
+}
+
+// GitHub org names are case-insensitive.
+func TestAddRepoToTOMLMap_OrgBlockIsCaseInsensitive(t *testing.T) {
+	m := map[string]any{"github": map[string]any{
+		"non_monitored": []any{"MyOrg"},
+	}}
+	if err := addRepoToTOMLMap(m, "myorg/repo"); err == nil {
+		t.Fatal("expected error for a case-insensitive org match")
+	}
+}
+
+// A repo outside the excluded org is unaffected.
+func TestAddRepoToTOMLMap_UnrelatedOrgNotBlocked(t *testing.T) {
+	m := map[string]any{"github": map[string]any{
+		"non_monitored": []any{"myorg"},
+	}}
+	if err := addRepoToTOMLMap(m, "otherorg/repo"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	gh := m["github"].(map[string]any)
+	repos := gh["repositories"].([]any)
+	if len(repos) != 1 || repos[0] != "otherorg/repo" {
+		t.Errorf("repositories = %v, want [otherorg/repo]", repos)
+	}
+}
