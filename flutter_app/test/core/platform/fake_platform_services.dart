@@ -67,7 +67,16 @@ class FakePlatformServices
   int setupWindowCalls = 0;
   int setupTrayCalls = 0;
   int setupNotifierCalls = 0;
-  final List<({String title, String body})> notifications = [];
+
+  /// Notifications that would have reached the OS. Like the real
+  /// implementations, a category whose mode is `off` records nothing.
+  final List<
+    ({String title, String body, NotificationCategory category, bool silent})
+  >
+  notifications = [];
+  NotificationPreferences notificationPreferences =
+      const NotificationPreferences();
+  final List<NotificationPreferences> setNotificationModesCalls = [];
   int showAndFocusCalls = 0;
   int hideCalls = 0;
   int quitCalls = 0;
@@ -130,12 +139,26 @@ class FakePlatformServices
   }
 
   @override
+  void setNotificationModes(NotificationPreferences preferences) {
+    notificationPreferences = preferences;
+    setNotificationModesCalls.add(preferences);
+  }
+
+  @override
   void showNotification({
     required String title,
     required String body,
     VoidCallback? onClick,
+    NotificationCategory category = NotificationCategory.activity,
   }) {
-    notifications.add((title: title, body: body));
+    final mode = notificationPreferences.modeFor(category);
+    if (mode == NotificationMode.off) return;
+    notifications.add((
+      title: title,
+      body: body,
+      category: category,
+      silent: mode == NotificationMode.silent,
+    ));
   }
 
   @override

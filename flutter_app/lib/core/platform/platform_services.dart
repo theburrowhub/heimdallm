@@ -4,7 +4,10 @@ import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
 import '../models/config_model.dart';
 import '../models/merge_tracking.dart';
+import '../models/notification_mode.dart';
 import '../models/pr.dart';
+
+export '../models/notification_mode.dart';
 
 import 'platform_services_stub.dart'
     if (dart.library.io) 'platform_services_desktop.dart'
@@ -161,13 +164,21 @@ abstract class PlatformServices {
   /// Initializes the notifier (local_notifier on desktop). No-op on web.
   Future<void> setupNotifier({required String appName});
 
-  /// Fires a notification. On desktop: `LocalNotification`. On web: no-op.
-  /// `onClick` is invoked when the user clicks the notification.
+  /// Fires a notification, honouring the [NotificationMode] last set for
+  /// [category] via [setNotificationModes]: `off` drops it, `silent` shows it
+  /// without sound. On desktop: flutter_local_notifications. On web: the
+  /// browser Notification API. `onClick` is invoked when the user clicks it.
   void showNotification({
     required String title,
     required String body,
     VoidCallback? onClick,
+    NotificationCategory category = NotificationCategory.activity,
   });
+
+  /// Applies the user's per-category notification modes. Every notification
+  /// raised afterwards — including ones the platform raises on its own, like
+  /// "update available" — follows them. Defaults to [NotificationMode.sound].
+  void setNotificationModes(NotificationPreferences preferences);
 
   /// Prevent the OS from closing the window (we intercept to hide to tray).
   /// No-op on web.

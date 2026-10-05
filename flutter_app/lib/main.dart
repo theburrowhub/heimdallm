@@ -7,6 +7,7 @@ import 'core/models/config_model.dart';
 import 'core/platform/platform_services.dart';
 import 'core/platform/platform_services_provider.dart';
 import 'core/state/appearance_preferences.dart';
+import 'core/state/notification_preferences.dart';
 import 'shared/design_system/components/components.dart';
 import 'shared/design_system/theme.dart';
 import 'shared/router.dart';
@@ -70,6 +71,15 @@ Future<void> main() async {
     });
   } catch (e) {
     debugPrint('tray init failed: $e');
+  }
+
+  // Apply the saved notification modes before the notifier exists, so even
+  // the first notification (e.g. a pending "update available") honours them.
+  // Later changes flow in through _BootstrapAppState's provider listener.
+  try {
+    platform.setNotificationModes(await readNotificationPreferences());
+  } catch (e) {
+    debugPrint('notification preferences load failed: $e');
   }
 
   try {
@@ -170,6 +180,12 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   @override
   void initState() {
     super.initState();
+    // This state lives for the whole app session, so it owns the bridge that
+    // keeps the platform's notification modes in sync with the settings UI.
+    ref.listenManual<NotificationPreferences>(
+      notificationPreferencesProvider,
+      (_, next) => _platform.setNotificationModes(next),
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _platform.setPreventWindowClose(true);
     });
