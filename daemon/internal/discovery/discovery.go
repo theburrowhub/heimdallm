@@ -128,10 +128,13 @@ func (s *Service) Run(ctx context.Context, interval time.Duration, topic string,
 // Order: static first (stable for TOML-driven overrides), then configured
 // ([ai.repos.*] explicit entries), then discovered (topic search results).
 //
-// Repos in nonMonitored are always excluded. Configured repos still join the
-// union when they are not explicitly disabled, keeping repos wired through
-// [ai.repos.*] monitored without letting an override undo the operator's
-// Not monitored choice.
+// Repos in nonMonitored are always excluded. An entry may be either an exact
+// "owner/repo" slug or a bare org/owner name (no slash) — a bare entry
+// excludes every repo under that org, current and future, not just a
+// snapshot of repos known at the time it was added (theburrowhub/heimdallm#828).
+// Configured repos still join the union when they are not explicitly
+// disabled, keeping repos wired through [ai.repos.*] monitored without
+// letting an override undo the operator's Not monitored choice.
 func MergeRepos(static, configured, discovered, nonMonitored []string) []string {
 	if len(static) == 0 && len(configured) == 0 && len(discovered) == 0 {
 		return nil
@@ -159,6 +162,11 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 		}
 		if _, blocked := blacklist[r]; blocked {
 			return
+		}
+		if org, _, found := strings.Cut(r, "/"); found {
+			if _, blocked := blacklist[org]; blocked {
+				return
+			}
 		}
 		if _, dup := seen[r]; dup {
 			return

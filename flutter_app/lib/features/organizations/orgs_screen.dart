@@ -43,6 +43,7 @@ class OrgsScreen extends ConsumerWidget {
           itemBuilder: (context, i) {
             final org = orgs[i];
             final overridden = config.orgConfigs[org]?.hasOverride ?? false;
+            final monitoringDisabled = config.nonMonitoredOrgs.contains(org);
             return AppSurface(
               child: Material(
                 type: MaterialType.transparency,
@@ -50,7 +51,9 @@ class OrgsScreen extends ConsumerWidget {
                   leading: const Icon(Icons.business_outlined),
                   title: AppText.sectionTitle(org),
                   subtitle: AppText.muted(
-                    overridden
+                    monitoringDisabled
+                        ? 'Monitoring disabled for this org'
+                        : overridden
                         ? 'Custom overrides on global defaults'
                         : 'Inherits global defaults',
                   ),

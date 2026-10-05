@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -155,6 +156,12 @@ func (p *Probe) tickNonMonitored(ctx context.Context) {
 	for _, repo := range current {
 		if ctx.Err() != nil {
 			return
+		}
+		// A bare org entry (no slash, theburrowhub/heimdallm#828) excludes a
+		// whole org rather than naming one repo — there is no single
+		// full_name to probe for it, so skip it here.
+		if !strings.Contains(repo, "/") {
+			continue
 		}
 		canonical, err := p.deps.Probe.GetCanonicalFullName(repo)
 		if err != nil {

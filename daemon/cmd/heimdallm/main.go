@@ -3135,6 +3135,14 @@ func aiReposInNonMonitored(c *config.Config) []string {
 	for _, repo := range aiRepoKeys(c) {
 		if _, ok := disabled[repo]; ok {
 			conflicts = append(conflicts, repo)
+			continue
+		}
+		// A bare org entry (theburrowhub/heimdallm#828) also conflicts with
+		// every [ai.repos.*] entry under that org, not just an exact match.
+		if org, _, found := strings.Cut(repo, "/"); found {
+			if _, ok := disabled[org]; ok {
+				conflicts = append(conflicts, repo)
+			}
 		}
 	}
 	return conflicts

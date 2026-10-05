@@ -34,6 +34,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
   OrgConfig _saved = const OrgConfig();
   bool _initialized = false;
   bool _saving = false;
+  bool _togglingMonitoring = false;
   Timer? _debounce;
 
   @override
@@ -96,6 +97,47 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
       if (mounted) showToast(context, 'Error: $e', isError: true);
     } finally {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  // One-click org-level exclusion (theburrowhub/heimdallm#828): writes a
+  // single bare org entry into non_monitored instead of enumerating every
+  // repo currently known under the org, so repos created later stay excluded
+  // too. Mirrors RepoDetailScreen's monitoring-toggle write, but for the org
+  // entry rather than a per-repo one.
+  Future<void> _toggleOrgMonitoring(AppConfig appConfig) async {
+    final disabled = appConfig.nonMonitoredOrgs.contains(widget.orgName);
+    final nonMonitoredOrgs = disabled
+        ? appConfig.nonMonitoredOrgs
+              .where((o) => o != widget.orgName)
+              .toList()
+        : [...appConfig.nonMonitoredOrgs, widget.orgName];
+    final nonMonitored =
+        <String>{
+            ...nonMonitoredOrgs,
+            ...appConfig.repoConfigs.entries
+                .where((e) => !e.value.isMonitored)
+                .map((e) => e.key),
+          }.toList()
+          ..sort();
+    if (mounted) setState(() => _togglingMonitoring = true);
+    try {
+      final freshJson = await ref.read(apiClientProvider).patchConfig({
+        'github': {'non_monitored': nonMonitored},
+      });
+      ref.read(configNotifierProvider.notifier).updateFromServer(freshJson);
+      if (mounted) {
+        showToast(
+          context,
+          disabled
+              ? 'Monitoring enabled for ${widget.orgName}'
+              : 'Monitoring disabled for ${widget.orgName}',
+        );
+      }
+    } catch (e) {
+      if (mounted) showToast(context, 'Error: $e', isError: true);
+    } finally {
+      if (mounted) setState(() => _togglingMonitoring = false);
     }
   }
 
@@ -196,10 +238,38 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
             final prompts = ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
             final promptOptions = prompts.map((p) => p.id).toList();
 
+            final orgDisabled = appConfig.nonMonitoredOrgs.contains(
+              widget.orgName,
+            );
             return SingleChildScrollView(
               padding: const EdgeInsets.all(16),
               child: Column(
                 children: [
+                  _sectionCard('Monitoring', [
+                    AppText(
+                      orgDisabled
+                          ? 'Every repo under ${widget.orgName} is excluded from monitoring, including ones created later.'
+                          : 'Repos under ${widget.orgName} are monitored per their individual settings.',
+                    ),
+                    const SizedBox(height: 10),
+                    _togglingMonitoring
+                        ? const Center(
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : orgDisabled
+                        ? AppButton.secondary(
+                            label: 'Enable monitoring for this org',
+                            onPressed: () => _toggleOrgMonitoring(appConfig),
+                          )
+                        : AppButton.destructive(
+                            label: 'Disable monitoring for this org',
+                            onPressed: () => _toggleOrgMonitoring(appConfig),
+                          ),
+                  ]),
                   _sectionCard('General', [
                     OverrideTextField(
                       label: 'Local directory',

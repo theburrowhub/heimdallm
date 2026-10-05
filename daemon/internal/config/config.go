@@ -773,6 +773,9 @@ func (c *Config) Validate() error {
 	if err := c.validateOrgKeys(); err != nil {
 		return err
 	}
+	if err := c.validateNonMonitored(); err != nil {
+		return err
+	}
 	if err := c.validateNeverApproveMinSeverity(); err != nil {
 		return err
 	}
@@ -1199,6 +1202,27 @@ func (c *Config) validateOrgKeys() error {
 	for org := range c.AI.Orgs {
 		if err := ValidateOrgSlug(org); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateNonMonitored checks every github.non_monitored entry is either a
+// full "owner/repo" slug or a bare org/owner slug (theburrowhub/heimdallm#828:
+// a bare entry excludes every repo under that org, not just one repo).
+func (c *Config) validateNonMonitored() error {
+	for _, entry := range c.GitHub.NonMonitored {
+		if entry == "" {
+			continue
+		}
+		var err error
+		if strings.Contains(entry, "/") {
+			err = ValidateRepoSlug(entry)
+		} else {
+			err = ValidateOrgSlug(entry)
+		}
+		if err != nil {
+			return fmt.Errorf("config: github.non_monitored entry %q is invalid: %w", entry, err)
 		}
 	}
 	return nil

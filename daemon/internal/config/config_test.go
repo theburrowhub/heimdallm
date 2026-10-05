@@ -518,6 +518,51 @@ func TestValidate_DiscoveryOrgsValid(t *testing.T) {
 	}
 }
 
+func TestValidate_NonMonitoredOrgEntryValid(t *testing.T) {
+	cases := []string{
+		"freepik-company",
+		"theburrowhub",
+		"myorg/specific-repo",
+	}
+	for _, entry := range cases {
+		cfg := &Config{
+			AI:     AIConfig{Primary: "claude"},
+			GitHub: GitHubConfig{NonMonitored: []string{entry}},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate(non_monitored=%q) = %v, want nil", entry, err)
+		}
+	}
+}
+
+func TestValidate_NonMonitoredEntryInvalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry string
+	}{
+		{"bare org contains space", "evil org:other"},
+		{"bare org starts with hyphen", "-freepik"},
+		{"owner/repo bad repo name", "myorg/.."},
+		{"owner/repo empty owner", "/repo"},
+		{"owner/repo too many slashes", "myorg/sub/repo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				AI:     AIConfig{Primary: "claude"},
+				GitHub: GitHubConfig{NonMonitored: []string{tc.entry}},
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate(non_monitored=%q) = nil, want error", tc.entry)
+			}
+			if !strings.Contains(err.Error(), "non_monitored") {
+				t.Errorf("error should mention non_monitored, got: %v", err)
+			}
+		})
+	}
+}
+
 // ── Issue tracking ───────────────────────────────────────────────────────────
 
 func TestValidate_InvalidOrgOverrideKey(t *testing.T) {

@@ -194,6 +194,80 @@ func TestMergeRepos_ConfiguredDeduplicatesWithStatic(t *testing.T) {
 	}
 }
 
+// theburrowhub/heimdallm#828: a bare org name (no slash) in nonMonitored
+// excludes every repo under that org, not just an exact "owner/repo" match.
+func TestMergeRepos_NonMonitoredOrgExcludesAllReposInOrg(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"myorg/repo1", "myorg/repo2", "otherorg/repo1"},
+		nil,
+		nil,
+		[]string{"myorg"},
+	)
+	want := []string{"otherorg/repo1"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// A bare-org entry and an exact-slug entry coexist fine in the same list.
+func TestMergeRepos_NonMonitoredOrgAndExactRepoBothWork(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"myorg/repo1", "otherorg/repo1", "otherorg/repo2"},
+		nil,
+		nil,
+		[]string{"myorg", "otherorg/repo1"},
+	)
+	want := []string{"otherorg/repo2"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// A bare-org entry must not affect repos outside that org.
+func TestMergeRepos_NonMonitoredOrgDoesNotAffectOtherOrgs(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"otherorg/repo1"},
+		nil,
+		nil,
+		[]string{"myorg"},
+	)
+	want := []string{"otherorg/repo1"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// Mirrors TestMergeRepos_NonMonitoredWinsAcrossAllSources but for an org-level
+// entry: every repo under the blacklisted org is excluded regardless of which
+// source(s) it appears in.
+func TestMergeRepos_NonMonitoredOrgWinsAcrossAllSources(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"myorg/triple", "otherorg/static-only"},
+		[]string{"myorg/triple"},
+		[]string{"myorg/triple"},
+		[]string{"myorg"},
+	)
+	want := []string{"otherorg/static-only"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v (org blacklist must win over every source, deduped)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // ── FilterArchived ──────────────────────────────────────────────────────────
 
 type fakeArchivedChecker struct {

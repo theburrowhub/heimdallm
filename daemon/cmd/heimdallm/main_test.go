@@ -323,6 +323,24 @@ func TestAIReposInNonMonitoredDetectsStoreLayerConflict(t *testing.T) {
 	}
 }
 
+// theburrowhub/heimdallm#828: a bare org entry in non_monitored also
+// conflicts with an [ai.repos.*] entry for a repo under that org, not just an
+// exact owner/repo match.
+func TestAIReposInNonMonitoredDetectsOrgLevelConflict(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"myorg/repo1":    {},
+		"otherorg/repo2": {},
+	}
+	cfg.GitHub.NonMonitored = []string{"myorg"}
+
+	got := aiReposInNonMonitored(cfg)
+	want := []string{"myorg/repo1"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("aiReposInNonMonitored = %v, want %v", got, want)
+	}
+}
+
 func TestRepoMonitoringConflictWarnerDeduplicatesAndResets(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.AI.Repos = map[string]config.RepoAI{"a/repo": {}, "b/repo": {}}

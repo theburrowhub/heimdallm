@@ -943,6 +943,11 @@ class AppConfig {
   final Map<String, CLIAgentConfig> agentConfigs; // keyed by CLI name
   final Map<String, RepoConfig> repoConfigs; // keyed by "org/repo"
   final Map<String, OrgConfig> orgConfigs; // keyed by "org"
+
+  /// Bare org entries in `github.non_monitored` (no slash) — each one
+  /// excludes every repo under that org, current and future, rather than
+  /// naming a single repo (theburrowhub/heimdallm#828).
+  final List<String> nonMonitoredOrgs;
   final String globalCloneDir;
   final bool globalNeverApproveWithIssues;
 
@@ -987,6 +992,7 @@ class AppConfig {
     this.agentConfigs = const {},
     this.repoConfigs = const {},
     this.orgConfigs = const {},
+    this.nonMonitoredOrgs = const [],
     this.globalCloneDir = '',
     this.mergeTracking = const MergeTrackingConfig(),
     this.myPrs = const MyPrsConfig(),
@@ -1009,13 +1015,31 @@ class AppConfig {
         ..sort());
 
   List<String> get knownOrganizations {
-    final orgs = <String>{...orgConfigs.keys, ...mergeTracking.orgs.keys};
+    final orgs = <String>{
+      ...orgConfigs.keys,
+      ...mergeTracking.orgs.keys,
+      ...nonMonitoredOrgs,
+    };
     for (final repo in repoConfigs.keys) {
       final slash = repo.indexOf('/');
       if (slash > 0) orgs.add(repo.substring(0, slash));
     }
     return orgs.where((o) => o.trim().isNotEmpty).toList()..sort();
   }
+
+  /// The raw `github.non_monitored` list as the daemon expects it back on a
+  /// `patchConfig` write: bare org entries first, then exact "owner/repo"
+  /// entries for individually-disabled repos. Any writer that mutates one
+  /// half (an org toggle, a per-repo toggle) must source the other half from
+  /// here so it doesn't silently drop the entries it isn't changing.
+  List<String> get nonMonitoredList =>
+      [
+          ...nonMonitoredOrgs,
+          ...repoConfigs.entries
+              .where((e) => !e.value.isMonitored)
+              .map((e) => e.key),
+        ]
+        ..sort();
 
   AppConfig copyWith({
     Object? bindAddr = _sentinel,
@@ -1028,6 +1052,7 @@ class AppConfig {
     Map<String, CLIAgentConfig>? agentConfigs,
     Map<String, RepoConfig>? repoConfigs,
     Map<String, OrgConfig>? orgConfigs,
+    List<String>? nonMonitoredOrgs,
     String? globalCloneDir,
     MergeTrackingConfig? mergeTracking,
     MyPrsConfig? myPrs,
@@ -1050,6 +1075,7 @@ class AppConfig {
       agentConfigs: agentConfigs ?? this.agentConfigs,
       repoConfigs: repoConfigs ?? this.repoConfigs,
       orgConfigs: orgConfigs ?? this.orgConfigs,
+      nonMonitoredOrgs: nonMonitoredOrgs ?? this.nonMonitoredOrgs,
       globalCloneDir: globalCloneDir ?? this.globalCloneDir,
       mergeTracking: mergeTracking ?? this.mergeTracking,
       myPrs: myPrs ?? this.myPrs,
@@ -1087,11 +1113,18 @@ class AppConfig {
       // Repos in the monitored list have PR review enabled
       for (final r in repos) r: const RepoConfig(prEnabled: true),
     };
-    // Restore non-monitored repos
+    // Restore non-monitored repos. A bare entry (no slash) excludes a whole
+    // org (theburrowhub/heimdallm#828) rather than naming one repo, so it
+    // must not become a fake RepoConfig keyed by the org name.
     final nonMonitored =
         (json['non_monitored'] as List<dynamic>?)?.cast<String>() ?? [];
+    final nonMonitoredOrgs = <String>[];
     for (final r in nonMonitored) {
-      configs.putIfAbsent(r, () => const RepoConfig());
+      if (r.contains('/')) {
+        configs.putIfAbsent(r, () => const RepoConfig());
+      } else if (r.isNotEmpty) {
+        nonMonitoredOrgs.add(r);
+      }
     }
     // Per-repo overrides (normalize empty strings to null)
     final overrides = json['repo_overrides'] as Map<String, dynamic>?;
@@ -1157,6 +1190,7 @@ class AppConfig {
       agentConfigs: agentConfigs,
       repoConfigs: _withMergeTrackingOverrides(configs, json),
       orgConfigs: _withMergeTrackingOrgOverrides(orgConfigs, json),
+      nonMonitoredOrgs: nonMonitoredOrgs..sort(),
       globalCloneDir: (json['clone_dir'] as String?) ?? '',
       mergeTracking: json['merge_tracking'] != null
           ? MergeTrackingConfig.fromJson(

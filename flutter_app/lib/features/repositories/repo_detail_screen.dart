@@ -91,11 +91,17 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   .map((e) => e.key)
                   .toList()
                 ..sort();
+          // Preserve any bare org entries (theburrowhub/heimdallm#828) —
+          // they aren't represented in repoConfigs, so recomputing
+          // non_monitored purely from the per-repo map would silently drop
+          // an org-level exclusion every time an unrelated repo is toggled.
           final nonMonitored =
-              updatedRepos.entries
-                  .where((e) => !e.value.isMonitored)
-                  .map((e) => e.key)
-                  .toList()
+              <String>{
+                  ...current.nonMonitoredOrgs,
+                  ...updatedRepos.entries
+                      .where((e) => !e.value.isMonitored)
+                      .map((e) => e.key),
+                }.toList()
                 ..sort();
           lastResponse = await api.patchConfig({
             'github': {

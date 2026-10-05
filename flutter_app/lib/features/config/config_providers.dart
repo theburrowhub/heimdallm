@@ -435,18 +435,11 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   if (_listsDiffer(old.repositories, updated.repositories)) {
     githubDiff['repositories'] = updated.repositories;
   }
-  final oldNonMon =
-      old.repoConfigs.entries
-          .where((e) => !e.value.isMonitored)
-          .map((e) => e.key)
-          .toList()
-        ..sort();
-  final newNonMon =
-      updated.repoConfigs.entries
-          .where((e) => !e.value.isMonitored)
-          .map((e) => e.key)
-          .toList()
-        ..sort();
+  // AppConfig.nonMonitoredList folds in bare org entries (#828) alongside
+  // per-repo entries — using the raw repoConfigs-only list here would send a
+  // non_monitored write that silently drops any org-level exclusion.
+  final oldNonMon = old.nonMonitoredList;
+  final newNonMon = updated.nonMonitoredList;
   if (_listsDiffer(oldNonMon, newNonMon)) {
     githubDiff['non_monitored'] = newNonMon;
   }
