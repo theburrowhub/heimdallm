@@ -176,6 +176,48 @@ fallback = "fast"
 	}
 }
 
+// theburrowhub/heimdallm#828: a bare org entry (no slash) in non_monitored
+// excludes an entire org. When that org is renamed on GitHub, the bare entry
+// must follow the rename like ai.orgs.<org> already does, or the exclusion
+// silently stops applying to the renamed org's repos.
+func TestRenameRepoInTOML_RenamesBareOrgNonMonitoredEntryWhenOrgChanged(t *testing.T) {
+	path := writeConfigFile(t, `
+[github]
+non_monitored = ["acme", "other/repo"]
+
+[ai.repos."acme/api"]
+fallback = "fast"
+`)
+
+	if err := config.RenameRepoInTOML(path, "acme/api", "widget/api"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	got := toStringSlice(readBack(t, path)["github"].(map[string]any)["non_monitored"])
+	want := []string{"widget", "other/repo"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("non_monitored = %v, want %v", got, want)
+	}
+}
+
+// Within-org renames must not perturb a bare org entry for an unrelated org.
+func TestRenameRepoInTOML_LeavesBareOrgNonMonitoredEntryWhenOrgUnchanged(t *testing.T) {
+	path := writeConfigFile(t, `
+[github]
+non_monitored = ["acme"]
+`)
+
+	if err := config.RenameRepoInTOML(path, "acme/old", "acme/new"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	got := toStringSlice(readBack(t, path)["github"].(map[string]any)["non_monitored"])
+	want := []string{"acme"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("non_monitored = %v, want %v", got, want)
+	}
+}
+
 // TestConfig_ApplyRename_AllSurfaces pins the in-memory mutation
 // contract that complements RenameRepoInTOML on disk. The reconciler
 // invokes both under cfgMu so they must agree on which fields move.
@@ -228,6 +270,21 @@ func TestConfig_ApplyRename_SameOrgLeavesOrgsMap(t *testing.T) {
 
 	if _, has := cfg.AI.Orgs["acme"]; !has {
 		t.Error("AI.Orgs[acme] dropped on within-org rename")
+	}
+}
+
+// Mirrors TestRenameRepoInTOML_RenamesBareOrgNonMonitoredEntryWhenOrgChanged
+// for the in-memory ApplyRename path.
+func TestConfig_ApplyRename_RenamesBareOrgNonMonitoredEntryWhenOrgChanged(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.NonMonitored = []string{"acme", "other/repo"}
+	cfg.AI.Repos = map[string]config.RepoAI{"acme/api": {Primary: "claude"}}
+
+	cfg.ApplyRename("acme/api", "widget/api")
+
+	want := []string{"widget", "other/repo"}
+	if !reflect.DeepEqual(cfg.GitHub.NonMonitored, want) {
+		t.Errorf("NonMonitored = %v, want %v", cfg.GitHub.NonMonitored, want)
 	}
 }
 

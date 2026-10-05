@@ -283,8 +283,8 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
         // Monitored first, disabled last; both groups sorted alphabetically
         final allRepos = _repoConfigs.keys.toList()
           ..sort((a, b) {
-            final ma = _repoConfigs[a]!.isMonitored ? 0 : 1;
-            final mb = _repoConfigs[b]!.isMonitored ? 0 : 1;
+            final ma = _repoConfigs[a]!.isEffectivelyMonitored ? 0 : 1;
+            final mb = _repoConfigs[b]!.isEffectivelyMonitored ? 0 : 1;
             if (ma != mb) return ma.compareTo(mb);
             return a.compareTo(b);
           });
@@ -307,8 +307,12 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
             if (!_orgFilter.contains(org)) return false;
           }
           final c = _repoConfigs[r]!;
-          if (_filter == 'monitored' && !c.isMonitored) return false;
-          if (_filter == 'not_monitored' && c.isMonitored) return false;
+          if (_filter == 'monitored' && !c.isEffectivelyMonitored) {
+            return false;
+          }
+          if (_filter == 'not_monitored' && c.isEffectivelyMonitored) {
+            return false;
+          }
           return true;
         }).toList();
 
@@ -342,10 +346,10 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                       counts: {
                         'all': _repoConfigs.length,
                         'monitored': _repoConfigs.values
-                            .where((c) => c.isMonitored)
+                            .where((c) => c.isEffectivelyMonitored)
                             .length,
                         'not_monitored': _repoConfigs.values
-                            .where((c) => !c.isMonitored)
+                            .where((c) => !c.isEffectivelyMonitored)
                             .length,
                       },
                       current: _filter,
@@ -509,10 +513,10 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
   @override
   Widget build(BuildContext context) {
     final monitored = widget.repos
-        .where((r) => widget.configs[r]!.isMonitored)
+        .where((r) => widget.configs[r]!.isEffectivelyMonitored)
         .toList();
     final disabled = widget.repos
-        .where((r) => !widget.configs[r]!.isMonitored)
+        .where((r) => !widget.configs[r]!.isEffectivelyMonitored)
         .toList();
 
     return ListView(
@@ -721,8 +725,12 @@ class _ReposGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final monitored = repos.where((r) => configs[r]!.isMonitored).toList();
-    final disabled = repos.where((r) => !configs[r]!.isMonitored).toList();
+    final monitored = repos
+        .where((r) => configs[r]!.isEffectivelyMonitored)
+        .toList();
+    final disabled = repos
+        .where((r) => !configs[r]!.isEffectivelyMonitored)
+        .toList();
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
 
     return CustomScrollView(

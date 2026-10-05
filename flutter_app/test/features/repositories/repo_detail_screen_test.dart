@@ -28,9 +28,10 @@ Map<String, dynamic> _configJson({
   Map<String, dynamic> repoMergeTracking = const {},
   Map<String, dynamic> orgMergeTracking = const {},
   bool monitored = true,
+  bool orgExcluded = false,
 }) => {
   'repositories': [if (monitored) _repoName],
-  'non_monitored': [if (!monitored) _repoName],
+  'non_monitored': [if (!monitored) _repoName, if (orgExcluded) _orgName],
   'server_port': 1,
   'poll_interval': '60s',
   'retention_days': 30,
@@ -52,6 +53,7 @@ Future<MockApiClient> _mountMergeTrackingDetail(
   Map<String, dynamic> repoMergeTracking = const {},
   Map<String, dynamic> orgMergeTracking = const {},
   bool monitored = true,
+  bool orgExcluded = false,
 }) async {
   final mockApi = MockApiClient();
   final currentRepoMergeTracking = Map<String, dynamic>.from(repoMergeTracking);
@@ -62,6 +64,7 @@ Future<MockApiClient> _mountMergeTrackingDetail(
       repoMergeTracking: currentRepoMergeTracking,
       orgMergeTracking: orgMergeTracking,
       monitored: monitored,
+      orgExcluded: orgExcluded,
     ),
   );
   when(() => mockApi.patchMergeTrackingRepoConfig(_repoName, any())).thenAnswer(
@@ -365,6 +368,49 @@ void main() {
       expect(find.text('Inherited from repository monitoring'), findsOneWidget);
 
       await tester.pump(const Duration(seconds: 4));
+    },
+  );
+
+  // theburrowhub/heimdallm#829 review feedback: a repo under a bare-excluded
+  // org is still individually "monitored" (prEnabled) but the daemon never
+  // reviews it — the screen must say so instead of looking like a normal
+  // active repo.
+  testWidgets(
+    'a repo excluded by its org shows the exclusion banner',
+    (tester) async {
+      await _mountMergeTrackingDetail(
+        tester,
+        globalMtEnabled: true,
+        monitored: true,
+        orgExcluded: true,
+      );
+
+      expect(
+        find.textContaining('is excluded from monitoring'),
+        findsOneWidget,
+      );
+      expect(find.text('Open org settings'), findsOneWidget);
+
+      // Merge tracking also follows isEffectivelyMonitored, not just
+      // isMonitored, so an org-excluded repo reads the same as a disabled one.
+      final switchFinder = find.byKey(const Key('repo_merge_tracking_switch'));
+      expect(tester.widget<Switch>(switchFinder).value, isFalse);
+      expect(find.text('Inherited from repository monitoring'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 4));
+    },
+  );
+
+  testWidgets(
+    'a monitored repo in a non-excluded org shows no banner',
+    (tester) async {
+      await _mountMergeTrackingDetail(tester, monitored: true);
+
+      expect(
+        find.textContaining('is excluded from monitoring'),
+        findsNothing,
+      );
+      expect(find.text('Open org settings'), findsNothing);
     },
   );
 

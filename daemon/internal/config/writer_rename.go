@@ -49,7 +49,15 @@ func RenameRepoInTOML(path, oldRepo, newRepo string) error {
 	// 1. github.repositories / github.non_monitored: rewrite slices in place.
 	if gh, ok := m["github"].(map[string]any); ok {
 		gh["repositories"] = replaceInTOMLList(gh["repositories"], oldRepo, newRepo)
-		gh["non_monitored"] = replaceInTOMLList(gh["non_monitored"], oldRepo, newRepo)
+		nonMonitored := replaceInTOMLList(gh["non_monitored"], oldRepo, newRepo)
+		// A bare org entry (theburrowhub/heimdallm#828) excludes the whole
+		// org, not one repo — it must follow an org rename the same way
+		// ai.orgs.<org> does below, or the exclusion silently stops
+		// applying to the renamed org's repos.
+		if oldOrg != "" && newOrg != "" && oldOrg != newOrg {
+			nonMonitored = replaceInTOMLList(nonMonitored, oldOrg, newOrg)
+		}
+		gh["non_monitored"] = nonMonitored
 	}
 
 	// 2. ai.repos.<old> -> ai.repos.<new>.
@@ -125,10 +133,15 @@ func (c *Config) ApplyRename(oldRepo, newRepo string) {
 		}
 	}
 	oldOrg, newOrg := orgOf(oldRepo), orgOf(newRepo)
-	if oldOrg != "" && newOrg != "" && oldOrg != newOrg && c.AI.Orgs != nil {
-		if v, ok := c.AI.Orgs[oldOrg]; ok {
-			delete(c.AI.Orgs, oldOrg)
-			c.AI.Orgs[newOrg] = v
+	if oldOrg != "" && newOrg != "" && oldOrg != newOrg {
+		// A bare org entry (theburrowhub/heimdallm#828) excludes the whole
+		// org, not one repo — it must follow an org rename too.
+		c.GitHub.NonMonitored = replaceInStringSlice(c.GitHub.NonMonitored, oldOrg, newOrg)
+		if c.AI.Orgs != nil {
+			if v, ok := c.AI.Orgs[oldOrg]; ok {
+				delete(c.AI.Orgs, oldOrg)
+				c.AI.Orgs[newOrg] = v
+			}
 		}
 	}
 }

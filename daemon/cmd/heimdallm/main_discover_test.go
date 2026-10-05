@@ -148,6 +148,75 @@ func TestUpsertDiscoveredRepos_OrgFilterCaseInsensitive(t *testing.T) {
 	}
 }
 
+// theburrowhub/heimdallm#829 review feedback: upsertDiscoveredRepos only
+// checked non_monitored by exact slug, so a PR seen for a repo under a
+// bare-org-excluded org was still persisted into Repositories, contradicting
+// what MergeRepos actually serves.
+func TestUpsertDiscoveredRepos_NonMonitoredOrgBlocksAutoDiscovery(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.NonMonitored = []string{"myorg"}
+
+	prs := []*gh.PullRequest{
+		{RepositoryURL: "https://api.github.com/repos/myorg/new", Number: 1},
+		{RepositoryURL: "https://api.github.com/repos/otherorg/new", Number: 2},
+	}
+	for _, pr := range prs {
+		pr.ResolveRepo()
+	}
+
+	added := upsertDiscoveredRepos(cfg, prs)
+	if len(added) != 1 || added[0] != "otherorg/new" {
+		t.Fatalf("expected only otherorg/new added, got %v", added)
+	}
+	for _, r := range cfg.GitHub.Repositories {
+		if r == "myorg/new" {
+			t.Fatalf("myorg/new must not be persisted into Repositories, got %v", cfg.GitHub.Repositories)
+		}
+	}
+}
+
+// A bare org entry is as authoritative as an exact non_monitored slug: it
+// must override an explicit [ai.repos.*] entry too, not just plain discovery.
+func TestUpsertDiscoveredRepos_NonMonitoredOrgOverridesExplicitConfig(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.NonMonitored = []string{"myorg"}
+	cfg.AI.Repos = map[string]config.RepoAI{"myorg/wired-up": {}}
+
+	prs := []*gh.PullRequest{
+		{RepositoryURL: "https://api.github.com/repos/myorg/wired-up", Number: 1},
+	}
+	for _, pr := range prs {
+		pr.ResolveRepo()
+	}
+
+	added := upsertDiscoveredRepos(cfg, prs)
+	if len(added) != 0 {
+		t.Fatalf("org-excluded repo must not be auto-added even with explicit AI config, got %v", added)
+	}
+	for _, r := range cfg.GitHub.Repositories {
+		if r == "myorg/wired-up" {
+			t.Fatalf("myorg/wired-up must remain out of Repositories, got %v", cfg.GitHub.Repositories)
+		}
+	}
+}
+
+func TestUpsertDiscoveredRepos_NonMonitoredOrgCaseInsensitive(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.NonMonitored = []string{"MyOrg"}
+
+	prs := []*gh.PullRequest{
+		{RepositoryURL: "https://api.github.com/repos/myorg/new", Number: 1},
+	}
+	for _, pr := range prs {
+		pr.ResolveRepo()
+	}
+
+	added := upsertDiscoveredRepos(cfg, prs)
+	if len(added) != 0 {
+		t.Fatalf("org match must be case-insensitive, got %v", added)
+	}
+}
+
 func TestIntersectMonitoredRepos_AppliesLiveDisableToStaleTier1Snapshot(t *testing.T) {
 	current := []string{"org/keep", "org/just-disabled", "org/archived-elsewhere"}
 	got := intersectMonitoredRepos(current, func() []string {

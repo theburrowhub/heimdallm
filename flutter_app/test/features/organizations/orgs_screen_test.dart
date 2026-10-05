@@ -122,4 +122,28 @@ void main() {
 
     expect(find.text('Org acme'), findsOneWidget);
   });
+
+  // theburrowhub/heimdallm#829 review feedback: the org list is the place an
+  // operator discovers that a whole org is excluded, not just the detail
+  // screen they'd have to already know to open.
+  testWidgets(
+    'shows a monitoring-disabled subtitle for a bare-excluded org',
+    (tester) async {
+      const config = AppConfig(
+        repoConfigs: {'acme/heimdallm': RepoConfig(prEnabled: true)},
+        nonMonitoredOrgs: ['acme'],
+      );
+
+      await tester.pumpWidget(
+        _routerHost([
+          configNotifierProvider.overrideWith(
+            () => _StaticConfigNotifier(config),
+          ),
+        ]),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Monitoring disabled for this org'), findsOneWidget);
+    },
+  );
 }

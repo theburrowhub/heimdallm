@@ -128,10 +128,13 @@ func (s *Service) Run(ctx context.Context, interval time.Duration, topic string,
 // Order: static first (stable for TOML-driven overrides), then configured
 // ([ai.repos.*] explicit entries), then discovered (topic search results).
 //
-// Repos in nonMonitored are always excluded. Configured repos still join the
-// union when they are not explicitly disabled, keeping repos wired through
-// [ai.repos.*] monitored without letting an override undo the operator's
-// Not monitored choice.
+// Repos in nonMonitored are always excluded. An entry may be either an exact
+// "owner/repo" slug or a bare org/owner name (no slash) — a bare entry
+// excludes every repo under that org, current and future, not just a
+// snapshot of repos known at the time it was added (theburrowhub/heimdallm#828).
+// Configured repos still join the union when they are not explicitly
+// disabled, keeping repos wired through [ai.repos.*] monitored without
+// letting an override undo the operator's Not monitored choice.
 func MergeRepos(static, configured, discovered, nonMonitored []string) []string {
 	if len(static) == 0 && len(configured) == 0 && len(discovered) == 0 {
 		return nil
@@ -151,6 +154,7 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 		}
 		blacklist[r] = struct{}{}
 	}
+	orgBlacklist := BuildNonMonitoredOrgs(nonMonitored)
 	seen := make(map[string]struct{}, len(static)+len(configured)+len(discovered))
 	out := make([]string, 0, len(static)+len(configured)+len(discovered))
 	add := func(r string) {
@@ -158,6 +162,9 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 			return
 		}
 		if _, blocked := blacklist[r]; blocked {
+			return
+		}
+		if orgBlacklist.Blocks(r) {
 			return
 		}
 		if _, dup := seen[r]; dup {
@@ -179,6 +186,37 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 		return nil
 	}
 	return out
+}
+
+// NonMonitoredOrgs is a case-insensitive set of the bare org entries found in
+// a non_monitored list (theburrowhub/heimdallm#828). GitHub org/user names
+// are case-insensitive, so comparisons normalize to lowercase the same way
+// discovery_orgs already does (see upsertDiscoveredRepos' allowedOrgs set).
+type NonMonitoredOrgs map[string]struct{}
+
+// BuildNonMonitoredOrgs extracts the bare (no "/") entries from nonMonitored
+// into a reusable lookup. Build once per batch of candidate repos rather than
+// per repo.
+func BuildNonMonitoredOrgs(nonMonitored []string) NonMonitoredOrgs {
+	orgs := make(NonMonitoredOrgs, len(nonMonitored))
+	for _, r := range nonMonitored {
+		if r == "" || strings.Contains(r, "/") {
+			continue
+		}
+		orgs[strings.ToLower(r)] = struct{}{}
+	}
+	return orgs
+}
+
+// Blocks reports whether repo ("owner/name") falls under one of the set's
+// excluded orgs.
+func (o NonMonitoredOrgs) Blocks(repo string) bool {
+	org, _, found := strings.Cut(repo, "/")
+	if !found {
+		return false
+	}
+	_, blocked := o[strings.ToLower(org)]
+	return blocked
 }
 
 // ArchivedChecker verifies whether a single repository is archived or deleted.

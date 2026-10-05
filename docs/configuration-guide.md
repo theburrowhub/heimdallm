@@ -151,6 +151,20 @@ If the HEAD changed while disabled, the stale result is retired and the
 outstanding review request can evaluate the replacement commit instead.
 Retry publication is anchored to the reviewed commit SHA.
 
+An entry with no `/` excludes an entire org — every repo under it, now and
+any created later — instead of one repo:
+
+```toml
+[github]
+non_monitored = ["myorg", "otherorg/specific-repo"]
+```
+
+This is dynamic, not a one-time snapshot: it is resolved against the current
+repo list on every poll, so a repo created in `myorg` next month is excluded
+automatically, without editing `non_monitored` again. It is the counterpart
+to `discovery_orgs` above, which operates at the same org granularity for
+*adding* repos.
+
 ### Poll interval
 
 ```bash

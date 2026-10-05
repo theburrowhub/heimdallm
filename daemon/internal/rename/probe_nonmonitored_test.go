@@ -189,6 +189,30 @@ func TestProbe_NonMonitored_404DoesNotEmit(t *testing.T) {
 	}
 }
 
+// TestProbe_NonMonitored_SkipsBareOrgEntries pins theburrowhub/heimdallm#828:
+// a bare org name (no slash) in non_monitored excludes a whole org, it is not
+// a single repo slug, so the probe must not issue a canonical-name lookup for
+// it (that would hit GET /repos/<org>, which is meaningless) nor emit a
+// stale-slug warning for it.
+func TestProbe_NonMonitored_SkipsBareOrgEntries(t *testing.T) {
+	canonical := &fakeCanonical{
+		results: map[string]canonicalResult{
+			"acme/parked": {canonical: "acme/parked-v2"},
+		},
+	}
+	publisher := &fakePublisher{}
+	p := newNonMonitoredProbe(t, canonical, publisher, []string{"myorg", "acme/parked"})
+
+	p.Tick(context.Background())
+
+	if canonical.callCount() != 1 {
+		t.Fatalf("canonical.callCount() = %d, want 1 (bare org entry skipped)", canonical.callCount())
+	}
+	if publisher.calls != 1 {
+		t.Fatalf("publisher.calls = %d, want 1 (only the exact-slug entry warns)", publisher.calls)
+	}
+}
+
 // TestProbe_NonMonitored_NilFunc_NoCalls pins backward-compat for
 // callers that wire the probe without the non-monitored axis (e.g.,
 // existing tests). When NonMonitored is nil, the probe must skip

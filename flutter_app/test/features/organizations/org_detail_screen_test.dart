@@ -21,8 +21,10 @@ class _ErrorConfigNotifier extends ConfigNotifier {
 
 Map<String, dynamic> _configJson({
   Map<String, dynamic> orgMergeTracking = const {},
+  List<String> nonMonitored = const [],
 }) => {
   'repositories': <String>[],
+  'non_monitored': nonMonitored,
   'server_port': 1,
   'poll_interval': '60s',
   'retention_days': 30,
@@ -61,15 +63,22 @@ Map<String, dynamic> _configJson({
 Future<MockApiClient> _pumpOrgDetail(
   WidgetTester tester, {
   Map<String, dynamic> orgMergeTracking = const {},
+  List<String> nonMonitored = const [],
 }) async {
   final mockApi = MockApiClient();
-  final config = _configJson(orgMergeTracking: orgMergeTracking);
+  final config = _configJson(
+    orgMergeTracking: orgMergeTracking,
+    nonMonitored: nonMonitored,
+  );
   when(() => mockApi.fetchConfig()).thenAnswer((_) async => config);
   when(
     () => mockApi.patchOrgConfig('acme', any()),
   ).thenAnswer((_) async => config);
   when(
     () => mockApi.patchMergeTrackingOrgConfig('acme', any()),
+  ).thenAnswer((_) async => config);
+  when(
+    () => mockApi.patchConfig(any()),
   ).thenAnswer((_) async => config);
 
   await tester.pumpWidget(
@@ -265,4 +274,43 @@ void main() {
 
     verify(() => mockApi.deleteOrgField('acme', 'clone_dir')).called(1);
   });
+
+  // theburrowhub/heimdallm#828: a one-click org-level exclusion that writes a
+  // bare org entry into non_monitored instead of enumerating every repo.
+  testWidgets(
+    'disabling org monitoring writes a bare org entry to non_monitored',
+    (tester) async {
+      final mockApi = await _pumpOrgDetail(tester);
+
+      await tester.tap(find.text('Disable monitoring for this org'));
+      await tester.pumpAndSettle();
+
+      final captured = verify(
+        () => mockApi.patchConfig(captureAny()),
+      ).captured;
+      expect(captured.single, {
+        'github': {
+          'non_monitored': ['acme'],
+        },
+      });
+    },
+  );
+
+  testWidgets(
+    'enabling org monitoring removes the bare org entry from non_monitored',
+    (tester) async {
+      final mockApi = await _pumpOrgDetail(tester, nonMonitored: ['acme']);
+
+      expect(find.text('Enable monitoring for this org'), findsOneWidget);
+      await tester.tap(find.text('Enable monitoring for this org'));
+      await tester.pumpAndSettle();
+
+      final captured = verify(
+        () => mockApi.patchConfig(captureAny()),
+      ).captured;
+      expect(captured.single, {
+        'github': {'non_monitored': <String>[]},
+      });
+    },
+  );
 }

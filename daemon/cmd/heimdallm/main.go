@@ -3131,9 +3131,18 @@ func aiReposInNonMonitored(c *config.Config) []string {
 			disabled[repo] = struct{}{}
 		}
 	}
+	// A bare org entry (theburrowhub/heimdallm#828) also conflicts with every
+	// [ai.repos.*] entry under that org, not just an exact match. GitHub
+	// org/user names are case-insensitive, so this comparison normalizes to
+	// lowercase like discovery_orgs already does.
+	disabledOrgs := discovery.BuildNonMonitoredOrgs(c.GitHub.NonMonitored)
 	conflicts := make([]string, 0)
 	for _, repo := range aiRepoKeys(c) {
 		if _, ok := disabled[repo]; ok {
+			conflicts = append(conflicts, repo)
+			continue
+		}
+		if disabledOrgs.Blocks(repo) {
 			conflicts = append(conflicts, repo)
 		}
 	}
@@ -3208,6 +3217,10 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 	for _, r := range c.GitHub.NonMonitored {
 		inNonMonitored[r] = struct{}{}
 	}
+	// A bare org entry (theburrowhub/heimdallm#828) is as authoritative as an
+	// exact slug: it must block discovery for every repo under that org, not
+	// just one already-known repo.
+	nonMonitoredOrgs := discovery.BuildNonMonitoredOrgs(c.GitHub.NonMonitored)
 
 	// Build an org allowlist from DiscoveryOrgs. When set, repos whose org
 	// prefix is not in the list are silently skipped — prevents the PR
@@ -3228,6 +3241,9 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 		// [ai.repos.*] override may customize a repo without opting it back in;
 		// seeing a review-requested PR must never erase the operator's choice.
 		if _, disabled := inNonMonitored[pr.Repo]; disabled {
+			continue
+		}
+		if nonMonitoredOrgs.Blocks(pr.Repo) {
 			continue
 		}
 
@@ -3302,6 +3318,9 @@ func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
 	for repo := range cfg.AI.Repos {
 		known[repo] = struct{}{}
 	}
+	// A bare org entry (theburrowhub/heimdallm#828) blocks every repo under
+	// that org, not just ones already in `known`.
+	nonMonitoredOrgs := discovery.BuildNonMonitoredOrgs(cfg.GitHub.NonMonitored)
 
 	enable := cfg.GitHub.AutoEnablePRForDiscovery()
 	var added []string
@@ -3310,6 +3329,9 @@ func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
 			continue
 		}
 		if _, ok := known[repo]; ok {
+			continue
+		}
+		if nonMonitoredOrgs.Blocks(repo) {
 			continue
 		}
 		if enable {

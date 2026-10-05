@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/sse"
@@ -1117,8 +1118,7 @@ func (srv *Server) adoptPR(repo string, number int) (*store.PR, error) {
 	// from non_monitored) in config.toml, then reload so the poller tracks it.
 	if srv.configPath != "" {
 		if _, err := srv.patchTOML(func(m map[string]any) error {
-			addRepoToTOMLMap(m, repo)
-			return nil
+			return addRepoToTOMLMap(m, repo)
 		}); err != nil {
 			return nil, &adoptPRError{adoptPRStageConfig, fmt.Errorf("add repo to config: %w", err)}
 		}
@@ -1211,22 +1211,55 @@ func parsePRURL(raw string) (repo string, number int, err error) {
 }
 
 // addRepoToTOMLMap appends repo to github.repositories (if absent) and removes
-// it from github.non_monitored, mutating the decoded TOML map in place.
-func addRepoToTOMLMap(m map[string]any, repo string) {
+// it from github.non_monitored, mutating the decoded TOML map in place. It
+// returns an error without mutating anything when a bare org entry in
+// non_monitored (theburrowhub/heimdallm#828) excludes repo's org: silently
+// "adopting" such a PR would report success while MergeRepos keeps filtering
+// the repo out everywhere else.
+func addRepoToTOMLMap(m map[string]any, repo string) error {
 	gh, ok := m["github"].(map[string]any)
 	if !ok || gh == nil {
 		gh = map[string]any{}
 		m["github"] = gh
+	}
+	if nonMonitoredOrg, blocked := orgBlockingTOMLList(gh["non_monitored"], repo); blocked {
+		return fmt.Errorf("repo %s is excluded by a non_monitored entry for org %q; remove that entry before adopting a PR in this org", repo, nonMonitoredOrg)
 	}
 	gh["non_monitored"] = removeFromTOMLList(gh["non_monitored"], repo)
 
 	repos, _ := gh["repositories"].([]any)
 	for _, it := range repos {
 		if s, ok := it.(string); ok && s == repo {
-			return // already monitored
+			return nil // already monitored
 		}
 	}
 	gh["repositories"] = append(repos, repo)
+	return nil
+}
+
+// orgBlockingTOMLList reports whether the decoded TOML `non_monitored` list
+// raw contains a bare org entry (theburrowhub/heimdallm#828) that blocks
+// repo. GitHub org/user names are case-insensitive, matching
+// discovery.BuildNonMonitoredOrgs elsewhere in the daemon.
+func orgBlockingTOMLList(raw any, repo string) (org string, blocked bool) {
+	list, ok := raw.([]any)
+	if !ok {
+		return "", false
+	}
+	entries := make([]string, 0, len(list))
+	for _, it := range list {
+		if s, ok := it.(string); ok {
+			entries = append(entries, s)
+		}
+	}
+	orgOf, _, found := strings.Cut(repo, "/")
+	if !found {
+		return "", false
+	}
+	if discovery.BuildNonMonitoredOrgs(entries).Blocks(repo) {
+		return orgOf, true
+	}
+	return "", false
 }
 
 // removeFromTOMLList returns raw with every string element equal to target
