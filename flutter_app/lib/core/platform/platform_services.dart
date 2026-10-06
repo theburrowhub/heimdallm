@@ -4,7 +4,10 @@ import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
 import '../models/config_model.dart';
 import '../models/merge_tracking.dart';
+import '../models/notification_mode.dart';
 import '../models/pr.dart';
+
+export '../models/notification_mode.dart';
 
 import 'platform_services_stub.dart'
     if (dart.library.io) 'platform_services_desktop.dart'
@@ -238,6 +241,17 @@ abstract interface class TrayMyPrsPlatformCapability {
   Future<void> setTrayMyPrs(List<MergeTrackingEntry> entries);
 }
 
+/// Optional per-category notification presentation (sound / silent / off),
+/// implemented where the platform controls the notification sound itself.
+/// Platforms without it still honour [NotificationMode.off] for activity
+/// notifications, because `sendPRNotification` drops those before they reach
+/// the platform.
+abstract interface class NotificationModePlatformCapability {
+  /// Applies [preferences] to every notification raised afterwards, including
+  /// ones the platform raises on its own, like "update available".
+  void setNotificationModes(NotificationPreferences preferences);
+}
+
 /// Optional termination path for a process that has already disproved desktop
 /// singleton ownership.
 abstract interface class DuplicateInstancePlatformCapability {
@@ -250,6 +264,16 @@ abstract interface class DuplicateInstancePlatformCapability {
 /// stays independent of the macOS updater and remains covered by its existing
 /// browser-only contract.
 extension OptionalPlatformCapabilities on PlatformServices {
+  /// No-op where the platform does not control notification sound (web).
+  void setNotificationModes(NotificationPreferences preferences) {
+    final platform = this;
+    if (platform is NotificationModePlatformCapability) {
+      (platform as NotificationModePlatformCapability).setNotificationModes(
+        preferences,
+      );
+    }
+  }
+
   /// No-op where there is no tray (web).
   Future<void> setTrayMyPrs(List<MergeTrackingEntry> entries) async {
     final platform = this;

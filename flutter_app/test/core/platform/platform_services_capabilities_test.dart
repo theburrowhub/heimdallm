@@ -27,6 +27,19 @@ void main() {
   );
 
   group('optional platform capabilities', () {
+    test('notification modes reach only platforms that support them', () {
+      const prefs = NotificationPreferences(update: NotificationMode.off);
+      final fake = FakePlatformServices();
+      (fake as PlatformServices).setNotificationModes(prefs);
+      expect(fake.setNotificationModesCalls, [prefs]);
+
+      // A platform without the capability (web) simply ignores them.
+      expect(
+        () => _PlatformOnly().setNotificationModes(prefs),
+        returnsNormally,
+      );
+    });
+
     test('the tray My PRs section is a no-op without a tray', () async {
       final PlatformServices platform = _PlatformOnly();
       await platform.setTrayMyPrs(const [

@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    show NotificationDetails;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/daemon/daemon_lifecycle.dart';
 import 'package:heimdallm/core/platform/linux_app_updater.dart';
@@ -1060,6 +1062,104 @@ else:
       // The test runner has no bundled heimdalld, so the concrete updater must
       // reject native support after successfully detecting the AppImage.
       expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
+    });
+  });
+
+  group('notification modes', () {
+    test('sound keeps the platform defaults (sound on)', () {
+      final details = notificationDetailsFor(NotificationMode.sound)!;
+      expect(details.macOS!.presentSound, isNull);
+      expect(details.linux!.suppressSound, isFalse);
+    });
+
+    test('silent shows the banner without sound on macOS and Linux', () {
+      final NotificationDetails details = notificationDetailsFor(
+        NotificationMode.silent,
+      )!;
+      expect(details.macOS!.presentSound, isFalse);
+      expect(details.macOS!.presentAlert, isNot(isFalse));
+      expect(details.linux!.suppressSound, isTrue);
+    });
+
+    test('off produces no notification at all', () {
+      expect(notificationDetailsFor(NotificationMode.off), isNull);
+    });
+
+    test('showNotification drops activity notifications when off', () {
+      final services = DesktopPlatformServices();
+      services.setNotificationModes(
+        const NotificationPreferences(activity: NotificationMode.off),
+      );
+      // Reaching the plugin would throw in a unit test; off must return first.
+      services.showNotification(title: 't', body: 'b', onClick: () {});
+    });
+
+    test('re-enabling update notifications re-checks the pending update', () {
+      final services = DesktopPlatformServices();
+      services.setNotificationModes(
+        const NotificationPreferences(update: NotificationMode.off),
+      );
+      // Notifier not initialised in a unit test: the re-check must bail out
+      // through shouldAnnounceAppUpdate instead of reaching the plugin.
+      services.setNotificationModes(const NotificationPreferences());
+    });
+
+    const available = AppUpdateStatus(
+      phase: AppUpdatePhase.available,
+      version: '2.0.0',
+    );
+
+    test('update is announced once per version when enabled', () {
+      for (final mode in [NotificationMode.sound, NotificationMode.silent]) {
+        expect(
+          shouldAnnounceAppUpdate(
+            notifierReady: true,
+            status: available,
+            alreadyAnnouncedVersion: null,
+            mode: mode,
+          ),
+          isTrue,
+        );
+      }
+      expect(
+        shouldAnnounceAppUpdate(
+          notifierReady: true,
+          status: available,
+          alreadyAnnouncedVersion: '2.0.0',
+          mode: NotificationMode.sound,
+        ),
+        isFalse,
+      );
+    });
+
+    test('update is not announced while off, before the notifier, or idle', () {
+      expect(
+        shouldAnnounceAppUpdate(
+          notifierReady: true,
+          status: available,
+          alreadyAnnouncedVersion: null,
+          mode: NotificationMode.off,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldAnnounceAppUpdate(
+          notifierReady: false,
+          status: available,
+          alreadyAnnouncedVersion: null,
+          mode: NotificationMode.sound,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldAnnounceAppUpdate(
+          notifierReady: true,
+          status: const AppUpdateStatus.idle(),
+          alreadyAnnouncedVersion: null,
+          mode: NotificationMode.sound,
+        ),
+        isFalse,
+      );
     });
   });
 }

@@ -7,7 +7,9 @@ import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/models.dart' show ClusterRole;
 import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
+import 'package:heimdallm/core/models/notification_mode.dart';
 import 'package:heimdallm/core/state/appearance_preferences.dart';
+import 'package:heimdallm/core/state/notification_preferences.dart';
 import 'package:heimdallm/core/setup/first_run_setup.dart';
 import 'package:heimdallm/features/config/config_providers.dart'
     show
@@ -113,6 +115,63 @@ void main() {
     expect(find.byKey(const Key('app-update-settings')), findsOneWidget);
     expect(find.text('Version 0.8.4'), findsOneWidget);
     // Primary agent ('claude') moved to Agents tab — no longer in ConfigScreen
+  });
+
+  testWidgets('Notifications section saves each mode locally', (
+    tester,
+  ) async {
+    const config = AppConfig(
+      pollInterval: '5m',
+      repoConfigs: {'org/repo': RepoConfig(prEnabled: true)},
+    );
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.daemon);
+
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        configNotifierProvider.overrideWith(ConfigNotifier.new),
+        platformServicesProvider.overrideWithValue(FakePlatformServices()),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(container: container, child: _configTestApp()),
+    );
+    await tester.pumpAndSettle();
+
+    ChoiceChip chip(String key) =>
+        tester.widget<ChoiceChip>(find.byKey(Key(key)));
+    expect(chip('notifications-activity-sound').selected, isTrue);
+    expect(chip('notifications-update-sound').selected, isTrue);
+
+    for (final key in [
+      'notifications-activity-silent',
+      'notifications-update-off',
+    ]) {
+      await tester.ensureVisible(find.byKey(Key(key)));
+      await tester.tap(find.byKey(Key(key)));
+      await tester.pumpAndSettle();
+    }
+
+    expect(chip('notifications-activity-silent').selected, isTrue);
+    expect(chip('notifications-update-off').selected, isTrue);
+    expect(
+      container.read(notificationPreferencesProvider),
+      const NotificationPreferences(
+        activity: NotificationMode.silent,
+        update: NotificationMode.off,
+      ),
+    );
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString(notificationActivityModeKey), 'silent');
+    expect(prefs.getString(notificationUpdateModeKey), 'off');
+    verifyNever(() => mockApi.patchConfig(any()));
+    verifyNever(() => mockApi.updateConfig(any()));
   });
 
   testWidgets('AI defaults expose the never-approve severity threshold', (

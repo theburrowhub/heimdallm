@@ -817,6 +817,17 @@ digest_time        = "10:00"  # local time, 24h HH:MM
 
 Watching only covers **monitored** repositories. To watch a PR elsewhere, add its repository (or use **Track a PR**, which adds it for you).
 
+### Notification sound and muting
+
+How notifications are presented is an **app setting on each device**, not part of `config.toml`: **Settings → Notifications** (badge *Local only*). Every desktop app or browser chooses for itself, because notifications are raised by the client.
+
+| Row | Covers | Modes |
+|---|---|---|
+| **Reviews & My PRs** | review started / complete / failed, My PRs transitions and the daily digest | **Sound** (default), **Silent** (banner, no sound), **Off** (nothing) |
+| **App updates** | "Heimdallm update available" | same three modes |
+
+The `[my_prs]` switches above still decide *whether* a My PRs notification exists; this setting decides *how* it is shown. An update announcement skipped while **App updates** is Off is shown once it is turned back on. On the web build, Off is honoured (and never triggers the browser's permission prompt), but Silent behaves like Sound: whether a browser notification plays a sound is decided by the browser and OS settings.
+
 ### What it reports
 
 For every tracked PR, Heimdallm records an explainable decision and shows it in the My PRs screen in the app shell, on the PR detail view, in `heimdallm-cli merges`, and in the TUI:

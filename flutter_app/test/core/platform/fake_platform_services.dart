@@ -16,6 +16,7 @@ class FakePlatformServices
         AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability,
+        NotificationModePlatformCapability,
         TrayMyPrsPlatformCapability {
   FakePlatformServices({
     this.apiBaseUrl = 'http://127.0.0.1:7842',
@@ -67,7 +68,14 @@ class FakePlatformServices
   int setupWindowCalls = 0;
   int setupTrayCalls = 0;
   int setupNotifierCalls = 0;
-  final List<({String title, String body})> notifications = [];
+
+  /// Notifications that reached the platform, with whether the activity
+  /// mode asked for them to be silent. Off is dropped before the platform by
+  /// `sendPRNotification`, which is what these tests exercise.
+  final List<({String title, String body, bool silent})> notifications = [];
+  NotificationPreferences notificationPreferences =
+      const NotificationPreferences();
+  final List<NotificationPreferences> setNotificationModesCalls = [];
   int showAndFocusCalls = 0;
   int hideCalls = 0;
   int quitCalls = 0;
@@ -130,12 +138,22 @@ class FakePlatformServices
   }
 
   @override
+  void setNotificationModes(NotificationPreferences preferences) {
+    notificationPreferences = preferences;
+    setNotificationModesCalls.add(preferences);
+  }
+
+  @override
   void showNotification({
     required String title,
     required String body,
     VoidCallback? onClick,
   }) {
-    notifications.add((title: title, body: body));
+    notifications.add((
+      title: title,
+      body: body,
+      silent: notificationPreferences.activity == NotificationMode.silent,
+    ));
   }
 
   @override

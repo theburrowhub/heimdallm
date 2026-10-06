@@ -5,10 +5,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/sse_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/models/merge_tracking.dart';
+import 'package:heimdallm/core/models/notification_mode.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
+import 'package:heimdallm/main.dart' show applyNotificationPreferences;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/platform/fake_platform_services.dart';
@@ -73,8 +75,19 @@ void main() {
       SseEvent event, {
       bool notify = true,
       bool enabled = true,
+      NotificationMode mode = NotificationMode.sound,
     }) async {
       final platform = FakePlatformServices();
+      applyNotificationPreferences(
+        platform,
+        NotificationPreferences(activity: mode),
+      );
+      addTearDown(
+        () => applyNotificationPreferences(
+          platform,
+          const NotificationPreferences(),
+        ),
+      );
       final controller = StreamController<SseEvent>();
       addTearDown(controller.close);
       final container = _container(
@@ -128,6 +141,19 @@ void main() {
       );
       expect((await deliver(event, notify: false)).notifications, isEmpty);
       expect((await deliver(event, enabled: false)).notifications, isEmpty);
+    });
+
+    test('the device notification mode applies to My PRs alerts', () async {
+      const event = SseEvent(
+        type: 'my_pr_attention',
+        data: '{"repo":"a/b","number":1,"attention":"action"}',
+      );
+      final silent = await deliver(event, mode: NotificationMode.silent);
+      expect(silent.notifications.single.silent, isTrue);
+      expect(
+        (await deliver(event, mode: NotificationMode.off)).notifications,
+        isEmpty,
+      );
     });
 
     test('a malformed payload is ignored', () {

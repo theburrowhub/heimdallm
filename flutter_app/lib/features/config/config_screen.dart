@@ -5,7 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart' show ClusterRole;
+import '../../core/models/notification_mode.dart';
 import '../../core/state/appearance_preferences.dart';
+import '../../core/state/notification_preferences.dart';
 import '../instances/config_propagation_dialog.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
@@ -108,6 +110,7 @@ String? myPrsDigestTimeError(String? raw) {
 
 enum _ConfigSectionId {
   appearance,
+  notifications,
   token,
   poll,
   retention,
@@ -139,6 +142,12 @@ const _configSections = <_ConfigSectionMeta>[
     title: 'Appearance',
     summary: 'Local UI preference for this device. Does not change daemon configuration.',
     icon: Icons.palette_outlined,
+  ),
+  _ConfigSectionMeta(
+    id: _ConfigSectionId.notifications,
+    title: 'Notifications',
+    summary: 'Sound, silent or off. Local to this device.',
+    icon: Icons.notifications_outlined,
   ),
   _ConfigSectionMeta(
     id: _ConfigSectionId.token,
@@ -380,6 +389,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               if (!daemonRunning) _setupBanner(),
               const AppUpdateSettingsCard(),
               _appearanceSection(),
+              _notificationsSection(),
               _tokenSection(),
               _pollSection(),
               _retentionSection(),
@@ -449,6 +459,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       _configSections.firstWhere((section) => section.id == id);
 
   _ConfigSectionId _sectionIdForTitle(String title) => switch (title) {
+    'Notifications' => _ConfigSectionId.notifications,
     'GitHub Token' => _ConfigSectionId.token,
     'Polling' => _ConfigSectionId.poll,
     'Retention' => _ConfigSectionId.retention,
@@ -571,6 +582,75 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                 selected: mode == option.mode,
                 onSelected: (_) =>
                     ref.read(appearanceProvider.notifier).set(option.mode),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ── Notifications ───────────────────────────────────────────────────────
+
+  Widget _notificationsSection() {
+    final prefs = ref.watch(notificationPreferencesProvider);
+    final notifier = ref.read(notificationPreferencesProvider.notifier);
+    final theme = Theme.of(context);
+
+    return _buildSectionCard(
+      _ConfigSectionId.notifications,
+      trailing: AppBadge(
+        label: 'Local only',
+        foreground: theme.colorScheme.onSecondaryContainer,
+        background: theme.colorScheme.secondaryContainer,
+      ),
+      children: [
+        const AppText.muted(
+          'Choose how this device presents notifications. Silent keeps the banner without sound; Off shows nothing. Saves immediately and never touches config.toml.',
+        ),
+        const SizedBox(height: 16),
+        _notificationModeRow(
+          keyPrefix: 'notifications-activity',
+          label: 'Reviews & My PRs',
+          mode: prefs.activity,
+          onSelected: notifier.setActivity,
+        ),
+        const SizedBox(height: 12),
+        _notificationModeRow(
+          keyPrefix: 'notifications-update',
+          label: 'App updates',
+          mode: prefs.update,
+          onSelected: notifier.setUpdate,
+        ),
+      ],
+    );
+  }
+
+  Widget _notificationModeRow({
+    required String keyPrefix,
+    required String label,
+    required NotificationMode mode,
+    required ValueChanged<NotificationMode> onSelected,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        AppText(label, role: AppTextRole.label),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final option in const [
+              (mode: NotificationMode.sound, label: 'Sound', icon: Icons.notifications_active_outlined),
+              (mode: NotificationMode.silent, label: 'Silent', icon: Icons.notifications_paused_outlined),
+              (mode: NotificationMode.off, label: 'Off', icon: Icons.notifications_off_outlined),
+            ])
+              ChoiceChip(
+                key: Key('$keyPrefix-${encodeNotificationMode(option.mode)}'),
+                label: Text(option.label),
+                avatar: Icon(option.icon, size: 18),
+                selected: mode == option.mode,
+                onSelected: (_) => onSelected(option.mode),
               ),
           ],
         ),

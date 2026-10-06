@@ -95,6 +95,7 @@ class DesktopPlatformServices
         AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability,
+        NotificationModePlatformCapability,
         TrayMyPrsPlatformCapability {
   DesktopPlatformServices({
     int apiPort = 7842,
@@ -537,6 +538,8 @@ class DesktopPlatformServices
   int _nextNotifierId = 0;
   bool _notifierReady = false;
   String? _notifiedUpdateVersion;
+  NotificationPreferences _notificationPreferences =
+      const NotificationPreferences();
 
   @override
   Future<void> setupNotifier({required String appName}) async {
@@ -568,11 +571,39 @@ class DesktopPlatformServices
   }
 
   @override
+  void setNotificationModes(NotificationPreferences preferences) {
+    final updateWasOff =
+        _notificationPreferences.update == NotificationMode.off;
+    _notificationPreferences = preferences;
+    // An update announcement swallowed while muted is shown once the user
+    // turns update notifications back on.
+    if (updateWasOff && preferences.update != NotificationMode.off) {
+      _notifyAvailableUpdateIfNeeded(_appUpdateStatus);
+    }
+  }
+
+  @override
   void showNotification({
     required String title,
     required String body,
     VoidCallback? onClick,
+  }) => _showNotification(
+    title: title,
+    body: body,
+    onClick: onClick,
+    category: NotificationCategory.activity,
+  );
+
+  void _showNotification({
+    required String title,
+    required String body,
+    required VoidCallback? onClick,
+    required NotificationCategory category,
   }) {
+    final details = notificationDetailsFor(
+      _notificationPreferences.modeFor(category),
+    );
+    if (details == null) return;
     // Bitmask keeps the id in 32-bit positive range; some platform notifier
     // backends use 32-bit ids internally, so we avoid relying on Dart's
     // 64-bit ints surviving the boundary.
@@ -589,10 +620,7 @@ class DesktopPlatformServices
       id: id,
       title: title,
       body: body,
-      notificationDetails: const NotificationDetails(
-        macOS: DarwinNotificationDetails(),
-        linux: LinuxNotificationDetails(),
-      ),
+      notificationDetails: details,
       payload: id.toString(),
     );
   }
@@ -794,16 +822,20 @@ class DesktopPlatformServices
   }
 
   void _notifyAvailableUpdateIfNeeded(AppUpdateStatus status) {
-    if (!_notifierReady ||
-        !status.updateAvailable ||
-        _notifiedUpdateVersion == status.version) {
+    if (!shouldAnnounceAppUpdate(
+      notifierReady: _notifierReady,
+      status: status,
+      alreadyAnnouncedVersion: _notifiedUpdateVersion,
+      mode: _notificationPreferences.update,
+    )) {
       return;
     }
     _notifiedUpdateVersion = status.version;
-    showNotification(
+    _showNotification(
       title: 'Heimdallm update available',
       body: 'Version ${status.version ?? 'new'} is ready to install.',
       onClick: () => unawaited(showAndFocusWindow()),
+      category: NotificationCategory.update,
     );
   }
 
@@ -973,3 +1005,35 @@ class DesktopPlatformServices
 
 /// Alias used by the conditional export in `platform_services.dart`.
 typedef PlatformServicesImpl = DesktopPlatformServices;
+
+/// Platform notification details for [mode], or null when the notification
+/// must not be shown at all. Silent keeps the banner but drops the sound,
+/// which otherwise defaults to on for both macOS and Linux.
+@visibleForTesting
+NotificationDetails? notificationDetailsFor(NotificationMode mode) =>
+    switch (mode) {
+      NotificationMode.sound => const NotificationDetails(
+        macOS: DarwinNotificationDetails(),
+        linux: LinuxNotificationDetails(),
+      ),
+      NotificationMode.silent => const NotificationDetails(
+        macOS: DarwinNotificationDetails(presentSound: false),
+        linux: LinuxNotificationDetails(suppressSound: true),
+      ),
+      NotificationMode.off => null,
+    };
+
+/// Whether the "update available" notification should fire for [status].
+/// A version is announced once; while update notifications are [mode] off it
+/// is not marked as announced, so turning them back on still shows it.
+@visibleForTesting
+bool shouldAnnounceAppUpdate({
+  required bool notifierReady,
+  required AppUpdateStatus status,
+  required String? alreadyAnnouncedVersion,
+  required NotificationMode mode,
+}) =>
+    notifierReady &&
+    status.updateAvailable &&
+    alreadyAnnouncedVersion != status.version &&
+    mode != NotificationMode.off;

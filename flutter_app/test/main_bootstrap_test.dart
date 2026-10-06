@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
+import 'package:heimdallm/core/models/notification_mode.dart';
+import 'package:heimdallm/core/state/notification_preferences.dart';
 import 'package:heimdallm/main.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/platform/fake_platform_services.dart';
 
@@ -102,6 +106,37 @@ void main() {
     },
   );
 
+  test(
+    'platform initialization applies the saved notification modes',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        notificationActivityModeKey: 'off',
+        notificationUpdateModeKey: 'silent',
+      });
+      final platform = FakePlatformServices();
+      addTearDown(
+        () => applyNotificationPreferences(
+          platform,
+          const NotificationPreferences(),
+        ),
+      );
+
+      expect(await initializePlatformForApp(platform), isTrue);
+      expect(
+        platform.notificationPreferences,
+        const NotificationPreferences(
+          activity: NotificationMode.off,
+          update: NotificationMode.silent,
+        ),
+      );
+
+      // Activity Off is enforced before the platform, so it also holds where
+      // the platform cannot control notifications (web).
+      sendPRNotification(platform: platform, title: 't', body: 'b');
+      expect(platform.notifications, isEmpty);
+    },
+  );
+
   testWidgets('reachable daemon enters the application without spawning', (
     tester,
   ) async {
@@ -119,6 +154,51 @@ void main() {
     await _pumpUntil(tester, find.text('Dashboard target'));
 
     expect(platform.spawnedDaemons, isEmpty);
+  });
+
+  testWidgets('notification preferences are pushed to the platform', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      notificationActivityModeKey: 'silent',
+    });
+    final api = _MockApiClient();
+    final platform = FakePlatformServices();
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Dashboard target'));
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pump();
+
+    expect(
+      platform.notificationPreferences,
+      const NotificationPreferences(activity: NotificationMode.silent),
+      reason: 'the persisted mode reaches the platform once loaded',
+    );
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.text('Dashboard target')),
+    );
+    container
+        .read(notificationPreferencesProvider.notifier)
+        .setUpdate(NotificationMode.off);
+    await tester.pump();
+
+    expect(
+      platform.notificationPreferences,
+      const NotificationPreferences(
+        activity: NotificationMode.silent,
+        update: NotificationMode.off,
+      ),
+    );
+    applyNotificationPreferences(platform, const NotificationPreferences());
   });
 
   testWidgets('completed native update requires matching daemon version', (
