@@ -1149,7 +1149,16 @@ func ensureInstanceID(cfg *config.Config, dir string) (string, error) {
 // look like "mbp-3f2a91..." rather than opaque hex in logs and the UI.
 func instanceIDPrefix() string {
 	host, err := os.Hostname()
-	if err != nil || host == "" {
+	if err != nil {
+		host = ""
+	}
+	return hostIDPrefix(host)
+}
+
+// hostIDPrefix is instanceIDPrefix for a given hostname, split out so every
+// case is tested whatever the test machine's (or container's) name is.
+func hostIDPrefix(host string) string {
+	if host == "" {
 		return "node-"
 	}
 	if i := strings.IndexByte(host, '.'); i > 0 {
