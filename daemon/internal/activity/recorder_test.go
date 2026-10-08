@@ -202,6 +202,35 @@ func TestRecorder_HeadReanchoredSkipIsRecorded(t *testing.T) {
 	}
 }
 
+// TestRecorder_NoReReviewRequestRecordedOncePerHead covers the activity spam
+// of the same PR showing "Skipped because no rereview request" every few
+// minutes: the first skip for a commit is recorded, repeats for that commit
+// are dropped, and a new push records again.
+func TestRecorder_NoReReviewRequestRecordedOncePerHead(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	skip := func(sha string) {
+		events <- sse.Event{
+			Type: sse.EventReviewSkipped,
+			Data: `{"repo":"org/name","pr_number":78,"pr_title":"feat: x","reason":"no_rereview_request","head_sha":"` + sha + `"}`,
+		}
+	}
+	skip("aaa")
+	skip("aaa")
+	skip("aaa")
+	waitFor(t, func() bool { return fs.count() == 1 })
+	skip("bbb")
+	waitFor(t, func() bool { return fs.count() == 2 })
+	skip("bbb")
+	time.Sleep(50 * time.Millisecond)
+	if got := fs.count(); got != 2 {
+		t.Fatalf("rows = %d, want 2 (one per HEAD)", got)
+	}
+	if got := fs.at(1).outcome; got != "no_rereview_request" {
+		t.Errorf("outcome = %q, want no_rereview_request", got)
+	}
+}
+
 // TestRecorder_ReviewSkippedDedupReasonsAreNotRecorded locks in the
 // fix from theburrowhub/heimdallm#322 review feedback: dedup-flavoured
 // skips (sha_unchanged, legacy_backfill, retry cooldowns) MUST NOT generate

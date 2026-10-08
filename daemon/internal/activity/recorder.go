@@ -27,6 +27,9 @@ type Store interface {
 type Recorder struct {
 	store  Store
 	events chan sse.Event
+	// recordedOnce holds the onceSkipReasons rows already written, keyed by
+	// PR, reason and HEAD. Only touched from the single Start goroutine.
+	recordedOnce map[onceSkipKey]bool
 }
 
 // New subscribes to the broker and returns a recorder ready to Start.
@@ -174,12 +177,45 @@ var dedupSkipReasons = map[string]bool{
 	"self_authored":    true,
 }
 
+// onceSkipReasons are skips worth one audit row per commit — "why did it
+// not review my push?" — but that repeat on every poll while the PR sits
+// unchanged. The first occurrence for a (PR, reason, HEAD) is recorded and
+// the repeats are dropped; a new push records again.
+var onceSkipReasons = map[string]bool{
+	"no_rereview_request": true,
+	"head_reanchored":     true,
+}
+
+type onceSkipKey struct {
+	Repo     string
+	PRNumber int
+	Reason   string
+	HeadSHA  string
+}
+
+// maxRecordedOnce bounds recordedOnce; past it the set is dropped, which at
+// worst records one extra row per PR.
+const maxRecordedOnce = 4096
+
+// firstOnceSkip reports whether key has not been recorded yet and marks it.
+func (r *Recorder) firstOnceSkip(key onceSkipKey) bool {
+	if r.recordedOnce[key] {
+		return false
+	}
+	if r.recordedOnce == nil || len(r.recordedOnce) >= maxRecordedOnce {
+		r.recordedOnce = make(map[onceSkipKey]bool)
+	}
+	r.recordedOnce[key] = true
+	return true
+}
+
 func (r *Recorder) recordReviewSkipped(ev sse.Event) error {
 	var p struct {
 		Repo     string `json:"repo"`
 		PRNumber int    `json:"pr_number"`
 		PRTitle  string `json:"pr_title"`
 		Reason   string `json:"reason"`
+		HeadSHA  string `json:"head_sha"`
 		// Set on peer_published only (theburrowhub/heimdallm#781): which
 		// peer review covered the commit. Kept out of details when absent
 		// so rows from daemons that predate the fields keep their shape.
@@ -193,6 +229,11 @@ func (r *Recorder) recordReviewSkipped(ev sse.Event) error {
 	if dedupSkipReasons[p.Reason] {
 		// Routine dedup skip — UI still gets the SSE so the spinner can
 		// clear, but the activity log stays free of poll-cycle noise.
+		return nil
+	}
+	if onceSkipReasons[p.Reason] && !r.firstOnceSkip(onceSkipKey{
+		Repo: p.Repo, PRNumber: p.PRNumber, Reason: p.Reason, HeadSHA: p.HeadSHA,
+	}) {
 		return nil
 	}
 	details := map[string]any{"reason": p.Reason}

@@ -18,7 +18,8 @@ func TestGetPRSnapshot(t *testing.T) {
 			"draft":true,
 			"user":{"login":"alice"},
 			"updated_at":"2026-04-22T10:00:00Z",
-			"head":{"sha":"deadbeef"}
+			"head":{"sha":"deadbeef"},
+			"requested_reviewers":[{"login":"heimdallm-bot"}]
 		}`))
 	}))
 	defer srv.Close()
@@ -30,6 +31,19 @@ func TestGetPRSnapshot(t *testing.T) {
 	}
 	if snap.State != "open" || !snap.Draft || snap.Author != "alice" || snap.HeadSHA != "deadbeef" {
 		t.Errorf("snapshot = %+v", snap)
+	}
+	if !snap.ReviewRequestedFor("@Heimdallm-Bot") {
+		t.Error("ReviewRequestedFor(@Heimdallm-Bot) = false, want true")
+	}
+	if snap.ReviewRequestedFor("bob") {
+		t.Error("ReviewRequestedFor(bob) = true, want false")
+	}
+}
+
+func TestPRSnapshotReviewRequestedForNil(t *testing.T) {
+	var snap *gh.PRSnapshot
+	if snap.ReviewRequestedFor("heimdallm-bot") {
+		t.Error("nil snapshot must not report a pending request")
 	}
 }
 

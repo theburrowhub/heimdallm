@@ -248,6 +248,9 @@ type Pipeline struct {
 	// workGate prevents new long-running reviews from racing an application
 	// update. Nil preserves the standalone/test behaviour.
 	workGate *workgate.Gate
+	// verdicts caches the re-review gate's skip verdict per PR so an
+	// unchanged PR is not re-evaluated against GitHub on every poll.
+	verdicts gateVerdicts
 }
 
 // New creates a new Pipeline with the provided dependencies.
@@ -519,6 +522,9 @@ func (p *Pipeline) publishSkippedWith(pr *github.PullRequest, reason SkipReason,
 	data["pr_number"] = pr.Number
 	data["pr_title"] = pr.Title
 	data["reason"] = string(reason)
+	if pr.Head.SHA != "" {
+		data["head_sha"] = pr.Head.SHA
+	}
 	p.publish(sse.EventReviewSkipped, data)
 }
 
@@ -538,6 +544,7 @@ func (p *Pipeline) shouldBypassSHASkipForReReview(pr *github.PullRequest, prevRe
 	if err != nil {
 		slog.Warn("pipeline: re-request timeline lookup failed, keeping SHA skip (fail-closed)",
 			"repo", pr.Repo, "pr", pr.Number, "err", err)
+		p.verdicts.lookupFailed.Add(1)
 		return false
 	}
 	// events is sorted ascending by CreatedAt. We need the LAST event
@@ -591,6 +598,7 @@ func (p *Pipeline) shouldReReviewNewCommitsAsRequestedReviewer(pr *github.PullRe
 	if err != nil {
 		slog.Warn("pipeline: requested-reviewer lookup failed, keeping SHA skip (fail-closed)",
 			"repo", pr.Repo, "pr", pr.Number, "err", err)
+		p.verdicts.lookupFailed.Add(1)
 		return false
 	}
 	return info.ReviewRequestedFor(p.botLogin)
@@ -640,6 +648,7 @@ func (p *Pipeline) reviewWasReanchoredToHead(pr *github.PullRequest, prevReview 
 	if err != nil {
 		slog.Warn("pipeline: could not list published reviews to check for a HEAD reanchor, keeping SHA skip (fail-closed)",
 			"repo", pr.Repo, "pr", pr.Number, "err", err)
+		p.verdicts.lookupFailed.Add(1)
 		return false
 	}
 	found := false
@@ -1020,6 +1029,22 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
 			"has_prev_review", prevReview != nil)
 	}
+	gateKey := gateVerdictKey{HeadSHA: pr.Head.SHA, UpdatedAt: pr.UpdatedAt}
+	if prevReview != nil {
+		gateKey.PrevReviewID = prevReview.ID
+	}
+	if !opts.Force && prevReview != nil && pr.Head.SHA != "" {
+		if reason, ok := p.verdicts.lookup(prID, gateKey); ok {
+			// Same previous review, HEAD and updated_at as the last
+			// evaluation that skipped: nothing on GitHub can have changed
+			// the answer, so skip without the timeline/reviews/pulls calls.
+			slog.Debug("pipeline: re-review gate verdict unchanged, skipping",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "reason", string(reason))
+			p.publishSkipped(pr, reason)
+			return nil, nil
+		}
+	}
+	failuresBefore := p.verdicts.lookupFailed.Load()
 	if !opts.Force && prevReview != nil && pr.Head.SHA != "" {
 		// Regardless of whether the HEAD SHA changed, the bot must not
 		// re-review unless the operator explicitly re-requested it. The
@@ -1071,6 +1096,8 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 				"repo", pr.Repo, "pr", pr.Number,
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
 			p.publishSkipped(pr, SkipReasonHeadReanchored)
+			// The reconcile above rewrote the stored HeadSHA, so the next
+			// poll takes the sha_unchanged path anyway; no verdict to cache.
 			return nil, nil
 		case p.shouldReReviewNewCommitsAsRequestedReviewer(pr, prevReview):
 			// New unreviewed commits AND the bot is a current requested
@@ -1089,9 +1116,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 				"repo", pr.Repo, "pr", pr.Number,
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA,
 				"reason", string(reason))
+			// A fail-closed lookup error is not an answer from GitHub: caching
+			// it would hide a re-request until the PR changes again.
+			if p.verdicts.lookupFailed.Load() == failuresBefore {
+				p.verdicts.remember(prID, gateKey, reason)
+			}
 			p.publishSkipped(pr, reason)
 			return nil, nil
 		}
+		// The gate let this PR through; a stale skip verdict must not
+		// outlive the request that just cleared it.
+		p.verdicts.forget(prID)
 	}
 
 	// Race mitigation (#772): two instances that both pass every gate above
