@@ -109,9 +109,19 @@ func printTokenStats(w io.Writer, t api.TokenStats) {
 	if t.CacheReadTokens > 0 {
 		fmt.Fprintf(w, "    Cache reads:  %d\n", t.CacheReadTokens)
 	}
-	fmt.Fprintf(w, "    Per review:   %d\n", (t.InputTokens+t.OutputTokens)/int64(t.Reviews))
+	// Estimated reviews count only prompt and answer text (no agent
+	// exploration) and report no cost, so say when they are mixed in.
+	perReview := fmt.Sprintf("%d", (t.InputTokens+t.OutputTokens)/int64(t.Reviews))
+	if t.EstimatedReviews > 0 {
+		perReview += " (includes estimates)"
+	}
+	fmt.Fprintf(w, "    Per review:   %s\n", perReview)
 	fmt.Fprintf(w, "    Avg prompt:   %.1f KB\n", t.AvgPromptBytes/1024)
 	if t.CostUSD > 0 {
-		fmt.Fprintf(w, "    Cost:         $%.2f\n", t.CostUSD)
+		cost := fmt.Sprintf("$%.2f", t.CostUSD)
+		if t.EstimatedReviews > 0 {
+			cost += " (reported reviews only)"
+		}
+		fmt.Fprintf(w, "    Cost:         %s\n", cost)
 	}
 }

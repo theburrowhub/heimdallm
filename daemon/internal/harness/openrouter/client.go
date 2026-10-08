@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultBaseURL is the OpenRouter API. The client never takes a URL from
@@ -23,6 +26,10 @@ const (
 	maxModelsResponseBytes = 16 << 20
 	maxSmallResponseBytes  = 1 << 20
 	maxErrorBodyLen        = 300
+	// metaRequestTimeout bounds the small requests (key info, model list).
+	// Completions have no client-side cap: the executor's review timeout
+	// governs them through the request context.
+	metaRequestTimeout = 30 * time.Second
 )
 
 // ErrNoKey is returned when no API key is configured.
@@ -34,18 +41,19 @@ type Client struct {
 	HTTP    *http.Client
 	Keys    *KeyStore
 
-	modelsMu   sync.Mutex
-	models     []Model
-	modelsAt   time.Time
-	modelsTTL  time.Duration
-	nowForTest func() time.Time
+	modelsMu    sync.Mutex
+	modelsFetch sync.Mutex // one /models fetch at a time; readers never wait on it
+	models      []Model
+	modelsAt    time.Time
+	modelsTTL   time.Duration
+	nowForTest  func() time.Time
 }
 
 // NewClient returns a client for the real API.
 func NewClient(keys *KeyStore) *Client {
 	return &Client{
 		BaseURL:   DefaultBaseURL,
-		HTTP:      &http.Client{Timeout: 10 * time.Minute},
+		HTTP:      &http.Client{},
 		Keys:      keys,
 		modelsTTL: time.Hour,
 	}
@@ -101,9 +109,12 @@ func (c *Client) do(ctx context.Context, method, path string, body any, limit in
 		return fmt.Errorf("openrouter: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return fmt.Errorf("openrouter: read response: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return fmt.Errorf("openrouter: %s %s: response exceeds %d bytes", method, path, limit)
 	}
 	if resp.StatusCode/100 != 2 {
 		return &APIError{Status: resp.StatusCode, Message: errorMessage(data)}
@@ -128,11 +139,32 @@ func errorMessage(data []byte) string {
 	return truncate(strings.TrimSpace(string(data)), maxErrorBodyLen)
 }
 
+// truncate cuts s to at most n bytes on a rune boundary.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
 	return s[:n] + "…"
+}
+
+// errorStatus maps the code of an error OpenRouter reports inside a 200 body
+// to an HTTP status, so a 429 or 402 there still reads as RateLimited. Codes
+// that are not HTTP statuses become 502.
+func errorStatus(code any) int {
+	var n int
+	switch v := code.(type) {
+	case float64:
+		n = int(v)
+	case string:
+		n, _ = strconv.Atoi(v)
+	}
+	if n >= 400 && n <= 599 {
+		return n
+	}
+	return http.StatusBadGateway
 }
 
 // ── Chat completions ─────────────────────────────────────────────────────
@@ -234,7 +266,7 @@ func (c *Client) Chat(ctx context.Context, p ChatParams) (Message, ChatUsage, er
 		return Message{}, ChatUsage{}, err
 	}
 	if resp.Error != nil {
-		return Message{}, resp.Usage, &APIError{Status: http.StatusBadGateway, Message: truncate(resp.Error.Message, maxErrorBodyLen)}
+		return Message{}, resp.Usage, &APIError{Status: errorStatus(resp.Error.Code), Message: truncate(resp.Error.Message, maxErrorBodyLen)}
 	}
 	if len(resp.Choices) == 0 {
 		return Message{}, resp.Usage, errors.New("openrouter: completion has no choices")
@@ -257,6 +289,8 @@ type KeyInfo struct {
 
 // KeyInfo returns the key's spend and limit.
 func (c *Client) KeyInfo(ctx context.Context) (KeyInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, metaRequestTimeout)
+	defer cancel()
 	var env struct {
 		Data KeyInfo `json:"data"`
 	}
@@ -288,19 +322,36 @@ func (m Model) SupportsTools() bool {
 	return false
 }
 
-// Models returns the model list, cached for an hour.
+// Models returns the model list, cached for an hour. Callers get their own
+// copy, and a fresh cache is served without waiting on a fetch in flight.
 func (c *Client) Models(ctx context.Context) ([]Model, error) {
-	c.modelsMu.Lock()
-	defer c.modelsMu.Unlock()
-	if c.models != nil && c.now().Sub(c.modelsAt) < c.modelsTTL {
-		return c.models, nil
+	if m, ok := c.cachedModels(); ok {
+		return m, nil
 	}
+	c.modelsFetch.Lock()
+	defer c.modelsFetch.Unlock()
+	if m, ok := c.cachedModels(); ok {
+		return m, nil // fetched by the call we waited for
+	}
+	ctx, cancel := context.WithTimeout(ctx, metaRequestTimeout)
+	defer cancel()
 	var env struct {
 		Data []Model `json:"data"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/models", nil, maxModelsResponseBytes, &env); err != nil {
 		return nil, err
 	}
+	c.modelsMu.Lock()
 	c.models, c.modelsAt = env.Data, c.now()
-	return c.models, nil
+	c.modelsMu.Unlock()
+	return slices.Clone(env.Data), nil
+}
+
+func (c *Client) cachedModels() ([]Model, bool) {
+	c.modelsMu.Lock()
+	defer c.modelsMu.Unlock()
+	if c.models != nil && c.now().Sub(c.modelsAt) < c.modelsTTL {
+		return slices.Clone(c.models), true
+	}
+	return nil, false
 }

@@ -9,6 +9,8 @@ import (
 
 // Usage is the token accounting of one agent run.
 type Usage struct {
+	// InputTokens counts every input token billed at the input rate or
+	// above, so it includes CacheWriteTokens; do not add the two together.
 	InputTokens      int64
 	OutputTokens     int64
 	CacheReadTokens  int64
@@ -60,6 +62,10 @@ type claudeEnvelope struct {
 // or extra_flags chose another output format); the caller parses it as-is.
 var errNotEnvelope = errors.New("executor: output is not a claude result envelope")
 
+// ErrClaudeMaxTurns is returned when Claude stopped at --max-turns without an
+// answer.
+var ErrClaudeMaxTurns = errors.New("executor: claude run ended with error_max_turns")
+
 // unwrapClaudeEnvelope extracts the answer and usage from Claude's JSON
 // envelope. An envelope that reports an error (e.g. error_max_turns) is
 // returned as an error so the review fails instead of parsing a non-answer.
@@ -70,6 +76,9 @@ func unwrapClaudeEnvelope(raw []byte) ([]byte, *Usage, error) {
 	}
 	if env.IsError || env.Result == nil {
 		subtype := env.Subtype
+		if subtype == "error_max_turns" {
+			return nil, nil, ErrClaudeMaxTurns
+		}
 		if subtype == "" {
 			subtype = "error"
 		}

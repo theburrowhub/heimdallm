@@ -140,6 +140,10 @@ type Detector struct {
 	Provider func(ctx context.Context, id string) (configured bool, models []string)
 }
 
+// RefreshInterval is how often the daemon rescans the catalog in the
+// background, so an agent installed while it runs shows up without a restart.
+const RefreshInterval = 10 * time.Minute
+
 // Bounds on the subprocesses a scan starts.
 const (
 	versionTimeout = 5 * time.Second
@@ -147,6 +151,12 @@ const (
 	maxVersionLen  = 80
 	maxModels      = 200
 	maxModelLen    = 120
+	// maxProbeOutput caps what one probe may print; a scan reads at most
+	// this much per command.
+	maxProbeOutput = 256 << 10
+	// probeWaitDelay bounds how long a killed probe's children (npm/node
+	// shims) may keep its output pipe open.
+	probeWaitDelay = 2 * time.Second
 )
 
 // NewDetector returns a Detector wired to the real system.
@@ -165,9 +175,32 @@ func NewDetector() Detector {
 func runCommand(ctx context.Context, path string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = executor.CommandEnv(path)
-	cmd.Stdin = nil
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	// Many agents are node shims whose children inherit the output pipe;
+	// WaitDelay stops Wait from hanging on them after the context kills the
+	// shim.
+	cmd.WaitDelay = probeWaitDelay
+	out := &cappedBuffer{max: maxProbeOutput}
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
+	return out.String(), err
+}
+
+// cappedBuffer keeps the first max bytes written and discards the rest, so a
+// probe that prints megabytes cannot grow the daemon's memory.
+type cappedBuffer struct {
+	strings.Builder
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.Len(); room > 0 {
+		if len(p) > room {
+			b.Builder.Write(p[:room])
+		} else {
+			b.Builder.Write(p)
+		}
+	}
+	return len(p), nil
 }
 
 // Scan detects every catalog entry. Version and model probes run in parallel
@@ -301,16 +334,15 @@ func (d Detector) version(ctx context.Context, path string) string {
 
 // parseVersion pulls the version number out of a CLI's --version output
 // ("2.1.292 (Claude Code)", "codex-cli 0.161.0", "GitHub Copilot CLI 1.0.88.").
+// Output without a version number (an error or a login prompt) is no version.
 func parseVersion(out string) string {
 	first, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
-	if v := versionPattern.FindString(first); v != "" {
-		return strings.TrimRight(v, ".")
+	v := strings.TrimRight(versionPattern.FindString(first), ".")
+	if len(v) > maxVersionLen {
+		// The pattern only matches ASCII, so a byte cut is a rune cut.
+		v = v[:maxVersionLen]
 	}
-	first = strings.TrimSpace(first)
-	if len(first) > maxVersionLen {
-		first = first[:maxVersionLen]
-	}
-	return first
+	return v
 }
 
 func (d Detector) models(ctx context.Context, path string, e Entry) []string {
@@ -386,19 +418,37 @@ type Store struct {
 	mu        sync.RWMutex
 	agents    []Agent
 	scannedAt time.Time
+	scans     uint64 // completed scans; guarded by mu
 	scanning  sync.Mutex
 }
 
 // NewStore returns an empty store; call Refresh to populate it.
 func NewStore(d Detector) *Store { return &Store{detector: d} }
 
-// Refresh rescans the machine. Concurrent calls coalesce into one scan.
+// Refresh rescans the machine. Concurrent calls coalesce: a call that waited
+// for another scan to finish returns that scan instead of starting its own.
+// A scan whose ctx ended midway (a client that gave up) is not stored, since
+// its probes were cut short; the previous result stays.
 func (s *Store) Refresh(ctx context.Context) []Agent {
+	s.mu.RLock()
+	before := s.scans
+	s.mu.RUnlock()
 	s.scanning.Lock()
 	defer s.scanning.Unlock()
+	s.mu.RLock()
+	if s.scans != before {
+		agents := s.agents
+		s.mu.RUnlock()
+		return agents
+	}
+	s.mu.RUnlock()
 	agents := s.detector.Scan(ctx)
+	if ctx.Err() != nil {
+		return agents
+	}
 	s.mu.Lock()
 	s.agents, s.scannedAt = agents, time.Now().UTC()
+	s.scans++
 	s.mu.Unlock()
 	return agents
 }

@@ -737,3 +737,34 @@ func TestFetchDataLoadsInstalledAgents(t *testing.T) {
 		t.Errorf("dashboard agents = %+v", got)
 	}
 }
+
+func TestAgentsCacheThrottlesAndKeepsLastGood(t *testing.T) {
+	now := time.Date(2026, 10, 8, 10, 0, 0, 0, time.UTC)
+	c := agentsCache{nowFunc: func() time.Time { return now }}
+	calls := 0
+	fail := false
+	fetch := func() (*api.CLIAgentCatalog, error) {
+		calls++
+		if fail {
+			return nil, errors.New("404")
+		}
+		return &api.CLIAgentCatalog{Agents: []api.CLIAgent{{ID: "claude"}}}, nil
+	}
+	if got := c.get(fetch); len(got) != 1 || calls != 1 {
+		t.Fatalf("first get = %v (calls %d)", got, calls)
+	}
+	now = now.Add(30 * time.Second)
+	c.get(fetch)
+	if calls != 1 {
+		t.Errorf("refetched within %s: %d calls", agentsRefreshEvery, calls)
+	}
+	now = now.Add(agentsRefreshEvery)
+	fail = true
+	if got := c.get(fetch); calls != 2 || len(got) != 1 {
+		t.Errorf("a failed refetch must keep the last list: %v (calls %d)", got, calls)
+	}
+	var real agentsCache
+	if got := real.get(func() (*api.CLIAgentCatalog, error) { return nil, errors.New("x") }); got != nil {
+		t.Errorf("no catalog yet = %v", got)
+	}
+}

@@ -68,6 +68,10 @@ type ExecOptions struct {
 	Model string
 	// MaxTurns sets --max-turns <n> for Claude (0 = not set).
 	MaxTurns int
+	// SoftMaxTurns marks MaxTurns as a token-saving default rather than an
+	// operator setting: a review that runs out of turns is retried once
+	// without the cap instead of failing.
+	SoftMaxTurns bool
 	// ApprovalMode sets the typed Codex/Gemini approval option.
 	// Legacy values from older Codex CLIs are still accepted and normalized.
 	ApprovalMode string
@@ -121,6 +125,7 @@ func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptio
 	}
 	opts.Model = ""
 	opts.MaxTurns = 0
+	opts.SoftMaxTurns = false
 	opts.ApprovalMode = ""
 	opts.ExtraFlags = ""
 	opts.Effort = ""
@@ -354,8 +359,10 @@ func (e *Executor) TerminateAll() {
 	for _, tracked := range e.inFlightGroups {
 		groups = append(groups, tracked.process)
 	}
-	// In-process agents stop by cancelling their request context.
+	// In-process agents stop by cancelling their request context, reported
+	// as ErrExecutionCancelled like TerminateExecution.
 	for tracked := range e.inFlightHTTP {
+		tracked.manuallyCancelled = true
 		if tracked.cancel != nil {
 			tracked.cancel()
 		}
@@ -390,6 +397,18 @@ func (e *Executor) TerminateAll() {
 // SECURITY: Detect validates each name against the CLI allowlist before
 // resolving it, preventing shell injection (issue #2).
 func (e *Executor) Detect(primary, fallback string) (string, error) {
+	return e.detect(primary, fallback, false)
+}
+
+// DetectRaw is Detect for free-form runs (ExecuteRaw, e.g. merge-conflict
+// resolution): review-only in-process agents are skipped, so a configured
+// openrouter primary falls through to the fallback CLI instead of being
+// picked and then refused with ErrReviewOnlyAgent.
+func (e *Executor) DetectRaw(primary, fallback string) (string, error) {
+	return e.detect(primary, fallback, true)
+}
+
+func (e *Executor) detect(primary, fallback string, raw bool) (string, error) {
 	for _, name := range []string{primary, fallback} {
 		if name == "" {
 			continue
@@ -398,6 +417,9 @@ func (e *Executor) Detect(primary, fallback string) (string, error) {
 			return "", err // reject unknown / potentially-injected names early
 		}
 		if httpOnlyCLIs[name] {
+			if raw {
+				continue
+			}
 			if agent := e.httpAgent(name); agent != nil && agent.Configured() {
 				return name, nil
 			}
@@ -1577,6 +1599,13 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 		switch {
 		case envErr == nil:
 			raw, usage = payload, u
+		case errors.Is(envErr, ErrClaudeMaxTurns) && opts.SoftMaxTurns && opts.MaxTurns > 0:
+			// The cap came from limit_exploration, not the operator: a
+			// review that needed more turns used to finish, so finish it.
+			slog.Warn("executor: claude ran out of the token-saving turn cap, retrying without it",
+				"max_turns", opts.MaxTurns)
+			opts.MaxTurns, opts.SoftMaxTurns = 0, false
+			return e.Execute(cli, prompt, opts)
 		case !errors.Is(envErr, errNotEnvelope):
 			return nil, envErr
 		}

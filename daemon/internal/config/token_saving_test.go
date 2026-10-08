@@ -83,3 +83,22 @@ func TestTokenSaving_RejectsBadGlobs(t *testing.T) {
 		t.Fatal("too many globs must be rejected")
 	}
 }
+
+// noise_globs = [] means "drop no paths" and must survive resolution as an
+// empty, non-nil list: the pipeline reads nil as "use the defaults".
+func TestTokenSaving_ExplicitEmptyNoiseGlobs(t *testing.T) {
+	cfg, err := loadReviewLimitsTOML(t, `
+[ai.repos."acme/api".token_saving]
+noise_globs = []
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.TokenSavingForRepo("acme/api")
+	if got.NoiseGlobs == nil || len(got.NoiseGlobs) != 0 {
+		t.Fatalf("noise globs = %#v, want an empty non-nil list", got.NoiseGlobs)
+	}
+	if other := cfg.TokenSavingForRepo("acme/web"); len(other.NoiseGlobs) != len(DefaultNoiseGlobs) {
+		t.Errorf("another repo must keep the defaults, got %v", other.NoiseGlobs)
+	}
+}
