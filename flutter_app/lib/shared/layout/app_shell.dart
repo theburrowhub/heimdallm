@@ -77,6 +77,7 @@ final appDestinations = <AppDestination>[
     icon: Icons.auto_awesome,
   ),
   const AppDestination(branchIndex: 6, label: 'Agents', icon: Icons.smart_toy),
+  const AppDestination(branchIndex: 9, label: 'Flows', icon: Icons.alt_route),
   const AppDestination(branchIndex: 7, label: 'Stats', icon: Icons.bar_chart),
   const AppDestination(
     branchIndex: 8,

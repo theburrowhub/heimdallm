@@ -270,6 +270,12 @@ type AIConfig struct {
 	// TokenSaving switches the measures that reduce what a review costs.
 	// Overridable per org and per repo; see TokenSavingForRepo.
 	TokenSaving TokenSavingConfig `toml:"token_saving"`
+
+	// Flows are the configured review flows, keyed by id; Flow selects the
+	// global one. With no flow selected, the flow is synthesised from
+	// Primary/Fallback (see FlowForRepo).
+	Flows map[string]FlowConfig `toml:"flows"`
+	Flow  string                `toml:"flow"`
 }
 
 type RepoAI struct {
@@ -303,6 +309,9 @@ type RepoAI struct {
 	// TokenSaving overrides the token-saving measures for this repo; nil
 	// fields inherit from the org and global settings.
 	TokenSaving *TokenSavingConfig `toml:"token_saving,omitempty"`
+
+	// Flow selects the review flow for this repo ("" = inherit).
+	Flow string `toml:"flow,omitempty"`
 }
 
 // OrgAI holds per-organisation overrides, applied to all repos in the org
@@ -330,6 +339,9 @@ type OrgAI struct {
 	// TokenSaving overrides the token-saving measures for every repo in this
 	// org; nil fields inherit from the global settings.
 	TokenSaving *TokenSavingConfig `toml:"token_saving,omitempty"`
+
+	// Flow selects the review flow for every repo in this org ("" = inherit).
+	Flow string `toml:"flow,omitempty"`
 }
 
 // MaxRetentionDays is the upper bound (≈10 years) shared by every retention
@@ -811,6 +823,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateTokenSaving(); err != nil {
+		return err
+	}
+	if err := c.validateFlows(); err != nil {
 		return err
 	}
 	// Bound the review-retention window for the TOML and env paths (the HTTP

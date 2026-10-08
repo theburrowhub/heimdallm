@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/models/flow.dart';
 import 'platform/fake_platform_services.dart';
 
 void main() {
@@ -111,6 +112,103 @@ void main() {
 
       status = 503;
       expect(client.fetchReviewLimits(), throwsA(isA<ApiException>()));
+    });
+
+    test('flow and quota endpoints', () async {
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+        token: 'abc-123',
+      );
+      var status = 200;
+      final seen = <String>[];
+      Map<String, dynamic>? sentBody;
+      final client = ApiClient(
+        httpClient: MockClient((request) async {
+          seen.add('${request.method} ${request.url.path}');
+          expect(request.headers['X-Heimdallm-Token'], 'abc-123');
+          if (request.body.isNotEmpty) {
+            sentBody = jsonDecode(request.body) as Map<String, dynamic>;
+          }
+          if (status != 200) {
+            return http.Response('{"error":"bad rule"}', status);
+          }
+          return switch (request.url.path) {
+            '/flows' => http.Response(
+              jsonEncode({
+                'selected': 'night',
+                'flows': {
+                  'night': {
+                    'name': 'Night',
+                    'rules': {
+                      '10': {'agent': 'codex'},
+                    },
+                  },
+                },
+              }),
+              200,
+            ),
+            '/flows/simulate' => http.Response(
+              jsonEncode({
+                'flow_id': 'night',
+                'candidates': ['codex'],
+              }),
+              200,
+            ),
+            '/quotas' => http.Response(
+              jsonEncode([
+                {'agent': 'claude', 'available': true, 'windows': []},
+                'junk',
+              ]),
+              200,
+            ),
+            _ => http.Response('{"ai":{}}', 200),
+          };
+        }),
+        platform: platform,
+      );
+      final listing = await client.fetchFlows();
+      expect(listing.selected, 'night');
+      expect(listing.flows['night']!.rules.single.agent, 'codex');
+
+      await client.putFlow(
+        'night',
+        const ReviewFlow(
+          name: 'Night',
+          rules: [FlowRule(agent: 'codex')],
+        ),
+      );
+      expect(sentBody!['rules'], {
+        '10': {'agent': 'codex'},
+      });
+      await client.deleteFlow('night');
+      final at = DateTime.utc(2026, 10, 8, 9);
+      final d = await client.simulateFlow(repo: 'org/a', at: at);
+      expect(d.candidates, ['codex']);
+      expect(sentBody, {'repo': 'org/a', 'at': '2026-10-08T09:00:00.000Z'});
+      expect((await client.fetchQuotas()).single.agent, 'claude');
+      expect(seen, [
+        'GET /flows',
+        'PUT /flows/night',
+        'DELETE /flows/night',
+        'POST /flows/simulate',
+        'GET /quotas',
+      ]);
+
+      status = 400;
+      expect(client.fetchFlows(), throwsA(isA<ApiException>()));
+      await expectLater(
+        client.putFlow('night', const ReviewFlow()),
+        throwsA(
+          isA<ApiException>().having(
+            (e) => '$e',
+            'message',
+            contains('bad rule'),
+          ),
+        ),
+      );
+      expect(client.deleteFlow('night'), throwsA(isA<ApiException>()));
+      expect(client.simulateFlow(flow: 'x'), throwsA(isA<ApiException>()));
+      expect(client.fetchQuotas(), throwsA(isA<ApiException>()));
     });
 
     test('fetchPRs sends X-Heimdallm-Token and hits absolute URL', () async {

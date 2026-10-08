@@ -27,6 +27,7 @@ A Flutter Web UI (`:3000`) with responsive sidebar/rail/drawer navigation for Ac
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/prompts` (`/agents` remains a compatibility alias)
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
 - **Per-repo overrides** — different AI agent, prompt, and feedback mode per repository
+- **Review flows** — choose the reviewing agent by time of day and remaining quota (Claude, Codex, Copilot, Gemini, OpenRouter), and fall back to the next agent when one runs out of quota mid-review (usage limit, HTTP 402/429)
 - **Topic-based auto-discovery** — tag repos with a GitHub topic and Heimdallm monitors them without editing config
 - **Severity gating** — `high` severity always triggers `REQUEST_CHANGES`; with `never_approve_with_issues` enabled, any finding at or above the configured threshold does too, otherwise the review approves
 - **Native desktop** — macOS menu-bar app, system notifications, dark mode, no Electron

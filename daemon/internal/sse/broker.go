@@ -12,6 +12,11 @@ const (
 	EventReviewSkipped         = "review_skipped"
 	EventCircuitBreakerTripped = "circuit_breaker_tripped"
 
+	// EventReviewAgentFallback fires when a review flow hands a review to its
+	// next agent because the current one ran out of quota mid-review.
+	// Payload: {"repo", "pr_number", "from", "to"}.
+	EventReviewAgentFallback = "review_agent_fallback"
+
 	// EventRepoDiscovered fires when the poll cycle sees a PR whose repo
 	// is not yet in monitored or non-monitored. Payload: {"repo": "org/name"}.
 	EventRepoDiscovered = "repo_discovered"

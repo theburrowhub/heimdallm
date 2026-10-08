@@ -372,6 +372,9 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   if (old.reviewMode != updated.reviewMode) {
     aiDiff['review_mode'] = updated.reviewMode;
   }
+  if (old.aiFlow != updated.aiFlow) {
+    aiDiff['flow'] = updated.aiFlow;
+  }
 
   if (old.globalCloneDir != updated.globalCloneDir) {
     aiDiff['clone_dir'] = updated.globalCloneDir;

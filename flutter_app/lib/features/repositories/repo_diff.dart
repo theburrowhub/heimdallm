@@ -20,6 +20,9 @@ Map<String, dynamic> computeRepoDiff(RepoConfig old, RepoConfig updated) {
   if (old.reviewMode != updated.reviewMode) {
     diff['review_mode'] = updated.reviewMode ?? '';
   }
+  if (old.flow != updated.flow) {
+    diff['flow'] = updated.flow ?? '';
+  }
   if (old.promptId != updated.promptId) {
     diff['prompt'] = updated.promptId ?? '';
   }

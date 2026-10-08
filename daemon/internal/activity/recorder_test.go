@@ -530,3 +530,21 @@ func TestRecorder_PeerPublishedSkipRecordsThePeer(t *testing.T) {
 		t.Errorf("details must not carry an empty peer_login when the event had none: %+v", fs.at(1).details)
 	}
 }
+
+func TestRecorder_AgentFallback(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+	events <- sse.Event{
+		Type: sse.EventReviewAgentFallback,
+		Data: `{"repo":"org/name","pr_number":9,"from":"claude","to":"copilot"}`,
+	}
+	waitFor(t, func() bool { return fs.count() == 1 })
+	got := fs.at(0)
+	if got.action != "review_agent_fallback" || got.outcome != "claude → copilot" || got.itemNumber != 9 {
+		t.Errorf("row = %+v", got)
+	}
+	events <- sse.Event{Type: sse.EventReviewAgentFallback, Data: `not json`}
+	time.Sleep(20 * time.Millisecond)
+	if fs.count() != 1 {
+		t.Error("malformed payload must not record")
+	}
+}

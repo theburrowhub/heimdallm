@@ -98,6 +98,10 @@ type Server struct {
 	agentCatalog *agentcatalog.Store
 	// apiKeyProviders manage in-process agents' API keys, keyed by agent id.
 	apiKeyProviders map[string]APIKeyProvider
+	// Review flows and quotas (see flows.go). Nil until main wires them.
+	flowsListFn    func() any
+	flowSimulateFn func(ctx context.Context, req FlowSimulation) (any, error)
+	quotasFn       func(ctx context.Context) any
 	// reviewLimitsFn returns live usage of every configured review budget
 	// for GET /review-limits. Nil until main wires it.
 	reviewLimitsFn func() (any, error)
@@ -298,6 +302,8 @@ var sensitiveGETPaths = []string{
 	"/github",        // covers /github/rate_limit (live GitHub API usage)
 	"/review-limits", // exposes repo/org names and review volume
 	"/cli-agents",    // exposes installed tools, versions and paths
+	"/quotas",        // exposes each agent's account usage
+	"/flows",         // exposes the review routing configuration
 	// exposes PR titles, repos, block reasons and check names
 	"/merge-tracking",
 	// the registry exposes every instance's base URL and the routing map
@@ -713,6 +719,11 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Put("/cli-agents/{id}/key", srv.handlePutAgentKey)
 	r.Delete("/cli-agents/{id}/key", srv.handleDeleteAgentKey)
 	r.Get("/cli-agents/{id}/usage", srv.handleAgentUsage)
+	r.Get("/quotas", srv.handleQuotas)
+	r.Get("/flows", srv.handleListFlows)
+	r.Post("/flows/simulate", srv.handleSimulateFlow)
+	r.Put("/flows/{id}", srv.handlePutFlow)
+	r.Delete("/flows/{id}", srv.handleDeleteFlow)
 	r.Get("/agents", srv.handleListAgents)
 	r.Post("/agents", srv.handleUpsertAgent)
 	r.Delete("/agents/{id}", srv.handleDeleteAgent)

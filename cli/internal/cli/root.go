@@ -123,6 +123,7 @@ func NewRootCmd(version string) *cobra.Command {
 		newConfigCmd(),
 		newStatsCmd(),
 		newAgentsCmd(),
+		newFlowsCmd(),
 		newDashboardCmd(),
 		newConfigureCmd(),
 		newInstancesCmd(),

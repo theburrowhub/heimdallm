@@ -74,6 +74,8 @@ func (r *Recorder) handle(ev sse.Event) error {
 		return r.recordReviewError(ev)
 	case sse.EventReviewSkipped:
 		return r.recordReviewSkipped(ev)
+	case sse.EventReviewAgentFallback:
+		return r.recordAgentFallback(ev)
 	case sse.EventMergeTrackMerged:
 		return r.recordMergeTrackMerged(ev)
 	case sse.EventMergeTrackAutoMergeArmed:
@@ -186,6 +188,8 @@ var onceSkipReasons = map[string]bool{
 	"head_reanchored":     true,
 	// A deferred review is re-tried every poll until its budget has room.
 	"review_limit": true,
+	// Likewise until the review flow selects an agent again.
+	"no_flow_agent": true,
 }
 
 type onceSkipKey struct {
@@ -250,6 +254,27 @@ func (r *Recorder) recordReviewSkipped(ev sse.Event) error {
 	}
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
 		p.PRNumber, p.PRTitle, "review_skipped", p.Reason, details)
+	return err
+}
+
+// recordAgentFallback logs that a review moved to the flow's next agent
+// because the previous one ran out of quota.
+func (r *Recorder) recordAgentFallback(ev sse.Event) error {
+	var p struct {
+		Repo     string `json:"repo"`
+		PRNumber int    `json:"pr_number"`
+		From     string `json:"from"`
+		To       string `json:"to"`
+	}
+	if err := decode(ev.Data, &p); err != nil {
+		return err
+	}
+	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
+		p.PRNumber, "", "review_agent_fallback", p.From+" → "+p.To, map[string]any{
+			"item_type": "pr",
+			"from":      p.From,
+			"to":        p.To,
+		})
 	return err
 }
 

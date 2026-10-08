@@ -803,6 +803,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	var loginMu sync.Mutex
 	var cachedLogin = resolvedBotLogin
 
+	// Remaining quota of each agent, for review flows (cached 2 minutes).
+	quotaSvc := newQuotaService(openRouterAdmin)
+	agentAvailable := func(agent string) bool {
+		_, err := exec.Detect(agent, "")
+		return err == nil
+	}
+
 	buildRunOpts := func(pr *gh.PullRequest, aiCfg config.RepoAI) pipeline.RunOptions {
 		cli := aiCfg.Primary
 		if cli == "" {
@@ -823,15 +830,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		guards := pipeline.GateConfig(cfg.ReviewGuards(botLogin))
 		budgets := reviewBudgetsFor(cfg, pr.Repo)
 		tokenSaving := cfg.TokenSavingForRepo(pr.Repo)
-		cfgMu.Unlock()
-		maxTurns, effort := limitedExploration(cli, agentCfg.MaxTurns, agentCfg.Effort, tokenSaving.LimitExploration)
-		extraFlags := agentCfg.ExtraFlags
-		if extraFlags != "" {
-			if err := executor.ValidateExtraFlagsForCLI(cli, extraFlags); err != nil {
-				slog.Warn("buildRunOpts: extra_flags from config rejected", "err", err)
-				extraFlags = ""
-			}
+		flowID, flow := cfg.FlowForRepo(pr.Repo)
+		agentExec := map[string]executor.ExecOptions{}
+		for _, agent := range flowAgents(flow) {
+			agentExec[agent] = agentExecOptions(agent, cfg.AgentConfigFor(agent), globalTimeout, aiCfg.LocalDir, tokenSaving.LimitExploration)
 		}
+		cfgMu.Unlock()
+		primaryOpts := agentExecOptions(cli, agentCfg, globalTimeout, aiCfg.LocalDir, tokenSaving.LimitExploration)
 		return pipeline.RunOptions{
 			Primary:                      aiCfg.Primary,
 			Fallback:                     aiCfg.Fallback,
@@ -842,22 +847,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			NeverApproveWithIssues:       aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
 			NeverApproveMinSeverity:      aiCfg.NeverApproveMinSeverity,
 			ReviewFailureRepoHourlyLimit: reviewFailureRepoHourlyLimit,
-			ExecOpts: executor.ExecOptions{
-				Model:                agentCfg.Model,
-				MaxTurns:             maxTurns,
-				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           extraFlags,
-				WorkDir:              aiCfg.LocalDir,
-				Effort:               effort,
-				PermissionMode:       agentCfg.PermissionMode,
-				Bare:                 agentCfg.Bare,
-				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
-			},
-			Guards:      guards,
-			Budgets:     budgets,
-			TokenSaving: pipelineTokenSaving(tokenSaving),
+			ExecOpts:                     primaryOpts,
+			Guards:                       guards,
+			Budgets:                      budgets,
+			TokenSaving:                  pipelineTokenSaving(tokenSaving),
+			Candidates:                   flowCandidates(flowID, flow, pr.Repo, quotaSvc, agentAvailable),
+			AgentExecOpts:                agentExec,
 		}
 	}
 
@@ -1969,6 +1964,23 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 	}()
 
+	// Review flows and agent quotas for the app's flow editor and agent pages.
+	srv.SetQuotasFn(func(ctx context.Context) any { return quotaSvc.Snapshot(ctx) })
+	srv.SetFlowFns(
+		func() any {
+			cfgMu.Lock()
+			c := cfg
+			cfgMu.Unlock()
+			return flowListing(c)
+		},
+		func(ctx context.Context, req server.FlowSimulation) (any, error) {
+			cfgMu.Lock()
+			c := cfg
+			cfgMu.Unlock()
+			return simulateFlow(ctx, c, req, quotaSvc, agentAvailable)
+		},
+	)
+
 	// Live review budget usage for GET /review-limits: stored reviews plus
 	// the ones the pipeline has admitted and is still running.
 	srv.SetReviewLimitsFn(func() (any, error) {
@@ -2100,6 +2112,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 		result["review_limits"] = reviewLimitsMap(c.ReviewLimits)
 		result["token_saving"] = resolvedTokenSavingMap(c.TokenSavingForRepo(""))
+		result["ai_flow"] = c.AI.Flow
 		result["polling"] = map[string]any{
 			"poll_interval":               c.Polling.PollInterval,
 			"discovery_interval":          c.Polling.DiscoveryInterval,
@@ -4726,6 +4739,9 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 	if m := tokenSavingOverrideMap(ai.TokenSaving); m != nil {
 		out["token_saving"] = m
 	}
+	if ai.Flow != "" {
+		out["flow"] = ai.Flow
+	}
 	return out
 }
 
@@ -4754,6 +4770,9 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 	}
 	if m := tokenSavingOverrideMap(ai.TokenSaving); m != nil {
 		out["token_saving"] = m
+	}
+	if ai.Flow != "" {
+		out["flow"] = ai.Flow
 	}
 	return out
 }

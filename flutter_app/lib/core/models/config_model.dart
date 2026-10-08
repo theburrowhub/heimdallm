@@ -402,6 +402,9 @@ class RepoConfig {
   /// Token-saving measures this repo overrides (null = inherit all).
   final TokenSavingOverride? tokenSaving;
 
+  /// Review flow selected for this repo (null = inherit).
+  final String? flow;
+
   /// True when this repo's org has a bare entry in `non_monitored`
   /// (theburrowhub/heimdallm#828). Derived by `AppConfig.fromJson` from
   /// `nonMonitoredOrgs`, never set directly by the UI — it is not part of
@@ -424,6 +427,7 @@ class RepoConfig {
     this.neverApproveMinSeverity,
     this.reviewLimits,
     this.tokenSaving,
+    this.flow,
     this.firstSeenAt,
     this.excludedByOrg = false,
   }) : _legacyMtEnabled = mtEnabled,
@@ -457,7 +461,8 @@ class RepoConfig {
       (localDir != null && localDir!.isNotEmpty) ||
       cloneDir != null ||
       neverApproveWithIssues != null ||
-      neverApproveMinSeverity != null;
+      neverApproveMinSeverity != null ||
+      flow != null;
 
   /// LED status for each feature: 'off', 'global', 'repo'
   String prLedStatus(bool globalMonitored) {
@@ -480,6 +485,7 @@ class RepoConfig {
     Object? neverApproveMinSeverity = _sentinel,
     Object? reviewLimits = _sentinel,
     Object? tokenSaving = _sentinel,
+    Object? flow = _sentinel,
     Object? firstSeenAt = _sentinel,
     bool? excludedByOrg,
   }) {
@@ -515,6 +521,7 @@ class RepoConfig {
       tokenSaving: tokenSaving == _sentinel
           ? this.tokenSaving
           : tokenSaving as TokenSavingOverride?,
+      flow: flow == _sentinel ? this.flow : flow as String?,
       firstSeenAt: firstSeenAt == _sentinel
           ? this.firstSeenAt
           : firstSeenAt as DateTime?,
@@ -555,6 +562,9 @@ class OrgConfig {
   /// Token-saving measures this org overrides (null = inherit all).
   final TokenSavingOverride? tokenSaving;
 
+  /// Review flow selected for this org (null = inherit).
+  final String? flow;
+
   const OrgConfig({
     this.aiPrimary,
     this.aiFallback,
@@ -568,6 +578,7 @@ class OrgConfig {
     this.neverApproveMinSeverity,
     this.reviewLimits,
     this.tokenSaving,
+    this.flow,
   }) : _legacyMtEnabled = mtEnabled,
        _mergeTracking = mergeTracking;
 
@@ -582,6 +593,7 @@ class OrgConfig {
       neverApproveMinSeverity != null ||
       reviewLimits != null ||
       tokenSaving != null ||
+      flow != null ||
       !mergeTracking.isEmpty;
 
   OrgConfig copyWith({
@@ -597,6 +609,7 @@ class OrgConfig {
     Object? neverApproveMinSeverity = _sentinel,
     Object? reviewLimits = _sentinel,
     Object? tokenSaving = _sentinel,
+    Object? flow = _sentinel,
   }) {
     final requestedMergeTracking = mergeTracking == _sentinel
         ? this.mergeTracking
@@ -629,6 +642,7 @@ class OrgConfig {
       tokenSaving: tokenSaving == _sentinel
           ? this.tokenSaving
           : tokenSaving as TokenSavingOverride?,
+      flow: flow == _sentinel ? this.flow : flow as String?,
     );
   }
 
@@ -644,6 +658,7 @@ class OrgConfig {
       neverApproveMinSeverity: _nonEmpty(json['never_approve_min_severity']),
       reviewLimits: ReviewLimits.maybeFromJson(json['review_limits']),
       tokenSaving: TokenSavingOverride.maybeFromJson(json['token_saving']),
+      flow: _nonEmpty(json['flow']),
     );
   }
 }
@@ -1252,6 +1267,10 @@ class AppConfig {
 
   /// Effective global token-saving measures (`[ai.token_saving]`).
   final TokenSavingSettings tokenSaving;
+
+  /// Globally selected review flow ('' = the default flow from
+  /// primary/fallback).
+  final String aiFlow;
   final PollingConfig polling;
 
   /// Host paths the daemon scans (in order) when a repo has no explicit
@@ -1291,6 +1310,7 @@ class AppConfig {
     this.circuitBreaker = const CircuitBreakerConfig(),
     this.reviewLimits = const ReviewLimits(),
     this.tokenSaving = const TokenSavingSettings(),
+    this.aiFlow = '',
     this.globalNeverApproveWithIssues = false,
     this.globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity,
     this.polling = const PollingConfig(),
@@ -1361,6 +1381,7 @@ class AppConfig {
     CircuitBreakerConfig? circuitBreaker,
     ReviewLimits? reviewLimits,
     TokenSavingSettings? tokenSaving,
+    String? aiFlow,
     bool? globalNeverApproveWithIssues,
     String? globalNeverApproveMinSeverity,
     PollingConfig? polling,
@@ -1386,6 +1407,7 @@ class AppConfig {
       circuitBreaker: circuitBreaker ?? this.circuitBreaker,
       reviewLimits: reviewLimits ?? this.reviewLimits,
       tokenSaving: tokenSaving ?? this.tokenSaving,
+      aiFlow: aiFlow ?? this.aiFlow,
       globalNeverApproveWithIssues:
           globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
       globalNeverApproveMinSeverity:
@@ -1405,6 +1427,7 @@ class AppConfig {
     'repositories': repositories,
     'ai_primary': aiPrimary,
     'ai_fallback': aiFallback,
+    'ai_flow': aiFlow,
     'review_mode': reviewMode,
     'retention_days': retentionDays,
     'clone_dir': globalCloneDir,
@@ -1454,6 +1477,7 @@ class AppConfig {
           neverApproveMinSeverity: _nonEmpty(ov['never_approve_min_severity']),
           reviewLimits: ReviewLimits.maybeFromJson(ov['review_limits']),
           tokenSaving: TokenSavingOverride.maybeFromJson(ov['token_saving']),
+          flow: _nonEmpty(ov['flow']),
           firstSeenAt: firstSeen,
         );
       }
@@ -1537,6 +1561,7 @@ class AppConfig {
               json['token_saving'] as Map<String, dynamic>,
             )
           : const TokenSavingSettings(),
+      aiFlow: (json['ai_flow'] as String?) ?? '',
       globalNeverApproveWithIssues:
           (json['never_approve_with_issues'] as bool?) ?? false,
       // The daemon serves "" when unset; surface the default it will actually

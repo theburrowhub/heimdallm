@@ -381,7 +381,73 @@ API endpoints:
 | `DELETE /cli-agents/openrouter/key` | Removes the stored key |
 | `GET /cli-agents/openrouter/usage` | Spend and limit |
 
-### Primary and fallback
+### Review flows
+
+A **flow** decides which agent reviews a PR. It is an ordered list of rules;
+each rule names an agent and optional conditions. Rules are evaluated in
+order: the first rule whose conditions hold and whose agent is installed (or,
+for OpenRouter, has a key) reviews. The later matching rules are the
+fallbacks: if the chosen agent fails **because it ran out of quota** (a usage
+limit, rate limit, HTTP 402 or 429), the review moves on to the next one in
+the same run, and the activity log records `review fallback: claude → codex`.
+Any other failure fails the review as before.
+
+Conditions:
+
+| Condition | Holds when |
+|---|---|
+| `schedule` | today is one of `days` (`mon`…`sun`; empty = every day) and the time is within `[from, to)` in `tz` (IANA zone; empty = the daemon's). `from > to` spans midnight, e.g. `22:00`–`06:00`. |
+| `quota` | `agent`'s used `window` is `below` / `above` `percent`. Windows: `session` (5h), `weekly`, `monthly`, `credit`, `any` (the most used window) or `model:<id>` (a per-model bucket, Gemini). |
+
+A rule with several conditions needs all of them (`match = "all"`, the
+default) or any of them (`match = "any"`). A rule with no conditions always
+applies, which makes it the catch-all at the end of a flow. Quota conditions
+**fail closed**: when an agent's quota cannot be read, `below` and `above`
+both read as false and the flow moves on rather than guess.
+
+The example below reviews with Claude while both its 5h and weekly windows
+are under 50%, with Copilot on weekday mornings, and with Codex otherwise:
+
+```toml
+[ai]
+flow = "weekday"                       # the global flow
+
+[ai.flows.weekday]
+name = "Weekday"
+
+[ai.flows.weekday.rules.10]
+agent = "claude"
+[ai.flows.weekday.rules.10.quota.session]
+agent = "claude"
+window = "session"
+op = "below"
+percent = 50
+[ai.flows.weekday.rules.10.quota.weekly]
+agent = "claude"
+window = "weekly"
+op = "below"
+percent = 50
+
+[ai.flows.weekday.rules.20]
+agent = "copilot"
+[ai.flows.weekday.rules.20.schedule.office]
+days = ["mon", "tue", "wed", "thu", "fri"]
+from = "08:00"
+to = "15:00"
+tz = "Europe/Madrid"
+
+[ai.flows.weekday.rules.99]
+agent = "codex"                        # no conditions: if everything else fails
+```
+
+Rule keys (`10`, `20`, `99`) only set the order; they are compared as
+numbers. The **Flows** screen in the app edits all of this (drag rules to
+reorder) and has a *What would review now?* panel; the same answer is
+available from `POST /flows/simulate` and `heimdallm-cli flows simulate`.
+
+**The default flow.** With no flow selected, Heimdallm uses the flow
+`default`, built from the classic `primary` / `fallback` settings, so configs
+written before flows behave as they did (plus the quota fallback):
 
 ```bash
 HEIMDALLM_AI_PRIMARY=claude     # claude | codex | gemini | copilot | cursor_cli | opencode | openrouter
@@ -393,6 +459,30 @@ HEIMDALLM_AI_FALLBACK=gemini    # optional
 primary  = "claude"
 fallback = "gemini"
 ```
+
+Conflict resolution in merge tracking edits the branch, so it follows the
+same flow but only with agents that can write (Claude, Codex, Gemini,
+OpenCode); Copilot, Cursor CLI and OpenRouter review read-only.
+
+#### Agent quotas
+
+Flows read each agent's remaining quota the way the agents' own tools do,
+with the credentials those tools already store. The tokens are used only to
+call the provider's own usage endpoint, are never logged and never leave the
+daemon; `GET /quotas` returns only the percentages.
+
+| Agent | Source | Windows |
+|---|---|---|
+| Claude Code | Claude Code's OAuth login (macOS Keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) → `api.anthropic.com/api/oauth/usage` | `session` (5h), `weekly` |
+| Codex | `~/.codex/auth.json` (or `$CODEX_HOME`) → `chatgpt.com/backend-api/wham/usage` | `session`, `weekly` |
+| GitHub Copilot | the Copilot OAuth token in `~/.config/github-copilot/apps.json` → `api.github.com/copilot_internal/user` | `monthly` (premium requests) |
+| Gemini CLI | `~/.gemini/oauth_creds.json` → Code Assist `retrieveUserQuota` | `model:<id>` per model |
+| OpenRouter | the stored API key → `/api/v1/key` | `credit` (when the key has a limit) |
+| Cursor, OpenCode | — | no quota reported |
+
+Readings are cached for 2 minutes. On macOS the first Keychain read may ask
+for permission once. An expired login shows as *unknown* until you sign in
+with the agent's CLI again (Heimdallm does not refresh other tools' tokens).
 
 ### Per-agent configuration
 
@@ -452,14 +542,20 @@ prompt = "security-review-profile-id"
 
 ### Per-repo agent assignment
 
-Override the global AI agent for a specific repo:
+Pick a different flow for an org or a repo; the repo wins over the org, and
+the org over the global `ai.flow`:
 
 ```toml
+[ai.orgs.myorg]
+flow = "weekday"
+
 [ai.repos."myorg/frontend"]
-primary     = "codex"
-fallback    = "claude"
+flow        = "night"
 review_mode = "multi"
 ```
+
+The legacy `primary` / `fallback` overrides still work: they shape the
+`default` flow for that org or repo when no flow is selected there.
 ### Token saving
 
 Four measures cut what a review costs. They are **all on by default**, and each one can be turned off globally, per organisation or per repository:
@@ -769,6 +865,8 @@ HEIMDALLM_HOST=https://heimdallm.example.com HEIMDALLM_TOKEN=... make dev-cli
 | `heimdallm-cli follow` | Stream real-time SSE events (like `tail -f`; add `--json` for raw JSON) |
 | `heimdallm-cli config` | Print the daemon's running configuration as JSON |
 | `heimdallm-cli stats` | Review statistics: totals, by severity, by CLI, top repos, timing |
+| `heimdallm-cli agents` | Supported agents and which are installed (`--rescan` to look again) |
+| `heimdallm-cli flows` | Review flows and their rules; `flows simulate [--flow ID] [--repo owner/name] [--at RFC3339]` explains which agent would review; `flows quotas` shows each agent's remaining quota |
 | `heimdallm-cli dashboard` | Live terminal dashboard |
 
 ### TUI dashboard keybindings
@@ -1671,9 +1769,10 @@ non_monitored = []
 # ── AI ────────────────────────────────────────────────────────────────────────
 
 [ai]
-# Available CLIs: claude, gemini, codex, opencode
-primary  = "claude"   # env: HEIMDALLM_AI_PRIMARY
+# Available agents: claude, gemini, codex, copilot, cursor_cli, opencode, openrouter
+primary  = "claude"   # env: HEIMDALLM_AI_PRIMARY — the "default" flow
 # fallback = "gemini" # env: HEIMDALLM_AI_FALLBACK
+# flow = "weekday"    # select a flow from [ai.flows.*] (see "Review flows")
 
 # Review feedback mode.
 review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE

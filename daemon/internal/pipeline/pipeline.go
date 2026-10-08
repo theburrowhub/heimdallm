@@ -854,6 +854,15 @@ type RunOptions struct {
 	// TokenSaving selects the measures that shrink the prompt. The zero value
 	// keeps the full diff and the default template.
 	TokenSaving TokenSaving
+	// Candidates, when set, returns the agents the review flow picks, in
+	// order. It is called only once the review is past every dedup gate, so
+	// quota lookups are not spent on skipped PRs. Nil keeps the legacy
+	// primary/fallback selection.
+	Candidates func() []string
+	// AgentExecOpts are each agent's own execution options, used when the
+	// flow hands the review to that agent. Missing agents fall back to
+	// ExecOpts with provider-specific fields dropped.
+	AgentExecOpts map[string]executor.ExecOptions
 	// WorkPermit carries admission acquired at the outer worker boundary. When
 	// nil, Run acquires its own permit for backwards-compatible direct callers.
 	WorkPermit *workgate.Permit
@@ -1257,17 +1266,24 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	})
 
 	// 4. Select CLI (profile can override the global primary/fallback)
-	cli, err := p.selectCLI(primary, fallback, opts, ticket)
+	agentsToTry, err := p.selectCLIs(primary, fallback, opts, ticket)
 	_ = cliFlags // passed to Execute below
 	var agentBudgetErr *ReviewBudgetError
 	if errors.As(err, &agentBudgetErr) {
 		p.deferForBudget(pr, agentBudgetErr)
 		return nil, nil
 	}
+	if errors.Is(err, ErrNoFlowAgent) {
+		slog.Info("pipeline: review flow selected no available agent — deferring review",
+			"repo", pr.Repo, "pr", pr.Number)
+		p.publishSkipped(pr, SkipReasonNoFlowAgent)
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: detect CLI: %w", err)
 	}
-	slog.Info("pipeline: using CLI", "cli", cli)
+	cli := agentsToTry[0]
+	slog.Info("pipeline: using CLI", "cli", cli, "fallbacks", agentsToTry[1:])
 
 	// 4b. Circuit breaker: hard cap on completed reviews per PR HEAD / per repo.
 	// Runs AFTER all dedup layers so it only fires when the dedup failed but
@@ -1399,22 +1415,45 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// Validate cliFlags from the prompt profile against the selected provider's
 	// execution policy — a stored prompt must not override sandbox, approval,
 	// permission or workspace guards.
-	execOpts := executor.OptionsForSelectedCLI(primary, cli, opts.ExecOpts)
-	if cliFlags != "" && execOpts.ExtraFlags == "" {
-		migratedOpts, err := applyStoredProfileCLIFlags(cli, cliFlags, execOpts)
-		if err != nil {
-			slog.Warn("pipeline: prompt cli_flags rejected by execution policy, ignoring", "err", err)
-			// Don't abort the review — just skip the unsafe flags
-		} else {
-			execOpts = migratedOpts
-		}
-	}
-	execOpts.ExecutionID = ReviewExecutionID(prID)
-	execOpts.ReportUsage = true
 	slog.Info("pipeline: prompt built", "repo", pr.Repo, "pr", pr.Number,
 		"prompt_bytes", len(prompt), "incremental", incrementalFrom != "", "compact", compact)
-	result, err := p.executor.Execute(cli, prompt, execOpts)
-	if err != nil {
+	var result *executor.ReviewResult
+	for i, agent := range agentsToTry {
+		execOpts := execOptionsFor(agent, primary, opts)
+		if cliFlags != "" && execOpts.ExtraFlags == "" {
+			migratedOpts, err := applyStoredProfileCLIFlags(agent, cliFlags, execOpts)
+			if err != nil {
+				slog.Warn("pipeline: prompt cli_flags rejected by execution policy, ignoring", "err", err)
+				// Don't abort the review — just skip the unsafe flags
+			} else {
+				execOpts = migratedOpts
+			}
+		}
+		execOpts.ExecutionID = ReviewExecutionID(prID)
+		execOpts.ReportUsage = true
+		if i > 0 {
+			// Charge the agent that actually runs, and stop if its own
+			// budget filled up while the previous agent was running.
+			if blocked := p.budget.assignAgent(p.store, ticket, agent, opts.Budgets.Agents[agent], time.Now().UTC()); blocked != nil && !opts.Force {
+				return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
+			}
+		}
+		cli = agent
+		result, err = p.executor.Execute(cli, prompt, execOpts)
+		if err == nil {
+			break
+		}
+		if i+1 < len(agentsToTry) && executor.IsQuotaError(err) {
+			slog.Warn("pipeline: agent out of quota, handing the review to the next agent in the flow",
+				"repo", pr.Repo, "pr", pr.Number, "agent", cli, "next", agentsToTry[i+1], "err", err)
+			p.publish(sse.EventReviewAgentFallback, map[string]any{
+				"repo":      pr.Repo,
+				"pr_number": pr.Number,
+				"from":      cli,
+				"to":        agentsToTry[i+1],
+			})
+			continue
+		}
 		runErr := fmt.Errorf("pipeline: execute %s: %w", cli, err)
 		return nil, runErr
 	}

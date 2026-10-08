@@ -8,6 +8,7 @@ import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/agent.dart';
 import 'package:heimdallm/core/models/cli_agent.dart';
 import 'package:heimdallm/core/models/config_model.dart';
+import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/cli_agents/agent_catalog_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
@@ -83,6 +84,7 @@ class _TestConfigNotifier extends ConfigNotifier {
 Future<(_MockApiClient, GoRouter)> _pump(
   WidgetTester tester, {
   String location = '/cli-agents',
+  bool quotasFail = false,
 }) async {
   tester.view.physicalSize = const Size(1400, 1200);
   tester.view.devicePixelRatio = 1;
@@ -97,6 +99,23 @@ Future<(_MockApiClient, GoRouter)> _pump(
     () => api.rescanCliAgents(),
   ).thenAnswer((_) async => CliAgentCatalog.fromJson(_catalogJson));
   when(() => api.patchConfig(any())).thenAnswer((_) async => {});
+  if (quotasFail) {
+    when(() => api.fetchQuotas()).thenThrow(ApiException('404'));
+  } else {
+    when(() => api.fetchQuotas()).thenAnswer(
+      (_) async => [
+        AgentQuota.fromJson({
+          'agent': 'claude',
+          'available': true,
+          'windows': [
+            {'kind': 'session', 'used_percent': 34},
+            {'kind': 'weekly', 'used_percent': 95},
+          ],
+        }),
+        AgentQuota.fromJson({'agent': 'codex', 'error': 'not signed in'}),
+      ],
+    );
+  }
   when(() => api.fetchAgentKey('openrouter')).thenAnswer(
     (_) async => const AgentKeyStatus(configured: true, source: 'stored'),
   );
@@ -179,6 +198,26 @@ void main() {
     await tester.pumpAndSettle();
     verify(() => api.rescanCliAgents()).called(1);
     expect(find.text('Agents rescanned'), findsOneWidget);
+  });
+
+  testWidgets('catalog cards show the remaining quota', (tester) async {
+    await _pump(tester);
+    expect(find.byKey(const ValueKey('quota-claude-5h')), findsOneWidget);
+    final weekly = tester.widget<LinearProgressIndicator>(
+      find.byKey(const ValueKey('quota-claude-7d')),
+    );
+    expect(weekly.value, closeTo(0.95, 0.001));
+    expect(weekly.color, isNotNull);
+    expect(find.text('34%'), findsOneWidget);
+    expect(find.byKey(const ValueKey('quota-codex-5h')), findsNothing);
+  });
+
+  testWidgets('catalog renders without quotas on older daemons', (
+    tester,
+  ) async {
+    await _pump(tester, quotasFail: true);
+    expect(find.text('Claude Code'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
   });
 
   testWidgets('rescan errors are reported', (tester) async {

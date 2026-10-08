@@ -110,6 +110,7 @@ func cfgRepoLines(cfg map[string]any) []string {
 	for _, repo := range repos {
 		var sub []string
 		if ro, ok := overrides[repo].(map[string]any); ok {
+			sub = cfgSubKV(sub, "Flow", ro["flow"])
 			sub = cfgSubKV(sub, "Primary", ro["primary"])
 			sub = cfgSubKV(sub, "Fallback", ro["fallback"])
 			sub = cfgSubKV(sub, "Review mode", ro["review_mode"])
@@ -130,6 +131,7 @@ func cfgRepoLines(cfg map[string]any) []string {
 
 func cfgAILines(cfg map[string]any) []string {
 	var out []string
+	out = cfgKV(out, "Flow", cfgFlowName(cfg["ai_flow"]))
 	out = cfgKV(out, "Primary", cfg["ai_primary"])
 	out = cfgKV(out, "Fallback", cfg["ai_fallback"])
 	out = cfgKV(out, "Review mode", cfg["review_mode"])
@@ -195,6 +197,7 @@ func cfgOrgLines(cfg map[string]any) []string {
 			continue
 		}
 		var sub []string
+		sub = cfgSubKV(sub, "Flow", ov["flow"])
 		sub = cfgSubKV(sub, "Primary", ov["primary"])
 		sub = cfgSubKV(sub, "Fallback", ov["fallback"])
 		sub = cfgSubKV(sub, "Review mode", ov["review_mode"])
@@ -278,4 +281,13 @@ func cfgSortedKeys(m map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// cfgFlowName shows the global flow; none selected means the default flow
+// built from primary/fallback.
+func cfgFlowName(v any) any {
+	if s, _ := v.(string); s != "" {
+		return s
+	}
+	return "default (primary/fallback)"
 }
