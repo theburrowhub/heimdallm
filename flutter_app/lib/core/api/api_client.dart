@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/activity.dart';
+import '../models/cli_agent.dart';
 import '../models/merge_tracking.dart';
 import '../models/pr.dart';
 import '../models/review.dart';
@@ -680,6 +681,34 @@ class ApiClient {
       throw ApiException('GET /github/rate_limit failed: ${resp.statusCode}');
     }
     return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Installed-agent catalog: which agents exist on the daemon's machine.
+  Future<CliAgentCatalog> fetchCliAgents() async {
+    final resp = await _client.get(
+      _uri('/cli-agents'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /cli-agents failed: ${resp.statusCode}');
+    }
+    return CliAgentCatalog.fromJson(
+      jsonDecode(resp.body) as Map<String, dynamic>,
+    );
+  }
+
+  /// Asks the daemon to rescan for installed agents and returns the result.
+  Future<CliAgentCatalog> rescanCliAgents() async {
+    final resp = await _client.post(
+      _uri('/cli-agents/rescan'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('POST /cli-agents/rescan failed: ${resp.statusCode}');
+    }
+    return CliAgentCatalog.fromJson(
+      jsonDecode(resp.body) as Map<String, dynamic>,
+    );
   }
 
   /// Live usage of every configured review budget. Empty when no

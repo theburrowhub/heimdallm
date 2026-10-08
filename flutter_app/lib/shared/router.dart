@@ -1,7 +1,7 @@
 import 'package:go_router/go_router.dart';
 import '../features/activity/activity_screen.dart';
 import '../features/agents/agents_screen.dart';
-import '../features/cli_agents/cli_agents_screen.dart';
+import '../features/cli_agents/agent_catalog_screen.dart';
 import '../features/dashboard/dashboard_screen.dart';
 import '../features/instances/instances_screen.dart';
 import '../features/instances/routing_screen.dart';
@@ -84,7 +84,15 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
           routes: [
             GoRoute(
               path: '/cli-agents',
-              builder: (context, state) => const CLIAgentsScreen(),
+              builder: (context, state) => const AgentCatalogScreen(),
+              routes: [
+                GoRoute(
+                  path: ':id',
+                  builder: (context, state) => AgentConfigScreen(
+                    agentId: state.pathParameters['id']!,
+                  ),
+                ),
+              ],
             ),
           ],
         ),

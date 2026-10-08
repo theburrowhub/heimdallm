@@ -929,11 +929,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           border: OutlineInputBorder(),
           isDense: true,
         ),
-        items: const [
-          'claude',
-          'gemini',
-          'codex',
-        ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+        items: reviewAgentIds
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
         onChanged: (v) => setState(() => _aiPrimary = v ?? 'claude'),
       ),
       const SizedBox(height: 12),
@@ -944,12 +942,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           border: OutlineInputBorder(),
           isDense: true,
         ),
-        items: const [
-          'none',
-          'claude',
-          'gemini',
-          'codex',
-        ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+        items: const ['none', ...reviewAgentIds]
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
         onChanged: (v) =>
             setState(() => _aiFallback = (v == null || v == 'none') ? '' : v),
       ),

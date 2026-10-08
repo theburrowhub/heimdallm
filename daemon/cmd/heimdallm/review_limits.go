@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/pipeline"
 )
@@ -42,3 +44,7 @@ func reviewLimitsMap(l config.ReviewLimitsConfig) map[string]any {
 		"per_day":    l.PerDay,
 	}
 }
+
+// agentCatalogRefreshInterval is how often the installed-agent catalog is
+// rescanned in the background.
+const agentCatalogRefreshInterval = 10 * time.Minute

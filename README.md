@@ -153,7 +153,7 @@ echo "GITHUB_TOKEN=$(gh auth token)" >> docker/.env
 ```
 
 Then open `docker/.env` in your editor and set at minimum:
-- `HEIMDALLM_AI_PRIMARY` — `claude` | `gemini` | `codex` | `opencode`
+- `HEIMDALLM_AI_PRIMARY` — `claude` | `codex` | `gemini` | `copilot` | `cursor_cli` | `opencode`
 - The credential matching that primary (see below)
 - `HEIMDALLM_REPOSITORIES` — `owner/repo1,owner/repo2` (or leave empty if using `HEIMDALLM_DISCOVERY_TOPIC`)
 
@@ -356,7 +356,7 @@ CLI / TUI   ─┘                       │
                                      ├──→  PR review pipeline   ──→  POST /reviews
                                      └──→  Merge tracking       ──→  auto-merge / branch update / merge
                                                  │
-                                      claude / gemini / codex / opencode CLI
+                                      claude / codex / gemini / copilot / cursor / opencode CLI
 ```
 
 In **Docker mode** the daemon runs standalone with the web UI container as an optional-but-recommended companion (brought up by default with `make up`). Configuration is via environment variables (`HEIMDALLM_*`) or a mounted `config.toml`, and can be edited live from the web UI Settings screen at `/config`.
@@ -495,7 +495,7 @@ heimdallm/
 ├── daemon/                  Go background service (port 7842)
 │   └── internal/
 │       ├── github/          GitHub API client (PRs, diffs, reviews)
-│       ├── executor/        AI CLI runner (claude, gemini, codex, opencode)
+│       ├── executor/        AI CLI runner (claude, codex, gemini, copilot, cursor, opencode)
 │       ├── pipeline/        PR-review orchestration
 │       ├── gitops/          Git plumbing for merge-tracking branch updates
 │       ├── mergetrack/       Merge-readiness evaluator and reconciler

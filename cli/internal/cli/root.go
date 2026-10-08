@@ -122,6 +122,7 @@ func NewRootCmd(version string) *cobra.Command {
 		newReviewPRCmd(),
 		newConfigCmd(),
 		newStatsCmd(),
+		newAgentsCmd(),
 		newDashboardCmd(),
 		newConfigureCmd(),
 		newInstancesCmd(),

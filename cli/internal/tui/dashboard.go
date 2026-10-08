@@ -48,6 +48,7 @@ type Dashboard struct {
 	prs    []api.PR
 	merges []api.MergeTrackingEntry
 	config map[string]any
+	agents []api.CLIAgent
 	stats  *api.Stats
 
 	logLines  []logLine
@@ -99,6 +100,7 @@ type dataMsg struct {
 	registry *api.ClusterRegistry
 	merges   []api.MergeTrackingEntry
 	config   map[string]any
+	agents   []api.CLIAgent
 	stats    *api.Stats
 	activity *api.ActivityResponse
 	health   *api.Health
@@ -202,6 +204,11 @@ func (d *Dashboard) fetchData() tea.Msg {
 		return msg
 	}
 	msg.config = cfg
+
+	// Best-effort: older daemons have no /cli-agents.
+	if cat, aErr := d.client.ListCLIAgents(); aErr == nil {
+		msg.agents = cat.Agents
+	}
 
 	stats, err := d.client.GetStats()
 	if err != nil {
@@ -367,6 +374,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			api.SortMyPRs(msg.merges)
 			d.merges = msg.merges
 			d.config = msg.config
+			d.agents = msg.agents
 			d.stats = msg.stats
 			d.registry = msg.registry
 			if msg.activity != nil {
@@ -1337,6 +1345,30 @@ func (d *Dashboard) buildConfigLines() []string {
 	kv("Mode", str("review_mode"))
 	kv("Clone dir", str("clone_dir"))
 	blank()
+
+	// ── Installed agents ──
+	if len(d.agents) > 0 {
+		installed := 0
+		for _, a := range d.agents {
+			if a.Installed {
+				installed++
+			}
+		}
+		section(fmt.Sprintf("Agents (%d/%d installed)", installed, len(d.agents)))
+		for _, a := range d.agents {
+			state := "not installed"
+			if a.Installed {
+				state = "installed"
+				if a.Version != "" {
+					state += " " + api.DisplayText(a.Version, 40)
+				}
+			}
+			lines = append(lines, fmt.Sprintf("    %s %s",
+				keyStyle.Render(fmt.Sprintf("%-22s", api.DisplayText(a.Name, 22))),
+				valStyle.Render(state)))
+		}
+		blank()
+	}
 
 	// ── Agent Configs ──
 	if acRaw, ok := d.config["agent_configs"]; ok {

@@ -9,20 +9,44 @@ import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
 import '../../shared/widgets/review_limits_editor.dart';
 
-const _cliNames = ['claude', 'gemini', 'codex'];
+const _defaultCliNames = ['claude', 'gemini', 'codex'];
 
+/// Per-agent execution settings editor. With [agentIds] it edits only those
+/// agents (the per-agent settings page opened from the catalog); the default
+/// keeps the original three-agent page.
 class CLIAgentsScreen extends ConsumerStatefulWidget {
-  const CLIAgentsScreen({super.key});
+  final List<String> agentIds;
+
+  /// Models discovered from each CLI (catalog), preferred over the built-in
+  /// lists when non-empty.
+  final Map<String, List<String>> discoveredModels;
+
+  /// Shown above the editor (the catalog's detection details).
+  final Widget? header;
+
+  const CLIAgentsScreen({
+    super.key,
+    this.agentIds = _defaultCliNames,
+    this.discoveredModels = const {},
+    this.header,
+  });
 
   @override
   ConsumerState<CLIAgentsScreen> createState() => _CLIAgentsScreenState();
 }
 
 class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
-  // Per-agent — keys match _cliNames
-  final Map<String, _AgentState> _agents = {
-    for (final n in _cliNames) n: _AgentState(),
+  // Per-agent — keys match widget.agentIds
+  late final Map<String, _AgentState> _agents = {
+    for (final n in widget.agentIds) n: _AgentState(),
   };
+
+  List<String> _modelsFor(String name) {
+    final discovered = widget.discoveredModels[name] ?? const <String>[];
+    return discovered.isNotEmpty
+        ? discovered
+        : CLIAgentConfig.modelOptions[name] ?? const <String>[];
+  }
 
   bool _initialized = false;
   bool _saved = false;
@@ -40,12 +64,9 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   void _initFrom(AppConfig config) {
     if (_initialized) return;
     _initialized = true;
-    for (final name in _cliNames) {
+    for (final name in widget.agentIds) {
       final ac = config.agentConfigs[name] ?? const CLIAgentConfig();
-      _agents[name] = _AgentState.from(
-        ac,
-        modelOptions: CLIAgentConfig.modelOptions[name] ?? const <String>[],
-      );
+      _agents[name] = _AgentState.from(ac, modelOptions: _modelsFor(name));
     }
   }
 
@@ -70,8 +91,10 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
         _saved = false;
       });
     }
+    // Merge into the other agents' settings: this page may edit only one.
     final agentConfigs = <String, CLIAgentConfig>{
-      for (final name in _cliNames) name: _agents[name]!.toConfig(),
+      ...current.agentConfigs,
+      for (final name in widget.agentIds) name: _agents[name]!.toConfig(),
     };
     final updated = current.copyWith(agentConfigs: agentConfigs);
     try {
@@ -109,12 +132,17 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
+                  if (widget.header != null) ...[
+                    widget.header!,
+                    const SizedBox(height: 12),
+                  ],
                   // ── Per-agent sections ───────────────────────────────────
-                  for (final name in _cliNames) ...[
+                  for (final name in widget.agentIds) ...[
                     _AgentSection(
                       key: ValueKey('agent-section-$name'),
                       name: name,
                       state: _agents[name]!,
+                      models: _modelsFor(name),
                       prompts: prompts,
                       onChanged: (s) {
                         setState(() => _agents[name] = s);
@@ -261,6 +289,7 @@ class _AgentState {
 class _AgentSection extends StatefulWidget {
   final String name;
   final _AgentState state;
+  final List<String> models;
   final List<dynamic> prompts;
   final ValueChanged<_AgentState> onChanged;
 
@@ -268,6 +297,7 @@ class _AgentSection extends StatefulWidget {
     super.key,
     required this.name,
     required this.state,
+    required this.models,
     required this.prompts,
     required this.onChanged,
   });
@@ -350,7 +380,7 @@ class _AgentSectionState extends State<_AgentSection> {
   Widget build(BuildContext context) {
     final name = widget.name;
     final s = widget.state;
-    final models = CLIAgentConfig.modelOptions[name] ?? [];
+    final models = widget.models;
     final preservedUnlistedModel = s.unlistedModel;
     final unlistedModel =
         preservedUnlistedModel != null &&
@@ -469,6 +499,37 @@ class _AgentSectionState extends State<_AgentSection> {
               elevation: AppSurfaceElevation.canvas,
               padding: const EdgeInsets.all(12),
               child: _claudeOptions(s),
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (name == 'copilot') ...[
+            _tipDropdown<String>(
+              label: '--reasoning-effort',
+              value: s.effort.isEmpty ? null : s.effort,
+              tooltip:
+                  'How hard Copilot reasons before answering. Higher effort '
+                  'improves quality but uses more premium requests and time.',
+              items: [
+                const DropdownMenuItem<String>(
+                  value: null,
+                  child: Text('CLI default'),
+                ),
+                ...CLIAgentConfig.effortOptions.map(
+                  (v) => DropdownMenuItem(value: v, child: Text(v)),
+                ),
+              ],
+              onChanged: (v) {
+                setState(() => s.effort = v ?? '');
+                widget.onChanged(s);
+              },
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (name == 'cursor_cli') ...[
+            Text(
+              'Cursor reviews from the diff only, in an empty workspace: '
+              'trusting the PR checkout would load its .cursor configuration.',
+              style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
           ],
@@ -810,6 +871,12 @@ class _AgentSectionState extends State<_AgentSection> {
         return '🟡';
       case 'codex':
         return '🟢';
+      case 'copilot':
+        return '🐙';
+      case 'cursor_cli':
+        return '🖱️';
+      case 'opencode':
+        return '⬛';
       default:
         return '🤖';
     }
@@ -823,6 +890,10 @@ class _AgentSectionState extends State<_AgentSection> {
         return '--all-files';
       case 'codex':
         return '--sandbox workspace-write';
+      case 'copilot':
+        return '--excluded-tools fetch';
+      case 'opencode':
+        return '--variant high';
       default:
         return '--flag value';
     }
@@ -837,6 +908,9 @@ Color _cliColor(BuildContext context, String name) {
       return AppColors.warning.resolve(context);
     case 'codex':
       return AppColors.success.resolve(context);
+    case 'copilot':
+    case 'cursor_cli':
+      return AppColors.accent.resolve(context);
     default:
       return AppColors.textMuted.resolve(context);
   }

@@ -6,6 +6,7 @@ import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/features/activity/activity_screen.dart';
 import 'package:heimdallm/features/agents/agents_screen.dart';
+import 'package:heimdallm/features/cli_agents/agent_catalog_screen.dart';
 import 'package:heimdallm/features/cli_agents/cli_agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
@@ -65,7 +66,8 @@ void main() {
       '/repos': ReposScreen,
       '/orgs': OrgsScreen,
       '/prompts': AgentsScreen,
-      '/cli-agents': CLIAgentsScreen,
+      '/cli-agents': AgentCatalogScreen,
+      '/cli-agents/copilot': CLIAgentsScreen,
       '/stats': StatsScreen,
     };
 

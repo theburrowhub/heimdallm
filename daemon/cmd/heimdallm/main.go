@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/activity"
+	"github.com/heimdallm/daemon/internal/agentcatalog"
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
@@ -1932,6 +1933,26 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// API call), falling back to GitHub's GET /rate_limit only for a bucket
 	// that hasn't been observed yet. See buildRateLimitView's doc comment for
 	// why the tracker — not GitHub's own endpoint — must be the primary source.
+	// Installed-agent discovery for GET /cli-agents: scanned once at startup
+	// in the background (version/model probes take a few seconds) and every
+	// 10 minutes, so an agent installed while the daemon runs shows up without
+	// a restart. POST /cli-agents/rescan forces a scan.
+	agentCatalog := agentcatalog.NewStore(agentcatalog.NewDetector())
+	srv.SetAgentCatalog(agentCatalog)
+	go func() {
+		agentCatalog.Refresh(runtimeCtx)
+		ticker := time.NewTicker(agentCatalogRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runtimeCtx.Done():
+				return
+			case <-ticker.C:
+				agentCatalog.Refresh(runtimeCtx)
+			}
+		}
+	}()
+
 	// Live review budget usage for GET /review-limits: stored reviews plus
 	// the ones the pipeline has admitted and is still running.
 	srv.SetReviewLimitsFn(func() (any, error) {

@@ -9,6 +9,17 @@ const neverApproveMinSeverityOptions = ['low', 'medium', 'high'];
 /// sync, otherwise the dropdown shows a value the daemon is not using.
 const defaultNeverApproveMinSeverity = 'medium';
 
+/// Agents that can run reviews (the daemon's executor allowlist), in display
+/// order. Cursor IDE is not one: it reviews through `cursor_cli`.
+const reviewAgentIds = [
+  'claude',
+  'codex',
+  'gemini',
+  'copilot',
+  'cursor_cli',
+  'opencode',
+];
+
 /// Per-agent CLI execution settings.
 /// Stored under `ai.agents.<name>` in config.toml.
 class CLIAgentConfig {
