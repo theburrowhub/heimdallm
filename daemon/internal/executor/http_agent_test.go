@@ -3,6 +3,8 @@ package executor_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +66,32 @@ func TestHTTPAgent_DetectAndExecute(t *testing.T) {
 	}
 }
 
+// Free-form runs (merge-conflict resolution) cannot use a review-only agent:
+// DetectRaw skips it and falls through to the fallback CLI.
+func TestHTTPAgent_DetectRawSkipsReviewOnlyAgents(t *testing.T) {
+	e := executor.New()
+	_ = e.RegisterHTTPAgent("openrouter", &fakeHTTPAgent{configured: true})
+	if cli, err := e.Detect("openrouter", ""); err != nil || cli != "openrouter" {
+		t.Fatalf("Detect = %q, %v", cli, err)
+	}
+	if cli, err := e.DetectRaw("openrouter", ""); err == nil {
+		t.Fatalf("DetectRaw picked %q for a free-form run", cli)
+	}
+	if _, err := e.DetectRaw("bogus;rm", ""); err == nil {
+		t.Error("DetectRaw must validate names")
+	}
+
+	defer executor.ResetLoginPathCacheForTest()()
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if cli, err := e.DetectRaw("openrouter", "claude"); err != nil || cli != "claude" {
+		t.Errorf("DetectRaw(openrouter, claude) = %q, %v; want the claude fallback", cli, err)
+	}
+}
+
 func TestHTTPAgent_ErrorsAndPolicy(t *testing.T) {
 	e := executor.New()
 	if err := e.RegisterHTTPAgent("claude", &fakeHTTPAgent{}); err == nil {
@@ -110,8 +138,8 @@ func TestHTTPAgent_CancelAndTimeout(t *testing.T) {
 	}()
 	<-agent.started
 	e.TerminateAll()
-	if err := <-done; err == nil {
-		t.Fatal("TerminateAll must stop an in-process run")
+	if err := <-done; !errors.Is(err, executor.ErrExecutionCancelled) {
+		t.Fatalf("TerminateAll must cancel an in-process run, got %v", err)
 	}
 
 	agent.started = make(chan struct{})

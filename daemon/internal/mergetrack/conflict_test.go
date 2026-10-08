@@ -131,7 +131,7 @@ type fakeExec struct {
 	detectErr error
 }
 
-func (f *fakeExec) Detect(primary, _ string) (string, error) {
+func (f *fakeExec) DetectRaw(primary, _ string) (string, error) {
 	return primary, f.detectErr
 }
 

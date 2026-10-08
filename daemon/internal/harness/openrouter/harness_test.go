@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/heimdallm/daemon/internal/executor"
 )
@@ -293,5 +294,67 @@ func TestValidReview(t *testing.T) {
 		if got := validReview(in); got != want {
 			t.Errorf("validReview(%q) = %v", in, got)
 		}
+	}
+}
+
+// OpenRouter can report a rate limit or exhausted credits inside a 200 body;
+// its code must still classify the error, or the flow never falls back.
+func TestChat_InBodyErrorCodes(t *testing.T) {
+	f := &fakeOpenRouter{}
+	r := newTestRunner(t, f)
+	for _, tc := range []struct {
+		body        string
+		status      int
+		rateLimited bool
+	}{
+		{`{"error":{"code":429,"message":"slow down"}}`, 429, true},
+		{`{"error":{"code":"402","message":"no credits"}}`, 402, true},
+		{`{"error":{"code":"provider_error","message":"x"}}`, 502, false},
+		{`{"error":{"code":42,"message":"x"}}`, 502, false},
+	} {
+		f.replies = []string{tc.body}
+		_, _, err := r.Client.Chat(context.Background(), ChatParams{Model: "m"})
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != tc.status || apiErr.RateLimited() != tc.rateLimited {
+			t.Errorf("%s → %v", tc.body, err)
+		}
+	}
+}
+
+func TestClient_OversizedResponseAndCopies(t *testing.T) {
+	keys := &KeyStore{Path: filepath.Join(t.TempDir(), "k")}
+	_ = keys.Set("sk-or-x")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			_, _ = w.Write([]byte(`{"data":{"label":"` + strings.Repeat("x", maxSmallResponseBytes) + `"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"a"},{"id":"b"}]}`))
+	}))
+	defer srv.Close()
+	c := NewClient(keys)
+	c.BaseURL = srv.URL
+	if _, err := c.KeyInfo(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("oversized response = %v", err)
+	}
+	m, err := c.Models(context.Background())
+	if err != nil || len(m) != 2 {
+		t.Fatalf("Models = %v, %v", m, err)
+	}
+	m[0].ID = "mutated"
+	again, _ := c.Models(context.Background())
+	if again[0].ID != "a" {
+		t.Error("callers must get a copy, not the cache itself")
+	}
+}
+
+func TestTruncateKeepsRunes(t *testing.T) {
+	s := strings.Repeat("é", 10) // 2 bytes each
+	got := truncate(s, 5)
+	if !utf8.ValidString(got) || got != "éé…" {
+		t.Errorf("truncate = %q", got)
+	}
+	if truncate("short", 10) != "short" {
+		t.Error("short strings are kept")
 	}
 }
