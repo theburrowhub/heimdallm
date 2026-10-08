@@ -816,7 +816,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		budgets := reviewBudgetsFor(cfg, pr.Repo)
 		tokenSaving := cfg.TokenSavingForRepo(pr.Repo)
 		cfgMu.Unlock()
-		maxTurns, effort := limitedExploration(cli, agentCfg.MaxTurns, agentCfg.Effort, tokenSaving.LimitExploration)
+		maxTurns, effort, softTurns := limitedExploration(cli, agentCfg.MaxTurns, agentCfg.Effort, tokenSaving.LimitExploration)
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
 			if err := executor.ValidateExtraFlagsForCLI(cli, extraFlags); err != nil {
@@ -837,6 +837,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             maxTurns,
+				SoftMaxTurns:         softTurns,
 				ApprovalMode:         agentCfg.ApprovalMode,
 				ExtraFlags:           extraFlags,
 				WorkDir:              aiCfg.LocalDir,

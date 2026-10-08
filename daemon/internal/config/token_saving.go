@@ -79,7 +79,9 @@ func overlayTokenSaving(base ResolvedTokenSaving, o *TokenSavingConfig) Resolved
 		base.FilterNoise = *o.FilterNoise
 	}
 	if o.NoiseGlobs != nil {
-		base.NoiseGlobs = append([]string(nil), o.NoiseGlobs...)
+		// Non-nil even when empty: noise_globs = [] means "match no paths",
+		// which the pipeline must not mistake for "unset, use the defaults".
+		base.NoiseGlobs = append([]string{}, o.NoiseGlobs...)
 	}
 	if o.CompactPrompt != nil {
 		base.CompactPrompt = *o.CompactPrompt

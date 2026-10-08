@@ -14,16 +14,17 @@ func TestLimitedExploration(t *testing.T) {
 		limit      bool
 		wantTurns  int
 		wantEffort string
+		wantSoft   bool
 	}{
-		{"claude", 0, "", true, config.DefaultLimitedMaxTurns, config.DefaultLimitedEffort},
-		{"claude", 5, "high", true, 5, "high"},
-		{"claude", 0, "", false, 0, ""},
-		{"codex", 0, "", true, 0, ""},
+		{"claude", 0, "", true, config.DefaultLimitedMaxTurns, config.DefaultLimitedEffort, true},
+		{"claude", 5, "high", true, 5, "high", false},
+		{"claude", 0, "", false, 0, "", false},
+		{"codex", 0, "", true, 0, "", false},
 	}
 	for _, c := range cases {
-		turns, effort := limitedExploration(c.cli, c.turns, c.effort, c.limit)
-		if turns != c.wantTurns || effort != c.wantEffort {
-			t.Errorf("%+v → (%d, %q)", c, turns, effort)
+		turns, effort, soft := limitedExploration(c.cli, c.turns, c.effort, c.limit)
+		if turns != c.wantTurns || effort != c.wantEffort || soft != c.wantSoft {
+			t.Errorf("%+v → (%d, %q, %v)", c, turns, effort, soft)
 		}
 	}
 }
