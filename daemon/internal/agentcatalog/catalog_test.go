@@ -234,3 +234,18 @@ func TestNewDetectorIsWired(t *testing.T) {
 		t.Errorf("runCommand = %q, %v", out, err)
 	}
 }
+
+func TestScan_ProviderUsesItsOwnProbe(t *testing.T) {
+	d := testDetector("/h", map[string]string{}, fakeFS{}, map[string]string{})
+	or := byID(d.Scan(context.Background()))["openrouter"]
+	if or.Installed || !or.Executable || or.Kind != KindProvider {
+		t.Errorf("provider without a probe = %+v", or)
+	}
+	d.Provider = func(_ context.Context, id string) (bool, []string) {
+		return id == "openrouter", []string{"anthropic/claude-sonnet-4.5", "bad id"}
+	}
+	or = byID(d.Scan(context.Background()))["openrouter"]
+	if !or.Installed || !or.Configured || strings.Join(or.Models, ",") != "anthropic/claude-sonnet-4.5" {
+		t.Errorf("configured provider = %+v", or)
+	}
+}

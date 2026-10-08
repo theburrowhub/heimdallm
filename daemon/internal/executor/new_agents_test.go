@@ -126,7 +126,7 @@ func TestNewAgentsExtraFlagPolicy(t *testing.T) {
 		}
 	}
 	got := strings.Join(executor.SupportedCLIs(), ",")
-	if got != "claude,codex,copilot,cursor_cli,gemini,opencode" {
+	if got != "claude,codex,copilot,cursor_cli,gemini,opencode,openrouter" {
 		t.Errorf("SupportedCLIs = %s", got)
 	}
 	if err := executor.ValidateCLIName("nope"); err == nil || !strings.Contains(err.Error(), "cursor_cli") {

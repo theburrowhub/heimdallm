@@ -1356,13 +1356,7 @@ func (d *Dashboard) buildConfigLines() []string {
 		}
 		section(fmt.Sprintf("Agents (%d/%d installed)", installed, len(d.agents)))
 		for _, a := range d.agents {
-			state := "not installed"
-			if a.Installed {
-				state = "installed"
-				if a.Version != "" {
-					state += " " + api.DisplayText(a.Version, 40)
-				}
-			}
+			state := a.StateLabel()
 			lines = append(lines, fmt.Sprintf("    %s %s",
 				keyStyle.Render(fmt.Sprintf("%-22s", api.DisplayText(a.Name, 22))),
 				valStyle.Render(state)))

@@ -333,6 +333,7 @@ The per-agent override takes precedence when set (see [AI Agents](#6-ai-agents))
 | Cursor CLI | `cursor_cli` | `cursor-agent` (or `agent`), `~/.cursor` | Runs `--mode ask` in an empty, daemon-owned workspace and reviews from the diff only, because trusting the PR checkout would load its `.cursor` configuration |
 | Cursor IDE | — | `/Applications/Cursor.app`, `cursor` launcher | Detection only; reviews go through the Cursor CLI on the same account |
 | OpenCode | `opencode` | `opencode`, `~/.config/opencode` | |
+| OpenRouter | `openrouter` | An API key (set in the app, or `OPENROUTER_API_KEY`) | Runs in the daemon with Heimdallm's own review harness; see below |
 
 Discovery runs once at startup and then every 10 minutes:
 
@@ -343,10 +344,47 @@ Discovery runs once at startup and then every 10 minutes:
 
 `GET /cli-agents` returns what was found. `POST /cli-agents/rescan` scans again, which helps right after you install an agent. In the app, the **Agents** screen shows one card per agent, and a card opens that agent's settings. `heimdallm-cli agents [--rescan]` prints the same list.
 
+### OpenRouter review agent
+
+OpenRouter has no CLI. Heimdallm calls the API itself, using a harness built for code review:
+
+- **Prompt:** a review-specialist system prompt. It puts correctness, security, regressions and missing tests first, skips style, and treats PR content as data rather than instructions.
+- **Tools:** when the PR has a checkout, the model gets three read-only tools: `read_file`, `list_dir` and `grep`. They are confined to the checkout:
+  - symlinks are resolved and refused if they lead outside;
+  - `.git`, `node_modules`, `vendor` and build directories are skipped;
+  - every result is size-capped.
+- **Loop:** the model calls tools for up to *Max tool rounds* rounds (default 12, at most 40). After that it must answer.
+- **Answer check:** an answer that is not the review JSON gets one corrective retry.
+- **Usage:** exact token counts and cost come back from OpenRouter, so they appear in the token statistics.
+
+```toml
+[ai.agents.openrouter]
+model     = "anthropic/claude-sonnet-4.5"  # any tool-capable OpenRouter model
+max_turns = 12                              # max tool rounds
+effort    = "medium"                        # reasoning effort, for models that support it
+```
+
+Set the key on the **Agents → OpenRouter** page. The key is write-only:
+
+- The daemon stores it in `<data dir>/openrouter_api_key` with mode `0600`.
+- It only ever reports whether a key is set and where it comes from.
+- A stored key takes precedence over `OPENROUTER_API_KEY`.
+
+That page also shows the key's spend and limit, and the model list only offers models that accept tool calls. OpenRouter is review-only: it is never used to resolve merge conflicts.
+
+API endpoints:
+
+| Endpoint | What it does |
+|---|---|
+| `GET /cli-agents/openrouter/key` | `{configured, source}` |
+| `PUT /cli-agents/openrouter/key` | Sets the key. Body: `{"api_key": "..."}` |
+| `DELETE /cli-agents/openrouter/key` | Removes the stored key |
+| `GET /cli-agents/openrouter/usage` | Spend and limit |
+
 ### Primary and fallback
 
 ```bash
-HEIMDALLM_AI_PRIMARY=claude     # claude | codex | gemini | copilot | cursor_cli | opencode
+HEIMDALLM_AI_PRIMARY=claude     # claude | codex | gemini | copilot | cursor_cli | opencode | openrouter
 HEIMDALLM_AI_FALLBACK=gemini    # optional
 ```
 

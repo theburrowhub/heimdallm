@@ -51,6 +51,16 @@ const _catalogJson = {
       'models': ['auto', 'gpt-5.2'],
     },
     {
+      'id': 'openrouter',
+      'name': 'OpenRouter',
+      'kind': 'provider',
+      'executable': true,
+      'installed': true,
+      'configured': true,
+      'config_agent': 'openrouter',
+      'models': ['anthropic/claude-sonnet-4.5', 'openai/gpt-5'],
+    },
+    {
       'id': 'copilot',
       'name': 'GitHub Copilot CLI',
       'kind': 'agent',
@@ -87,6 +97,23 @@ Future<(_MockApiClient, GoRouter)> _pump(
     () => api.rescanCliAgents(),
   ).thenAnswer((_) async => CliAgentCatalog.fromJson(_catalogJson));
   when(() => api.patchConfig(any())).thenAnswer((_) async => {});
+  when(() => api.fetchAgentKey('openrouter')).thenAnswer(
+    (_) async => const AgentKeyStatus(configured: true, source: 'stored'),
+  );
+  when(() => api.setAgentKey('openrouter', any())).thenAnswer(
+    (_) async => const AgentKeyStatus(configured: true, source: 'stored'),
+  );
+  when(() => api.deleteAgentKey('openrouter')).thenAnswer(
+    (_) async => const AgentKeyStatus(configured: true, source: 'env'),
+  );
+  when(() => api.fetchAgentUsage('openrouter')).thenAnswer(
+    (_) async => {
+      'usage': 2.5,
+      'usage_daily': 0.4,
+      'limit': 10,
+      'limit_remaining': 7.5,
+    },
+  );
   final router = GoRouter(
     initialLocation: location,
     routes: [
@@ -217,6 +244,92 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('agent-copy-install')));
     await tester.pumpAndSettle();
     expect(copied, 'npm install -g @github/copilot');
+  });
+
+  testWidgets('OpenRouter page manages a write-only key and shows spend', (
+    tester,
+  ) async {
+    final (api, _) = await _pump(tester, location: '/cli-agents/openrouter');
+    expect(find.text('Key saved in Heimdallm'), findsOneWidget);
+    expect(
+      find.text(r'Spent $2.50 · today $0.40 · limit $10.00 · $7.50 left'),
+      findsOneWidget,
+    );
+
+    await tester.enterText(
+      find.byKey(const ValueKey('provider-key-field')),
+      'sk-or-new',
+    );
+    await tester.tap(find.byKey(const ValueKey('provider-key-save')));
+    await tester.pumpAndSettle();
+    verify(() => api.setAgentKey('openrouter', 'sk-or-new')).called(1);
+    expect(find.text('Key saved'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('provider-key-remove')));
+    await tester.pumpAndSettle();
+    verify(() => api.deleteAgentKey('openrouter')).called(1);
+    expect(
+      find.text('Key from the daemon environment (OPENROUTER_API_KEY)'),
+      findsOneWidget,
+    );
+
+    // Empty input does nothing.
+    await tester.tap(find.byKey(const ValueKey('provider-key-save')));
+    await tester.pumpAndSettle();
+    verifyNever(() => api.setAgentKey('openrouter', ''));
+
+    await tester.enterText(
+      find.byKey(const ValueKey('openrouter-tool-rounds')),
+      '20',
+    );
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    final patch =
+        verify(() => api.patchConfig(captureAny())).captured.last
+            as Map<String, dynamic>;
+    expect(patch['ai']['agents']['openrouter']['max_turns'], 20);
+  });
+
+  testWidgets('provider key errors and usage errors are shown', (tester) async {
+    final (api, _) = await _pump(tester);
+    when(() => api.fetchAgentKey('openrouter')).thenThrow(ApiException('down'));
+    when(
+      () => api.fetchAgentUsage('openrouter'),
+    ).thenThrow(ApiException('401'));
+    expect(find.text('API key set'), findsOneWidget);
+    expect(find.text('Runs in Heimdallm'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('agent-card-openrouter')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('down'), findsWidgets);
+
+    when(() => api.fetchAgentKey('openrouter')).thenAnswer(
+      (_) async => const AgentKeyStatus(configured: true, source: 'env'),
+    );
+    when(
+      () => api.setAgentKey('openrouter', any()),
+    ).thenThrow(ApiException('bad key'));
+    await tester.tap(find.byKey(const ValueKey('agent-config-back')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-card-openrouter')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Usage unavailable'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('provider-key-field')),
+      'x y',
+    );
+    await tester.tap(find.byKey(const ValueKey('provider-key-save')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('bad key'), findsOneWidget);
+  });
+
+  test('AgentKeyStatus parses', () {
+    final s = AgentKeyStatus.fromJson(const {
+      'configured': true,
+      'source': 'env',
+    });
+    expect(s.configured, isTrue);
+    expect(s.source, 'env');
+    expect(AgentKeyStatus.fromJson(const {}).configured, isFalse);
   });
 }
 

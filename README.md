@@ -153,7 +153,7 @@ echo "GITHUB_TOKEN=$(gh auth token)" >> docker/.env
 ```
 
 Then open `docker/.env` in your editor and set at minimum:
-- `HEIMDALLM_AI_PRIMARY` — `claude` | `codex` | `gemini` | `copilot` | `cursor_cli` | `opencode`
+- `HEIMDALLM_AI_PRIMARY` — `claude` | `codex` | `gemini` | `copilot` | `cursor_cli` | `opencode` | `openrouter`
 - The credential matching that primary (see below)
 - `HEIMDALLM_REPOSITORIES` — `owner/repo1,owner/repo2` (or leave empty if using `HEIMDALLM_DISCOVERY_TOPIC`)
 

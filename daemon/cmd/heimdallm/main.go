@@ -32,6 +32,7 @@ import (
 	"github.com/heimdallm/daemon/internal/executor"
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/gitops"
+	"github.com/heimdallm/daemon/internal/harness/openrouter"
 	"github.com/heimdallm/daemon/internal/instances"
 	"github.com/heimdallm/daemon/internal/keychain"
 	"github.com/heimdallm/daemon/internal/mergetrack"
@@ -605,6 +606,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	notifier := notify.New()
 	ghClient := deps.newGitHubClient(token)
 	exec := executor.New()
+	// OpenRouter is reviewed in-process by Heimdallm's own harness; its key
+	// lives in the data dir (set from the app) or OPENROUTER_API_KEY.
+	openRouterClient := openrouter.NewClient(openrouter.NewKeyStore(dataDir()))
+	openRouterAdmin := &openrouter.Admin{Client: openRouterClient}
+	if err := exec.RegisterHTTPAgent("openrouter", openrouter.NewRunner(openRouterClient)); err != nil {
+		slog.Error("openrouter: register agent", "err", err)
+	}
 	repoCtx := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{
 		MaxWorktreesPerRepo: cfg.AI.MaxWorktreesPerRepo,
 	})
@@ -1937,8 +1945,16 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// in the background (version/model probes take a few seconds) and every
 	// 10 minutes, so an agent installed while the daemon runs shows up without
 	// a restart. POST /cli-agents/rescan forces a scan.
-	agentCatalog := agentcatalog.NewStore(agentcatalog.NewDetector())
+	catalogDetector := agentcatalog.NewDetector()
+	catalogDetector.Provider = func(ctx context.Context, id string) (bool, []string) {
+		if id != "openrouter" || openRouterAdmin.KeySource() == "" {
+			return false, nil
+		}
+		return true, openRouterAdmin.ToolModels(ctx)
+	}
+	agentCatalog := agentcatalog.NewStore(catalogDetector)
 	srv.SetAgentCatalog(agentCatalog)
+	srv.SetAPIKeyProvider("openrouter", openRouterAdmin)
 	go func() {
 		agentCatalog.Refresh(runtimeCtx)
 		ticker := time.NewTicker(agentCatalogRefreshInterval)
