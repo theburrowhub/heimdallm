@@ -266,6 +266,8 @@ void main() {
   testWidgets('edits Claude flags and prompt, then auto-saves', (tester) async {
     final api = await pumpScreen(
       tester,
+      // Tall enough for the whole Claude card, including its review limits.
+      size: const Size(1400, 760),
       agentConfigs: const {
         'claude': CLIAgentConfig(extraFlags: '--allowedTools Bash,Read'),
       },
@@ -296,6 +298,8 @@ void main() {
           widget is DropdownButtonFormField<String?> &&
           widget.decoration.labelText == 'Default prompt',
     );
+    await tester.ensureVisible(promptDropdown.first);
+    await tester.pumpAndSettle();
     await tester.tap(promptDropdown.first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Security prompt').last);

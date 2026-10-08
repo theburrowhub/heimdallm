@@ -7,6 +7,7 @@ import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
+import '../../shared/widgets/review_limits_editor.dart';
 
 const _cliNames = ['claude', 'gemini', 'codex'];
 
@@ -217,6 +218,7 @@ class _AgentState {
   bool bare = false;
   bool dangerouslySkipPerms = false;
   bool noSessionPersistence = false;
+  ReviewLimits reviewLimits = const ReviewLimits();
 
   _AgentState();
 
@@ -234,6 +236,7 @@ class _AgentState {
     bare = ac.bare;
     dangerouslySkipPerms = ac.dangerouslySkipPerms;
     noSessionPersistence = ac.noSessionPersistence;
+    reviewLimits = ac.reviewLimits;
   }
 
   CLIAgentConfig toConfig() => CLIAgentConfig(
@@ -247,6 +250,7 @@ class _AgentState {
     bare: bare,
     dangerouslySkipPerms: dangerouslySkipPerms,
     noSessionPersistence: noSessionPersistence,
+    reviewLimits: reviewLimits,
   );
 
   bool get hasOverrides => toConfig().hasConfig;
@@ -468,6 +472,27 @@ class _AgentSectionState extends State<_AgentSection> {
             ),
             const SizedBox(height: 12),
           ],
+
+          AppText.label(
+            'Review limits',
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Reviews this agent may run. When it is spent, the review goes to '
+            'the fallback agent, or waits for a free slot.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 8),
+          ReviewLimitsFields(
+            keyPrefix: 'agent-$name',
+            value: s.reviewLimits,
+            onChanged: (v) {
+              setState(() => s.reviewLimits = v);
+              widget.onChanged(s);
+            },
+          ),
+          const SizedBox(height: 12),
 
           AppText.label(
             'Execution flags',

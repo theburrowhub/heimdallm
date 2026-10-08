@@ -75,6 +75,9 @@ type Config struct {
 	Retention      RetentionConfig      `toml:"retention"`
 	ActivityLog    ActivityLogConfig    `toml:"activity_log"`
 	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
+	// ReviewLimits is the global review budget per minute/hour/day. Orgs,
+	// repos and agents add their own budgets on top (see ReviewLimitsConfig).
+	ReviewLimits ReviewLimitsConfig `toml:"review_limits"`
 	Polling        PollingConfig        `toml:"polling"`
 	MergeTracking  MergeTrackingConfig  `toml:"merge_tracking"`
 	MyPRs          MyPRsConfig          `toml:"my_prs"`
@@ -200,6 +203,11 @@ type CLIAgentConfig struct {
 	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms" json:"dangerously_skip_perms"` // --dangerously-skip-permissions (HTTP may only disable it, see M-5)
 	NoSessionPersistence bool   `toml:"no_session_persistence" json:"no_session_persistence"` // --no-session-persistence
 	ExecutionTimeout     string `toml:"execution_timeout" json:"execution_timeout,omitempty"` // per-agent override, e.g. "20m"
+
+	// ReviewLimits caps the reviews this agent may run. When the selected
+	// agent is out of budget the review falls back to the next agent with
+	// room, or is deferred. nil = unlimited.
+	ReviewLimits *ReviewLimitsConfig `toml:"review_limits,omitempty" json:"review_limits,omitempty"`
 }
 
 // DefaultAIExecutionTimeout is the user-facing representation of the
@@ -283,6 +291,10 @@ type RepoAI struct {
 	// CircuitBreaker overrides circuit-breaker caps for this repo.
 	// nil = inherit from org/global. Present fields overlay the inherited baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
+
+	// ReviewLimits is this repo's own review budget, counted over this
+	// repo's reviews only and applied on top of the org and global budgets.
+	ReviewLimits *ReviewLimitsConfig `toml:"review_limits,omitempty"`
 }
 
 // OrgAI holds per-organisation overrides, applied to all repos in the org
@@ -302,6 +314,10 @@ type OrgAI struct {
 	// CircuitBreaker overrides circuit-breaker caps for all repos in this org.
 	// nil = inherit from global. Present fields overlay the global baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
+
+	// ReviewLimits is this org's review budget, counted over every repo in
+	// the org and applied on top of the global budget.
+	ReviewLimits *ReviewLimitsConfig `toml:"review_limits,omitempty"`
 }
 
 // MaxRetentionDays is the upper bound (≈10 years) shared by every retention
@@ -777,6 +793,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateNeverApproveMinSeverity(); err != nil {
+		return err
+	}
+	if err := c.validateReviewLimits(); err != nil {
 		return err
 	}
 	// Bound the review-retention window for the TOML and env paths (the HTTP

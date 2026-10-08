@@ -36,5 +36,11 @@ Map<String, dynamic> computeRepoDiff(RepoConfig old, RepoConfig updated) {
   if (old.neverApproveMinSeverity != updated.neverApproveMinSeverity) {
     diff['never_approve_min_severity'] = updated.neverApproveMinSeverity ?? '';
   }
+  // Removing a budget goes through DELETE (review_limits); only a present
+  // budget is patched.
+  if (old.reviewLimits != updated.reviewLimits &&
+      updated.reviewLimits != null) {
+    diff['review_limits'] = updated.reviewLimits!.toJson();
+  }
   return diff;
 }

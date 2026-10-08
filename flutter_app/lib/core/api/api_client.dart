@@ -4,6 +4,7 @@ import '../models/activity.dart';
 import '../models/merge_tracking.dart';
 import '../models/pr.dart';
 import '../models/review.dart';
+import '../models/review_limit_status.dart';
 import '../platform/platform_services.dart';
 import 'daemon_endpoint.dart';
 
@@ -679,6 +680,24 @@ class ApiClient {
       throw ApiException('GET /github/rate_limit failed: ${resp.statusCode}');
     }
     return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Live usage of every configured review budget. Empty when no
+  /// review_limits are set anywhere.
+  Future<List<ReviewLimitStatus>> fetchReviewLimits() async {
+    final resp = await _client.get(
+      _uri('/review-limits'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /review-limits failed: ${resp.statusCode}');
+    }
+    final decoded = jsonDecode(resp.body);
+    if (decoded is! List) return const [];
+    return decoded
+        .whereType<Map<String, dynamic>>()
+        .map(ReviewLimitStatus.fromJson)
+        .toList();
   }
 
   Future<void> updateConfig(Map<String, dynamic> config) async {

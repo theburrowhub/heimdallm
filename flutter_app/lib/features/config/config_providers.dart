@@ -420,6 +420,9 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     if (o.noSessionPersistence != n.noSessionPersistence) {
       ad['no_session_persistence'] = n.noSessionPersistence;
     }
+    if (o.reviewLimits != n.reviewLimits) {
+      ad['review_limits'] = n.reviewLimits.toJson();
+    }
     if (ad.isNotEmpty) agentsDiff[name] = ad;
   }
   if (agentsDiff.isNotEmpty) aiDiff['agents'] = agentsDiff;
@@ -541,6 +544,9 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     cbDiff['per_repo_hr'] = updated.circuitBreaker.perRepoHr;
   }
   if (cbDiff.isNotEmpty) diff['circuit_breaker'] = cbDiff;
+  if (old.reviewLimits != updated.reviewLimits) {
+    diff['review_limits'] = updated.reviewLimits.toJson();
+  }
   // Polling
   final pollingDiff = <String, dynamic>{};
   if (old.polling.pollInterval != updated.polling.pollInterval) {

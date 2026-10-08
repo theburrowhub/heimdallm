@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../core/models/pr.dart';
 import '../dashboard/dashboard_providers.dart';
+import '../review_limits/review_limits_usage.dart';
 import 'stats_filter_bar.dart';
 
 class StatsScreen extends ConsumerWidget {
@@ -22,6 +23,7 @@ class StatsScreen extends ConsumerWidget {
       children: [
         StatsFilterBar(allRepos: allRepos),
         const _GitHubRateLimitCard(),
+        const ReviewLimitsUsageCard(),
         Expanded(
           child: statsAsync.when(
             loading: () => const Center(child: CircularProgressIndicator()),

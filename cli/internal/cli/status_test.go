@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bytes"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/theburrowhub/heimdallm/cli/internal/api"
 )
@@ -32,5 +35,43 @@ func TestStatusLine(t *testing.T) {
 				t.Errorf("statusLine() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPrintReviewLimits(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	printReviewLimits(&buf, []api.ReviewLimitStatus{
+		{Kind: "global", Windows: []api.ReviewLimitWindow{
+			{Window: "minute", Used: 1, Limit: 1, ResetAt: now.Add(40 * time.Second)},
+			{Window: "day", Used: 3, Limit: 50},
+		}},
+		{Kind: "repo", Key: "acme/api\x1b[31m", Windows: []api.ReviewLimitWindow{
+			{Window: "hour", Used: 2, Limit: 2},
+		}},
+		{Kind: "agent", Key: "codex"}, // no limited window: skipped
+	}, now)
+	out := buf.String()
+	for _, want := range []string{
+		"Review limits:",
+		"all reviews: 1/1 per minute (full, next slot in 40s), 3/50 per day",
+		"acme/api",
+		"2/2 per hour (full)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("control bytes reached the terminal: %q", out)
+	}
+	if strings.Contains(out, "agent codex") {
+		t.Errorf("a budget with no windows must not print: %s", out)
+	}
+
+	buf.Reset()
+	printReviewLimits(&buf, nil, now)
+	if buf.Len() != 0 {
+		t.Errorf("no budgets must print nothing, got %q", buf.String())
 	}
 }

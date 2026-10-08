@@ -184,6 +184,8 @@ var dedupSkipReasons = map[string]bool{
 var onceSkipReasons = map[string]bool{
 	"no_rereview_request": true,
 	"head_reanchored":     true,
+	// A deferred review is re-tried every poll until its budget has room.
+	"review_limit": true,
 }
 
 type onceSkipKey struct {

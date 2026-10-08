@@ -33,6 +33,12 @@ const (
 	// retry budget. It is not a review circuit-breaker trip: no failed execution
 	// consumes completed-review quota, and manual Force runs bypass it.
 	SkipReasonRetryRepoLimit SkipReason = "retry_repo_limit"
+	// SkipReasonReviewLimit is emitted when a configured review budget
+	// ([review_limits], an org/repo/agent review_limits) has no slot left in
+	// its rolling minute, hour or day. The review is deferred, not failed:
+	// the PR still has a pending request, so the next poll after retry_at
+	// reviews it.
+	SkipReasonReviewLimit SkipReason = "review_limit"
 	// SkipReasonHeadChanged is emitted when a stored unpublished review was
 	// generated for an older commit. Publishing it against the current HEAD
 	// would misrepresent stale findings, so the pending row is retired and a
