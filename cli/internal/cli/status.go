@@ -2,7 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -82,8 +86,39 @@ func newStatusCmd() *cobra.Command {
 				fmt.Println()
 			}
 
+			// Older daemons have no /review-limits; the section is optional.
+			if limits, err := c.GetReviewLimits(); err == nil {
+				printReviewLimits(os.Stdout, limits, time.Now())
+			}
+
 			return nil
 		},
+	}
+}
+
+// printReviewLimits renders each configured review budget as
+// "used/limit per window", flagging a full window with when it frees up.
+// Prints nothing when no budget is configured.
+func printReviewLimits(w io.Writer, limits []api.ReviewLimitStatus, now time.Time) {
+	if len(limits) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\n  Review limits:")
+	for _, s := range limits {
+		if len(s.Windows) == 0 {
+			continue
+		}
+		parts := make([]string, 0, len(s.Windows))
+		for _, win := range s.Windows {
+			part := fmt.Sprintf("%d/%d per %s", win.Used, win.Limit, api.DisplayText(win.Window, 16))
+			if win.Exhausted() && win.ResetAt.After(now) {
+				part += fmt.Sprintf(" (full, next slot in %s)", win.ResetAt.Sub(now).Round(time.Second))
+			} else if win.Exhausted() {
+				part += " (full)"
+			}
+			parts = append(parts, part)
+		}
+		fmt.Fprintf(w, "    • %s: %s\n", s.Label(), strings.Join(parts, ", "))
 	}
 }
 

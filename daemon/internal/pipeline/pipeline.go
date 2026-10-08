@@ -251,6 +251,8 @@ type Pipeline struct {
 	// verdicts caches the re-review gate's skip verdict per PR so an
 	// unchanged PR is not re-evaluated against GitHub on every poll.
 	verdicts gateVerdicts
+	// budget tracks admitted reviews against the configured review limits.
+	budget reviewBudget
 }
 
 // New creates a new Pipeline with the provided dependencies.
@@ -841,6 +843,9 @@ type RunOptions struct {
 	// pollers, so the automatic path keeps every protection intact. The
 	// state guards (opts.Guards: closed / draft / self-authored) still apply.
 	Force bool
+	// Budgets are the review limits this review must fit in. Empty means no
+	// limit. Force reviews are charged but never deferred.
+	Budgets ReviewBudgets
 	// WorkPermit carries admission acquired at the outer worker boundary. When
 	// nil, Run acquires its own permit for backwards-compatible direct callers.
 	WorkPermit *workgate.Permit
@@ -1155,6 +1160,16 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		}
 	}
 
+	// Review limits: a spent budget defers the review before any further
+	// GitHub call. The admitted slot keeps counting until Run returns, by
+	// which point a successful review is stored and counted from SQLite.
+	ticket, budgetErr := p.budget.admit(p.store, opts.Budgets.Scopes, pr.Repo, time.Now().UTC(), opts.Force)
+	if budgetErr != nil {
+		p.deferForBudget(pr, budgetErr)
+		return nil, nil
+	}
+	defer p.budget.release(ticket)
+
 	// The PR survived every SHA/re-request dedup gate, so the diff will be
 	// consumed. Fetching it earlier paid a potentially large GitHub response
 	// for every unchanged PR and even when HEAD resolution had already failed.
@@ -1213,8 +1228,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	})
 
 	// 4. Select CLI (profile can override the global primary/fallback)
-	cli, err := p.executor.Detect(primary, fallback)
+	cli, err := p.selectCLI(primary, fallback, opts, ticket)
 	_ = cliFlags // passed to Execute below
+	var agentBudgetErr *ReviewBudgetError
+	if errors.As(err, &agentBudgetErr) {
+		p.deferForBudget(pr, agentBudgetErr)
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: detect CLI: %w", err)
 	}

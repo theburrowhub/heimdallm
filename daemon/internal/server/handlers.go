@@ -93,6 +93,9 @@ type Server struct {
 	// tests that don't need it).
 	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
 	meFn         func() (string, error)
+	// reviewLimitsFn returns live usage of every configured review budget
+	// for GET /review-limits. Nil until main wires it.
+	reviewLimitsFn func() (any, error)
 	// rateLimitFn returns the live GitHub API rate-limit buckets for the
 	// daemon's token. Wired by main; nil disables the /github/rate_limit
 	// endpoint (returns 503).
@@ -284,10 +287,11 @@ var sensitiveGETPaths = []string{
 	"/agents",
 	"/events",
 	"/logs/stream",
-	"/me",     // exposes GitHub username
-	"/prs",    // exposes PR titles, repos, authors
-	"/stats",  // exposes review activity metadata
-	"/github", // covers /github/rate_limit (live GitHub API usage)
+	"/me",            // exposes GitHub username
+	"/prs",           // exposes PR titles, repos, authors
+	"/stats",         // exposes review activity metadata
+	"/github",        // covers /github/rate_limit (live GitHub API usage)
+	"/review-limits", // exposes repo/org names and review volume
 	// exposes PR titles, repos, block reasons and check names
 	"/merge-tracking",
 	// the registry exposes every instance's base URL and the routing map
@@ -403,6 +407,9 @@ func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
 
 // SetRateLimitFn wires the live GitHub rate-limit lookup for GET /github/rate_limit.
 func (srv *Server) SetRateLimitFn(fn func() (any, error)) { srv.rateLimitFn = fn }
+
+// SetReviewLimitsFn wires the review budget usage lookup for GET /review-limits.
+func (srv *Server) SetReviewLimitsFn(fn func() (any, error)) { srv.reviewLimitsFn = fn }
 
 // SetConfigFn wires the callback that returns the live config for GET /config.
 func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
@@ -670,6 +677,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/activity", srv.handleActivity)
 	r.Get("/stats", srv.handleStats)
 	r.Get("/github/rate_limit", srv.handleGitHubRateLimit)
+	r.Get("/review-limits", srv.handleReviewLimits)
 	r.Get("/agents", srv.handleListAgents)
 	r.Post("/agents", srv.handleUpsertAgent)
 	r.Delete("/agents/{id}", srv.handleDeleteAgent)
@@ -2300,6 +2308,23 @@ func (srv *Server) handleGitHubRateLimit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, rl)
+}
+
+// handleReviewLimits returns current usage of every configured review budget
+// (global, per org, per repo, per agent): used / limit per window and when
+// the oldest counted review ages out. An empty list means no limits are set.
+func (srv *Server) handleReviewLimits(w http.ResponseWriter, r *http.Request) {
+	if srv.reviewLimitsFn == nil {
+		http.Error(w, `{"error":"review limits not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	status, err := srv.reviewLimitsFn()
+	if err != nil {
+		slog.Error("handleReviewLimits: lookup failed", "err", err)
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 // handleActivity returns rows from activity_log matching the query.

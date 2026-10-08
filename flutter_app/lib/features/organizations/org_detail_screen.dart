@@ -11,6 +11,7 @@ import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
+import '../../shared/widgets/review_limits_editor.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
@@ -181,6 +182,10 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     if (old.neverApproveMinSeverity != updated.neverApproveMinSeverity) {
       diff['never_approve_min_severity'] =
           updated.neverApproveMinSeverity ?? '';
+    }
+    if (old.reviewLimits != updated.reviewLimits &&
+        updated.reviewLimits != null) {
+      diff['review_limits'] = updated.reviewLimits!.toJson();
     }
     return diff;
   }
@@ -359,6 +364,16 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                       ),
                     ),
                   ], accent: FeaturePalette.mergeTracking),
+                  _sectionCard('Review Limits', [
+                    ReviewLimitsOverrideEditor(
+                      keyPrefix: 'org',
+                      scopeLabel: 'organization',
+                      value: _config.reviewLimits,
+                      onChanged: (v) =>
+                          _update(_config.copyWith(reviewLimits: v)),
+                      onRemove: () => _resetField('review_limits'),
+                    ),
+                  ]),
                 ],
               ),
             );

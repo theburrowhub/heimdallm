@@ -1278,7 +1278,7 @@ func dispatchKey(req dispatchRequest) string {
 // and /admin/* and /instances (no nested proxying).
 var proxyAllowedPrefixes = []string{
 	"/health", "/me", "/prs", "/activity", "/stats",
-	"/github/rate_limit", "/agents", "/config", "/merge-tracking",
+	"/github/rate_limit", "/agents", "/config", "/merge-tracking", "/review-limits",
 	"/events", "/logs/stream", "/reload",
 }
 

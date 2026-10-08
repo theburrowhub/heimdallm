@@ -11,6 +11,7 @@ import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
+import '../../shared/widgets/review_limits_editor.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
@@ -397,6 +398,16 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                         _update(_config.copyWith(mergeTracking: mergeTracking)),
                   ),
                 ], accent: FeaturePalette.mergeTracking),
+                _sectionCard('Review Limits', [
+                  ReviewLimitsOverrideEditor(
+                    keyPrefix: 'repo',
+                    scopeLabel: 'repository',
+                    value: _config.reviewLimits,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(reviewLimits: v)),
+                    onRemove: () => _resetField('review_limits'),
+                  ),
+                ]),
               ],
             ),
           );

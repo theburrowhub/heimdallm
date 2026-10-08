@@ -768,6 +768,36 @@ per_pr_24h = 2
 per_repo_hr = 40
 ```
 
+### Review limits
+
+Circuit breakers stop runaway loops. Review limits are a spend budget you choose yourself: how many AI reviews may **start** per rolling minute, hour and day. `0`, or leaving a field out, means no limit for that window.
+
+```toml
+[review_limits]            # every review, across all repos
+per_minute = 2
+per_hour   = 30
+per_day    = 200
+
+[ai.orgs."my-org".review_limits]          # only my-org's reviews
+per_hour = 10
+
+[ai.repos."my-org/monorepo".review_limits] # only this repo's reviews
+per_day = 20
+
+[ai.agents.claude.review_limits]          # only reviews Claude runs
+per_hour = 5
+```
+
+How the limits combine:
+
+- **They stack; they do not override.** A review of `my-org/monorepo` must fit in the global, org and repo budgets at once. Each budget counts only the reviews inside its own scope.
+- **Agent budgets steer the agent.** When the primary agent has used up its budget, the review runs on the fallback agent if that one still has room. If neither does, the review waits.
+- **Nothing is dropped.** A review over a limit is deferred. The PR still has its review request, so the next poll after a slot frees up reviews it. The activity log records one `review_limit` entry per PR and commit, with the time of the next free slot.
+- **Manual re-reviews always run.** The app's *Re-review* button runs even when a limit is reached, and still counts towards it.
+- **Restarts don't reset anything.** Finished reviews are counted from the review history, and reviews still running count too, so parallel workers cannot all take the last free slot.
+
+`GET /review-limits` returns the live usage of every configured budget. The **Statistics** screen, the **Review Limits** settings section and `heimdallm-cli status` all show it.
+
 ---
 
 ## 13. Merge Tracking and My PRs

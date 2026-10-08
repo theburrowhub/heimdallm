@@ -19,6 +19,8 @@ import '../dashboard/dashboard_providers.dart';
 import '../server/server_actions.dart' as server_actions;
 import '../updates/check_for_updates_button.dart';
 import 'config_providers.dart';
+import '../../shared/widgets/review_limits_editor.dart';
+import '../review_limits/review_limits_usage.dart';
 
 // Poll-interval bounds, mirrored from the daemon's config.ValidatePollInterval
 // (daemon/internal/config/config.go: minPollInterval=1m, maxPollInterval=24h).
@@ -119,6 +121,7 @@ enum _ConfigSectionId {
   myPrs,
   mergeTracking,
   circuitBreaker,
+  reviewLimits,
   cluster,
 }
 
@@ -198,6 +201,12 @@ const _configSections = <_ConfigSectionMeta>[
     icon: Icons.health_and_safety_outlined,
   ),
   _ConfigSectionMeta(
+    id: _ConfigSectionId.reviewLimits,
+    title: 'Review Limits',
+    summary: 'How many AI reviews may start per minute, hour and day.',
+    icon: Icons.hourglass_bottom_outlined,
+  ),
+  _ConfigSectionMeta(
     id: _ConfigSectionId.cluster,
     title: 'Cluster',
     summary: 'Role and restart flow for multi-instance deployments.',
@@ -238,6 +247,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   late TextEditingController _myPrsStaleAfterController;
   late TextEditingController _myPrsDigestTimeController;
   CircuitBreakerConfig _circuitBreaker = const CircuitBreakerConfig();
+  ReviewLimits _reviewLimits = const ReviewLimits();
   String _clusterRole = ClusterRole.standalone;
   late TextEditingController _mtPollIntervalController;
   late TextEditingController _mtResolveTimeoutController;
@@ -316,6 +326,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _myPrsStaleAfterController.text = config.myPrs.staleAfter;
     _myPrsDigestTimeController.text = config.myPrs.digestTime;
     _circuitBreaker = config.circuitBreaker;
+    _reviewLimits = config.reviewLimits;
     _mtPollIntervalController.text = config.mergeTracking.pollInterval;
     _mtResolveTimeoutController.text = config.mergeTracking.resolveTimeout;
     _perPr24hController.text = config.circuitBreaker.perPr24h.toString();
@@ -398,6 +409,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               _myPrsSection(),
               _mergeTrackingSection(),
               _circuitBreakerSection(),
+              _reviewLimitsSection(),
               if (_showClusterSection()) _clusterSection(config),
             ],
           ),
@@ -468,6 +480,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     'My PRs' => _ConfigSectionId.myPrs,
     'Merge Tracking' => _ConfigSectionId.mergeTracking,
     'Circuit Breaker' => _ConfigSectionId.circuitBreaker,
+    'Review Limits' => _ConfigSectionId.reviewLimits,
     'Cluster' => _ConfigSectionId.cluster,
     _ => throw ArgumentError.value(title, 'title', 'Unknown config section'),
   };
@@ -1399,6 +1412,28 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     ]);
   }
 
+  // ── Review limits ─────────────────────────────────────────────────────────
+
+  Widget _reviewLimitsSection() {
+    return _settingsCard('Review Limits', [
+      Text(
+        'Caps on AI reviews across every repository. Leave a field empty for '
+        'no limit. A review over the limit is not dropped: it waits for the '
+        'next free slot. Orgs, repositories and agents can add their own '
+        'limits from their settings pages.',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+      const SizedBox(height: 10),
+      ReviewLimitsFields(
+        keyPrefix: 'global',
+        value: _reviewLimits,
+        onChanged: (v) => setState(() => _reviewLimits = v),
+      ),
+      const SizedBox(height: 8),
+      const ReviewLimitsUsageCard(),
+    ]);
+  }
+
   // ── Cluster ─────────────────────────────────────────────────────────────
 
   /// Hidden while a remote instance is selected: this section edits the
@@ -1744,6 +1779,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     mergeTracking: _mergeTracking,
     myPrs: _myPrs,
     circuitBreaker: _circuitBreaker,
+    reviewLimits: _reviewLimits,
     aiPrimary: _aiPrimary,
     aiFallback: _aiFallback,
     reviewMode: _reviewMode,

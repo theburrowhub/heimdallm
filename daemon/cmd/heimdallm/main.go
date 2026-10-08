@@ -812,6 +812,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// config cannot import pipeline (import cycle), so the helper returns a shadow
 		// type that callers cast here.
 		guards := pipeline.GateConfig(cfg.ReviewGuards(botLogin))
+		budgets := reviewBudgetsFor(cfg, pr.Repo)
 		cfgMu.Unlock()
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
@@ -843,7 +844,8 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
 			},
-			Guards: guards,
+			Guards:  guards,
+			Budgets: budgets,
 		}
 	}
 
@@ -1927,6 +1929,14 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// API call), falling back to GitHub's GET /rate_limit only for a bucket
 	// that hasn't been observed yet. See buildRateLimitView's doc comment for
 	// why the tracker — not GitHub's own endpoint — must be the primary source.
+	// Live review budget usage for GET /review-limits: stored reviews plus
+	// the ones the pipeline has admitted and is still running.
+	srv.SetReviewLimitsFn(func() (any, error) {
+		cfgMu.Lock()
+		scopes := pipelineBudgetScopes(cfg.AllReviewLimitScopes())
+		cfgMu.Unlock()
+		return p.ReviewBudgetStatus(scopes, time.Now().UTC())
+	})
 	srv.SetRateLimitFn(func() (any, error) {
 		return buildRateLimitView(time.Now(), limiter.Snapshots(), ghClient.RateLimit)
 	})
@@ -1993,6 +2003,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				"dangerously_skip_perms": ac.DangerouslySkipPerms,
 				"no_session_persistence": ac.NoSessionPersistence,
 			}
+			if ac.ReviewLimits != nil {
+				agentConfigs[name]["review_limits"] = reviewLimitsMap(*ac.ReviewLimits)
+			}
 		}
 		// Expose first-seen timestamps so the Flutter app can show NEW
 		// badges on auto-discovered repos. Read-only; populated by the
@@ -2045,6 +2058,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"per_repo_hr":                c.CircuitBreaker.PerRepoHr,
 			"per_review_failure_repo_hr": c.CircuitBreaker.PerReviewFailureRepoHr,
 		}
+		result["review_limits"] = reviewLimitsMap(c.ReviewLimits)
 		result["polling"] = map[string]any{
 			"poll_interval":               c.Polling.PollInterval,
 			"discovery_interval":          c.Polling.DiscoveryInterval,
@@ -4665,6 +4679,9 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 		NeverApproveWithIssues:  ai.NeverApproveWithIssues,
 		NeverApproveMinSeverity: ai.NeverApproveMinSeverity,
 	})
+	if ai.ReviewLimits != nil {
+		out["review_limits"] = reviewLimitsMap(*ai.ReviewLimits)
+	}
 	return out
 }
 
@@ -4688,6 +4705,9 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 		NeverApproveWithIssues:  ai.NeverApproveWithIssues,
 		NeverApproveMinSeverity: ai.NeverApproveMinSeverity,
 	})
+	if ai.ReviewLimits != nil {
+		out["review_limits"] = reviewLimitsMap(*ai.ReviewLimits)
+	}
 	return out
 }
 

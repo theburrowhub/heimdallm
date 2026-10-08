@@ -27,6 +27,10 @@ class CLIAgentConfig {
   final bool dangerouslySkipPerms; // --dangerously-skip-permissions
   final bool noSessionPersistence; // --no-session-persistence
 
+  /// Reviews this agent may run per window; when it is spent the daemon falls
+  /// back to the next agent or defers the review.
+  final ReviewLimits reviewLimits;
+
   const CLIAgentConfig({
     this.model = '',
     this.maxTurns = 0,
@@ -38,6 +42,7 @@ class CLIAgentConfig {
     this.bare = false,
     this.dangerouslySkipPerms = false,
     this.noSessionPersistence = false,
+    this.reviewLimits = const ReviewLimits(),
   });
 
   bool get hasConfig =>
@@ -50,7 +55,8 @@ class CLIAgentConfig {
       permissionMode.isNotEmpty ||
       bare ||
       dangerouslySkipPerms ||
-      noSessionPersistence;
+      noSessionPersistence ||
+      !reviewLimits.isEmpty;
 
   CLIAgentConfig copyWith({
     String? model,
@@ -63,6 +69,7 @@ class CLIAgentConfig {
     bool? bare,
     bool? dangerouslySkipPerms,
     bool? noSessionPersistence,
+    ReviewLimits? reviewLimits,
   }) => CLIAgentConfig(
     model: model ?? this.model,
     maxTurns: maxTurns ?? this.maxTurns,
@@ -74,6 +81,7 @@ class CLIAgentConfig {
     bare: bare ?? this.bare,
     dangerouslySkipPerms: dangerouslySkipPerms ?? this.dangerouslySkipPerms,
     noSessionPersistence: noSessionPersistence ?? this.noSessionPersistence,
+    reviewLimits: reviewLimits ?? this.reviewLimits,
   );
 
   factory CLIAgentConfig.fromJson(Map<String, dynamic> json) => CLIAgentConfig(
@@ -87,6 +95,9 @@ class CLIAgentConfig {
     bare: (json['bare'] as bool?) ?? false,
     dangerouslySkipPerms: (json['dangerously_skip_perms'] as bool?) ?? false,
     noSessionPersistence: (json['no_session_persistence'] as bool?) ?? false,
+    reviewLimits:
+        ReviewLimits.maybeFromJson(json['review_limits']) ??
+        const ReviewLimits(),
   );
 
   // Temporary fallback until safe provider capability discovery lands (#734).
@@ -365,6 +376,10 @@ class RepoConfig {
   final bool? neverApproveWithIssues;
   final String? neverApproveMinSeverity;
 
+  /// This repo's own review budget (null = none), counted over this repo's
+  /// reviews only. Removing it is a DELETE, never a diffed null.
+  final ReviewLimits? reviewLimits;
+
   /// True when this repo's org has a bare entry in `non_monitored`
   /// (theburrowhub/heimdallm#828). Derived by `AppConfig.fromJson` from
   /// `nonMonitoredOrgs`, never set directly by the UI — it is not part of
@@ -385,6 +400,7 @@ class RepoConfig {
     this.reviewMode,
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
+    this.reviewLimits,
     this.firstSeenAt,
     this.excludedByOrg = false,
   }) : _legacyMtEnabled = mtEnabled,
@@ -439,6 +455,7 @@ class RepoConfig {
     Object? reviewMode = _sentinel,
     Object? neverApproveWithIssues = _sentinel,
     Object? neverApproveMinSeverity = _sentinel,
+    Object? reviewLimits = _sentinel,
     Object? firstSeenAt = _sentinel,
     bool? excludedByOrg,
   }) {
@@ -468,6 +485,9 @@ class RepoConfig {
       neverApproveMinSeverity: neverApproveMinSeverity == _sentinel
           ? this.neverApproveMinSeverity
           : neverApproveMinSeverity as String?,
+      reviewLimits: reviewLimits == _sentinel
+          ? this.reviewLimits
+          : reviewLimits as ReviewLimits?,
       firstSeenAt: firstSeenAt == _sentinel
           ? this.firstSeenAt
           : firstSeenAt as DateTime?,
@@ -502,6 +522,9 @@ class OrgConfig {
   final bool? neverApproveWithIssues;
   final String? neverApproveMinSeverity;
 
+  /// Review budget for every repo in this org (null = none).
+  final ReviewLimits? reviewLimits;
+
   const OrgConfig({
     this.aiPrimary,
     this.aiFallback,
@@ -513,6 +536,7 @@ class OrgConfig {
     MergeTrackingOverride mergeTracking = const MergeTrackingOverride(),
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
+    this.reviewLimits,
   }) : _legacyMtEnabled = mtEnabled,
        _mergeTracking = mergeTracking;
 
@@ -525,6 +549,7 @@ class OrgConfig {
       cloneDir != null ||
       neverApproveWithIssues != null ||
       neverApproveMinSeverity != null ||
+      reviewLimits != null ||
       !mergeTracking.isEmpty;
 
   OrgConfig copyWith({
@@ -538,6 +563,7 @@ class OrgConfig {
     Object? mergeTracking = _sentinel,
     Object? neverApproveWithIssues = _sentinel,
     Object? neverApproveMinSeverity = _sentinel,
+    Object? reviewLimits = _sentinel,
   }) {
     final requestedMergeTracking = mergeTracking == _sentinel
         ? this.mergeTracking
@@ -564,6 +590,9 @@ class OrgConfig {
       neverApproveMinSeverity: neverApproveMinSeverity == _sentinel
           ? this.neverApproveMinSeverity
           : neverApproveMinSeverity as String?,
+      reviewLimits: reviewLimits == _sentinel
+          ? this.reviewLimits
+          : reviewLimits as ReviewLimits?,
     );
   }
 
@@ -577,6 +606,7 @@ class OrgConfig {
       cloneDir: _nonEmpty(json['clone_dir']),
       neverApproveWithIssues: json['never_approve_with_issues'] as bool?,
       neverApproveMinSeverity: _nonEmpty(json['never_approve_min_severity']),
+      reviewLimits: ReviewLimits.maybeFromJson(json['review_limits']),
     );
   }
 }
@@ -875,6 +905,54 @@ Duration? parseHumanDuration(String raw) {
   return Duration(milliseconds: total.round());
 }
 
+/// Review budget per rolling minute, hour and day (mirrors the daemon's
+/// `review_limits` sections). 0 means "no limit" for that window.
+class ReviewLimits {
+  final int perMinute;
+  final int perHour;
+  final int perDay;
+
+  const ReviewLimits({this.perMinute = 0, this.perHour = 0, this.perDay = 0});
+
+  /// Upper bound the daemon accepts for every window (config.MaxReviewLimit).
+  static const maxValue = 100000;
+
+  bool get isEmpty => perMinute == 0 && perHour == 0 && perDay == 0;
+
+  ReviewLimits copyWith({int? perMinute, int? perHour, int? perDay}) =>
+      ReviewLimits(
+        perMinute: perMinute ?? this.perMinute,
+        perHour: perHour ?? this.perHour,
+        perDay: perDay ?? this.perDay,
+      );
+
+  factory ReviewLimits.fromJson(Map<String, dynamic> json) => ReviewLimits(
+    perMinute: (json['per_minute'] as num?)?.toInt() ?? 0,
+    perHour: (json['per_hour'] as num?)?.toInt() ?? 0,
+    perDay: (json['per_day'] as num?)?.toInt() ?? 0,
+  );
+
+  /// Parses an optional `review_limits` object; null when absent.
+  static ReviewLimits? maybeFromJson(dynamic raw) =>
+      raw is Map<String, dynamic> ? ReviewLimits.fromJson(raw) : null;
+
+  Map<String, dynamic> toJson() => {
+    'per_minute': perMinute,
+    'per_hour': perHour,
+    'per_day': perDay,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is ReviewLimits &&
+      other.perMinute == perMinute &&
+      other.perHour == perHour &&
+      other.perDay == perDay;
+
+  @override
+  int get hashCode => Object.hash(perMinute, perHour, perDay);
+}
+
 /// Circuit-breaker rate limits for PR reviews.
 class CircuitBreakerConfig {
   final int perPr24h;
@@ -980,6 +1058,9 @@ class AppConfig {
   final MergeTrackingConfig mergeTracking;
   final MyPrsConfig myPrs;
   final CircuitBreakerConfig circuitBreaker;
+
+  /// Global review budget (`[review_limits]`).
+  final ReviewLimits reviewLimits;
   final PollingConfig polling;
 
   /// Host paths the daemon scans (in order) when a repo has no explicit
@@ -1017,6 +1098,7 @@ class AppConfig {
     this.mergeTracking = const MergeTrackingConfig(),
     this.myPrs = const MyPrsConfig(),
     this.circuitBreaker = const CircuitBreakerConfig(),
+    this.reviewLimits = const ReviewLimits(),
     this.globalNeverApproveWithIssues = false,
     this.globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity,
     this.polling = const PollingConfig(),
@@ -1085,6 +1167,7 @@ class AppConfig {
     MergeTrackingConfig? mergeTracking,
     MyPrsConfig? myPrs,
     CircuitBreakerConfig? circuitBreaker,
+    ReviewLimits? reviewLimits,
     bool? globalNeverApproveWithIssues,
     String? globalNeverApproveMinSeverity,
     PollingConfig? polling,
@@ -1108,6 +1191,7 @@ class AppConfig {
       mergeTracking: mergeTracking ?? this.mergeTracking,
       myPrs: myPrs ?? this.myPrs,
       circuitBreaker: circuitBreaker ?? this.circuitBreaker,
+      reviewLimits: reviewLimits ?? this.reviewLimits,
       globalNeverApproveWithIssues:
           globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
       globalNeverApproveMinSeverity:
@@ -1174,6 +1258,7 @@ class AppConfig {
           promptId: _nonEmpty(ov['prompt']),
           neverApproveWithIssues: ov['never_approve_with_issues'] as bool?,
           neverApproveMinSeverity: _nonEmpty(ov['never_approve_min_severity']),
+          reviewLimits: ReviewLimits.maybeFromJson(ov['review_limits']),
           firstSeenAt: firstSeen,
         );
       }
@@ -1249,6 +1334,9 @@ class AppConfig {
               json['circuit_breaker'] as Map<String, dynamic>,
             )
           : const CircuitBreakerConfig(),
+      reviewLimits:
+          ReviewLimits.maybeFromJson(json['review_limits']) ??
+          const ReviewLimits(),
       globalNeverApproveWithIssues:
           (json['never_approve_with_issues'] as bool?) ?? false,
       // The daemon serves "" when unset; surface the default it will actually
