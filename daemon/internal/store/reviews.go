@@ -58,7 +58,6 @@ type Review struct {
 // order.
 const reviewColumns = "id, pr_id, cli_used, summary, issues, suggestions, severity, created_at, published_at, github_review_id, github_review_state, head_sha, event, input_tokens, output_tokens, cache_read_tokens, cost_usd, tokens_estimated, prompt_bytes"
 
-
 // InsertReview inserts a new review record and returns its row ID.
 func (s *Store) InsertReview(r *Review) (int64, error) {
 	publishedAt := ""
@@ -82,7 +81,7 @@ func (s *Store) InsertReview(r *Review) (int64, error) {
 // ListUnpublishedReviews returns reviews not yet submitted to GitHub (github_review_id == 0).
 func (s *Store) ListUnpublishedReviews() ([]*Review, error) {
 	rows, err := s.db.Query(
-		"SELECT "+reviewColumns+" FROM reviews WHERE github_review_id=0 ORDER BY created_at ASC",
+		"SELECT " + reviewColumns + " FROM reviews WHERE github_review_id=0 ORDER BY created_at ASC",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list unpublished: %w", err)
