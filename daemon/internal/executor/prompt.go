@@ -102,6 +102,47 @@ Rules for severity determination:
 - If no issues exist and no unresolved concerns remain, return empty arrays and severity "low".`
 }
 
+// compactRules is the answer contract shared by the compact templates: the
+// same JSON shape and severity rules as the default template, worded tersely.
+const compactRules = `Answer with ONLY this JSON (no markdown):
+{"summary":"...","issues":[{"file":"path","line":0,"description":"...","severity":"low|medium|high"}],"severity":"low|medium|high"}
+Top-level severity >= the highest issue severity. An unresolved reviewer concern about a real defect is at least "medium"; an unaddressed blocker or requested change is "high". No issues and no open concerns: empty arrays, "low". Report real defects only, not style.`
+
+// compactTemplate is the token-saving variant of defaultTemplate (the
+// compact_prompt measure). It keeps the untrusted-content delimiters and the
+// answer contract and drops everything the model does not need: the PR link
+// and the restated instructions.
+const compactTemplate = `Review this pull request as a senior engineer.
+PR: {title} (#{number}) in {repo} by {author}
+{standing_instructions}
+<user_content>
+Diff:
+{diff}
+</user_content>
+{review_context}
+{comments}
+` + compactRules
+
+// CompactTemplate returns the token-saving built-in template.
+func CompactTemplate() string { return compactTemplate }
+
+// CompactTemplateWithInstructions is the compact counterpart of
+// DefaultTemplateWithInstructions.
+func CompactTemplateWithInstructions(instructions string) string {
+	return `Review this pull request as a senior engineer.
+PR: {title} (#{number}) in {repo} by {author}
+{standing_instructions}
+FOCUS:
+` + instructions + `
+<user_content>
+Diff:
+{diff}
+</user_content>
+{review_context}
+{comments}
+` + compactRules
+}
+
 // BuildPrompt builds a prompt from the default template.
 // Kept for backwards compatibility.
 func BuildPrompt(title, author, diff string) string {

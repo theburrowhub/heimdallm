@@ -48,6 +48,9 @@ type ReviewResult struct {
 	Summary  string  `json:"summary"`
 	Issues   []Issue `json:"issues"`
 	Severity string  `json:"severity"`
+	// Usage is the run's token accounting when the agent reported it; nil
+	// otherwise. Never part of the agent's JSON answer.
+	Usage *Usage `json:"-"`
 }
 
 // Issue represents a single code issue found by the AI reviewer.
@@ -91,6 +94,10 @@ type ExecOptions struct {
 	// ExecutionID is an internal correlation key used for exact, operator-
 	// initiated cancellation. It is not forwarded to the CLI.
 	ExecutionID string
+	// ReportUsage asks agents that can report token usage to do so (Claude:
+	// --output-format json). Execute unwraps the envelope and fills
+	// ReviewResult.Usage. Ignored when extra_flags picks an output format.
+	ReportUsage bool
 }
 
 func effectiveExecutionTimeout(override time.Duration) time.Duration {
@@ -1394,7 +1401,22 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 	if err != nil {
 		return nil, err
 	}
-	return parseResult(raw)
+	var usage *Usage
+	if reportsUsage(cli, opts) {
+		payload, u, envErr := unwrapClaudeEnvelope(raw)
+		switch {
+		case envErr == nil:
+			raw, usage = payload, u
+		case !errors.Is(envErr, errNotEnvelope):
+			return nil, envErr
+		}
+	}
+	result, err := parseResult(raw)
+	if err != nil {
+		return nil, err
+	}
+	result.Usage = usage
+	return result, nil
 }
 
 // ExecuteRaw runs the AI CLI and returns stdout unchanged. Used by callers
@@ -1651,6 +1673,9 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 			}
 		}
 		if cli == "claude" {
+			if reportsUsage(cli, opts) {
+				args = append(args, "--output-format", "json")
+			}
 			if opts.MaxTurns > 0 {
 				args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 			}

@@ -42,5 +42,7 @@ Map<String, dynamic> computeRepoDiff(RepoConfig old, RepoConfig updated) {
       updated.reviewLimits != null) {
     diff['review_limits'] = updated.reviewLimits!.toJson();
   }
+  final tokenSaving = diffTokenSavingOverride(old.tokenSaving, updated.tokenSaving);
+  if (tokenSaving.isNotEmpty) diff['token_saving'] = tokenSaving;
   return diff;
 }

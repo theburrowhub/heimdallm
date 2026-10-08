@@ -66,3 +66,62 @@ func TestReviewTimesSince_FiltersByScope(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewTokenColumnsAndStats(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	prID, err := s.UpsertPR(&PR{GithubID: 1, Repo: "acme/api", Number: 1, Title: "t", State: "open", UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.InsertReview(&Review{
+		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]", CreatedAt: now,
+		InputTokens: 1200, OutputTokens: 80, CacheReadTokens: 400, CostUSD: 0.05, PromptBytes: 4800,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InsertReview(&Review{
+		PRID: prID, CLIUsed: "codex", Issues: "[]", Suggestions: "[]", CreatedAt: now,
+		InputTokens: 300, OutputTokens: 20, TokensEstimated: true, PromptBytes: 1200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy row (no prompt_bytes) and a peer placeholder are left out.
+	if _, err := s.InsertReview(&Review{PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InsertReview(&Review{PRID: prID, CLIUsed: "peer", Issues: "[]", Suggestions: "[]", CreatedAt: now, PromptBytes: 99}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.GetReview(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InputTokens != 1200 || got.OutputTokens != 80 || got.CacheReadTokens != 400 ||
+		got.CostUSD != 0.05 || got.TokensEstimated || got.PromptBytes != 4800 {
+		t.Errorf("round trip = %+v", got)
+	}
+
+	stats, err := s.ComputeStats(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk := stats.TokensLast7Days
+	if tk.Reviews != 2 || tk.EstimatedReviews != 1 || tk.InputTokens != 1500 || tk.OutputTokens != 100 ||
+		tk.CacheReadTokens != 400 || tk.CostUSD != 0.05 || tk.AvgPromptBytes != 3000 {
+		t.Errorf("token stats = %+v", tk)
+	}
+	scoped, err := s.ComputeStats([]string{"other/repo"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scoped.TokensLast7Days.Reviews != 0 {
+		t.Errorf("repo filter must apply to token stats: %+v", scoped.TokensLast7Days)
+	}
+}

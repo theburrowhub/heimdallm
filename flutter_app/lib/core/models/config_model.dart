@@ -380,6 +380,9 @@ class RepoConfig {
   /// reviews only. Removing it is a DELETE, never a diffed null.
   final ReviewLimits? reviewLimits;
 
+  /// Token-saving measures this repo overrides (null = inherit all).
+  final TokenSavingOverride? tokenSaving;
+
   /// True when this repo's org has a bare entry in `non_monitored`
   /// (theburrowhub/heimdallm#828). Derived by `AppConfig.fromJson` from
   /// `nonMonitoredOrgs`, never set directly by the UI — it is not part of
@@ -401,6 +404,7 @@ class RepoConfig {
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
     this.reviewLimits,
+    this.tokenSaving,
     this.firstSeenAt,
     this.excludedByOrg = false,
   }) : _legacyMtEnabled = mtEnabled,
@@ -456,6 +460,7 @@ class RepoConfig {
     Object? neverApproveWithIssues = _sentinel,
     Object? neverApproveMinSeverity = _sentinel,
     Object? reviewLimits = _sentinel,
+    Object? tokenSaving = _sentinel,
     Object? firstSeenAt = _sentinel,
     bool? excludedByOrg,
   }) {
@@ -488,6 +493,9 @@ class RepoConfig {
       reviewLimits: reviewLimits == _sentinel
           ? this.reviewLimits
           : reviewLimits as ReviewLimits?,
+      tokenSaving: tokenSaving == _sentinel
+          ? this.tokenSaving
+          : tokenSaving as TokenSavingOverride?,
       firstSeenAt: firstSeenAt == _sentinel
           ? this.firstSeenAt
           : firstSeenAt as DateTime?,
@@ -525,6 +533,9 @@ class OrgConfig {
   /// Review budget for every repo in this org (null = none).
   final ReviewLimits? reviewLimits;
 
+  /// Token-saving measures this org overrides (null = inherit all).
+  final TokenSavingOverride? tokenSaving;
+
   const OrgConfig({
     this.aiPrimary,
     this.aiFallback,
@@ -537,6 +548,7 @@ class OrgConfig {
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
     this.reviewLimits,
+    this.tokenSaving,
   }) : _legacyMtEnabled = mtEnabled,
        _mergeTracking = mergeTracking;
 
@@ -550,6 +562,7 @@ class OrgConfig {
       neverApproveWithIssues != null ||
       neverApproveMinSeverity != null ||
       reviewLimits != null ||
+      tokenSaving != null ||
       !mergeTracking.isEmpty;
 
   OrgConfig copyWith({
@@ -564,6 +577,7 @@ class OrgConfig {
     Object? neverApproveWithIssues = _sentinel,
     Object? neverApproveMinSeverity = _sentinel,
     Object? reviewLimits = _sentinel,
+    Object? tokenSaving = _sentinel,
   }) {
     final requestedMergeTracking = mergeTracking == _sentinel
         ? this.mergeTracking
@@ -593,6 +607,9 @@ class OrgConfig {
       reviewLimits: reviewLimits == _sentinel
           ? this.reviewLimits
           : reviewLimits as ReviewLimits?,
+      tokenSaving: tokenSaving == _sentinel
+          ? this.tokenSaving
+          : tokenSaving as TokenSavingOverride?,
     );
   }
 
@@ -607,6 +624,7 @@ class OrgConfig {
       neverApproveWithIssues: json['never_approve_with_issues'] as bool?,
       neverApproveMinSeverity: _nonEmpty(json['never_approve_min_severity']),
       reviewLimits: ReviewLimits.maybeFromJson(json['review_limits']),
+      tokenSaving: TokenSavingOverride.maybeFromJson(json['token_saving']),
     );
   }
 }
@@ -953,6 +971,157 @@ class ReviewLimits {
   int get hashCode => Object.hash(perMinute, perHour, perDay);
 }
 
+/// Default noise globs, mirroring the daemon's config.DefaultNoiseGlobs. Only
+/// used to offer "restore defaults"; the daemon reports the effective list.
+const defaultNoiseGlobs = [
+  '**/*.lock',
+  '**/package-lock.json',
+  '**/pnpm-lock.yaml',
+  '**/go.sum',
+  '**/vendor/**',
+  '**/node_modules/**',
+  '**/dist/**',
+  '**/*.min.js',
+  '**/*.min.css',
+  '**/*.map',
+  '**/*.pb.go',
+  '**/*_generated.*',
+  '**/*.g.dart',
+  '**/*.snap',
+];
+
+/// Effective global token-saving measures (`[ai.token_saving]`).
+class TokenSavingSettings {
+  final bool incrementalDiff;
+  final bool filterNoise;
+  final bool compactPrompt;
+  final bool limitExploration;
+  final List<String> noiseGlobs;
+
+  const TokenSavingSettings({
+    this.incrementalDiff = true,
+    this.filterNoise = true,
+    this.compactPrompt = true,
+    this.limitExploration = true,
+    this.noiseGlobs = defaultNoiseGlobs,
+  });
+
+  TokenSavingSettings copyWith({
+    bool? incrementalDiff,
+    bool? filterNoise,
+    bool? compactPrompt,
+    bool? limitExploration,
+    List<String>? noiseGlobs,
+  }) => TokenSavingSettings(
+    incrementalDiff: incrementalDiff ?? this.incrementalDiff,
+    filterNoise: filterNoise ?? this.filterNoise,
+    compactPrompt: compactPrompt ?? this.compactPrompt,
+    limitExploration: limitExploration ?? this.limitExploration,
+    noiseGlobs: noiseGlobs ?? this.noiseGlobs,
+  );
+
+  factory TokenSavingSettings.fromJson(Map<String, dynamic> json) =>
+      TokenSavingSettings(
+        incrementalDiff: (json['incremental_diff'] as bool?) ?? true,
+        filterNoise: (json['filter_noise'] as bool?) ?? true,
+        compactPrompt: (json['compact_prompt'] as bool?) ?? true,
+        limitExploration: (json['limit_exploration'] as bool?) ?? true,
+        noiseGlobs: json['noise_globs'] is List
+            ? (json['noise_globs'] as List).whereType<String>().toList()
+            : defaultNoiseGlobs,
+      );
+
+  /// The value of one measure by its TOML key.
+  bool measure(String key) => switch (key) {
+    'incremental_diff' => incrementalDiff,
+    'filter_noise' => filterNoise,
+    'compact_prompt' => compactPrompt,
+    'limit_exploration' => limitExploration,
+    _ => false,
+  };
+}
+
+/// Org/repo override of the token-saving measures; null = inherit.
+class TokenSavingOverride {
+  final Map<String, bool> measures; // keyed by TOML key
+  final List<String>? noiseGlobs;
+
+  const TokenSavingOverride({this.measures = const {}, this.noiseGlobs});
+
+  bool get isEmpty => measures.isEmpty && noiseGlobs == null;
+
+  bool? measure(String key) => measures[key];
+
+  TokenSavingOverride withMeasure(String key, bool? value) {
+    final next = Map<String, bool>.from(measures);
+    if (value == null) {
+      next.remove(key);
+    } else {
+      next[key] = value;
+    }
+    return TokenSavingOverride(measures: next, noiseGlobs: noiseGlobs);
+  }
+
+  static TokenSavingOverride? maybeFromJson(dynamic raw) {
+    if (raw is! Map<String, dynamic>) return null;
+    final measures = <String, bool>{
+      for (final key in tokenSavingMeasureKeys)
+        if (raw[key] is bool) key: raw[key] as bool,
+    };
+    final globs = raw['noise_globs'] is List
+        ? (raw['noise_globs'] as List).whereType<String>().toList()
+        : null;
+    final o = TokenSavingOverride(measures: measures, noiseGlobs: globs);
+    return o.isEmpty ? null : o;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is TokenSavingOverride &&
+      _mapEquals(other.measures, measures) &&
+      _listEquals(other.noiseGlobs, noiseGlobs);
+
+  @override
+  int get hashCode => Object.hash(
+    Object.hashAll(measures.entries.map((e) => '${e.key}=${e.value}')),
+    noiseGlobs == null ? null : Object.hashAll(noiseGlobs!),
+  );
+}
+
+/// TOML keys of the token-saving measures, in display order.
+const tokenSavingMeasureKeys = [
+  'incremental_diff',
+  'filter_noise',
+  'compact_prompt',
+  'limit_exploration',
+];
+
+bool _mapEquals(Map<String, bool> a, Map<String, bool> b) =>
+    a.length == b.length && a.entries.every((e) => b[e.key] == e.value);
+
+bool _listEquals(List<String>? a, List<String>? b) {
+  if (a == null || b == null) return a == b;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+/// Diff of the measures that changed between two overrides, for a scoped
+/// PATCH. Clearing a measure is a DELETE, so only set values are emitted.
+Map<String, dynamic> diffTokenSavingOverride(
+  TokenSavingOverride? old,
+  TokenSavingOverride? updated,
+) {
+  final out = <String, dynamic>{};
+  for (final key in tokenSavingMeasureKeys) {
+    final n = updated?.measure(key);
+    if (n != null && n != old?.measure(key)) out[key] = n;
+  }
+  return out;
+}
+
 /// Circuit-breaker rate limits for PR reviews.
 class CircuitBreakerConfig {
   final int perPr24h;
@@ -1061,6 +1230,9 @@ class AppConfig {
 
   /// Global review budget (`[review_limits]`).
   final ReviewLimits reviewLimits;
+
+  /// Effective global token-saving measures (`[ai.token_saving]`).
+  final TokenSavingSettings tokenSaving;
   final PollingConfig polling;
 
   /// Host paths the daemon scans (in order) when a repo has no explicit
@@ -1099,6 +1271,7 @@ class AppConfig {
     this.myPrs = const MyPrsConfig(),
     this.circuitBreaker = const CircuitBreakerConfig(),
     this.reviewLimits = const ReviewLimits(),
+    this.tokenSaving = const TokenSavingSettings(),
     this.globalNeverApproveWithIssues = false,
     this.globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity,
     this.polling = const PollingConfig(),
@@ -1168,6 +1341,7 @@ class AppConfig {
     MyPrsConfig? myPrs,
     CircuitBreakerConfig? circuitBreaker,
     ReviewLimits? reviewLimits,
+    TokenSavingSettings? tokenSaving,
     bool? globalNeverApproveWithIssues,
     String? globalNeverApproveMinSeverity,
     PollingConfig? polling,
@@ -1192,6 +1366,7 @@ class AppConfig {
       myPrs: myPrs ?? this.myPrs,
       circuitBreaker: circuitBreaker ?? this.circuitBreaker,
       reviewLimits: reviewLimits ?? this.reviewLimits,
+      tokenSaving: tokenSaving ?? this.tokenSaving,
       globalNeverApproveWithIssues:
           globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
       globalNeverApproveMinSeverity:
@@ -1259,6 +1434,7 @@ class AppConfig {
           neverApproveWithIssues: ov['never_approve_with_issues'] as bool?,
           neverApproveMinSeverity: _nonEmpty(ov['never_approve_min_severity']),
           reviewLimits: ReviewLimits.maybeFromJson(ov['review_limits']),
+          tokenSaving: TokenSavingOverride.maybeFromJson(ov['token_saving']),
           firstSeenAt: firstSeen,
         );
       }
@@ -1337,6 +1513,11 @@ class AppConfig {
       reviewLimits:
           ReviewLimits.maybeFromJson(json['review_limits']) ??
           const ReviewLimits(),
+      tokenSaving: json['token_saving'] is Map<String, dynamic>
+          ? TokenSavingSettings.fromJson(
+              json['token_saving'] as Map<String, dynamic>,
+            )
+          : const TokenSavingSettings(),
       globalNeverApproveWithIssues:
           (json['never_approve_with_issues'] as bool?) ?? false,
       // The daemon serves "" when unset; surface the default it will actually

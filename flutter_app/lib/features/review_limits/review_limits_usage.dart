@@ -153,7 +153,7 @@ class ReviewLimitStatusRow extends StatelessWidget {
           SizedBox(
             width: 92,
             child: Text(
-              full ? _slotLabel(w.resetAt) : '',
+              full ? reviewLimitSlotLabel(w.resetAt, clock.now()) : '',
               textAlign: TextAlign.right,
               style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
             ),
@@ -162,13 +162,14 @@ class ReviewLimitStatusRow extends StatelessWidget {
       ),
     );
   }
+}
 
-  static String _slotLabel(DateTime? at) {
-    if (at == null) return '';
-    final diff = at.difference(clock.now());
-    if (diff.isNegative) return 'slot free now';
-    if (diff.inMinutes < 1) return 'slot in ${diff.inSeconds}s';
-    if (diff.inMinutes < 60) return 'slot in ${diff.inMinutes}m';
-    return 'slot in ${diff.inHours}h';
-  }
+/// When a full window frees its next slot, relative to [now].
+String reviewLimitSlotLabel(DateTime? at, DateTime now) {
+  if (at == null) return '';
+  final diff = at.difference(now);
+  if (diff.isNegative) return 'slot free now';
+  if (diff.inMinutes < 1) return 'slot in ${diff.inSeconds}s';
+  if (diff.inMinutes < 60) return 'slot in ${diff.inMinutes}m';
+  return 'slot in ${diff.inHours}h';
 }

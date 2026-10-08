@@ -470,6 +470,18 @@ class _ReviewCard extends StatelessWidget {
                   'Reviewed by ${review.cliUsed}',
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
+                if (review.hasTokenUsage) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      review.tokenUsageLabel,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
                 const Spacer(),
                 SeverityBadge(severity: review.severity),
               ],

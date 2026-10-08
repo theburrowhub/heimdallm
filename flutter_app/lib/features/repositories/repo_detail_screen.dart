@@ -12,6 +12,7 @@ import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
 import '../../shared/widgets/review_limits_editor.dart';
+import '../../shared/widgets/token_saving_editor.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
@@ -195,6 +196,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
               ? widget.repoName.split('/').first
               : widget.repoName;
           final orgConfig = appConfig.orgConfigs[orgName];
+          final orgTokenSaving = orgConfig?.tokenSaving;
           final orgMergeTracking =
               orgConfig?.mergeTracking ?? const MergeTrackingOverride();
           final inheritedMergeTracking = appConfig.mergeTracking.applyOverride(
@@ -398,6 +400,21 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                         _update(_config.copyWith(mergeTracking: mergeTracking)),
                   ),
                 ], accent: FeaturePalette.mergeTracking),
+                _sectionCard('Token Saving', [
+                  TokenSavingOverrideEditor(
+                    value: _config.tokenSaving,
+                    inheritedLabelFor: (key) =>
+                        orgTokenSaving?.measure(key) == null
+                        ? 'global'
+                        : 'org: $orgName',
+                    inheritedValue: (key) =>
+                        orgTokenSaving?.measure(key) ??
+                        appConfig.tokenSaving.measure(key),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(tokenSaving: v)),
+                    onReset: (key) => _resetField('token_saving/$key'),
+                  ),
+                ]),
                 _sectionCard('Review Limits', [
                   ReviewLimitsOverrideEditor(
                     keyPrefix: 'repo',

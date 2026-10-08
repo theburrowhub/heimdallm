@@ -104,7 +104,9 @@ void main() {
     await _mount(tester, const MergeTrackingConfig());
     await _reveal(tester, find.text('Track my pull requests'));
 
-    await tester.tap(find.byType(SwitchListTile).last);
+    await tester.tap(
+      find.widgetWithText(SwitchListTile, 'Track my pull requests'),
+    );
     await tester.pumpAndSettle();
 
     await _reveal(tester, find.text('Automations'));
@@ -188,7 +190,9 @@ void main() {
     final api = await _mount(tester, const MergeTrackingConfig());
     await _reveal(tester, find.text('Track my pull requests'));
 
-    await tester.tap(find.byType(SwitchListTile).last);
+    await tester.tap(
+      find.widgetWithText(SwitchListTile, 'Track my pull requests'),
+    );
     await tester.pumpAndSettle();
 
     final save = find.widgetWithText(ElevatedButton, 'Save');

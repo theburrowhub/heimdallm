@@ -12,6 +12,7 @@ import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
 import '../../shared/widgets/review_limits_editor.dart';
+import '../../shared/widgets/token_saving_editor.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
@@ -187,6 +188,11 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
         updated.reviewLimits != null) {
       diff['review_limits'] = updated.reviewLimits!.toJson();
     }
+    final tokenSaving = diffTokenSavingOverride(
+      old.tokenSaving,
+      updated.tokenSaving,
+    );
+    if (tokenSaving.isNotEmpty) diff['token_saving'] = tokenSaving;
     return diff;
   }
 
@@ -364,6 +370,15 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                       ),
                     ),
                   ], accent: FeaturePalette.mergeTracking),
+                  _sectionCard('Token Saving', [
+                    TokenSavingOverrideEditor(
+                      value: _config.tokenSaving,
+                      inheritedValue: appConfig.tokenSaving.measure,
+                      onChanged: (v) =>
+                          _update(_config.copyWith(tokenSaving: v)),
+                      onReset: (key) => _resetField('token_saving/$key'),
+                    ),
+                  ]),
                   _sectionCard('Review Limits', [
                     ReviewLimitsOverrideEditor(
                       keyPrefix: 'org',

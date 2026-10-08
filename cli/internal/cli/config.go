@@ -153,7 +153,34 @@ func cfgAILines(cfg map[string]any) []string {
 			out = append(out, sub...)
 		}
 	}
+	if ts, ok := cfg["token_saving"].(map[string]any); ok {
+		out = append(out, fmt.Sprintf("  %s", cfgKeyStyle.Render("Token saving")))
+		for _, m := range []struct{ key, label string }{
+			{"incremental_diff", "Incremental diff"},
+			{"filter_noise", "Skip noise files"},
+			{"compact_prompt", "Compact prompt"},
+			{"limit_exploration", "Limit exploration"},
+		} {
+			if v, ok := ts[m.key].(bool); ok {
+				out = cfgSubKV(out, m.label, onOff(v))
+			}
+		}
+		if globs, ok := ts["noise_globs"].([]any); ok {
+			label := fmt.Sprintf("%d globs", len(globs))
+			if def, _ := ts["noise_globs_default"].(bool); def {
+				label += " (default)"
+			}
+			out = cfgSubKV(out, "Noise globs", label)
+		}
+	}
 	return out
+}
+
+func onOff(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
 }
 
 func cfgOrgLines(cfg map[string]any) []string {

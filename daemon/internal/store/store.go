@@ -223,6 +223,13 @@ func Open(dsn string) (*Store, error) {
 	// so retry/publish paths reproduce the decision. Empty default => legacy
 	// rows fall back to SeverityToEvent(severity).
 	db.Exec("ALTER TABLE reviews ADD COLUMN event TEXT NOT NULL DEFAULT ''")
+	// Token usage per review (token-saving measures and their effect).
+	db.Exec("ALTER TABLE reviews ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN tokens_estimated INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN prompt_bytes INTEGER NOT NULL DEFAULT 0")
 	db.Exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
@@ -597,6 +604,20 @@ type Stats struct {
 	AvgIssuesPerReview float64           `json:"avg_issues_per_review"`
 	ReviewTiming       ReviewTimingStats `json:"review_timing"`
 	ActivityCount24h   int               `json:"activity_count_24h"`
+	TokensLast7Days    TokenStats        `json:"tokens_last_7_days"`
+}
+
+// TokenStats sums agent token usage over a window. Reviews by a peer instance
+// are excluded (no agent ran here). EstimatedReviews counts the reviews whose
+// figures were approximated because the agent does not report usage.
+type TokenStats struct {
+	Reviews          int     `json:"reviews"`
+	EstimatedReviews int     `json:"estimated_reviews"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
+	AvgPromptBytes   float64 `json:"avg_prompt_bytes"`
 }
 
 type RepoCount struct {
@@ -794,6 +815,24 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 			t.MedianSeconds = sorted[n/2]
 		}
 	}
+
+	// Token usage over the last 7 days. Rows that predate token tracking have
+	// prompt_bytes = 0 and are left out so they do not dilute the averages.
+	tokenArgs := append([]any{time.Now().UTC().Add(-7 * 24 * time.Hour).Format(sqliteTimeFormat)}, repoArgs...)
+	var avgPrompt sql.NullFloat64
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(tokens_estimated),0),
+		       COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		       COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cost_usd),0),
+		       AVG(prompt_bytes)
+		FROM reviews r
+		WHERE r.created_at >= ? AND r.cli_used != 'peer' AND r.prompt_bytes > 0`+repoFilter,
+		tokenArgs...).Scan(&stats.TokensLast7Days.Reviews, &stats.TokensLast7Days.EstimatedReviews,
+		&stats.TokensLast7Days.InputTokens, &stats.TokensLast7Days.OutputTokens,
+		&stats.TokensLast7Days.CacheReadTokens, &stats.TokensLast7Days.CostUSD, &avgPrompt); err != nil {
+		return nil, fmt.Errorf("store: stats tokens: %w", err)
+	}
+	stats.TokensLast7Days.AvgPromptBytes = avgPrompt.Float64
 
 	// Activity log counter (last 24h). Non-fatal: a failing query leaves the
 	// field zero rather than breaking /stats entirely.

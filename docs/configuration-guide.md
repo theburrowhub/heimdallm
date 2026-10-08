@@ -401,6 +401,38 @@ primary     = "codex"
 fallback    = "claude"
 review_mode = "multi"
 ```
+### Token saving
+
+Four measures cut what a review costs. They are **all on by default**, and each one can be turned off globally, per organisation or per repository:
+
+```toml
+[ai.token_saving]
+incremental_diff  = true   # re-reviews get only the commits since the last review
+filter_noise      = true   # skip lockfiles, vendored/built output, binaries, generated code
+compact_prompt    = true   # terse template, trimmed comments, no bot chatter
+limit_exploration = true   # cap Claude at 20 turns / medium effort unless set per agent
+noise_globs = ["**/*.lock", "**/go.sum", "**/vendor/**"]  # replaces the default list
+
+[ai.orgs."my-org".token_saving]
+compact_prompt = false     # this org keeps the full prompt
+
+[ai.repos."my-org/infra".token_saving]
+filter_noise = false
+```
+
+| Measure | What it does | When it steps aside |
+|---|---|---|
+| `incremental_diff` | On a re-review, sends the diff since the last reviewed commit (GitHub compare API). The previous findings are still in the prompt, together with a note that the diff is partial. | Falls back to the full diff after a force-push or rebase (the old commit is no longer an ancestor), when the range has a merge commit (an *Update branch* would otherwise drag in the base branch), on a manual same-commit re-review, and when the previous review came from a peer instance. |
+| `filter_noise` | Drops files matching `noise_globs`, plus binaries and files whose first added lines carry a generated-code marker (`Code generated … DO NOT EDIT`, `@generated`). A one-line note lists what was left out. | Leaves the diff unchanged if every file would be dropped. |
+| `compact_prompt` | Uses a shorter built-in template. Comments lose the bot's own posts and the ones already in the re-review context, each body is capped at 600 bytes, the comment section at 8 KB and the re-review context at 8 KB. | Custom prompt profiles with a full template are used verbatim. Profiles that only set instructions get the compact wording. |
+| `limit_exploration` | Passes `--max-turns 20 --effort medium` to Claude. | Agents with their own `max_turns` or `effort` keep their settings. |
+
+Every review also records its token usage:
+
+- Claude runs with `--output-format json`, so its usage and cost are exact.
+- For agents that do not report usage, the daemon estimates it from the prompt and answer sizes and marks it as estimated.
+
+The PR detail shows the usage for each review. **Statistics** and `heimdallm-cli stats` show 7-day totals and the average prompt size, which makes the effect of these measures visible.
 
 ---
 

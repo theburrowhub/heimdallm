@@ -174,6 +174,31 @@ func TestCfgAILines(t *testing.T) {
 	}
 }
 
+func TestCfgAILinesTokenSaving(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	joined := strings.Join(cfgAILines(map[string]any{
+		"token_saving": map[string]any{
+			"incremental_diff":    true,
+			"filter_noise":        false,
+			"compact_prompt":      true,
+			"limit_exploration":   false,
+			"noise_globs":         []any{"a", "b"},
+			"noise_globs_default": true,
+		},
+	}), "\n")
+	for _, want := range []string{"Token saving", "Incremental diff:", "on", "Skip noise files:", "off", "2 globs (default)"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in:\n%s", want, joined)
+		}
+	}
+	custom := strings.Join(cfgAILines(map[string]any{
+		"token_saving": map[string]any{"noise_globs": []any{"x"}},
+	}), "\n")
+	if !strings.Contains(custom, "1 globs") || strings.Contains(custom, "(default)") {
+		t.Errorf("custom globs:\n%s", custom)
+	}
+}
+
 func TestCfgOrgLines(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	cfg := map[string]any{

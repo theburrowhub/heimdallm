@@ -432,6 +432,55 @@ void main() {
       expect(valueText.style?.color, isNot(Colors.red.shade400));
     },
   );
+
+  testWidgets('shows the 7-day token usage when reviews recorded it', (
+    tester,
+  ) async {
+    await _useWideViewport(tester);
+    await tester.pumpWidget(
+      _host(
+        loadStats: () async => {
+          ..._fullStats(),
+          'tokens_last_7_days': <String, dynamic>{
+            'reviews': 4,
+            'estimated_reviews': 1,
+            'input_tokens': 40000,
+            'output_tokens': 2000,
+            'cache_read_tokens': 0,
+            'cost_usd': 1.25,
+            'avg_prompt_bytes': 6144,
+          },
+        },
+        loadRateLimits: () async => <String, dynamic>{},
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Tokens Last 7 Days'), findsOneWidget);
+    _expectStatCard('Input tokens', '40.0k');
+    _expectStatCard('Output tokens', '2.0k');
+    _expectStatCard('Avg tokens / review', '10.5k');
+    _expectStatCard('Avg prompt size', '6.0 KB');
+    expect(
+      find.textContaining('\$1.25 reported cost', findRichText: true),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('1 estimated', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('hides token usage when no review recorded it', (tester) async {
+    await _useWideViewport(tester);
+    await tester.pumpWidget(
+      _host(
+        loadStats: () async => _fullStats(),
+        loadRateLimits: () async => <String, dynamic>{},
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Tokens Last 7 Days'), findsNothing);
+  });
 }
 
 Widget _withMixScope(BuildContext context, Widget? child) =>

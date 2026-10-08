@@ -266,6 +266,10 @@ type AIConfig struct {
 	// all. Only meaningful when NeverApproveWithIssues is on. Overridable
 	// per-org and per-repo.
 	NeverApproveMinSeverity string `toml:"never_approve_min_severity"`
+
+	// TokenSaving switches the measures that reduce what a review costs.
+	// Overridable per org and per repo; see TokenSavingForRepo.
+	TokenSaving TokenSavingConfig `toml:"token_saving"`
 }
 
 type RepoAI struct {
@@ -295,6 +299,10 @@ type RepoAI struct {
 	// ReviewLimits is this repo's own review budget, counted over this
 	// repo's reviews only and applied on top of the org and global budgets.
 	ReviewLimits *ReviewLimitsConfig `toml:"review_limits,omitempty"`
+
+	// TokenSaving overrides the token-saving measures for this repo; nil
+	// fields inherit from the org and global settings.
+	TokenSaving *TokenSavingConfig `toml:"token_saving,omitempty"`
 }
 
 // OrgAI holds per-organisation overrides, applied to all repos in the org
@@ -318,6 +326,10 @@ type OrgAI struct {
 	// ReviewLimits is this org's review budget, counted over every repo in
 	// the org and applied on top of the global budget.
 	ReviewLimits *ReviewLimitsConfig `toml:"review_limits,omitempty"`
+
+	// TokenSaving overrides the token-saving measures for every repo in this
+	// org; nil fields inherit from the global settings.
+	TokenSaving *TokenSavingConfig `toml:"token_saving,omitempty"`
 }
 
 // MaxRetentionDays is the upper bound (≈10 years) shared by every retention
@@ -796,6 +808,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateReviewLimits(); err != nil {
+		return err
+	}
+	if err := c.validateTokenSaving(); err != nil {
 		return err
 	}
 	// Bound the review-retention window for the TOML and env paths (the HTTP

@@ -11,6 +11,8 @@ import 'package:heimdallm/features/repositories/repo_detail_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/widgets/override_field.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:heimdallm/shared/widgets/review_limits_editor.dart';
+import 'package:heimdallm/shared/widgets/token_saving_editor.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
 
@@ -483,5 +485,99 @@ void main() {
 
       verify(() => mockApi.deleteRepoField(_repoName, 'clone_dir')).called(1);
     });
+  });
+
+  testWidgets('token saving and review limits are saved for the repo', (
+    tester,
+  ) async {
+    final mockApi = await _mountMergeTrackingDetail(tester);
+    when(
+      () => mockApi.patchRepoConfig(_repoName, any()),
+    ).thenAnswer((_) async => _configJson());
+    when(
+      () => mockApi.deleteRepoField(_repoName, any()),
+    ).thenAnswer((_) async => _configJson());
+
+    final editor = tester.widget<TokenSavingOverrideEditor>(
+      find.byType(TokenSavingOverrideEditor),
+    );
+    // Nothing is overridden at org level, so every measure inherits global.
+    expect(editor.inheritedLabelFor!('filter_noise'), 'global');
+    expect(editor.inheritedValue('filter_noise'), isTrue);
+    editor.onChanged(
+      const TokenSavingOverride(measures: {'filter_noise': false}),
+    );
+    tester
+        .widget<ReviewLimitsOverrideEditor>(
+          find.byType(ReviewLimitsOverrideEditor),
+        )
+        .onChanged(const ReviewLimits(perDay: 9));
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pump();
+
+    final patch =
+        verify(
+              () => mockApi.patchRepoConfig(_repoName, captureAny()),
+            ).captured.last
+            as Map<String, dynamic>;
+    expect(patch['token_saving'], {'filter_noise': false});
+    expect(patch['review_limits'], {
+      'per_minute': 0,
+      'per_hour': 0,
+      'per_day': 9,
+    });
+
+    tester
+        .widget<TokenSavingOverrideEditor>(
+          find.byType(TokenSavingOverrideEditor),
+        )
+        .onReset('filter_noise');
+    await tester.pump();
+    verify(
+      () => mockApi.deleteRepoField(_repoName, 'token_saving/filter_noise'),
+    ).called(1);
+    tester
+        .widget<ReviewLimitsOverrideEditor>(
+          find.byType(ReviewLimitsOverrideEditor),
+        )
+        .onRemove();
+    await tester.pump();
+    verify(() => mockApi.deleteRepoField(_repoName, 'review_limits')).called(1);
+  });
+
+  testWidgets('repo token saving shows the org as the source of an override', (
+    tester,
+  ) async {
+    final mockApi = MockApiClient();
+    final json = _configJson()
+      ..['org_overrides'] = {
+        _orgName: {
+          'token_saving': {'compact_prompt': false},
+        },
+      };
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => json);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
+        ],
+        child: MaterialApp(
+          theme: HeimdallmTheme.light(),
+          builder: (context, navigatorChild) => HeimdallmTheme.scope(
+            child: navigatorChild ?? const SizedBox.shrink(),
+          ),
+          home: const RepoDetailScreen(repoName: _repoName),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final editor = tester.widget<TokenSavingOverrideEditor>(
+      find.byType(TokenSavingOverrideEditor),
+    );
+    expect(editor.inheritedLabelFor!('compact_prompt'), 'org: $_orgName');
+    expect(editor.inheritedValue('compact_prompt'), isFalse);
+    expect(editor.inheritedLabelFor!('filter_noise'), 'global');
   });
 }

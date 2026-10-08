@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../core/models/pr.dart';
+import '../../core/models/review.dart' show compactTokenCount;
 import '../dashboard/dashboard_providers.dart';
 import '../review_limits/review_limits_usage.dart';
 import 'stats_filter_bar.dart';
@@ -51,6 +52,9 @@ class _StatsBody extends StatelessWidget {
     final last7 = (stats['reviews_last_7_days'] as List<dynamic>?) ?? [];
     final avgIssues = (stats['avg_issues_per_review'] as num?)?.toDouble() ?? 0;
     final timing = (stats['review_timing'] as Map<String, dynamic>?) ?? {};
+    final tokens =
+        (stats['tokens_last_7_days'] as Map<String, dynamic>?) ?? const {};
+    final tokenReviews = (tokens['reviews'] as num?)?.toInt() ?? 0;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
@@ -89,6 +93,14 @@ class _StatsBody extends StatelessWidget {
               ),
             ],
           ),
+
+          // Token usage (last 7 days)
+          if (tokenReviews > 0) ...[
+            const SizedBox(height: 24),
+            _sectionTitle(context, 'Tokens Last 7 Days'),
+            const SizedBox(height: 8),
+            _TokenUsageSection(tokens: tokens),
+          ],
 
           // Review timing
           if ((timing['sample_count'] as int? ?? 0) > 0) ...[
@@ -285,6 +297,70 @@ class _DistBar extends StatelessWidget {
       const SizedBox(width: 6),
       Text('$count', style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
     ]);
+  }
+}
+
+/// Token usage over the last 7 days, from /stats tokens_last_7_days.
+class _TokenUsageSection extends StatelessWidget {
+  final Map<String, dynamic> tokens;
+
+  const _TokenUsageSection({required this.tokens});
+
+  int _int(String key) => (tokens[key] as num?)?.toInt() ?? 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final reviews = _int('reviews');
+    final estimated = _int('estimated_reviews');
+    final input = _int('input_tokens');
+    final output = _int('output_tokens');
+    final cost = (tokens['cost_usd'] as num?)?.toDouble() ?? 0;
+    final avgPrompt = (tokens['avg_prompt_bytes'] as num?)?.toDouble() ?? 0;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _StatCard(
+              icon: Icons.input,
+              label: 'Input tokens',
+              value: compactTokenCount(input),
+              color: Colors.indigo,
+            ),
+            const SizedBox(width: 12),
+            _StatCard(
+              icon: Icons.output,
+              label: 'Output tokens',
+              value: compactTokenCount(output),
+              color: Colors.teal,
+            ),
+            const SizedBox(width: 12),
+            _StatCard(
+              icon: Icons.short_text,
+              label: 'Avg tokens / review',
+              value: compactTokenCount((input + output) / reviews),
+              color: Colors.purple,
+            ),
+            const SizedBox(width: 12),
+            _StatCard(
+              icon: Icons.notes,
+              label: 'Avg prompt size',
+              value: '${(avgPrompt / 1024).toStringAsFixed(1)} KB',
+              color: Colors.blueGrey,
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        AppText(
+          [
+            '$reviews reviews',
+            if (cost > 0) '\$${cost.toStringAsFixed(2)} reported cost',
+            if (estimated > 0)
+              '$estimated estimated (agent does not report usage)',
+          ].join(' · '),
+        ),
+      ],
+    );
   }
 }
 

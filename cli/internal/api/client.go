@@ -250,6 +250,18 @@ type Stats struct {
 	AvgIssuesPerReview float64           `json:"avg_issues_per_review"`
 	ReviewTiming       ReviewTimingStats `json:"review_timing"`
 	ActivityCount24h   int               `json:"activity_count_24h"`
+	TokensLast7Days    TokenStats        `json:"tokens_last_7_days"`
+}
+
+// TokenStats is the agent token usage summed over the last 7 days.
+type TokenStats struct {
+	Reviews          int     `json:"reviews"`
+	EstimatedReviews int     `json:"estimated_reviews"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
+	AvgPromptBytes   float64 `json:"avg_prompt_bytes"`
 }
 
 type ActivityEntry struct {
