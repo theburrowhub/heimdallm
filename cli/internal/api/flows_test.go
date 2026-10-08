@@ -108,11 +108,11 @@ func TestFlowDescriptions(t *testing.T) {
 			"s2": {From: "22:00", To: "06:00"},
 		},
 		Quota: map[string]api.QuotaCondition{
-			"q1": {Agent: "claude", Window: "weekly", Op: "above", Percent: 90},
+			"q1": {Agent: "claude", Window: "weekly", Op: "above", Percent: 90.5},
 			"q2": {Agent: "claude", Window: "session", Op: "below", Percent: 50},
 		},
 	}
-	want := "copilot when mon,fri 08:00-15:00 Europe/Madrid or every day 22:00-06:00 or claude weekly quota > 90% or claude session quota < 50%"
+	want := "copilot when mon,fri 08:00-15:00 Europe/Madrid or every day 22:00-06:00 daemon time or claude weekly quota > 90.5% or claude session quota < 50%"
 	if got := r.Describe(); got != want {
 		t.Errorf("Describe =\n%q\nwant\n%q", got, want)
 	}
@@ -123,8 +123,8 @@ func TestFlowDescriptions(t *testing.T) {
 	if got := (api.FlowRule{Agent: "codex\x1b[31m"}).Describe(); strings.Contains(got, "\x1b") || !strings.HasSuffix(got, " always") {
 		t.Errorf("control bytes kept: %q", got)
 	}
-	keys := api.Flow{Rules: map[string]api.FlowRule{"b": {}, "a": {}, "100": {}, "9": {}}}.OrderedRuleKeys()
-	if strings.Join(keys, ",") != "9,100,a,b" {
+	keys := api.Flow{Rules: map[string]api.FlowRule{"b": {}, "a": {}, "100": {}, "9": {}, "010": {}, "10": {}}}.OrderedRuleKeys()
+	if strings.Join(keys, ",") != "9,010,10,100,a,b" {
 		t.Errorf("keys = %v", keys)
 	}
 

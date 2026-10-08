@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -110,26 +109,9 @@ func (c *Client) SimulateFlow(flow, repo string, at time.Time) (*FlowDecision, e
 	if !at.IsZero() {
 		body["at"] = at.UTC().Format(time.RFC3339)
 	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("encoding simulation: %w", err)
-	}
-	req, err := c.newRequest(http.MethodPost, "/flows/simulate", bytes.NewReader(payload))
+	data, err := c.doJSON(http.MethodPost, "/flows/simulate", body)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	data, err := readLimited(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	var out FlowDecision
 	if err := json.Unmarshal(data, &out); err != nil {
@@ -151,27 +133,36 @@ func (c *Client) GetQuotas() ([]AgentQuota, error) {
 	return out, nil
 }
 
-// OrderedRuleKeys returns the rule keys in evaluation order: numeric keys
-// ascending, then the rest alphabetically (the daemon's order).
+// OrderedRuleKeys returns the rule keys in evaluation order (see orderKeys).
 func (f Flow) OrderedRuleKeys() []string {
 	keys := make([]string, 0, len(f.Rules))
 	for k := range f.Rules {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		a, aerr := strconv.Atoi(keys[i])
-		b, berr := strconv.Atoi(keys[j])
-		switch {
-		case aerr == nil && berr == nil:
-			return a < b
-		case aerr == nil:
-			return true
-		case berr == nil:
-			return false
-		}
-		return keys[i] < keys[j]
-	})
+	return orderKeys(keys)
+}
+
+// orderKeys sorts flow map keys like the daemon: numeric keys ascending, then
+// the rest alphabetically; numerically equal keys ("010", "10") by text.
+func orderKeys(keys []string) []string {
+	sort.Slice(keys, func(i, j int) bool { return keyLess(keys[i], keys[j]) })
 	return keys
+}
+
+// keyLess is orderKeys' comparison, named so every branch is tested directly
+// (a sort only reaches some of them, depending on map iteration order).
+func keyLess(a, b string) bool {
+	ai, aerr := strconv.Atoi(a)
+	bi, berr := strconv.Atoi(b)
+	switch {
+	case aerr == nil && berr == nil && ai != bi:
+		return ai < bi
+	case aerr == nil && berr != nil:
+		return true
+	case aerr != nil && berr == nil:
+		return false
+	}
+	return a < b
 }
 
 // Describe reads a rule as "<agent> when <conditions>". Daemon-supplied text
@@ -184,10 +175,11 @@ func (r FlowRule) Describe() string {
 		if len(s.Days) > 0 {
 			days = strings.Join(s.Days, ",")
 		}
-		d := fmt.Sprintf("%s %s-%s", days, s.From, s.To)
-		if s.TZ != "" {
-			d += " " + s.TZ
+		tz := s.TZ
+		if tz == "" {
+			tz = "daemon time"
 		}
+		d := fmt.Sprintf("%s %s-%s %s", days, s.From, s.To, tz)
 		conds = append(conds, DisplayText(d, 80))
 	}
 	for _, k := range sortedKeys(r.Quota) {
@@ -196,7 +188,7 @@ func (r FlowRule) Describe() string {
 		if q.Op == "above" {
 			op = ">"
 		}
-		conds = append(conds, DisplayText(fmt.Sprintf("%s %s quota %s %.0f%%", q.Agent, q.Window, op, q.Percent), 80))
+		conds = append(conds, DisplayText(fmt.Sprintf("%s %s quota %s %g%%", q.Agent, q.Window, op, q.Percent), 80))
 	}
 	agent := DisplayText(r.Agent, 24)
 	if len(conds) == 0 {
@@ -243,9 +235,9 @@ func (w QuotaWindow) ShortLabel() string {
 }
 
 func sortedKeys[V any](m map[string]V) []string {
-	f := Flow{Rules: map[string]FlowRule{}}
+	keys := make([]string, 0, len(m))
 	for k := range m {
-		f.Rules[k] = FlowRule{}
+		keys = append(keys, k)
 	}
-	return f.OrderedRuleKeys()
+	return orderKeys(keys)
 }

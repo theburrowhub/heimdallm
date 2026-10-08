@@ -1376,7 +1376,7 @@ func (d *Dashboard) buildConfigLines() []string {
 	section("AI")
 	flow := str("ai_flow")
 	if flow == "—" {
-		flow = "default"
+		flow = "default (primary/fallback)"
 	}
 	kv("Flow", flow)
 	kv("Primary", str("ai_primary"))

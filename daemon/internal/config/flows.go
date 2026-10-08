@@ -79,27 +79,40 @@ func Weekday(name string) (time.Weekday, bool) {
 	return d, ok
 }
 
-// OrderedRuleKeys returns a flow's rule keys in evaluation order: numeric
-// keys ascending, then non-numeric keys alphabetically.
+// OrderedRuleKeys returns a flow's rule keys in evaluation order (see
+// OrderKeys).
 func (f FlowConfig) OrderedRuleKeys() []string {
 	keys := make([]string, 0, len(f.Rules))
 	for k := range f.Rules {
 		keys = append(keys, k)
 	}
-	slices.SortFunc(keys, func(a, b string) int {
-		ai, aerr := strconv.Atoi(a)
-		bi, berr := strconv.Atoi(b)
-		switch {
-		case aerr == nil && berr == nil:
-			return ai - bi
-		case aerr == nil:
-			return -1
-		case berr == nil:
-			return 1
-		}
-		return strings.Compare(a, b)
-	})
+	return OrderKeys(keys)
+}
+
+// OrderKeys sorts flow map keys in evaluation order: numeric keys ascending,
+// then non-numeric keys alphabetically. Keys that are numerically equal
+// ("010" and "10") fall back to string order, so the order never depends on
+// map iteration.
+func OrderKeys(keys []string) []string {
+	slices.SortFunc(keys, compareKeys)
 	return keys
+}
+
+// compareKeys is OrderKeys' comparison. It is a named function so its
+// branches are tested directly: which ones a sort reaches depends on the
+// input order, and flow keys come from map iteration.
+func compareKeys(a, b string) int {
+	ai, aerr := strconv.Atoi(a)
+	bi, berr := strconv.Atoi(b)
+	switch {
+	case aerr == nil && berr == nil && ai != bi:
+		return ai - bi
+	case aerr == nil && berr != nil:
+		return -1
+	case aerr != nil && berr == nil:
+		return 1
+	}
+	return strings.Compare(a, b)
 }
 
 // FlowNameForRepo returns the flow selected for repo through repo > org >

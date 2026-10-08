@@ -27,6 +27,9 @@ func newQuotaService(admin *openrouter.Admin) *quota.Service {
 			}
 			info, err := admin.Client.KeyInfo(ctx)
 			if err != nil {
+				// The client's errors never carry the key; logging them is
+				// what tells a rejected key from an outage.
+				slog.Warn("quota: openrouter key info failed", "err", err)
 				return quota.Provider{Agent: "openrouter", Error: quota.ErrUnavailable}
 			}
 			return quota.CreditProvider("openrouter", info.Usage, info.Limit)
@@ -76,9 +79,16 @@ func flowAgents(f config.FlowConfig) []string {
 
 // flowCandidates evaluates repo's flow now and logs the decision, for the
 // pipeline's agent selection.
+// flowEvalTimeout bounds one flow evaluation. Quota reads are cached and each
+// is bounded on its own; this caps the worst case of several cold reads so
+// agent selection never waits on a slow provider for long.
+const flowEvalTimeout = 20 * time.Second
+
 func flowCandidates(flowID string, flow config.FlowConfig, repo string, quotas flows.QuotaReader, available func(string) bool) func() []string {
 	return func() []string {
-		d := flows.Evaluate(context.Background(), flowID, flow, time.Now(), quotas, available)
+		ctx, cancel := context.WithTimeout(context.Background(), flowEvalTimeout)
+		defer cancel()
+		d := flows.Evaluate(ctx, flowID, flow, time.Now(), quotas, available)
 		slog.Info("review flow evaluated", "repo", repo, "flow", flowID, "candidates", d.Candidates)
 		for _, r := range d.Rules {
 			slog.Debug("review flow rule", "repo", repo, "flow", flowID, "rule", r.Key, "agent", r.Agent,

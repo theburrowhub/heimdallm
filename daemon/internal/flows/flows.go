@@ -94,17 +94,14 @@ func matches(ctx context.Context, r config.FlowRule, now time.Time, q QuotaReade
 	return true, reasons
 }
 
+// sortedKeys orders condition keys like rule keys, so reasons read in a
+// stable order.
 func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
-	// Same numeric-first order as rules, so reasons read in a stable order.
-	f := config.FlowConfig{Rules: map[string]config.FlowRule{}}
-	for _, k := range keys {
-		f.Rules[k] = config.FlowRule{}
-	}
-	return f.OrderedRuleKeys()
+	return config.OrderKeys(keys)
 }
 
 func minutesOf(hhmm string) int {
@@ -149,6 +146,8 @@ func scheduleHolds(s config.ScheduleCondition, now time.Time) (bool, string) {
 	}
 	if s.TZ != "" {
 		desc += " " + s.TZ
+	} else {
+		desc += " daemon time"
 	}
 	now24 := t.Format("Mon 15:04")
 	if inWindow && dayOK {
@@ -158,7 +157,7 @@ func scheduleHolds(s config.ScheduleCondition, now time.Time) (bool, string) {
 }
 
 func quotaHolds(ctx context.Context, c config.QuotaCondition, q QuotaReader) (bool, string) {
-	label := fmt.Sprintf("%s %s quota %s %.0f%%", c.Agent, c.Window, c.Op, c.Percent)
+	label := fmt.Sprintf("%s %s quota %s %g%%", c.Agent, c.Window, c.Op, c.Percent)
 	if q == nil {
 		return false, label + ": quota unknown"
 	}

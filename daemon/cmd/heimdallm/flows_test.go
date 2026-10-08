@@ -132,3 +132,15 @@ func TestNewQuotaServiceOpenRouter(t *testing.T) {
 		t.Errorf("nil admin = %+v", p)
 	}
 }
+
+func TestOverrideMapsCarryTheFlow(t *testing.T) {
+	if got := repoAIOverrideMap(config.RepoAI{Flow: "night"}); got["flow"] != "night" {
+		t.Errorf("repo override = %v", got)
+	}
+	if got := orgAIOverrideMap(config.OrgAI{Flow: "weekday"}); got["flow"] != "weekday" {
+		t.Errorf("org override = %v", got)
+	}
+	if _, ok := repoAIOverrideMap(config.RepoAI{})["flow"]; ok {
+		t.Error("no flow selected must not project one")
+	}
+}

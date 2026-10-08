@@ -159,6 +159,9 @@ void main() {
       expect(back.rules[0].toJson().containsKey('match'), isFalse);
       expect(compareFlowKeys('a', '1'), greaterThan(0));
       expect(compareFlowKeys('b', 'a'), greaterThan(0));
+      expect(compareFlowKeys('10', '010'), greaterThan(0));
+      expect(formatPercent(49.5), '49.5');
+      expect(formatPercent(50), '50');
       expect(ReviewFlow.fromJson(const {}).rules, isEmpty);
     });
 
@@ -175,7 +178,7 @@ void main() {
       expect(describeRule(f.rules[2]), 'codex — always (fallback)');
       expect(
         const ScheduleCondition(days: [], tz: '').describe(),
-        'every day 08:00–15:00',
+        'every day 08:00–15:00 daemon time',
       );
       expect(
         const QuotaCondition(agent: 'x', op: 'above', percent: 90).describe(),

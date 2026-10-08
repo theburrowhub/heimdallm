@@ -50,12 +50,13 @@ func TestPrintFlowDecision(t *testing.T) {
 		Rules: []api.FlowRuleResult{
 			{Agent: "claude", Reasons: []string{"claude session quota below 50% does not hold (used 70%)"}},
 			{Agent: "copilot", Matched: true, Available: true, Reasons: []string{"schedule holds"}},
+			{Agent: "gemini", Matched: true, Reasons: []string{"gemini is not installed"}},
 		},
 	})
 	out := buf.String()
 	for _, want := range []string{
 		"Flow weekday — Weekday at", "Reviews with copilot, then codex if it runs out of quota",
-		"✗ claude", "used 70%", "✓ copilot",
+		"✗ claude", "used 70%", "✓ copilot", "⚠ gemini", "UTC",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)

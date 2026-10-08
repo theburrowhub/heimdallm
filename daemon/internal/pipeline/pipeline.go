@@ -1435,7 +1435,8 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 			// Charge the agent that actually runs, and stop if its own
 			// budget filled up while the previous agent was running.
 			if blocked := p.budget.assignAgent(p.store, ticket, agent, opts.Budgets.Agents[agent], time.Now().UTC()); blocked != nil && !opts.Force {
-				return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
+				// cli and err still describe the agent that ran out of quota.
+				return nil, fmt.Errorf("pipeline: execute %s: %w; %s, next in the flow, is over its review limit: %w", cli, err, agent, blocked)
 			}
 		}
 		cli = agent

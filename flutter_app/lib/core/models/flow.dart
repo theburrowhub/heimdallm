@@ -47,7 +47,7 @@ class QuotaCondition {
   };
 
   String describe() =>
-      '$agent $window quota ${op == 'above' ? '>' : '<'} ${percent.round()}%';
+      '$agent $window quota ${op == 'above' ? '>' : '<'} ${formatPercent(percent)}%';
 }
 
 /// A weekday + time-of-day window.
@@ -95,7 +95,7 @@ class ScheduleCondition {
 
   String describe() {
     final d = days.isEmpty ? 'every day' : days.join(', ');
-    return '$d $from–$to${tz.isEmpty ? '' : ' $tz'}';
+    return '$d $from–$to ${tz.isEmpty ? 'daemon time' : tz}';
   }
 }
 
@@ -158,10 +158,15 @@ class FlowRule {
 }
 
 /// Compares map keys like the daemon: numeric keys first, numerically.
+/// A threshold as written: 50 → "50", 49.5 → "49.5".
+String formatPercent(double p) =>
+    p == p.roundToDouble() ? p.round().toString() : p.toString();
+
 int compareFlowKeys(String a, String b) {
   final ai = int.tryParse(a);
   final bi = int.tryParse(b);
-  if (ai != null && bi != null) return ai.compareTo(bi);
+  if (ai != null && bi != null && ai != bi) return ai.compareTo(bi);
+  if (ai != null && bi != null) return a.compareTo(b);
   if (ai != null) return -1;
   if (bi != null) return 1;
   return a.compareTo(b);

@@ -117,7 +117,8 @@ func printFlowDecision(w io.Writer, d *api.FlowDecision) {
 	}
 	fmt.Fprintf(w, "Flow %s", name)
 	if !d.At.IsZero() {
-		fmt.Fprintf(w, " at %s", d.At.Local().Format("Mon 2006-01-02 15:04"))
+		// The daemon's clock and zone, which schedules without a tz use.
+		fmt.Fprintf(w, " at %s", d.At.Format("Mon 2006-01-02 15:04 MST"))
 	}
 	fmt.Fprintln(w)
 	switch len(d.Candidates) {
@@ -135,9 +136,12 @@ func printFlowDecision(w io.Writer, d *api.FlowDecision) {
 		fmt.Fprintln(w)
 	}
 	for _, r := range d.Rules {
-		mark := "✗"
-		if r.Matched && r.Available {
+		mark := "✗" // conditions do not hold
+		switch {
+		case r.Matched && r.Available:
 			mark = "✓"
+		case r.Matched:
+			mark = "⚠" // conditions hold, but the agent is not available
 		}
 		fmt.Fprintf(w, "  %s %s\n", mark, api.DisplayText(r.Agent, 24))
 		for _, why := range r.Reasons {

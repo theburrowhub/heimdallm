@@ -18,6 +18,7 @@ type scriptedExec struct {
 	failWith  map[string]error
 	ran       []string
 	opts      map[string]executor.ExecOptions
+	onRun     func(cli string) // called before the run's outcome
 }
 
 func (f *scriptedExec) Detect(primary, fallback string) (string, error) {
@@ -35,6 +36,9 @@ func (f *scriptedExec) Execute(cli, _ string, opts executor.ExecOptions) (*execu
 		f.opts = map[string]executor.ExecOptions{}
 	}
 	f.opts[cli] = opts
+	if f.onRun != nil {
+		f.onRun(cli)
+	}
 	if err := f.failWith[cli]; err != nil {
 		return nil, err
 	}
@@ -137,5 +141,39 @@ func TestRun_FlowFallbackRespectsAgentBudget(t *testing.T) {
 	})
 	if err == nil || strings.Join(exec.ran, ",") != "claude" {
 		t.Fatalf("codex is over budget up front, so only claude runs and its quota failure ends the review: err=%v ran=%v", err, exec.ran)
+	}
+}
+
+// The next agent in the flow can fill its own review budget while the first
+// one is running. The review then ends, and its error must say both why the
+// first agent stopped and why the next one could not take over.
+func TestRun_FlowFallbackBlockedMidRunExplainsBoth(t *testing.T) {
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true},
+		failWith:  map[string]error{"claude": errors.New("usage limit reached")},
+	}
+	p, _ := flowPipeline(t, exec)
+	budgets := pipeline.ReviewBudgets{Agents: map[string]pipeline.ReviewWindowLimits{"codex": {PerHour: 1}}}
+	exec.onRun = func(cli string) {
+		if cli != "claude" {
+			return
+		}
+		exec.onRun = nil
+		// Another PR takes codex's only slot meanwhile.
+		if _, err := p.Run(budgetPR(57), pipeline.RunOptions{Primary: "codex", Budgets: budgets}); err != nil {
+			t.Errorf("concurrent codex review: %v", err)
+		}
+	}
+	_, err := p.Run(budgetPR(56), pipeline.RunOptions{
+		Primary:    "claude",
+		Candidates: func() []string { return []string{"claude", "codex"} },
+		Budgets:    budgets,
+	})
+	var budgetErr *pipeline.ReviewBudgetError
+	if err == nil || !strings.Contains(err.Error(), "usage limit reached") || !errors.As(err, &budgetErr) || !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("err = %v; want claude's quota error and codex's review limit", err)
+	}
+	if strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Errorf("runs = %v; codex only ran for the other PR", exec.ran)
 	}
 }

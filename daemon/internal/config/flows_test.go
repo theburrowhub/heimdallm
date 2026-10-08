@@ -68,6 +68,30 @@ func TestOrderedRuleKeys(t *testing.T) {
 	}
 }
 
+// Numerically equal keys sort by their text, so evaluation order never
+// depends on map iteration.
+func TestCompareKeys(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want int
+	}{
+		{"9", "10", -1}, {"10", "9", 1}, {"10", "a", -1}, {"a", "10", 1},
+		{"010", "10", -1}, {"10", "010", 1}, {"a", "b", -1}, {"b", "b", 0},
+	} {
+		if got := compareKeys(c.a, c.b); (got < 0) != (c.want < 0) || (got > 0) != (c.want > 0) {
+			t.Errorf("compareKeys(%q, %q) = %d, want sign of %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestOrderKeysIsDeterministic(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		if got := strings.Join(OrderKeys([]string{"10", "010", "+10", "b", "2"}), ","); got != "2,+10,010,10,b" {
+			t.Fatalf("OrderKeys = %s", got)
+		}
+	}
+}
+
 func TestValidateFlows(t *testing.T) {
 	bad := map[string]string{
 		"bad id":       "[ai.flows.\"Bad Id\".rules.1]\nagent = \"claude\"\n",
