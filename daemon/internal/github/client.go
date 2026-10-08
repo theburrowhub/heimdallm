@@ -1003,6 +1003,24 @@ type PRSnapshot struct {
 	Author    string
 	UpdatedAt time.Time
 	HeadSHA   string
+	// RequestedReviewers comes free with the same /pulls/N response. Tier 3
+	// uses it to tell an updated_at bump (CI, comments, peer reviews) apart
+	// from an actual re-review request without walking the timeline.
+	RequestedReviewers []string
+}
+
+// ReviewRequestedFor reports whether login (case-insensitive, leading "@"
+// tolerated) is still a pending reviewer on the snapshot. Same matching rule
+// as PullRequest.ReviewRequestedFor.
+func (s *PRSnapshot) ReviewRequestedFor(login string) bool {
+	if s == nil {
+		return false
+	}
+	pr := PullRequest{RequestedReviewers: make([]User, len(s.RequestedReviewers))}
+	for i, r := range s.RequestedReviewers {
+		pr.RequestedReviewers[i] = User{Login: r}
+	}
+	return pr.ReviewRequestedFor(login)
 }
 
 // GetPRSnapshot returns the current state, draft flag, author, updated_at,
@@ -1025,12 +1043,17 @@ func (c *Client) GetPRSnapshot(repo string, number int) (*PRSnapshot, error) {
 	if err := json.Unmarshal(body, &pr); err != nil {
 		return nil, fmt.Errorf("github: get PR snapshot: unmarshal: %w", err)
 	}
+	reviewers := make([]string, len(pr.RequestedReviewers))
+	for i, u := range pr.RequestedReviewers {
+		reviewers[i] = u.Login
+	}
 	return &PRSnapshot{
-		State:     pr.State,
-		Draft:     pr.Draft,
-		Author:    pr.User.Login,
-		UpdatedAt: pr.UpdatedAt,
-		HeadSHA:   pr.Head.SHA,
+		State:              pr.State,
+		Draft:              pr.Draft,
+		Author:             pr.User.Login,
+		UpdatedAt:          pr.UpdatedAt,
+		HeadSHA:            pr.Head.SHA,
+		RequestedReviewers: reviewers,
 	}, nil
 }
 

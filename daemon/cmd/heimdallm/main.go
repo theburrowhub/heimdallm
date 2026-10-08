@@ -4065,6 +4065,17 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		if !snap.UpdatedAt.After(item.LastSeen) {
 			return false, nil, nil
 		}
+		if a.awaitingReReviewRequest(item, snap) {
+			// The bump is CI, comments or peer reviews, not a re-request: the
+			// pipeline gate would only end in no_rereview_request after a
+			// timeline + reviews + pulls round-trip and a skip event. Report
+			// "unchanged" so the backoff keeps growing and LastSeen is left
+			// alone; a later re-request moves updated_at again and lands here
+			// with the bot back in requested_reviewers.
+			slog.Debug("tier3: PR updated without a re-review request, not re-evaluating",
+				"repo", item.Repo, "pr", item.Number)
+			return false, nil, nil
+		}
 		// Forward HeadSHA so HandleChange can feed it into runReview's
 		// persistent in-flight claim (#258, theburrowhub/heimdallm#264).
 		// GetPRSnapshot already fetches head.sha in the same /pulls/N call —
@@ -4081,6 +4092,33 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 	// from before the issue pipelines were removed; report no change and let
 	// the watch store evict it.
 	return false, nil, nil
+}
+
+// awaitingReReviewRequest reports whether a watched PR already has a review
+// from this daemon and the fresh snapshot does not list the bot as a pending
+// reviewer. Such a PR can only be skipped by the pipeline gate (both of its
+// re-review triggers need a live request), so Tier 3 drops it before spending
+// the gate's GitHub calls and emitting a skip on every updated_at bump.
+//
+// A PR with no stored review, or an unknown bot login, is never filtered
+// here: the first review and the login-less startup window keep their
+// existing path.
+func (a *tier2Adapter) awaitingReReviewRequest(item *scheduler.WatchItem, snap *gh.PRSnapshot) bool {
+	if a == nil || a.store == nil || a.loginMu == nil || a.login == nil {
+		return false
+	}
+	a.loginMu.Lock()
+	botLogin := *a.login
+	a.loginMu.Unlock()
+	if botLogin == "" || snap.ReviewRequestedFor(botLogin) {
+		return false
+	}
+	stored, err := a.store.GetPRByGithubID(item.GithubID)
+	if err != nil || stored == nil {
+		return false
+	}
+	prev, err := a.store.LatestReviewForPR(stored.ID)
+	return err == nil && prev != nil
 }
 
 // HandleChange implements scheduler.Tier3ItemChecker.
