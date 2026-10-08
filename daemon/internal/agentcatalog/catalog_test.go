@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -167,12 +168,14 @@ func TestRootsHonourEnvironment(t *testing.T) {
 
 func TestParseVersion(t *testing.T) {
 	cases := map[string]string{
-		"2.1.292 (Claude Code)":      "2.1.292",
-		"codex-cli 0.161.0":          "0.161.0",
-		"GitHub Copilot CLI 1.0.88.": "1.0.88",
-		"2026.10.01-e373342":         "2026.10.01-e373342",
-		"no digits here":             "no digits here",
-		strings.Repeat("x", 200):     strings.Repeat("x", maxVersionLen),
+		"2.1.292 (Claude Code)":              "2.1.292",
+		"codex-cli 0.161.0":                  "0.161.0",
+		"GitHub Copilot CLI 1.0.88.":         "1.0.88",
+		"2026.10.01-e373342":                 "2026.10.01-e373342",
+		"no digits here":                     "",
+		"Please run cursor-agent login":      "",
+		strings.Repeat("x", 200):             "",
+		"v" + strings.Repeat("1.", 60) + "1": strings.Repeat("1.", 40),
 	}
 	for in, want := range cases {
 		if got := parseVersion(in); got != want {
@@ -232,5 +235,77 @@ func TestNewDetectorIsWired(t *testing.T) {
 	out, err := runCommand(context.Background(), "/bin/echo", "hello")
 	if err != nil || strings.TrimSpace(out) != "hello" {
 		t.Errorf("runCommand = %q, %v", out, err)
+	}
+}
+
+// A Refresh that waited on a running scan returns that scan: concurrent first
+// hits after startup must not each launch every agent's probes again.
+func TestStore_ConcurrentRefreshesCoalesce(t *testing.T) {
+	var runs atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	d := Detector{
+		Home:    "/h",
+		Resolve: func(id string) string { return map[string]string{"claude": "/bin/claude"}[id] },
+		Stat:    fakeFS{}.stat,
+		Run: func(_ context.Context, path string, args ...string) (string, error) {
+			if runs.Add(1) == 1 {
+				close(started)
+				<-release
+			}
+			return "1.0.0", nil
+		},
+	}
+	s := NewStore(d)
+	first := make(chan []Agent)
+	go func() { first <- s.Refresh(context.Background()) }()
+	<-started
+	second := make(chan []Agent)
+	go func() { second <- s.Refresh(context.Background()) }()
+	time.Sleep(20 * time.Millisecond) // let the second call queue on the scan
+	close(release)
+	a, b := <-first, <-second
+	if byID(a)["claude"].Version != "1.0.0" || byID(b)["claude"].Version != "1.0.0" {
+		t.Fatalf("results = %v / %v", a, b)
+	}
+	if n := runs.Load(); n != 1 {
+		t.Errorf("probes ran %d times, want one scan", n)
+	}
+	s.Refresh(context.Background())
+	if n := runs.Load(); n != 2 {
+		t.Errorf("a later refresh must scan again, probes ran %d times", n)
+	}
+}
+
+// A scan cut short by its caller's context is not stored over a good one.
+func TestStore_CancelledScanIsNotStored(t *testing.T) {
+	version := "1.0.0"
+	d := Detector{
+		Home:    "/h",
+		Resolve: func(id string) string { return map[string]string{"claude": "/bin/claude"}[id] },
+		Stat:    fakeFS{}.stat,
+		Run: func(ctx context.Context, path string, args ...string) (string, error) {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return version, nil
+		},
+	}
+	s := NewStore(d)
+	s.Refresh(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	version = "2.0.0"
+	if got := byID(s.Refresh(ctx))["claude"]; got.Version != "" {
+		t.Errorf("cancelled scan = %+v", got)
+	}
+	if a, _ := s.Get(context.Background(), "claude"); a.Version != "1.0.0" {
+		t.Errorf("stored version = %q, want the good scan kept", a.Version)
+	}
+}
+
+func TestRunCommandCapsOutput(t *testing.T) {
+	out, err := runCommand(context.Background(), "/bin/sh", "-c", "head -c 400000 /dev/zero | tr '\\0' x")
+	if err != nil || len(out) != maxProbeOutput {
+		t.Errorf("len = %d, err = %v; want the output capped at %d", len(out), err, maxProbeOutput)
 	}
 }

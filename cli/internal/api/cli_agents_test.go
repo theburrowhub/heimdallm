@@ -12,9 +12,6 @@ func TestCLIAgentsClient(t *testing.T) {
 	var seen []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method+" "+r.URL.Path)
-		if r.URL.Query().Get("bad") != "" {
-			return
-		}
 		_, _ = w.Write([]byte(`{"scanned_at":"2026-10-08T10:00:00Z","agents":[{"id":"copilot","name":"GitHub Copilot CLI","installed":true,"models":["gpt-5.5"]}]}`))
 	}))
 	defer srv.Close()
