@@ -287,10 +287,10 @@ var sensitiveGETPaths = []string{
 	"/agents",
 	"/events",
 	"/logs/stream",
-	"/me",     // exposes GitHub username
-	"/prs",    // exposes PR titles, repos, authors
-	"/stats",  // exposes review activity metadata
-	"/github", // covers /github/rate_limit (live GitHub API usage)
+	"/me",            // exposes GitHub username
+	"/prs",           // exposes PR titles, repos, authors
+	"/stats",         // exposes review activity metadata
+	"/github",        // covers /github/rate_limit (live GitHub API usage)
 	"/review-limits", // exposes repo/org names and review volume
 	// exposes PR titles, repos, block reasons and check names
 	"/merge-tracking",

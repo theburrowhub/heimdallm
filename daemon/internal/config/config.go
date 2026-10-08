@@ -77,11 +77,11 @@ type Config struct {
 	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
 	// ReviewLimits is the global review budget per minute/hour/day. Orgs,
 	// repos and agents add their own budgets on top (see ReviewLimitsConfig).
-	ReviewLimits ReviewLimitsConfig `toml:"review_limits"`
-	Polling        PollingConfig        `toml:"polling"`
-	MergeTracking  MergeTrackingConfig  `toml:"merge_tracking"`
-	MyPRs          MyPRsConfig          `toml:"my_prs"`
-	Cluster        ClusterConfig        `toml:"cluster,omitempty"`
+	ReviewLimits  ReviewLimitsConfig  `toml:"review_limits"`
+	Polling       PollingConfig       `toml:"polling"`
+	MergeTracking MergeTrackingConfig `toml:"merge_tracking"`
+	MyPRs         MyPRsConfig         `toml:"my_prs"`
+	Cluster       ClusterConfig       `toml:"cluster,omitempty"`
 }
 
 type ServerConfig struct {
