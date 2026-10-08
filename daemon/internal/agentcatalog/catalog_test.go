@@ -324,3 +324,17 @@ func TestRunCommandCapsOutput(t *testing.T) {
 		t.Errorf("len = %d, err = %v; want the output capped at %d", len(out), err, maxProbeOutput)
 	}
 }
+
+// Writes are cut at the cap whatever their size; a pipe splits a probe's
+// output unpredictably, so the boundary cases are tested here directly.
+func TestCappedBuffer(t *testing.T) {
+	b := &cappedBuffer{max: 5}
+	for _, chunk := range []string{"ab", "cdef", "gh"} {
+		if n, err := b.Write([]byte(chunk)); n != len(chunk) || err != nil {
+			t.Fatalf("Write(%q) = %d, %v; must report the whole chunk consumed", chunk, n, err)
+		}
+	}
+	if b.String() != "abcde" {
+		t.Errorf("buffer = %q, want the first 5 bytes", b.String())
+	}
+}
