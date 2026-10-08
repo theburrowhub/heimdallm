@@ -824,7 +824,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		budgets := reviewBudgetsFor(cfg, pr.Repo)
 		tokenSaving := cfg.TokenSavingForRepo(pr.Repo)
 		cfgMu.Unlock()
-		maxTurns, effort := limitedExploration(cli, agentCfg.MaxTurns, agentCfg.Effort, tokenSaving.LimitExploration)
+		maxTurns, effort, softTurns := limitedExploration(cli, agentCfg.MaxTurns, agentCfg.Effort, tokenSaving.LimitExploration)
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
 			if err := executor.ValidateExtraFlagsForCLI(cli, extraFlags); err != nil {
@@ -845,6 +845,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             maxTurns,
+				SoftMaxTurns:         softTurns,
 				ApprovalMode:         agentCfg.ApprovalMode,
 				ExtraFlags:           extraFlags,
 				WorkDir:              aiCfg.LocalDir,
@@ -1936,11 +1937,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 
 	// Expose live config for GET /config
 
-	// Live GitHub API rate-limit lookup for GET /github/rate_limit. Served from
-	// the scheduler's tracker (real X-RateLimit-* headers observed on every
-	// API call), falling back to GitHub's GET /rate_limit only for a bucket
-	// that hasn't been observed yet. See buildRateLimitView's doc comment for
-	// why the tracker — not GitHub's own endpoint — must be the primary source.
 	// Installed-agent discovery for GET /cli-agents: scanned once at startup
 	// in the background (version/model probes take a few seconds) and every
 	// 10 minutes, so an agent installed while the daemon runs shows up without
@@ -1957,7 +1953,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	srv.SetAPIKeyProvider("openrouter", openRouterAdmin)
 	go func() {
 		agentCatalog.Refresh(runtimeCtx)
-		ticker := time.NewTicker(agentCatalogRefreshInterval)
+		ticker := time.NewTicker(agentcatalog.RefreshInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -1977,6 +1973,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		cfgMu.Unlock()
 		return p.ReviewBudgetStatus(scopes, time.Now().UTC())
 	})
+	// Live GitHub API rate-limit lookup for GET /github/rate_limit. Served from
+	// the scheduler's tracker (real X-RateLimit-* headers observed on every
+	// API call), falling back to GitHub's GET /rate_limit only for a bucket
+	// that hasn't been observed yet. See buildRateLimitView's doc comment for
+	// why the tracker — not GitHub's own endpoint — must be the primary source.
 	srv.SetRateLimitFn(func() (any, error) {
 		return buildRateLimitView(time.Now(), limiter.Snapshots(), ghClient.RateLimit)
 	})
