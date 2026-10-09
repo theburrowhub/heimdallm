@@ -10,6 +10,7 @@ import 'package:heimdallm/features/cli_agents/cli_agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
+import 'package:heimdallm/shared/widgets/review_limits_editor.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
 
@@ -425,4 +426,30 @@ void main() {
       ),
     ).called(greaterThanOrEqualTo(1));
   });
+
+  testWidgets('agent review limits auto-save', (tester) async {
+    final api = await pumpScreen(
+      tester,
+      agentConfigs: const {'claude': CLIAgentConfig()},
+    );
+    tester
+        .widget<ReviewLimitsFields>(
+          find.byWidgetPredicate(
+            (w) => w is ReviewLimitsFields && w.keyPrefix == 'agent-claude',
+          ),
+        )
+        .onChanged(const ReviewLimits(perHour: 3));
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+
+    final patch =
+        verify(() => api.patchConfig(captureAny())).captured.last
+            as Map<String, dynamic>;
+    expect(patch['ai']['agents']['claude']['review_limits'], {
+      'per_minute': 0,
+      'per_hour': 3,
+      'per_day': 0,
+    });
+  });
 }
+

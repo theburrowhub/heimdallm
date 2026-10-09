@@ -10,6 +10,8 @@ import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/organizations/org_detail_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/widgets/override_field.dart';
+import 'package:heimdallm/shared/widgets/review_limits_editor.dart';
+import 'package:heimdallm/shared/widgets/token_saving_editor.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -313,4 +315,60 @@ void main() {
       });
     },
   );
+
+  testWidgets('token saving and review limits are saved for the org', (
+    tester,
+  ) async {
+    final mockApi = await _pumpOrgDetail(tester);
+    when(
+      () => mockApi.deleteOrgField('acme', any()),
+    ).thenAnswer((_) async => _configJson());
+
+    expect(find.text('Token Saving'), findsOneWidget);
+    expect(find.text('Review Limits'), findsOneWidget);
+
+    tester
+        .widget<TokenSavingOverrideEditor>(
+          find.byType(TokenSavingOverrideEditor),
+        )
+        .onChanged(
+          const TokenSavingOverride(measures: {'compact_prompt': false}),
+        );
+    tester
+        .widget<ReviewLimitsOverrideEditor>(
+          find.byType(ReviewLimitsOverrideEditor),
+        )
+        .onChanged(const ReviewLimits(perHour: 4));
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pump();
+
+    final patch =
+        verify(
+              () => mockApi.patchOrgConfig('acme', captureAny()),
+            ).captured.last
+            as Map<String, dynamic>;
+    expect(patch['token_saving'], {'compact_prompt': false});
+    expect(patch['review_limits'], {
+      'per_minute': 0,
+      'per_hour': 4,
+      'per_day': 0,
+    });
+
+    tester
+        .widget<TokenSavingOverrideEditor>(
+          find.byType(TokenSavingOverrideEditor),
+        )
+        .onReset('compact_prompt');
+    await tester.pump();
+    verify(
+      () => mockApi.deleteOrgField('acme', 'token_saving/compact_prompt'),
+    ).called(1);
+    tester
+        .widget<ReviewLimitsOverrideEditor>(
+          find.byType(ReviewLimitsOverrideEditor),
+        )
+        .onRemove();
+    await tester.pump();
+    verify(() => mockApi.deleteOrgField('acme', 'review_limits')).called(1);
+  });
 }

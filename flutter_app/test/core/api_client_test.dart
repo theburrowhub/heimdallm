@@ -7,6 +7,40 @@ import 'platform/fake_platform_services.dart';
 
 void main() {
   group('ApiClient (desktop shape — absolute URL + token)', () {
+    test('fetchReviewLimits parses budgets and surfaces errors', () async {
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+        token: 'abc-123',
+      );
+      var status = 200;
+      var body = jsonEncode([
+        {
+          'kind': 'agent',
+          'key': 'claude',
+          'windows': [
+            {'window': 'hour', 'used': 1, 'limit': 5},
+          ],
+        },
+      ]);
+      final client = ApiClient(
+        httpClient: MockClient((request) async {
+          expect(request.url.path, '/review-limits');
+          expect(request.headers['X-Heimdallm-Token'], 'abc-123');
+          return http.Response(body, status);
+        }),
+        platform: platform,
+      );
+      final limits = await client.fetchReviewLimits();
+      expect(limits.single.label, 'Agent claude');
+      expect(limits.single.windows.single.limit, 5);
+
+      body = '{"not":"a list"}';
+      expect(await client.fetchReviewLimits(), isEmpty);
+
+      status = 503;
+      expect(client.fetchReviewLimits(), throwsA(isA<ApiException>()));
+    });
+
     test('fetchPRs sends X-Heimdallm-Token and hits absolute URL', () async {
       final platform = FakePlatformServices(
         apiBaseUrl: 'http://127.0.0.1:7842',

@@ -427,6 +427,17 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   }
   if (agentsDiff.isNotEmpty) aiDiff['agents'] = agentsDiff;
 
+  final tsOld = old.tokenSaving;
+  final tsNew = updated.tokenSaving;
+  final tsDiff = <String, dynamic>{
+    for (final key in tokenSavingMeasureKeys)
+      if (tsOld.measure(key) != tsNew.measure(key)) key: tsNew.measure(key),
+  };
+  if (tsOld.noiseGlobs.join('\n') != tsNew.noiseGlobs.join('\n')) {
+    tsDiff['noise_globs'] = tsNew.noiseGlobs;
+  }
+  if (tsDiff.isNotEmpty) aiDiff['token_saving'] = tsDiff;
+
   if (aiDiff.isNotEmpty) {
     diff['ai'] = aiDiff;
   }

@@ -43,6 +43,34 @@ void main() {
     expect(find.text('Overall looks good'), findsOneWidget);
   });
 
+  testWidgets('PRDetailScreen shows the review token usage', (tester) async {
+    final pr = PR(id: 1, githubId: 101, repo: 'org/repo', number: 42,
+      title: 'Fix bug', author: 'alice', url: 'https://github.com',
+      state: 'open', updatedAt: DateTime.now());
+    final review = Review(id: 1, prId: 1, cliUsed: 'claude',
+      summary: 'Overall looks good', issues: [],
+      severity: 'low', createdAt: DateTime.now(),
+      inputTokens: 12000, outputTokens: 300, tokensEstimated: true);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          prDetailProvider((instanceId: '', prId: 1)).overrideWith((_) => Future.value({'pr': pr, 'reviews': [review]})),
+          sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(routes: [
+            GoRoute(path: '/', builder: (_, _) => const SizedBox()),
+            GoRoute(path: '/prs/:id', builder: (ctx, state) =>
+                PRDetailScreen(prId: int.parse(state.pathParameters['id']!))),
+          ], initialLocation: '/prs/1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('≈ 12.0k in · 300 out tokens'), findsOneWidget);
+  });
+
   testWidgets('active daemon status offers scoped cancellation from detail', (
     tester,
   ) async {

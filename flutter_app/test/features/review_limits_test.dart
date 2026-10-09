@@ -324,4 +324,15 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
   });
+
+  test('slot labels and unknown scope kinds', () {
+    final now = DateTime.utc(2026, 10, 8, 12);
+    expect(reviewLimitSlotLabel(null, now), '');
+    expect(reviewLimitSlotLabel(now.subtract(const Duration(seconds: 1)), now), 'slot free now');
+    expect(reviewLimitSlotLabel(now.add(const Duration(seconds: 30)), now), 'slot in 30s');
+    expect(reviewLimitSlotLabel(now.add(const Duration(minutes: 12)), now), 'slot in 12m');
+    expect(reviewLimitSlotLabel(now.add(const Duration(hours: 5)), now), 'slot in 5h');
+    expect(const ReviewLimitStatus(kind: 'future', key: '', windows: []).label, 'future');
+    expect(const ReviewLimitStatus(kind: 'future', key: 'x', windows: []).label, 'future x');
+  });
 }

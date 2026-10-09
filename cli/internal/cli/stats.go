@@ -2,10 +2,14 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/theburrowhub/heimdallm/cli/internal/api"
 )
 
 func newStatsCmd() *cobra.Command {
@@ -82,7 +86,42 @@ func newStatsCmd() *cobra.Command {
 				fmt.Printf("    Very slow (>300s): %d\n", t.BucketVerySlow)
 			}
 
+			printTokenStats(os.Stdout, stats.TokensLast7Days)
 			return nil
 		},
+	}
+}
+
+// printTokenStats renders the 7-day token usage section; nothing when no
+// review in the window recorded usage.
+func printTokenStats(w io.Writer, t api.TokenStats) {
+	if t.Reviews == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\n  Tokens (last 7 days):")
+	fmt.Fprintf(w, "    Reviews:      %d", t.Reviews)
+	if t.EstimatedReviews > 0 {
+		fmt.Fprintf(w, " (%d estimated)", t.EstimatedReviews)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "    Input:        %d\n", t.InputTokens)
+	fmt.Fprintf(w, "    Output:       %d\n", t.OutputTokens)
+	if t.CacheReadTokens > 0 {
+		fmt.Fprintf(w, "    Cache reads:  %d\n", t.CacheReadTokens)
+	}
+	// Estimated reviews count only prompt and answer text (no agent
+	// exploration) and report no cost, so say when they are mixed in.
+	perReview := fmt.Sprintf("%d", (t.InputTokens+t.OutputTokens)/int64(t.Reviews))
+	if t.EstimatedReviews > 0 {
+		perReview += " (includes estimates)"
+	}
+	fmt.Fprintf(w, "    Per review:   %s\n", perReview)
+	fmt.Fprintf(w, "    Avg prompt:   %.1f KB\n", t.AvgPromptBytes/1024)
+	if t.CostUSD > 0 {
+		cost := fmt.Sprintf("$%.2f", t.CostUSD)
+		if t.EstimatedReviews > 0 {
+			cost += " (reported reviews only)"
+		}
+		fmt.Fprintf(w, "    Cost:         %s\n", cost)
 	}
 }

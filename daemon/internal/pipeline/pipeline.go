@@ -727,7 +727,10 @@ func (p *Pipeline) persistPeerCoveredReview(prID int64, headSHA string, peer git
 }
 
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
-func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string, flags *string) {
+//
+// compact selects the token-saving wording for profiles that only supply
+// instructions; a profile with its own full template is used verbatim.
+func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, compact bool, tmpl *string, flags *string) {
 	agents, err := p.store.ListAgents()
 	if err != nil || len(agents) == 0 {
 		return
@@ -765,6 +768,8 @@ func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string,
 	switch {
 	case a.Prompt != "":
 		*tmpl = a.Prompt
+	case a.Instructions != "" && compact:
+		*tmpl = executor.CompactTemplateWithInstructions(a.Instructions)
 	case a.Instructions != "":
 		*tmpl = executor.DefaultTemplateWithInstructions(a.Instructions)
 	}
@@ -846,6 +851,9 @@ type RunOptions struct {
 	// Budgets are the review limits this review must fit in. Empty means no
 	// limit. Force reviews are charged but never deferred.
 	Budgets ReviewBudgets
+	// TokenSaving selects the measures that shrink the prompt. The zero value
+	// keeps the full diff and the default template.
+	TokenSaving TokenSaving
 	// WorkPermit carries admission acquired at the outer worker boundary. When
 	// nil, Run acquires its own permit for backwards-compatible direct callers.
 	WorkPermit *workgate.Permit
@@ -1173,7 +1181,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// The PR survived every SHA/re-request dedup gate, so the diff will be
 	// consumed. Fetching it earlier paid a potentially large GitHub response
 	// for every unchanged PR and even when HEAD resolution had already failed.
-	diff, err := p.gh.FetchDiff(pr.Repo, pr.Number)
+	diff, incrementalFrom, err := p.reviewDiff(pr, prevReview, opts.TokenSaving)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: fetch diff: %w", err)
 	}
@@ -1189,7 +1197,18 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		}
 		prComments = cs
 	}
-	commentsSection := formatComments(prComments, pr.User.Login)
+	compact := opts.TokenSaving.CompactPrompt
+	var commentsSection string
+	if compact {
+		// Discussion after the last review is already in the re-review context.
+		var inContextAfter time.Time
+		if prevReview != nil {
+			inContextAfter = prevReview.CreatedAt
+		}
+		commentsSection = formatCommentsCompact(prComments, p.botLogin, inContextAfter)
+	} else {
+		commentsSection = formatComments(prComments, pr.User.Login)
+	}
 
 	// 2c. Build re-review context if a previous review exists for this PR.
 	var reviewCtx string
@@ -1202,13 +1221,23 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 			p.botLogin,
 			pr.User.Login,
 		)
+		if incrementalFrom != "" {
+			// First, so the compact cap below trims discussion, not this.
+			reviewCtx = incrementalNote(incrementalFrom) + reviewCtx
+		}
+		if compact {
+			reviewCtx = truncateText(reviewCtx, compactReviewContextBytes)
+		}
 	}
 
 	// 3. Build prompt:
 	//    Priority: repo override > agent-level prompt > globally active default > built-in default
 	promptTemplate := executor.DefaultTemplate()
+	if compact {
+		promptTemplate = executor.CompactTemplate()
+	}
 	var cliFlags string
-	p.applyPrompt(promptOverride, opts.AgentPromptID, &promptTemplate, &cliFlags)
+	p.applyPrompt(promptOverride, opts.AgentPromptID, compact, &promptTemplate, &cliFlags)
 	var standing string
 	if instr, err := p.store.ListRepoInstructions(pr.Repo); err != nil {
 		slog.Warn("pipeline: list repo instructions for prompt failed", "err", err, "repo", pr.Repo)
@@ -1381,10 +1410,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		}
 	}
 	execOpts.ExecutionID = ReviewExecutionID(prID)
+	execOpts.ReportUsage = true
+	slog.Info("pipeline: prompt built", "repo", pr.Repo, "pr", pr.Number,
+		"prompt_bytes", len(prompt), "incremental", incrementalFrom != "", "compact", compact)
 	result, err := p.executor.Execute(cli, prompt, execOpts)
 	if err != nil {
 		runErr := fmt.Errorf("pipeline: execute %s: %w", cli, err)
 		return nil, runErr
+	}
+	usage := result.Usage
+	if usage == nil {
+		usage = executor.EstimateUsage(prompt, result)
 	}
 
 	// 5b. Reconcile severity: ensure top-level severity >= max(issues[].severity).
@@ -1432,6 +1468,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		CreatedAt:      time.Now().UTC(),
 		GitHubReviewID: 0, // will be set after GitHub publish
 		HeadSHA:        pr.Head.SHA,
+
+		InputTokens:     usage.InputTokens,
+		OutputTokens:    usage.OutputTokens,
+		CacheReadTokens: usage.CacheReadTokens,
+		CostUSD:         usage.CostUSD,
+		TokensEstimated: usage.Estimated,
+		PromptBytes:     int64(len(prompt)),
 	}
 	rev.ID, err = p.store.InsertReview(rev)
 	if err != nil {

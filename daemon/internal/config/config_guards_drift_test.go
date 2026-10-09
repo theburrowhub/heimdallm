@@ -27,3 +27,16 @@ func TestResolvedReviewGuards_AlignedWithGateConfig(t *testing.T) {
 		t.Errorf("field mismatch after cast: src=%+v gc=%+v", src, gc)
 	}
 }
+
+// TestDefaultNoiseGlobsMatchPipeline keeps the default noise glob list shown
+// and resolved by config identical to the one the pipeline falls back to.
+func TestDefaultNoiseGlobsMatchPipeline(t *testing.T) {
+	if len(config.DefaultNoiseGlobs) != len(pipeline.DefaultNoiseGlobs) {
+		t.Fatalf("config has %d default noise globs, pipeline %d", len(config.DefaultNoiseGlobs), len(pipeline.DefaultNoiseGlobs))
+	}
+	for i := range config.DefaultNoiseGlobs {
+		if config.DefaultNoiseGlobs[i] != pipeline.DefaultNoiseGlobs[i] {
+			t.Errorf("glob %d: config %q, pipeline %q", i, config.DefaultNoiseGlobs[i], pipeline.DefaultNoiseGlobs[i])
+		}
+	}
+}

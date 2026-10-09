@@ -570,6 +570,18 @@ func TestInstanceIDPrefix(t *testing.T) {
 	if len(prefix) > 14 {
 		t.Errorf("prefix %q is longer than the 12-char cap plus separator", prefix)
 	}
+	for host, want := range map[string]string{
+		"":                      "node-",
+		"MBP-Jane.local":        "mbp-jane-",
+		"3f2a91c0d4e5":          "node-", // container ids start with a digit
+		"___":                   "node-",
+		"averyveryverylonghost": "averyveryver-",
+		"web_01.example.com":    "web-01-",
+	} {
+		if got := hostIDPrefix(host); got != want {
+			t.Errorf("hostIDPrefix(%q) = %q, want %q", host, got, want)
+		}
+	}
 }
 
 func TestClusterStateNilReceiverIsPermissive(t *testing.T) {

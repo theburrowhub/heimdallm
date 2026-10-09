@@ -20,6 +20,7 @@ import '../server/server_actions.dart' as server_actions;
 import '../updates/check_for_updates_button.dart';
 import 'config_providers.dart';
 import '../../shared/widgets/review_limits_editor.dart';
+import '../../shared/widgets/token_saving_editor.dart';
 import '../review_limits/review_limits_usage.dart';
 
 // Poll-interval bounds, mirrored from the daemon's config.ValidatePollInterval
@@ -122,6 +123,7 @@ enum _ConfigSectionId {
   mergeTracking,
   circuitBreaker,
   reviewLimits,
+  tokenSaving,
   cluster,
 }
 
@@ -207,6 +209,12 @@ const _configSections = <_ConfigSectionMeta>[
     icon: Icons.hourglass_bottom_outlined,
   ),
   _ConfigSectionMeta(
+    id: _ConfigSectionId.tokenSaving,
+    title: 'Token Saving',
+    summary: 'Measures that cut what each review costs in tokens.',
+    icon: Icons.savings_outlined,
+  ),
+  _ConfigSectionMeta(
     id: _ConfigSectionId.cluster,
     title: 'Cluster',
     summary: 'Role and restart flow for multi-instance deployments.',
@@ -248,6 +256,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   late TextEditingController _myPrsDigestTimeController;
   CircuitBreakerConfig _circuitBreaker = const CircuitBreakerConfig();
   ReviewLimits _reviewLimits = const ReviewLimits();
+  TokenSavingSettings _tokenSaving = const TokenSavingSettings();
   String _clusterRole = ClusterRole.standalone;
   late TextEditingController _mtPollIntervalController;
   late TextEditingController _mtResolveTimeoutController;
@@ -327,6 +336,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _myPrsDigestTimeController.text = config.myPrs.digestTime;
     _circuitBreaker = config.circuitBreaker;
     _reviewLimits = config.reviewLimits;
+    _tokenSaving = config.tokenSaving;
     _mtPollIntervalController.text = config.mergeTracking.pollInterval;
     _mtResolveTimeoutController.text = config.mergeTracking.resolveTimeout;
     _perPr24hController.text = config.circuitBreaker.perPr24h.toString();
@@ -410,6 +420,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               _mergeTrackingSection(),
               _circuitBreakerSection(),
               _reviewLimitsSection(),
+              _tokenSavingSection(),
               if (_showClusterSection()) _clusterSection(config),
             ],
           ),
@@ -481,6 +492,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     'Merge Tracking' => _ConfigSectionId.mergeTracking,
     'Circuit Breaker' => _ConfigSectionId.circuitBreaker,
     'Review Limits' => _ConfigSectionId.reviewLimits,
+    'Token Saving' => _ConfigSectionId.tokenSaving,
     'Cluster' => _ConfigSectionId.cluster,
     _ => throw ArgumentError.value(title, 'title', 'Unknown config section'),
   };
@@ -1434,6 +1446,23 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     ]);
   }
 
+  // ── Token saving ──────────────────────────────────────────────────────────
+
+  Widget _tokenSavingSection() {
+    return _settingsCard('Token Saving', [
+      Text(
+        'All measures are on by default. Organizations and repositories can '
+        'turn each one on or off from their settings pages.',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+      const SizedBox(height: 6),
+      TokenSavingSettingsEditor(
+        value: _tokenSaving,
+        onChanged: (v) => setState(() => _tokenSaving = v),
+      ),
+    ]);
+  }
+
   // ── Cluster ─────────────────────────────────────────────────────────────
 
   /// Hidden while a remote instance is selected: this section edits the
@@ -1780,6 +1809,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     myPrs: _myPrs,
     circuitBreaker: _circuitBreaker,
     reviewLimits: _reviewLimits,
+    tokenSaving: _tokenSaving,
     aiPrimary: _aiPrimary,
     aiFallback: _aiFallback,
     reviewMode: _reviewMode,

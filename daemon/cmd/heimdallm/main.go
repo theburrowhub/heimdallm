@@ -813,7 +813,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// type that callers cast here.
 		guards := pipeline.GateConfig(cfg.ReviewGuards(botLogin))
 		budgets := reviewBudgetsFor(cfg, pr.Repo)
+		tokenSaving := cfg.TokenSavingForRepo(pr.Repo)
 		cfgMu.Unlock()
+		maxTurns, effort, softTurns := limitedExploration(cli, agentCfg.MaxTurns, agentCfg.Effort, tokenSaving.LimitExploration)
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
 			if err := executor.ValidateExtraFlagsForCLI(cli, extraFlags); err != nil {
@@ -833,19 +835,21 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			ReviewFailureRepoHourlyLimit: reviewFailureRepoHourlyLimit,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
-				MaxTurns:             agentCfg.MaxTurns,
+				MaxTurns:             maxTurns,
+				SoftMaxTurns:         softTurns,
 				ApprovalMode:         agentCfg.ApprovalMode,
 				ExtraFlags:           extraFlags,
 				WorkDir:              aiCfg.LocalDir,
-				Effort:               agentCfg.Effort,
+				Effort:               effort,
 				PermissionMode:       agentCfg.PermissionMode,
 				Bare:                 agentCfg.Bare,
 				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
 			},
-			Guards:  guards,
-			Budgets: budgets,
+			Guards:      guards,
+			Budgets:     budgets,
+			TokenSaving: pipelineTokenSaving(tokenSaving),
 		}
 	}
 
@@ -2059,6 +2063,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"per_review_failure_repo_hr": c.CircuitBreaker.PerReviewFailureRepoHr,
 		}
 		result["review_limits"] = reviewLimitsMap(c.ReviewLimits)
+		result["token_saving"] = resolvedTokenSavingMap(c.TokenSavingForRepo(""))
 		result["polling"] = map[string]any{
 			"poll_interval":               c.Polling.PollInterval,
 			"discovery_interval":          c.Polling.DiscoveryInterval,
@@ -4682,6 +4687,9 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 	if ai.ReviewLimits != nil {
 		out["review_limits"] = reviewLimitsMap(*ai.ReviewLimits)
 	}
+	if m := tokenSavingOverrideMap(ai.TokenSaving); m != nil {
+		out["token_saving"] = m
+	}
 	return out
 }
 
@@ -4707,6 +4715,9 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 	})
 	if ai.ReviewLimits != nil {
 		out["review_limits"] = reviewLimitsMap(*ai.ReviewLimits)
+	}
+	if m := tokenSavingOverrideMap(ai.TokenSaving); m != nil {
+		out["token_saving"] = m
 	}
 	return out
 }
