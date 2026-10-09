@@ -184,8 +184,14 @@ func (r FlowRule) Describe() string {
 	}
 	for _, k := range sortedKeys(r.Quota) {
 		q := r.Quota[k]
-		op := "<"
-		if q.Op == "above" {
+		// Show an op this CLI does not know as the daemon sent it, rather
+		// than as a comparison the daemon may not be making. An empty op is
+		// "below", as the daemon evaluates it.
+		op := q.Op
+		switch q.Op {
+		case "below", "":
+			op = "<"
+		case "above":
 			op = ">"
 		}
 		conds = append(conds, DisplayText(fmt.Sprintf("%s %s quota %s %g%%", q.Agent, q.Window, op, q.Percent), 80))

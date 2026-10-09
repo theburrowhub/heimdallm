@@ -120,6 +120,16 @@ func TestFlowDescriptions(t *testing.T) {
 	if got := r.Describe(); !strings.Contains(got, " and ") {
 		t.Errorf("all-match rule = %q", got)
 	}
+	unknown := api.FlowRule{Agent: "codex", Quota: map[string]api.QuotaCondition{
+		"q": {Agent: "claude", Window: "weekly", Op: "near", Percent: 50},
+	}}
+	if got := unknown.Describe(); !strings.Contains(got, "quota near 50%") {
+		t.Errorf("an op the CLI does not know must be shown as sent: %q", got)
+	}
+	unknown.Quota["q"] = api.QuotaCondition{Agent: "claude", Window: "weekly", Percent: 50}
+	if got := unknown.Describe(); !strings.Contains(got, "quota < 50%") {
+		t.Errorf("an empty op is below, as the daemon evaluates it: %q", got)
+	}
 	if got := (api.FlowRule{Agent: "codex\x1b[31m"}).Describe(); strings.Contains(got, "\x1b") || !strings.HasSuffix(got, " always") {
 		t.Errorf("control bytes kept: %q", got)
 	}

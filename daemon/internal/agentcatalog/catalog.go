@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/procgroup"
 )
 
 // Kind classifies a catalog entry.
@@ -154,9 +155,9 @@ const (
 	// maxProbeOutput caps what one probe may print; a scan reads at most
 	// this much per command.
 	maxProbeOutput = 256 << 10
-	// probeWaitDelay bounds how long a killed probe's children (npm/node
-	// shims) may keep its output pipe open.
-	probeWaitDelay = 2 * time.Second
+	// versionProbeLines is how many non-empty lines of --version output are
+	// searched for a version: some CLIs print a banner or a warning first.
+	versionProbeLines = 5
 )
 
 // NewDetector returns a Detector wired to the real system.
@@ -172,16 +173,19 @@ func NewDetector() Detector {
 	}
 }
 
+// runCommand runs one probe in a process group of its own. Many agents are
+// node shims that start children; when the probe times out, or once it
+// finishes, the whole group is killed so no child outlives the scan.
 func runCommand(ctx context.Context, path string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = executor.CommandEnv(path)
-	// Many agents are node shims whose children inherit the output pipe;
-	// WaitDelay stops Wait from hanging on them after the context kills the
-	// shim.
-	cmd.WaitDelay = probeWaitDelay
 	out := &cappedBuffer{max: maxProbeOutput}
 	cmd.Stdout, cmd.Stderr = out, out
-	err := cmd.Run()
+	p, err := procgroup.Start(cmd)
+	if err != nil {
+		return "", err
+	}
+	err = p.Wait()
 	return out.String(), err
 }
 
@@ -254,7 +258,9 @@ func (d Detector) scanOne(ctx context.Context, e Entry) Agent {
 			break
 		}
 	}
-	if path != "" && d.Run != nil {
+	// IDE entries are informational (reviews go through ConfigAgent), so
+	// their launcher is not run: its version cannot run a review.
+	if path != "" && d.Run != nil && e.Kind != KindIDE {
 		a.Version = d.version(ctx, path)
 		if e.ModelsArgs != nil && e.parseModels != nil {
 			a.Models = d.models(ctx, path, e)
@@ -334,15 +340,42 @@ func (d Detector) version(ctx context.Context, path string) string {
 
 // parseVersion pulls the version number out of a CLI's --version output
 // ("2.1.292 (Claude Code)", "codex-cli 0.161.0", "GitHub Copilot CLI 1.0.88.").
-// Output without a version number (an error or a login prompt) is no version.
+// The first versionProbeLines non-empty lines are searched, since a banner or
+// a runtime warning can come first. Output without a version number (an
+// error or a login prompt) is no version.
 func parseVersion(out string) string {
-	first, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
-	v := strings.TrimRight(versionPattern.FindString(first), ".")
-	if len(v) > maxVersionLen {
-		// The pattern only matches ASCII, so a byte cut is a rune cut.
-		v = v[:maxVersionLen]
+	seen := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// A runtime warning can carry another program's version ("Node.js
+		// v18.19.0 is deprecated"); it is never the agent's.
+		if isWarningLine(line) {
+			if seen++; seen >= versionProbeLines {
+				break
+			}
+			continue
+		}
+		if v := strings.TrimRight(versionPattern.FindString(line), "."); v != "" {
+			if len(v) > maxVersionLen {
+				// The pattern only matches ASCII, so a byte cut is a rune cut.
+				v = v[:maxVersionLen]
+			}
+			return v
+		}
+		if seen++; seen >= versionProbeLines {
+			break
+		}
 	}
-	return v
+	return ""
+}
+
+// isWarningLine reports whether a --version output line is a runtime notice
+// (a node warning or a deprecation) rather than the CLI's own output.
+func isWarningLine(line string) bool {
+	l := strings.ToLower(strings.TrimSpace(line))
+	return strings.HasPrefix(l, "(node:") || strings.Contains(l, "warn") || strings.Contains(l, "deprecat")
 }
 
 func (d Detector) models(ctx context.Context, path string, e Entry) []string {

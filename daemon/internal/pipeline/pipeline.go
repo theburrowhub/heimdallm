@@ -1515,6 +1515,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		CostUSD:         usage.CostUSD,
 		TokensEstimated: usage.Estimated,
 		PromptBytes:     int64(len(prompt)),
+		TurnCapRetries:  usage.TurnCapRetries,
 	}
 	rev.ID, err = p.store.InsertReview(rev)
 	if err != nil {

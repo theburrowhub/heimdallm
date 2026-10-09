@@ -40,7 +40,7 @@ func newQuotaService(admin *openrouter.Admin) *quota.Service {
 // agentExecOptions resolves one agent's execution options from its settings,
 // for whichever agent a review flow hands the review to.
 func agentExecOptions(cli string, agentCfg config.CLIAgentConfig, globalTimeout, workDir string, limitExploration bool) executor.ExecOptions {
-	maxTurns, effort, softTurns := limitedExploration(cli, agentCfg.MaxTurns, agentCfg.Effort, limitExploration)
+	maxTurns, softTurns := limitedExploration(cli, agentCfg.MaxTurns, limitExploration)
 	extraFlags := agentCfg.ExtraFlags
 	if extraFlags != "" {
 		if err := executor.ValidateExtraFlagsForCLI(cli, extraFlags); err != nil {
@@ -55,7 +55,7 @@ func agentExecOptions(cli string, agentCfg config.CLIAgentConfig, globalTimeout,
 		ApprovalMode:         agentCfg.ApprovalMode,
 		ExtraFlags:           extraFlags,
 		WorkDir:              workDir,
-		Effort:               effort,
+		Effort:               agentCfg.Effort,
 		PermissionMode:       agentCfg.PermissionMode,
 		Bare:                 agentCfg.Bare,
 		DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/executor"
 )
@@ -79,8 +80,8 @@ func TestExecute_SoftMaxTurnsRetriesWithoutTheCap(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"--help\" ]; then printf 'Usage: claude\\n'; exit 0; fi\n" +
 		"printf '%s\\n' \"$*\" >> " + shellQuote(calls) + "\n" +
-		"case \"$*\" in *--max-turns*) printf '%s' '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true}'; exit 0;; esac\n" +
-		"printf '%s' " + shellQuote(`{"type":"result","subtype":"success","is_error":false,"result":"{\"summary\":\"ok\",\"issues\":[],\"severity\":\"low\"}"}`) + "\n"
+		"case \"$*\" in *--max-turns*) printf '%s' '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"total_cost_usd\":0.5,\"usage\":{\"input_tokens\":1000,\"output_tokens\":100}}'; exit 0;; esac\n" +
+		"printf '%s' " + shellQuote(`{"type":"result","subtype":"success","is_error":false,"result":"{\"summary\":\"ok\",\"issues\":[],\"severity\":\"low\"}","total_cost_usd":0.25,"usage":{"input_tokens":500,"output_tokens":50}}`) + "\n"
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +95,23 @@ func TestExecute_SoftMaxTurnsRetriesWithoutTheCap(t *testing.T) {
 	if len(lines) != 2 || !strings.Contains(lines[0], "--max-turns 20") || strings.Contains(lines[1], "--max-turns") {
 		t.Fatalf("runs = %q, want a capped run then an uncapped retry", lines)
 	}
+	// Both runs were billed, so the review reports both.
+	if u := res.Usage; u == nil || u.InputTokens != 1500 || u.OutputTokens != 150 || u.CostUSD != 0.75 || u.TurnCapRetries != 1 || u.Estimated {
+		t.Fatalf("usage = %+v, want both runs and one retry", u)
+	}
+
+	// The retry only gets what is left of the review's timeout. A capped run
+	// that used it all fails instead of starting a second full run.
+	if err := os.Remove(calls); err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.New().Execute("claude", "prompt", executor.ExecOptions{ReportUsage: true, MaxTurns: 20, SoftMaxTurns: true, Timeout: 5 * time.Second})
+	if !errors.Is(err, executor.ErrClaudeMaxTurns) || !strings.Contains(err.Error(), "no time left") {
+		t.Fatalf("err = %v, want ErrClaudeMaxTurns with no time left to retry", err)
+	}
+	if runs := strings.Split(strings.TrimSpace(readArgs(t, calls)), "\n"); len(runs) != 1 {
+		t.Fatalf("runs = %q, want no retry", runs)
+	}
 
 	_, err = executor.New().Execute("claude", "prompt", executor.ExecOptions{ReportUsage: true, MaxTurns: 20})
 	if !errors.Is(err, executor.ErrClaudeMaxTurns) {
@@ -101,6 +119,42 @@ func TestExecute_SoftMaxTurnsRetriesWithoutTheCap(t *testing.T) {
 	}
 	if got := executor.OptionsForSelectedCLI("claude", "codex", executor.ExecOptions{MaxTurns: 20, SoftMaxTurns: true}); got.SoftMaxTurns {
 		t.Error("a fallback agent must not inherit SoftMaxTurns")
+	}
+}
+
+// fakeCappedClaude writes a claude that runs out of turns whenever it gets
+// --max-turns and otherwise runs uncapped as the given shell lines.
+func fakeCappedClaude(t *testing.T, uncapped string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then printf 'Usage: claude\\n'; exit 0; fi\n" +
+		"cat >/dev/null\n" +
+		"case \"$*\" in *--max-turns*) printf '%s' '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"usage\":{\"input_tokens\":700,\"output_tokens\":70}}'; exit 0;; esac\n" +
+		uncapped + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// The capped run is counted even when the retry reports no usage, and a retry
+// that fails fails the review.
+func TestExecute_SoftMaxTurnsRetryOutcomes(t *testing.T) {
+	soft := executor.ExecOptions{ReportUsage: true, MaxTurns: 20, SoftMaxTurns: true}
+
+	fakeCappedClaude(t, `printf '%s' '{"summary":"plain","issues":[],"severity":"low"}'`)
+	res, err := executor.New().Execute("claude", "prompt", soft)
+	if err != nil || res.Summary != "plain" {
+		t.Fatalf("retry with a plain answer: res=%+v err=%v", res, err)
+	}
+	if u := res.Usage; u == nil || u.InputTokens != 700 || u.OutputTokens != 70 || u.TurnCapRetries != 1 || !u.Estimated {
+		t.Fatalf("usage = %+v, want the capped run's usage, one retry, marked estimated", u)
+	}
+
+	fakeCappedClaude(t, `echo 'boom' >&2; exit 3`)
+	if _, err := executor.New().Execute("claude", "prompt", soft); err == nil || errors.Is(err, executor.ErrClaudeMaxTurns) {
+		t.Fatalf("a failed retry must fail the review with its own error, got %v", err)
 	}
 }
 
@@ -120,6 +174,18 @@ func TestExecute_ClaudePlainOutputStillParses(t *testing.T) {
 	}
 	if got := readArgs(t, args); strings.Count(got, "--output-format") != 1 {
 		t.Errorf("args = %q: an operator-chosen output format must not be doubled", got)
+	}
+
+	// Without the envelope a run that ran out of turns cannot be detected and
+	// retried, so limit_exploration's default cap is not applied at all.
+	args = fakeClaude(t, `{"summary":"plain","issues":[],"severity":"medium"}`)
+	if _, err := executor.New().Execute("claude", "prompt", executor.ExecOptions{
+		ReportUsage: true, ExtraFlags: "--output-format text", MaxTurns: 20, SoftMaxTurns: true,
+	}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := readArgs(t, args); strings.Contains(got, "--max-turns") {
+		t.Errorf("args = %q: a soft cap must not be passed when it cannot be retried", got)
 	}
 
 	fakeClaude(t, `{"summary":"plain","issues":[],"severity":"medium"}`)

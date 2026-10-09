@@ -16,23 +16,18 @@ func pipelineTokenSaving(ts config.ResolvedTokenSaving) pipeline.TokenSaving {
 	}
 }
 
-// limitedExploration applies the limit_exploration caps to an agent that has
-// no explicit setting of its own. Only Claude exposes turn and effort knobs
-// through the executor today; other agents pass through unchanged. soft is
-// true when the turn cap is this default rather than the operator's: the
-// executor then retries a review that ran out of turns without the cap, so
-// the measure saves tokens on most reviews without failing the long ones.
-func limitedExploration(cli string, maxTurns int, effort string, limit bool) (turns int, eff string, soft bool) {
-	if !limit || cli != "claude" {
-		return maxTurns, effort, false
+// limitedExploration applies the limit_exploration turn cap to an agent with
+// no max_turns of its own. Only Claude exposes a turn knob through the
+// executor today; other agents pass through unchanged. soft is true when the
+// cap is this default rather than the operator's: the executor then retries a
+// review that ran out of turns without the cap, so the measure saves tokens on
+// most reviews without failing the long ones. Effort is never lowered: that
+// would change review quality, not just how much a review explores.
+func limitedExploration(cli string, maxTurns int, limit bool) (turns int, soft bool) {
+	if !limit || cli != "claude" || maxTurns != 0 {
+		return maxTurns, false
 	}
-	if maxTurns == 0 {
-		maxTurns, soft = config.DefaultLimitedMaxTurns, true
-	}
-	if effort == "" {
-		effort = config.DefaultLimitedEffort
-	}
-	return maxTurns, effort, soft
+	return config.DefaultLimitedMaxTurns, true
 }
 
 // resolvedTokenSavingMap projects the effective global measures for GET

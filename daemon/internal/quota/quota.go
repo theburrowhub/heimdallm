@@ -84,6 +84,11 @@ type Source interface {
 // rate limited, and a flow evaluation per review must not hit them each time.
 const cacheTTL = 2 * time.Minute
 
+// maxStale is how old a reading may be and still be returned while a fresh
+// one is read in the background. Older readings are not trusted for a flow
+// decision: the caller waits for the read instead.
+const maxStale = 10 * time.Minute
+
 // readTimeout bounds one source read.
 const readTimeout = 10 * time.Second
 
@@ -95,13 +100,14 @@ type Service struct {
 
 	mu    sync.Mutex
 	cache map[string]Provider
-	// inflight coalesces concurrent reads of the same agent.
-	inflight map[string]*sync.WaitGroup
+	// inflight holds the running read of each agent; its channel is closed
+	// when the reading is stored, so concurrent callers share one read.
+	inflight map[string]chan struct{}
 }
 
 // NewService returns a service over sources.
 func NewService(sources ...Source) *Service {
-	s := &Service{sources: map[string]Source{}, now: time.Now, cache: map[string]Provider{}, inflight: map[string]*sync.WaitGroup{}}
+	s := &Service{sources: map[string]Source{}, now: time.Now, cache: map[string]Provider{}, inflight: map[string]chan struct{}{}}
 	for _, src := range sources {
 		s.sources[src.Agent()] = src
 		s.order = append(s.order, src.Agent())
@@ -111,42 +117,60 @@ func NewService(sources ...Source) *Service {
 
 // Get returns agent's quota, read through the cache. An agent with no source
 // reports ErrUnsupported.
+//
+// One slow provider must not hold up every review: a reading past cacheTTL
+// but within maxStale is returned at once while it is refreshed in the
+// background, and a caller with no usable reading waits for the read only as
+// long as its ctx allows. A caller that gives up gets ErrUnavailable, which
+// flow conditions treat as not met.
 func (s *Service) Get(ctx context.Context, agent string) Provider {
 	src, ok := s.sources[agent]
 	if !ok {
 		return Provider{Agent: agent, Error: ErrUnsupported}
 	}
-	for {
-		s.mu.Lock()
-		if p, ok := s.cache[agent]; ok && s.now().Sub(p.FetchedAt) < cacheTTL {
-			s.mu.Unlock()
-			return p
-		}
-		if wg, busy := s.inflight[agent]; busy {
-			s.mu.Unlock()
-			wg.Wait()
-			continue
-		}
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-		s.inflight[agent] = wg
+	s.mu.Lock()
+	p, cached := s.cache[agent]
+	age := s.now().Sub(p.FetchedAt)
+	if cached && age < cacheTTL {
 		s.mu.Unlock()
-
-		rctx, cancel := context.WithTimeout(ctx, readTimeout)
-		p := src.Read(rctx)
-		cancel()
-		p.Agent = agent
-		if p.FetchedAt.IsZero() {
-			p.FetchedAt = s.now()
-		}
-
-		s.mu.Lock()
-		s.cache[agent] = p
-		delete(s.inflight, agent)
-		s.mu.Unlock()
-		wg.Done()
 		return p
 	}
+	done, busy := s.inflight[agent]
+	if !busy {
+		done = make(chan struct{})
+		s.inflight[agent] = done
+		go s.refresh(agent, src, done)
+	}
+	s.mu.Unlock()
+	if cached && age < maxStale {
+		return p
+	}
+	select {
+	case <-done:
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.cache[agent]
+	case <-ctx.Done():
+		return Provider{Agent: agent, Error: ErrUnavailable}
+	}
+}
+
+// refresh reads one source and stores the result. It runs detached from any
+// caller, bounded by readTimeout, so a caller that gives up does not waste the
+// read for the next one; at most one refresh per agent runs at a time.
+func (s *Service) refresh(agent string, src Source, done chan struct{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	p := src.Read(ctx)
+	cancel()
+	p.Agent = agent
+	if p.FetchedAt.IsZero() {
+		p.FetchedAt = s.now()
+	}
+	s.mu.Lock()
+	s.cache[agent] = p
+	delete(s.inflight, agent)
+	s.mu.Unlock()
+	close(done)
 }
 
 // Snapshot reads every source.

@@ -52,11 +52,14 @@ type Review struct {
 	// PromptBytes is the size of the prompt sent to the agent, the number the
 	// token-saving measures act on.
 	PromptBytes int64 `json:"prompt_bytes"`
+	// TurnCapRetries counts runs that hit limit_exploration's turn cap and
+	// were retried without it (their tokens are included above).
+	TurnCapRetries int `json:"turn_cap_retries"`
 }
 
 // reviewColumns is the column list every scanReview query selects, in scan
 // order.
-const reviewColumns = "id, pr_id, cli_used, summary, issues, suggestions, severity, created_at, published_at, github_review_id, github_review_state, head_sha, event, input_tokens, output_tokens, cache_read_tokens, cost_usd, tokens_estimated, prompt_bytes"
+const reviewColumns = "id, pr_id, cli_used, summary, issues, suggestions, severity, created_at, published_at, github_review_id, github_review_state, head_sha, event, input_tokens, output_tokens, cache_read_tokens, cost_usd, tokens_estimated, prompt_bytes, turn_cap_retries"
 
 // InsertReview inserts a new review record and returns its row ID.
 func (s *Store) InsertReview(r *Review) (int64, error) {
@@ -65,12 +68,12 @@ func (s *Store) InsertReview(r *Review) (int64, error) {
 		publishedAt = r.PublishedAt.UTC().Format(sqliteTimeFormat)
 	}
 	res, err := s.db.Exec(`
-		INSERT INTO reviews (pr_id, cli_used, summary, issues, suggestions, severity, created_at, published_at, github_review_id, github_review_state, head_sha, event, input_tokens, output_tokens, cache_read_tokens, cost_usd, tokens_estimated, prompt_bytes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO reviews (pr_id, cli_used, summary, issues, suggestions, severity, created_at, published_at, github_review_id, github_review_state, head_sha, event, input_tokens, output_tokens, cache_read_tokens, cost_usd, tokens_estimated, prompt_bytes, turn_cap_retries)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, r.PRID, r.CLIUsed, r.Summary, r.Issues, r.Suggestions, r.Severity,
 		r.CreatedAt.UTC().Format(sqliteTimeFormat), publishedAt,
 		r.GitHubReviewID, r.GitHubReviewState, r.HeadSHA, r.Event,
-		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CostUSD, r.TokensEstimated, r.PromptBytes,
+		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CostUSD, r.TokensEstimated, r.PromptBytes, r.TurnCapRetries,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert review: %w", err)
@@ -195,7 +198,7 @@ func scanReview(s scanner) (*Review, error) {
 		&rev.Issues, &rev.Suggestions, &rev.Severity, &createdAt, &publishedAt,
 		&rev.GitHubReviewID, &rev.GitHubReviewState, &rev.HeadSHA, &rev.Event,
 		&rev.InputTokens, &rev.OutputTokens, &rev.CacheReadTokens, &rev.CostUSD,
-		&rev.TokensEstimated, &rev.PromptBytes); err != nil {
+		&rev.TokensEstimated, &rev.PromptBytes, &rev.TurnCapRetries); err != nil {
 		return nil, fmt.Errorf("store: scan review: %w", err)
 	}
 	if rev.CreatedAt, err = time.Parse(sqliteTimeFormat, createdAt); err != nil {

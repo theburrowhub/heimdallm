@@ -230,6 +230,7 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE reviews ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0")
 	db.Exec("ALTER TABLE reviews ADD COLUMN tokens_estimated INTEGER NOT NULL DEFAULT 0")
 	db.Exec("ALTER TABLE reviews ADD COLUMN prompt_bytes INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN turn_cap_retries INTEGER NOT NULL DEFAULT 0")
 	db.Exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
@@ -618,6 +619,10 @@ type TokenStats struct {
 	CacheReadTokens  int64   `json:"cache_read_tokens"`
 	CostUSD          float64 `json:"cost_usd"`
 	AvgPromptBytes   float64 `json:"avg_prompt_bytes"`
+	// TurnCapRetries counts reviews that ran out of limit_exploration's turn
+	// cap and were retried without it: if most long reviews do, the cap
+	// costs more tokens than it saves.
+	TurnCapRetries int `json:"turn_cap_retries"`
 }
 
 type RepoCount struct {
@@ -824,12 +829,13 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 		SELECT COUNT(*), COALESCE(SUM(tokens_estimated),0),
 		       COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 		       COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cost_usd),0),
-		       AVG(prompt_bytes)
+		       AVG(prompt_bytes), COALESCE(SUM(turn_cap_retries),0)
 		FROM reviews r
 		WHERE r.created_at >= ? AND r.cli_used != 'peer' AND r.prompt_bytes > 0`+repoFilter,
 		tokenArgs...).Scan(&stats.TokensLast7Days.Reviews, &stats.TokensLast7Days.EstimatedReviews,
 		&stats.TokensLast7Days.InputTokens, &stats.TokensLast7Days.OutputTokens,
-		&stats.TokensLast7Days.CacheReadTokens, &stats.TokensLast7Days.CostUSD, &avgPrompt); err != nil {
+		&stats.TokensLast7Days.CacheReadTokens, &stats.TokensLast7Days.CostUSD, &avgPrompt,
+		&stats.TokensLast7Days.TurnCapRetries); err != nil {
 		return nil, fmt.Errorf("store: stats tokens: %w", err)
 	}
 	stats.TokensLast7Days.AvgPromptBytes = avgPrompt.Float64

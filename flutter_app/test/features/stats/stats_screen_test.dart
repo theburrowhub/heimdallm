@@ -449,6 +449,7 @@ void main() {
             'cache_read_tokens': 0,
             'cost_usd': 1.25,
             'avg_prompt_bytes': 6144,
+            'turn_cap_retries': 2,
           },
         },
         loadRateLimits: () async => <String, dynamic>{},
@@ -466,6 +467,10 @@ void main() {
     );
     expect(
       find.textContaining('1 estimated', findRichText: true),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('2 retried without the turn cap', findRichText: true),
       findsOneWidget,
     );
   });

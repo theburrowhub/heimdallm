@@ -52,7 +52,7 @@ func TestPrintFlowDecision(t *testing.T) {
 			{Agent: "copilot", Matched: true, Available: true, Reasons: []string{"schedule holds"}},
 			{Agent: "gemini", Matched: true, Reasons: []string{"gemini is not installed"}},
 		},
-	})
+	}, false)
 	out := buf.String()
 	for _, want := range []string{
 		"Flow weekday — Weekday at", "Reviews with copilot, then codex if it runs out of quota",
@@ -63,14 +63,19 @@ func TestPrintFlowDecision(t *testing.T) {
 		}
 	}
 	buf.Reset()
-	printFlowDecision(&buf, &api.FlowDecision{FlowID: "x", Candidates: []string{"codex"}})
+	printFlowDecision(&buf, &api.FlowDecision{FlowID: "x", Candidates: []string{"codex"}}, true)
 	if !strings.Contains(buf.String(), "Reviews with codex\n") || strings.Contains(buf.String(), " at ") {
 		t.Errorf("single candidate:\n%s", buf.String())
 	}
 	buf.Reset()
-	printFlowDecision(&buf, &api.FlowDecision{FlowID: "x"})
-	if !strings.Contains(buf.String(), "the review would wait") {
+	printFlowDecision(&buf, &api.FlowDecision{FlowID: "x"}, true)
+	if !strings.Contains(buf.String(), "No agent would review now") || !strings.Contains(buf.String(), "the review would wait") {
 		t.Errorf("no candidates:\n%s", buf.String())
+	}
+	buf.Reset()
+	printFlowDecision(&buf, &api.FlowDecision{FlowID: "x"}, false)
+	if !strings.Contains(buf.String(), "No agent would review at that time") || strings.Contains(buf.String(), "review now") {
+		t.Errorf("no candidates with --at:\n%s", buf.String())
 	}
 }
 
@@ -110,8 +115,12 @@ func TestFlowsCommandIsRegistered(t *testing.T) {
 
 func TestCfgFlowLines(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	if got := strings.Join(cfgAILines(map[string]any{}), "\n"); !strings.Contains(got, "default (primary/fallback)") {
-		t.Errorf("no flow:\n%s", got)
+	if got := strings.Join(cfgAILines(map[string]any{"ai_flow": ""}), "\n"); !strings.Contains(got, "default (primary/fallback)") {
+		t.Errorf("no flow selected:\n%s", got)
+	}
+	// A daemon without review flows does not send ai_flow: no Flow line.
+	if got := strings.Join(cfgAILines(map[string]any{"ai_primary": "claude"}), "\n"); strings.Contains(got, "Flow") {
+		t.Errorf("older daemon:\n%s", got)
 	}
 	if got := strings.Join(cfgAILines(map[string]any{"ai_flow": "weekday"}), "\n"); !strings.Contains(got, "weekday") {
 		t.Errorf("flow:\n%s", got)

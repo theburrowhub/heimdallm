@@ -23,7 +23,8 @@ const tokenSavingMeasureText = <String, (String, String)>{
   ),
   'limit_exploration': (
     'Limit agent exploration',
-    'Cap Claude at 20 turns and medium effort unless the agent sets its own.',
+    'Cap Claude at 20 turns unless the agent sets its own; a review that '
+        'needs more is retried once without the cap.',
   ),
 };
 

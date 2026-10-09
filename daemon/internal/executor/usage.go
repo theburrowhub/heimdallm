@@ -19,6 +19,25 @@ type Usage struct {
 	// Estimated is set when the agent does not report usage and the counts
 	// were approximated from text sizes (see EstimateUsage).
 	Estimated bool
+	// TurnCapRetries counts the runs that hit limit_exploration's turn cap
+	// and were retried without it; their tokens are included above.
+	TurnCapRetries int
+}
+
+// plus returns u with another run of the same review added; a nil other (a
+// run that reported no usage) adds nothing.
+func (u Usage) plus(other *Usage) Usage {
+	if other == nil {
+		return u
+	}
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CacheWriteTokens += other.CacheWriteTokens
+	u.CostUSD += other.CostUSD
+	u.Estimated = u.Estimated || other.Estimated
+	u.TurnCapRetries += other.TurnCapRetries
+	return u
 }
 
 // estimatedBytesPerToken is the rough bytes-per-token ratio for English
@@ -69,6 +88,7 @@ var ErrClaudeMaxTurns = errors.New("executor: claude run ended with error_max_tu
 // unwrapClaudeEnvelope extracts the answer and usage from Claude's JSON
 // envelope. An envelope that reports an error (e.g. error_max_turns) is
 // returned as an error so the review fails instead of parsing a non-answer.
+// error_max_turns still returns the run's usage: those turns were billed.
 func unwrapClaudeEnvelope(raw []byte) ([]byte, *Usage, error) {
 	var env claudeEnvelope
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &env); err != nil || env.Type != "result" {
@@ -77,7 +97,7 @@ func unwrapClaudeEnvelope(raw []byte) ([]byte, *Usage, error) {
 	if env.IsError || env.Result == nil {
 		subtype := env.Subtype
 		if subtype == "error_max_turns" {
-			return nil, nil, ErrClaudeMaxTurns
+			return nil, env.usage(), ErrClaudeMaxTurns
 		}
 		if subtype == "" {
 			subtype = "error"
@@ -93,6 +113,10 @@ func unwrapClaudeEnvelope(raw []byte) ([]byte, *Usage, error) {
 		}
 		return nil, nil, fmt.Errorf("executor: claude run ended with %s", subtype)
 	}
+	return []byte(*env.Result), env.usage(), nil
+}
+
+func (env claudeEnvelope) usage() *Usage {
 	u := &Usage{CostUSD: env.TotalCostUSD}
 	if env.Usage != nil {
 		u.InputTokens = env.Usage.InputTokens + env.Usage.CacheCreationInputTokens
@@ -100,7 +124,7 @@ func unwrapClaudeEnvelope(raw []byte) ([]byte, *Usage, error) {
 		u.CacheReadTokens = env.Usage.CacheReadInputTokens
 		u.CacheWriteTokens = env.Usage.CacheCreationInputTokens
 	}
-	return []byte(*env.Result), u, nil
+	return u
 }
 
 // reportsUsage reports whether buildArgs asks cli for a machine-readable

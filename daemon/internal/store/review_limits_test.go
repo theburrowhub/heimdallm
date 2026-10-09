@@ -80,7 +80,7 @@ func TestReviewTokenColumnsAndStats(t *testing.T) {
 	}
 	id, err := s.InsertReview(&Review{
 		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]", CreatedAt: now,
-		InputTokens: 1200, OutputTokens: 80, CacheReadTokens: 400, CostUSD: 0.05, PromptBytes: 4800,
+		InputTokens: 1200, OutputTokens: 80, CacheReadTokens: 400, CostUSD: 0.05, PromptBytes: 4800, TurnCapRetries: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestReviewTokenColumnsAndStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.InputTokens != 1200 || got.OutputTokens != 80 || got.CacheReadTokens != 400 ||
-		got.CostUSD != 0.05 || got.TokensEstimated || got.PromptBytes != 4800 {
+		got.CostUSD != 0.05 || got.TokensEstimated || got.PromptBytes != 4800 || got.TurnCapRetries != 1 {
 		t.Errorf("round trip = %+v", got)
 	}
 
@@ -114,7 +114,7 @@ func TestReviewTokenColumnsAndStats(t *testing.T) {
 	}
 	tk := stats.TokensLast7Days
 	if tk.Reviews != 2 || tk.EstimatedReviews != 1 || tk.InputTokens != 1500 || tk.OutputTokens != 100 ||
-		tk.CacheReadTokens != 400 || tk.CostUSD != 0.05 || tk.AvgPromptBytes != 3000 {
+		tk.CacheReadTokens != 400 || tk.CostUSD != 0.05 || tk.AvgPromptBytes != 3000 || tk.TurnCapRetries != 1 {
 		t.Errorf("token stats = %+v", tk)
 	}
 	scoped, err := s.ComputeStats([]string{"other/repo"}, nil)

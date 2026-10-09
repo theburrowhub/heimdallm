@@ -129,12 +129,14 @@ func TestScan_FailingProbesLeaveFieldsEmpty(t *testing.T) {
 	}
 }
 
+// An IDE launcher on PATH marks the IDE installed, but it is not run: the IDE
+// is informational and its version cannot run a review.
 func TestScan_IDELauncherOnPath(t *testing.T) {
 	d := testDetector("/h", map[string]string{"bin:cursor": "/usr/local/bin/cursor"}, fakeFS{},
 		map[string]string{"/usr/local/bin/cursor --version": "3.4.5\nabc\n"})
 	ide := byID(d.Scan(context.Background()))["cursor"]
-	if !ide.Installed || ide.Version != "3.4.5" || ide.Path != "/usr/local/bin/cursor" {
-		t.Errorf("cursor IDE via launcher = %+v", ide)
+	if !ide.Installed || ide.Version != "" || ide.Path != "/usr/local/bin/cursor" {
+		t.Errorf("cursor IDE via launcher = %+v, want installed and not probed", ide)
 	}
 }
 
@@ -176,6 +178,15 @@ func TestParseVersion(t *testing.T) {
 		"Please run cursor-agent login":      "",
 		strings.Repeat("x", 200):             "",
 		"v" + strings.Repeat("1.", 60) + "1": strings.Repeat("1.", 40),
+		// A runtime warning or banner before the version.
+		"(node:42) DeprecationWarning: punycode\n\n1.4.2\n": "1.4.2",
+		// A warning that carries another program's version is skipped.
+		"Warning: Node.js v18.19.0 is deprecated\n2.0.1 (Claude Code)": "2.0.1",
+		"npm WARN config 10.2.4\n0.9.0":                                "0.9.0",
+		// Warnings count towards the lines searched.
+		strings.Repeat("(node:1) Warning\n", versionProbeLines) + "3.3.3": "",
+		// Only the first few non-empty lines are searched.
+		strings.Repeat("noise\n", versionProbeLines) + "9.9.9": "",
 	}
 	for in, want := range cases {
 		if got := parseVersion(in); got != want {
@@ -315,6 +326,37 @@ func TestStore_CancelledScanIsNotStored(t *testing.T) {
 	}
 	if a, _ := s.Get(context.Background(), "claude"); a.Version != "1.0.0" {
 		t.Errorf("stored version = %q, want the good scan kept", a.Version)
+	}
+}
+
+// A probe that times out takes the children it started down with it, as a
+// node shim's would: nothing keeps running after the scan.
+func TestRunCommandKillsTheProbesChildren(t *testing.T) {
+	beat := filepath.Join(t.TempDir(), "beat")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	script := `(while :; do echo x >> "$1"; sleep 0.05; done) & sleep 30`
+	if _, err := runCommand(ctx, "/bin/sh", "-c", script, "sh", beat); err == nil {
+		t.Fatal("a probe that outlived its timeout must report an error")
+	}
+	size := func() int64 {
+		fi, err := os.Stat(beat)
+		if err != nil {
+			t.Fatalf("the child never ran: %v", err)
+		}
+		return fi.Size()
+	}
+	before := size()
+	time.Sleep(400 * time.Millisecond)
+	if after := size(); after != before {
+		t.Fatalf("the probe's child is still running (%d → %d bytes)", before, after)
+	}
+}
+
+func TestRunCommandMissingBinary(t *testing.T) {
+	out, err := runCommand(context.Background(), filepath.Join(t.TempDir(), "no-such-agent"), "--version")
+	if err == nil || out != "" {
+		t.Errorf("runCommand = %q, %v; want an error and no output", out, err)
 	}
 }
 
