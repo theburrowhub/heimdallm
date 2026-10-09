@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -331,10 +332,37 @@ func (e *Executor) Detect(primary, fallback string) (string, error) {
 // Any value not in this set is rejected before reaching resolveCLIPath,
 // preventing shell injection via a crafted ai.primary / ai.fallback config value.
 var allowedCLIs = map[string]struct{}{
-	"claude":   {},
-	"gemini":   {},
-	"codex":    {},
-	"opencode": {},
+	"claude":     {},
+	"gemini":     {},
+	"codex":      {},
+	"opencode":   {},
+	"copilot":    {},
+	"cursor_cli": {},
+}
+
+// cliBinaries maps an agent id to the executable names that implement it,
+// tried in order. Agents not listed run a binary named like their id. The
+// Cursor CLI ships as `cursor-agent`, with `agent` as its newer alias.
+var cliBinaries = map[string][]string{
+	"cursor_cli": {"cursor-agent", "agent"},
+}
+
+// binariesFor returns the executable names to resolve for an agent id.
+func binariesFor(name string) []string {
+	if bins, ok := cliBinaries[name]; ok {
+		return bins
+	}
+	return []string{name}
+}
+
+// SupportedCLIs lists every executable agent id, sorted.
+func SupportedCLIs() []string {
+	out := make([]string, 0, len(allowedCLIs))
+	for name := range allowedCLIs {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // allowedPermissionModes is the strict allowlist for the --permission-mode flag.
@@ -876,6 +904,15 @@ var allowedExtraFlagsByCLI = map[string]map[string]extraFlagArity{
 		"--thinking": extraFlagBoolean,
 		"--variant":  extraFlagValue,
 	},
+	"copilot": {
+		"--context":        extraFlagValue,
+		"--excluded-tools": extraFlagVariadicValue,
+		"--log-level":      extraFlagValue,
+		"--screen-reader":  extraFlagBoolean,
+	},
+	// Cursor's tuning lives in the model string ('model[effort=high]'); every
+	// other option changes trust, workspace or permissions.
+	"cursor_cli": {},
 }
 
 // dangerousFlagValues are flag values that must never appear regardless of position.
@@ -1145,7 +1182,7 @@ func forbiddenExtraFlagError(cli, flag, category string) error {
 // shell command (e.g. resolveCLIPath).
 func ValidateCLIName(name string) error {
 	if _, ok := allowedCLIs[name]; !ok {
-		return fmt.Errorf("executor: unknown CLI %q — must be one of: claude, gemini, codex, opencode", name)
+		return fmt.Errorf("executor: unknown CLI %q — must be one of: %s", name, strings.Join(SupportedCLIs(), ", "))
 	}
 	return nil
 }
@@ -1163,21 +1200,32 @@ func validateCLIName(name string) error {
 // function. resolveCLIPath passes the name into a shell command; an unvalidated
 // value would allow shell injection (CVE-equivalent: issue #2).
 func resolveCLIPath(name string) string {
-	// Fast path: already in the process PATH.
-	if path, err := exec.LookPath(name); err == nil && path != "" {
-		return path
-	}
-	// Fall back to the user's login shell.
-	if path := loginShellLookPath(name); path != "" {
-		return path
-	}
-	// Last resort: installer directories commonly missing from both launchd's
-	// minimal PATH and non-interactive login shells.
-	if path := lookInWellKnownDirs(name); path != "" {
-		return path
+	for _, bin := range binariesFor(name) {
+		// Fast path: already in the process PATH.
+		if path, err := exec.LookPath(bin); err == nil && path != "" {
+			return path
+		}
+		// Fall back to the user's login shell.
+		if path := loginShellLookPath(bin); path != "" {
+			return path
+		}
+		// Last resort: installer directories commonly missing from both
+		// launchd's minimal PATH and non-interactive login shells.
+		if path := lookInWellKnownDirs(bin); path != "" {
+			return path
+		}
 	}
 	slog.Debug("executor: CLI not found on PATH, login shell, or well-known dirs", "cli", name)
 	return ""
+}
+
+// ResolveCLIPath reports where an agent's executable is, or "" when it is not
+// installed. name must be a supported agent id.
+func ResolveCLIPath(name string) string {
+	if ValidateCLIName(name) != nil {
+		return ""
+	}
+	return resolveCLIPath(name)
 }
 
 // appendDirToPath returns env (the process environment when nil) with dir
@@ -1228,9 +1276,13 @@ func appendDirToPath(env []string, dir string) []string {
 // exporting it only in ~/.zshrc — which non-interactive login shells never
 // source, so the login-shell probe cannot see it either (issue #643).
 var wellKnownBinDirs = func() []string {
-	dirs := make([]string, 0, 3)
+	dirs := make([]string, 0, 7)
 	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".local", "bin"))
+		// npm/volta/bun global installs (Copilot, Gemini, Codex via npm) and
+		// the OpenCode installer use these, again exported only from rc files.
+		for _, d := range []string{".local/bin", ".npm-global/bin", ".volta/bin", ".bun/bin", ".opencode/bin"} {
+			dirs = append(dirs, filepath.Join(home, d))
+		}
 	}
 	return append(dirs, "/opt/homebrew/bin", "/usr/local/bin")
 }
@@ -1455,6 +1507,22 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 
 	var workDirFlags []string
 	switch {
+	case cli == "cursor_cli":
+		// The Cursor CLI refuses to run in an untrusted workspace, and trusting
+		// one loads its .cursor configuration — MCP servers, rules, hooks — from
+		// what is, for a review, the PR author's code. So Cursor never sees the
+		// checkout: it runs in an empty, daemon-owned workspace that is safe to
+		// trust, and reviews from the diff in the prompt alone.
+		if opts.WorkDir != "" {
+			slog.Info("executor: Cursor CLI reviews run diff-only; the checkout is not exposed to it")
+		}
+		ws, err := os.MkdirTemp("", "heimdallm-cursor-ws-*")
+		if err != nil {
+			return nil, fmt.Errorf("executor: create cursor workspace: %w", err)
+		}
+		defer os.RemoveAll(ws)
+		opts.WorkDir = ws
+		workDirFlags = []string{"--trust", "--workspace", ws}
 	case opts.WorkDir != "":
 		workDirFlags = detectWorkDirFlags(cli, cliPath, opts.WorkDir)
 	case cli == "codex":
@@ -1643,6 +1711,29 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 	var args []string
 
 	switch cli {
+	case "copilot":
+		// Prompt on stdin, answer only (-s). Read-only: no shell, no file
+		// writes, and no GitHub MCP server (it could post on the PR). The
+		// checkout is the child's cwd; it is deliberately not passed through
+		// --add-dir, which would load its .github skills and agents as trusted.
+		args = append(args, "-s", "--stream", "off", "--disable-builtin-mcps",
+			"--deny-tool", "shell", "--deny-tool", "write")
+		if opts.Model != "" {
+			args = append(args, "--model", strings.TrimSpace(opts.Model))
+		}
+		if opts.Effort != "" {
+			if effort, err := NormalizeEffort(opts.Effort); err == nil {
+				args = append(args, "--reasoning-effort", effort)
+			}
+		}
+	case "cursor_cli":
+		// Print mode, read-only "ask" mode, plain text answer; the prompt is
+		// read from stdin. workDirFlags carries --trust/--workspace for the
+		// empty workspace ExecuteRaw created.
+		args = append(args, "-p", "--mode", "ask", "--output-format", "text")
+		if opts.Model != "" {
+			args = append(args, "--model", strings.TrimSpace(opts.Model))
+		}
 	case "opencode":
 		// opencode uses "run" subcommand; reads prompt from stdin when no
 		// positional message args are given.
@@ -1970,4 +2061,17 @@ func parseResult(data []byte) (*ReviewResult, error) {
 		result.Severity = "low"
 	}
 	return &result, nil
+}
+
+// CommandEnv is the environment Heimdallm gives an agent subprocess: the
+// process environment with the login shell's PATH and the binary's own
+// directory appended. Exposed for helpers that run an agent CLI outside a
+// review (version and model discovery) so they see the same PATH a review
+// does.
+func CommandEnv(cliPath string) []string {
+	env := enrichEnvWithLoginPath()
+	if filepath.IsAbs(cliPath) {
+		env = appendDirToPath(env, filepath.Dir(cliPath))
+	}
+	return env
 }

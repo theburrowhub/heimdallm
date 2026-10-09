@@ -7,6 +7,36 @@ import 'platform/fake_platform_services.dart';
 
 void main() {
   group('ApiClient (desktop shape — absolute URL + token)', () {
+    test('fetchCliAgents and rescanCliAgents parse the catalog', () async {
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+        token: 'abc-123',
+      );
+      var status = 200;
+      final seen = <String>[];
+      final client = ApiClient(
+        httpClient: MockClient((request) async {
+          seen.add('${request.method} ${request.url.path}');
+          return http.Response(
+            jsonEncode({
+              'scanned_at': '2026-10-08T10:00:00Z',
+              'agents': [
+                {'id': 'copilot', 'name': 'GitHub Copilot CLI', 'installed': true},
+              ],
+            }),
+            status,
+          );
+        }),
+        platform: platform,
+      );
+      expect((await client.fetchCliAgents()).byId('copilot')!.installed, isTrue);
+      expect((await client.rescanCliAgents()).agents, hasLength(1));
+      expect(seen, ['GET /cli-agents', 'POST /cli-agents/rescan']);
+      status = 503;
+      expect(client.fetchCliAgents(), throwsA(isA<ApiException>()));
+      expect(client.rescanCliAgents(), throwsA(isA<ApiException>()));
+    });
+
     test('fetchReviewLimits parses budgets and surfaces errors', () async {
       final platform = FakePlatformServices(
         apiBaseUrl: 'http://127.0.0.1:7842',

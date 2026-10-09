@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,6 +34,10 @@ var tabNames = []string{
 
 type Dashboard struct {
 	client *api.Client
+	// agentsCache throttles GET /cli-agents: the catalog changes at most every
+	// few minutes, so it is not refetched on every refresh tick.
+	agentsCache agentsCache
+
 	width  int
 	height int
 
@@ -48,6 +53,7 @@ type Dashboard struct {
 	prs    []api.PR
 	merges []api.MergeTrackingEntry
 	config map[string]any
+	agents []api.CLIAgent
 	stats  *api.Stats
 
 	logLines  []logLine
@@ -99,6 +105,7 @@ type dataMsg struct {
 	registry *api.ClusterRegistry
 	merges   []api.MergeTrackingEntry
 	config   map[string]any
+	agents   []api.CLIAgent
 	stats    *api.Stats
 	activity *api.ActivityResponse
 	health   *api.Health
@@ -203,6 +210,8 @@ func (d *Dashboard) fetchData() tea.Msg {
 	}
 	msg.config = cfg
 
+	msg.agents = d.agentsCache.get(d.client.ListCLIAgents)
+
 	stats, err := d.client.GetStats()
 	if err != nil {
 		msg.err = err
@@ -218,6 +227,38 @@ func (d *Dashboard) fetchData() tea.Msg {
 	msg.activity = activity
 
 	return msg
+}
+
+// agentsRefreshEvery is how often the dashboard refetches the agent catalog.
+const agentsRefreshEvery = time.Minute
+
+// agentsCache holds the last /cli-agents answer. fetchData runs off the UI
+// goroutine, hence the mutex.
+type agentsCache struct {
+	mu      sync.Mutex
+	at      time.Time
+	agents  []api.CLIAgent
+	nowFunc func() time.Time
+}
+
+// get returns the cached catalog, refetching it once it is older than
+// agentsRefreshEvery. Fetching is best-effort: older daemons have no
+// /cli-agents, and a failure keeps the previous list.
+func (c *agentsCache) get(fetch func() (*api.CLIAgentCatalog, error)) []api.CLIAgent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now
+	if c.nowFunc != nil {
+		now = c.nowFunc
+	}
+	if !c.at.IsZero() && now().Sub(c.at) < agentsRefreshEvery {
+		return c.agents
+	}
+	c.at = now()
+	if cat, err := fetch(); err == nil {
+		c.agents = cat.Agents
+	}
+	return c.agents
 }
 
 func (d *Dashboard) sseCommands() (tea.Cmd, tea.Cmd) {
@@ -367,6 +408,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			api.SortMyPRs(msg.merges)
 			d.merges = msg.merges
 			d.config = msg.config
+			d.agents = msg.agents
 			d.stats = msg.stats
 			d.registry = msg.registry
 			if msg.activity != nil {
@@ -1337,6 +1379,30 @@ func (d *Dashboard) buildConfigLines() []string {
 	kv("Mode", str("review_mode"))
 	kv("Clone dir", str("clone_dir"))
 	blank()
+
+	// ── Installed agents ──
+	if len(d.agents) > 0 {
+		installed := 0
+		for _, a := range d.agents {
+			if a.Installed {
+				installed++
+			}
+		}
+		section(fmt.Sprintf("Agents (%d/%d installed)", installed, len(d.agents)))
+		for _, a := range d.agents {
+			state := "not installed"
+			if a.Installed {
+				state = "installed"
+				if a.Version != "" {
+					state += " " + api.DisplayText(a.Version, 40)
+				}
+			}
+			lines = append(lines, fmt.Sprintf("    %s %s",
+				keyStyle.Render(fmt.Sprintf("%-22s", api.DisplayText(a.Name, 22))),
+				valStyle.Render(state)))
+		}
+		blank()
+	}
 
 	// ── Agent Configs ──
 	if acRaw, ok := d.config["agent_configs"]; ok {

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/heimdallm/daemon/internal/agentcatalog"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
@@ -93,6 +94,8 @@ type Server struct {
 	// tests that don't need it).
 	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
 	meFn         func() (string, error)
+	// agentCatalog serves GET /cli-agents. Nil until main wires it.
+	agentCatalog *agentcatalog.Store
 	// reviewLimitsFn returns live usage of every configured review budget
 	// for GET /review-limits. Nil until main wires it.
 	reviewLimitsFn func() (any, error)
@@ -292,6 +295,7 @@ var sensitiveGETPaths = []string{
 	"/stats",         // exposes review activity metadata
 	"/github",        // covers /github/rate_limit (live GitHub API usage)
 	"/review-limits", // exposes repo/org names and review volume
+	"/cli-agents",    // exposes installed tools, versions and paths
 	// exposes PR titles, repos, block reasons and check names
 	"/merge-tracking",
 	// the registry exposes every instance's base URL and the routing map
@@ -407,6 +411,9 @@ func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
 
 // SetRateLimitFn wires the live GitHub rate-limit lookup for GET /github/rate_limit.
 func (srv *Server) SetRateLimitFn(fn func() (any, error)) { srv.rateLimitFn = fn }
+
+// SetAgentCatalog wires the installed-agents discovery for /cli-agents.
+func (srv *Server) SetAgentCatalog(c *agentcatalog.Store) { srv.agentCatalog = c }
 
 // SetReviewLimitsFn wires the review budget usage lookup for GET /review-limits.
 func (srv *Server) SetReviewLimitsFn(fn func() (any, error)) { srv.reviewLimitsFn = fn }
@@ -678,6 +685,9 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/stats", srv.handleStats)
 	r.Get("/github/rate_limit", srv.handleGitHubRateLimit)
 	r.Get("/review-limits", srv.handleReviewLimits)
+	r.Get("/cli-agents", srv.handleListCLIAgents)
+	r.Post("/cli-agents/rescan", srv.handleRescanCLIAgents)
+	r.Get("/cli-agents/{id}", srv.handleGetCLIAgent)
 	r.Get("/agents", srv.handleListAgents)
 	r.Post("/agents", srv.handleUpsertAgent)
 	r.Delete("/agents/{id}", srv.handleDeleteAgent)
@@ -2308,6 +2318,50 @@ func (srv *Server) handleGitHubRateLimit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, rl)
+}
+
+// cliAgentsResponse is the GET /cli-agents body.
+type cliAgentsResponse struct {
+	Agents    []agentcatalog.Agent `json:"agents"`
+	ScannedAt time.Time            `json:"scanned_at"`
+}
+
+// handleListCLIAgents returns every supported agent and whether it is
+// installed and configured on the daemon's machine (the last scan; the first
+// call scans).
+func (srv *Server) handleListCLIAgents(w http.ResponseWriter, r *http.Request) {
+	if srv.agentCatalog == nil {
+		http.Error(w, `{"error":"agent catalog not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	agents, at := srv.agentCatalog.Snapshot(r.Context())
+	writeJSON(w, http.StatusOK, cliAgentsResponse{Agents: agents, ScannedAt: at})
+}
+
+// handleRescanCLIAgents rescans the machine, e.g. right after installing an
+// agent, and returns the fresh catalog.
+func (srv *Server) handleRescanCLIAgents(w http.ResponseWriter, r *http.Request) {
+	if srv.agentCatalog == nil {
+		http.Error(w, `{"error":"agent catalog not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	agents := srv.agentCatalog.Refresh(r.Context())
+	_, at := srv.agentCatalog.Snapshot(r.Context())
+	writeJSON(w, http.StatusOK, cliAgentsResponse{Agents: agents, ScannedAt: at})
+}
+
+// handleGetCLIAgent returns one catalog entry.
+func (srv *Server) handleGetCLIAgent(w http.ResponseWriter, r *http.Request) {
+	if srv.agentCatalog == nil {
+		http.Error(w, `{"error":"agent catalog not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	agent, ok := srv.agentCatalog.Get(r.Context(), chi.URLParam(r, "id"))
+	if !ok {
+		http.Error(w, `{"error":"unknown agent"}`, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
 }
 
 // handleReviewLimits returns current usage of every configured review budget

@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -687,5 +689,82 @@ func TestDaemonRowSanitisesHealthError(t *testing.T) {
 	// The useful part still survives.
 	if got := serverRow(t, out, "Daemon"); !strings.Contains(got, "HTTP 502") {
 		t.Errorf("Daemon row = %q, want the leading cause preserved", got)
+	}
+}
+
+func TestBuildConfigLinesInstalledAgents(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.config = map[string]any{}
+	d.agents = []api.CLIAgent{
+		{ID: "claude", Name: "Claude Code", Installed: true, Version: "2.1.292"},
+		{ID: "copilot", Name: "GitHub Copilot CLI"},
+	}
+	joined := strings.Join(d.buildConfigLines(), "\n")
+	for _, want := range []string{"Agents (1/2 installed)", "Claude Code", "installed 2.1.292", "GitHub Copilot CLI", "not installed"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
+func TestFetchDataLoadsInstalledAgents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/prs":
+			_, _ = w.Write([]byte(`[]`))
+		case "/config":
+			_, _ = w.Write([]byte(`{}`))
+		case "/stats":
+			_, _ = w.Write([]byte(`{}`))
+		case "/activity":
+			_, _ = w.Write([]byte(`{"entries":[]}`))
+		case "/cli-agents":
+			_, _ = w.Write([]byte(`{"agents":[{"id":"claude","name":"Claude Code","installed":true}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	d := NewDashboard(srv.URL, "", "test")
+	msg, ok := d.fetchData().(dataMsg)
+	if !ok || len(msg.agents) != 1 || msg.agents[0].ID != "claude" {
+		t.Fatalf("fetchData agents = %+v", msg.agents)
+	}
+	model, _ := d.Update(msg)
+	if got := model.(*Dashboard).agents; len(got) != 1 {
+		t.Errorf("dashboard agents = %+v", got)
+	}
+}
+
+func TestAgentsCacheThrottlesAndKeepsLastGood(t *testing.T) {
+	now := time.Date(2026, 10, 8, 10, 0, 0, 0, time.UTC)
+	c := agentsCache{nowFunc: func() time.Time { return now }}
+	calls := 0
+	fail := false
+	fetch := func() (*api.CLIAgentCatalog, error) {
+		calls++
+		if fail {
+			return nil, errors.New("404")
+		}
+		return &api.CLIAgentCatalog{Agents: []api.CLIAgent{{ID: "claude"}}}, nil
+	}
+	if got := c.get(fetch); len(got) != 1 || calls != 1 {
+		t.Fatalf("first get = %v (calls %d)", got, calls)
+	}
+	now = now.Add(30 * time.Second)
+	c.get(fetch)
+	if calls != 1 {
+		t.Errorf("refetched within %s: %d calls", agentsRefreshEvery, calls)
+	}
+	now = now.Add(agentsRefreshEvery)
+	fail = true
+	if got := c.get(fetch); calls != 2 || len(got) != 1 {
+		t.Errorf("a failed refetch must keep the last list: %v (calls %d)", got, calls)
+	}
+	var real agentsCache
+	if got := real.get(func() (*api.CLIAgentCatalog, error) { return nil, errors.New("x") }); got != nil {
+		t.Errorf("no catalog yet = %v", got)
 	}
 }

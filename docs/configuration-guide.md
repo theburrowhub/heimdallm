@@ -322,10 +322,31 @@ The per-agent override takes precedence when set (see [AI Agents](#6-ai-agents))
 
 ## 6. AI Agents
 
+### Supported agents and discovery
+
+| Agent | `primary` / `fallback` id | Detected from | Notes |
+|---|---|---|---|
+| Claude Code | `claude` | `claude` on PATH, `~/.claude` | Reports exact token usage |
+| Codex | `codex` | `codex`, `~/.codex` (`CODEX_HOME`) | Runs in a throwaway workspace when there is no checkout |
+| Gemini CLI | `gemini` | `gemini`, `~/.gemini` (`GEMINI_CLI_HOME`) | |
+| GitHub Copilot CLI | `copilot` | `copilot`, `~/.copilot` (`COPILOT_HOME`) | Read-only: `--deny-tool shell --deny-tool write`, no GitHub MCP server. The checkout is its working directory but is not trusted (no `--add-dir`) |
+| Cursor CLI | `cursor_cli` | `cursor-agent` (or `agent`), `~/.cursor` | Runs `--mode ask` in an empty, daemon-owned workspace and reviews from the diff only, because trusting the PR checkout would load its `.cursor` configuration |
+| Cursor IDE | — | `/Applications/Cursor.app`, `cursor` launcher | Detection only; reviews go through the Cursor CLI on the same account |
+| OpenCode | `opencode` | `opencode`, `~/.config/opencode` | |
+
+Discovery runs once at startup and then every 10 minutes:
+
+- It looks for each agent's executable in the same places a review does: PATH, the login shell, and installer directories such as `~/.local/bin`, `~/.npm-global/bin`, `~/.volta/bin`, `~/.bun/bin` and `~/.opencode/bin`.
+- It looks for each agent's configuration directory.
+- It reads the version with `--version`.
+- For Cursor, Copilot and OpenCode it also reads the models your account offers. The settings page then offers exactly those models.
+
+`GET /cli-agents` returns what was found. `POST /cli-agents/rescan` scans again, which helps right after you install an agent. In the app, the **Agents** screen shows one card per agent, and a card opens that agent's settings. `heimdallm-cli agents [--rescan]` prints the same list.
+
 ### Primary and fallback
 
 ```bash
-HEIMDALLM_AI_PRIMARY=claude     # claude | gemini | codex | opencode
+HEIMDALLM_AI_PRIMARY=claude     # claude | codex | gemini | copilot | cursor_cli | opencode
 HEIMDALLM_AI_FALLBACK=gemini    # optional
 ```
 

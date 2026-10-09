@@ -298,7 +298,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                       label: 'Primary',
                       globalValue: appConfig.aiPrimary,
                       overrideValue: _config.aiPrimary,
-                      options: const ['claude', 'gemini', 'codex'],
+                      options: reviewAgentIds,
                       onChanged: (v) => _update(_config.copyWith(aiPrimary: v)),
                       onReset: () => _resetField('primary'),
                     ),
@@ -309,7 +309,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                           ? 'none'
                           : appConfig.aiFallback,
                       overrideValue: _config.aiFallback,
-                      options: const ['claude', 'gemini', 'codex'],
+                      options: reviewAgentIds,
                       onChanged: (v) =>
                           _update(_config.copyWith(aiFallback: v)),
                       onReset: () => _resetField('fallback'),
