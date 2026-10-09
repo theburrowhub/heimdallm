@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/agent.dart';
 import 'package:heimdallm/core/models/config_model.dart';
+import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
@@ -579,5 +580,79 @@ void main() {
     expect(editor.inheritedLabelFor!('compact_prompt'), 'org: $_orgName');
     expect(editor.inheritedValue('compact_prompt'), isFalse);
     expect(editor.inheritedLabelFor!('filter_noise'), 'global');
+  });
+
+  testWidgets('the repo picks a review flow, inheriting the org one', (
+    tester,
+  ) async {
+    final mockApi = MockApiClient();
+    final org = _repoName.split('/').first;
+    final json = {
+      ..._configJson(),
+      'org_overrides': {
+        org: {'flow': 'night'},
+      },
+      'repo_overrides': {
+        _repoName: {'primary': 'codex'},
+      },
+    };
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => json);
+    when(
+      () => mockApi.patchRepoConfig(_repoName, any()),
+    ).thenAnswer((_) async => json);
+    when(
+      () => mockApi.deleteRepoField(_repoName, any()),
+    ).thenAnswer((_) async => json);
+    when(() => mockApi.fetchFlows()).thenAnswer(
+      (_) async => FlowListing.fromJson(const {
+        'flows': {
+          'default': {'rules': {}},
+          'night': {'rules': {}},
+        },
+      }),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
+        ],
+        child: MaterialApp(
+          theme: HeimdallmTheme.light(),
+          builder: (context, navigatorChild) => HeimdallmTheme.scope(
+            child: navigatorChild ?? const SizedBox.shrink(),
+          ),
+          home: const RepoDetailScreen(repoName: _repoName),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final dropdown = tester.widget<OverrideDropdown>(
+      find.byKey(const ValueKey('repo-review-flow')),
+    );
+    expect(dropdown.options, ['default', 'night']);
+    expect(dropdown.globalValue, 'night');
+    expect(dropdown.inheritedLabel, isNot('global'));
+    expect(find.widgetWithText(OverrideDropdown, 'Primary'), findsOneWidget);
+
+    dropdown.onChanged('default');
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pump();
+    final patch =
+        verify(
+              () => mockApi.patchRepoConfig(_repoName, captureAny()),
+            ).captured.last
+            as Map<String, dynamic>;
+    expect(patch['flow'], 'default');
+
+    tester
+        .widget<OverrideDropdown>(
+          find.byKey(const ValueKey('repo-review-flow')),
+        )
+        .onReset!();
+    await tester.pump();
+    verify(() => mockApi.deleteRepoField(_repoName, 'flow')).called(1);
   });
 }

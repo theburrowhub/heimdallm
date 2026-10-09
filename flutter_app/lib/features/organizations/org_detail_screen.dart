@@ -17,6 +17,7 @@ import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
+import '../flows/flows_screen.dart' show flowsProvider;
 import '../repositories/widgets/feature_palette.dart';
 
 class OrgDetailScreen extends ConsumerStatefulWidget {
@@ -167,6 +168,9 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     if (old.reviewMode != updated.reviewMode) {
       diff['review_mode'] = updated.reviewMode ?? '';
     }
+    if (old.flow != updated.flow) {
+      diff['flow'] = updated.flow ?? '';
+    }
     if (old.promptId != updated.promptId) {
       diff['prompt'] = updated.promptId ?? '';
     }
@@ -244,6 +248,9 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
             _initFrom(appConfig);
             final prompts = ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
             final promptOptions = prompts.map((p) => p.id).toList();
+            final flowIds =
+                ref.watch(flowsProvider).value?.ids ??
+                const <String>['default'];
 
             final orgDisabled = appConfig.isOrgNonMonitored(widget.orgName);
             return SingleChildScrollView(
@@ -295,26 +302,42 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                   ]),
                   _sectionCard('PR Review', [
                     OverrideDropdown(
-                      label: 'Primary',
-                      globalValue: appConfig.aiPrimary,
-                      overrideValue: _config.aiPrimary,
-                      options: reviewAgentIds,
-                      onChanged: (v) => _update(_config.copyWith(aiPrimary: v)),
-                      onReset: () => _resetField('primary'),
+                      key: const ValueKey('org-review-flow'),
+                      label: 'Review flow',
+                      globalValue: appConfig.aiFlow.isEmpty
+                          ? 'default'
+                          : appConfig.aiFlow,
+                      overrideValue: _config.flow,
+                      options: flowIds,
+                      onChanged: (v) => _update(_config.copyWith(flow: v)),
+                      onReset: () => _resetField('flow'),
                     ),
                     const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Fallback',
-                      globalValue: appConfig.aiFallback.isEmpty
-                          ? 'none'
-                          : appConfig.aiFallback,
-                      overrideValue: _config.aiFallback,
-                      options: reviewAgentIds,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(aiFallback: v)),
-                      onReset: () => _resetField('fallback'),
-                    ),
-                    const SizedBox(height: 10),
+                    if (_config.aiPrimary != null ||
+                        _config.aiFallback != null) ...[
+                      OverrideDropdown(
+                        label: 'Primary',
+                        globalValue: appConfig.aiPrimary,
+                        overrideValue: _config.aiPrimary,
+                        options: reviewAgentIds,
+                        onChanged: (v) =>
+                            _update(_config.copyWith(aiPrimary: v)),
+                        onReset: () => _resetField('primary'),
+                      ),
+                      const SizedBox(height: 10),
+                      OverrideDropdown(
+                        label: 'Fallback',
+                        globalValue: appConfig.aiFallback.isEmpty
+                            ? 'none'
+                            : appConfig.aiFallback,
+                        overrideValue: _config.aiFallback,
+                        options: reviewAgentIds,
+                        onChanged: (v) =>
+                            _update(_config.copyWith(aiFallback: v)),
+                        onReset: () => _resetField('fallback'),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
                     OverrideDropdown(
                       label: 'Review mode',
                       globalValue: appConfig.reviewMode,

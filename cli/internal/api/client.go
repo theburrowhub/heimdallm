@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -73,6 +74,12 @@ func (c *Client) do(method, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return c.send(req)
+}
+
+// send runs req and returns the body, or an error for a transport failure or
+// an HTTP status of 400 and above.
+func (c *Client) send(req *http.Request) ([]byte, error) {
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -86,6 +93,20 @@ func (c *Client) do(method, path string) ([]byte, error) {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return data, nil
+}
+
+// doJSON is do() with a JSON request body.
+func (c *Client) doJSON(method, path string, body any) ([]byte, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("encoding request: %w", err)
+	}
+	req, err := c.newRequest(method, path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.send(req)
 }
 
 // Health checks daemon connectivity. Shares GetHealth's transport, so a

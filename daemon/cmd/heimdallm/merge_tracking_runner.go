@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/repoctx"
 )
@@ -57,6 +58,7 @@ func mergeTrackAgentSpec(cfg **config.Config, cfgMu *sync.Mutex) func(repo strin
 		aiCfg := c.AIForRepo(repo)
 		mt := c.MergeTrackingForRepo(repo)
 		globalPrimary, globalFallback := c.AI.Primary, c.AI.Fallback
+		writers := flowWriteAgents(c, repo)
 		cfgMu.Unlock()
 
 		spec := mergetrack.AgentSpec{
@@ -64,11 +66,35 @@ func mergeTrackAgentSpec(cfg **config.Config, cfgMu *sync.Mutex) func(repo strin
 			Fallback: firstNonEmptyString(aiCfg.Fallback, globalFallback),
 			Effort:   mt.ResolveEffort,
 		}
+		// The repo's review flow decides the agent here too, in its rule
+		// order, limited to agents that can edit files.
+		if len(writers) > 0 {
+			spec.Primary, spec.Fallback = writers[0], ""
+			if len(writers) > 1 {
+				spec.Fallback = writers[1]
+			}
+		}
 		if d, err := time.ParseDuration(mt.ResolveTimeout); err == nil && d > 0 {
 			spec.Timeout = d
 		}
 		return spec
 	}
+}
+
+// flowWriteAgents lists, in rule order and without repeats, the agents of
+// repo's review flow that can edit files.
+func flowWriteAgents(c *config.Config, repo string) []string {
+	_, flow := c.FlowForRepo(repo)
+	var out []string
+	seen := map[string]bool{}
+	for _, key := range flow.OrderedRuleKeys() {
+		agent := flow.Rules[key].Agent
+		if !seen[agent] && executor.WriteCapable(agent) {
+			seen[agent] = true
+			out = append(out, agent)
+		}
+	}
+	return out
 }
 
 func firstNonEmptyString(values ...string) string {

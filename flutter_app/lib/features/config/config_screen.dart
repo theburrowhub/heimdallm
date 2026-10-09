@@ -22,6 +22,7 @@ import 'config_providers.dart';
 import '../../shared/widgets/review_limits_editor.dart';
 import '../../shared/widgets/token_saving_editor.dart';
 import '../review_limits/review_limits_usage.dart';
+import '../flows/flows_screen.dart' show flowsProvider;
 
 // Poll-interval bounds, mirrored from the daemon's config.ValidatePollInterval
 // (daemon/internal/config/config.go: minPollInterval=1m, maxPollInterval=24h).
@@ -902,16 +903,14 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   String _globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity;
   String _globalCloneDir = '';
 
-  String _aiPrimary = 'claude';
-  String _aiFallback = '';
+  String _aiFlow = '';
   String _reviewMode = 'single';
   bool _aiInitialized = false;
 
   void _initAiFromConfig(AppConfig config) {
     if (_aiInitialized) return;
     _aiInitialized = true;
-    _aiPrimary = config.aiPrimary.isEmpty ? 'claude' : config.aiPrimary;
-    _aiFallback = config.aiFallback;
+    _aiFlow = config.aiFlow;
     _reviewMode = config.reviewMode.isEmpty ? 'single' : config.reviewMode;
     _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
     _globalNeverApproveMinSeverity = config.globalNeverApproveMinSeverity;
@@ -921,32 +920,43 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   Widget _aiSection(AppConfig config) {
     _initAiFromConfig(config);
+    final flowIds =
+        ref.watch(flowsProvider).value?.ids ?? const <String>['default'];
+    final selectedFlow = _aiFlow.isEmpty ? 'default' : _aiFlow;
     return _settingsCard('AI defaults', [
-      DropdownButtonFormField<String>(
-        initialValue: _aiPrimary,
-        decoration: const InputDecoration(
-          labelText: 'Primary agent',
-          border: OutlineInputBorder(),
-          isDense: true,
-        ),
-        items: reviewAgentIds
-            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-            .toList(),
-        onChanged: (v) => setState(() => _aiPrimary = v ?? 'claude'),
-      ),
-      const SizedBox(height: 12),
-      DropdownButtonFormField<String>(
-        initialValue: _aiFallback.isEmpty ? 'none' : _aiFallback,
-        decoration: const InputDecoration(
-          labelText: 'Fallback agent',
-          border: OutlineInputBorder(),
-          isDense: true,
-        ),
-        items: const ['none', ...reviewAgentIds]
-            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-            .toList(),
-        onChanged: (v) =>
-            setState(() => _aiFallback = (v == null || v == 'none') ? '' : v),
+      Row(
+        children: [
+          Expanded(
+            child: DropdownButtonFormField<String>(
+              key: const ValueKey('global-review-flow'),
+              initialValue: flowIds.contains(selectedFlow)
+                  ? selectedFlow
+                  : null,
+              decoration: const InputDecoration(
+                labelText: 'Review flow',
+                helperText:
+                    'Decides which agent reviews: by time of day, quota '
+                    'left, or the classic primary/fallback ("default").',
+                helperMaxLines: 2,
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: [
+                for (final id in flowIds)
+                  DropdownMenuItem(value: id, child: Text(id)),
+              ],
+              onChanged: (v) => setState(
+                () => _aiFlow = (v == null || v == 'default') ? '' : v,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton(
+            key: const ValueKey('manage-flows'),
+            onPressed: () => context.go('/flows'),
+            child: const Text('Manage flows'),
+          ),
+        ],
       ),
       const SizedBox(height: 12),
       DropdownButtonFormField<String>(
@@ -1805,8 +1815,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     circuitBreaker: _circuitBreaker,
     reviewLimits: _reviewLimits,
     tokenSaving: _tokenSaving,
-    aiPrimary: _aiPrimary,
-    aiFallback: _aiFallback,
+    // Primary/fallback are edited in the default flow (Flows), not here, so
+    // the server's current values are kept rather than a stale copy.
+    aiFlow: _aiFlow,
     reviewMode: _reviewMode,
     clusterRole: _clusterRole,
     // agentConfigs (per-CLI) managed in Agents tab

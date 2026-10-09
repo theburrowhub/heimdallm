@@ -17,6 +17,7 @@ import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
+import '../flows/flows_screen.dart' show flowsProvider;
 import 'repo_diff.dart';
 import 'widgets/feature_palette.dart';
 import 'widgets/feature_switch.dart';
@@ -197,6 +198,8 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
               : widget.repoName;
           final orgConfig = appConfig.orgConfigs[orgName];
           final orgTokenSaving = orgConfig?.tokenSaving;
+          final flowIds =
+              ref.watch(flowsProvider).value?.ids ?? const <String>['default'];
           final orgMergeTracking =
               orgConfig?.mergeTracking ?? const MergeTrackingOverride();
           final inheritedMergeTracking = appConfig.mergeTracking.applyOverride(
@@ -308,28 +311,51 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   ),
                   const SizedBox(height: 6),
                   OverrideDropdown(
-                    label: 'Primary',
-                    globalValue: orgConfig?.aiPrimary ?? appConfig.aiPrimary,
-                    inheritedLabel: source(orgConfig?.aiPrimary != null),
-                    overrideValue: _config.aiPrimary,
-                    options: reviewAgentIds,
-                    onChanged: (v) => _update(_config.copyWith(aiPrimary: v)),
-                    onReset: () => _resetField('primary'),
-                  ),
-                  const SizedBox(height: 10),
-                  OverrideDropdown(
-                    label: 'Fallback',
+                    key: const ValueKey('repo-review-flow'),
+                    label: 'Review flow',
                     globalValue:
-                        (orgConfig?.aiFallback ?? appConfig.aiFallback).isEmpty
-                        ? 'none'
-                        : (orgConfig?.aiFallback ?? appConfig.aiFallback),
-                    inheritedLabel: source(orgConfig?.aiFallback != null),
-                    overrideValue: _config.aiFallback,
-                    options: reviewAgentIds,
-                    onChanged: (v) => _update(_config.copyWith(aiFallback: v)),
-                    onReset: () => _resetField('fallback'),
+                        orgConfig?.flow ??
+                        (appConfig.aiFlow.isEmpty
+                            ? 'default'
+                            : appConfig.aiFlow),
+                    inheritedLabel: source(orgConfig?.flow != null),
+                    overrideValue: _config.flow,
+                    options: flowIds,
+                    onChanged: (v) => _update(_config.copyWith(flow: v)),
+                    onReset: () => _resetField('flow'),
                   ),
                   const SizedBox(height: 10),
+                  // Legacy per-repo agent overrides: shown only while set,
+                  // so they can be reviewed and removed. They still feed
+                  // the default flow when no flow is selected.
+                  if (_config.aiPrimary != null ||
+                      _config.aiFallback != null) ...[
+                    OverrideDropdown(
+                      label: 'Primary',
+                      globalValue: orgConfig?.aiPrimary ?? appConfig.aiPrimary,
+                      inheritedLabel: source(orgConfig?.aiPrimary != null),
+                      overrideValue: _config.aiPrimary,
+                      options: reviewAgentIds,
+                      onChanged: (v) => _update(_config.copyWith(aiPrimary: v)),
+                      onReset: () => _resetField('primary'),
+                    ),
+                    const SizedBox(height: 10),
+                    OverrideDropdown(
+                      label: 'Fallback',
+                      globalValue:
+                          (orgConfig?.aiFallback ?? appConfig.aiFallback)
+                              .isEmpty
+                          ? 'none'
+                          : (orgConfig?.aiFallback ?? appConfig.aiFallback),
+                      inheritedLabel: source(orgConfig?.aiFallback != null),
+                      overrideValue: _config.aiFallback,
+                      options: reviewAgentIds,
+                      onChanged: (v) =>
+                          _update(_config.copyWith(aiFallback: v)),
+                      onReset: () => _resetField('fallback'),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
                   OverrideDropdown(
                     label: 'Review mode',
                     globalValue: orgConfig?.reviewMode ?? appConfig.reviewMode,

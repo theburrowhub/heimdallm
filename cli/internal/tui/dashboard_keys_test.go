@@ -65,3 +65,15 @@ func TestRenderHelpPerTab(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigLinesShowReviewFlow(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.config = map[string]any{"ai_primary": "claude"}
+	if got := strings.Join(d.buildConfigLines(), "\n"); !strings.Contains(got, "Flow") || !strings.Contains(got, "default") {
+		t.Errorf("no flow selected:\n%s", got)
+	}
+	d.config["ai_flow"] = "weekday"
+	if got := strings.Join(d.buildConfigLines(), "\n"); !strings.Contains(got, "weekday") {
+		t.Errorf("selected flow:\n%s", got)
+	}
+}

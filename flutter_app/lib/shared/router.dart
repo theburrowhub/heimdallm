@@ -2,6 +2,7 @@ import 'package:go_router/go_router.dart';
 import '../features/activity/activity_screen.dart';
 import '../features/agents/agents_screen.dart';
 import '../features/cli_agents/agent_catalog_screen.dart';
+import '../features/flows/flows_screen.dart';
 import '../features/dashboard/dashboard_screen.dart';
 import '../features/instances/instances_screen.dart';
 import '../features/instances/routing_screen.dart';
@@ -113,6 +114,22 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
                 GoRoute(
                   path: 'routing',
                   builder: (context, state) => const RoutingScreen(),
+                ),
+              ],
+            ),
+          ],
+        ),
+        // Appended last so the existing branch indexes stay stable.
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/flows',
+              builder: (context, state) => const FlowsScreen(),
+              routes: [
+                GoRoute(
+                  path: ':id',
+                  builder: (context, state) =>
+                      FlowEditorScreen(flowId: state.pathParameters['id']!),
                 ),
               ],
             ),

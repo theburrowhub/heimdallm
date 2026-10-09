@@ -82,6 +82,15 @@ func unwrapClaudeEnvelope(raw []byte) ([]byte, *Usage, error) {
 		if subtype == "" {
 			subtype = "error"
 		}
+		// Keep Claude's own message ("Claude AI usage limit reached…"): it is
+		// what tells a quota failure apart from a broken review.
+		if env.Result != nil && strings.TrimSpace(*env.Result) != "" {
+			msg := strings.TrimSpace(*env.Result)
+			if len(msg) > 300 {
+				msg = msg[:300]
+			}
+			return nil, nil, fmt.Errorf("executor: claude run ended with %s: %s", subtype, msg)
+		}
 		return nil, nil, fmt.Errorf("executor: claude run ended with %s", subtype)
 	}
 	u := &Usage{CostUSD: env.TotalCostUSD}

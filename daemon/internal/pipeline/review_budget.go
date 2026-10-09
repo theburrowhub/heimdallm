@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/store"
 )
@@ -271,51 +273,106 @@ func (p *Pipeline) ReviewBudgetStatus(scopes []ReviewBudgetScope, now time.Time)
 	return out, nil
 }
 
-// selectCLI picks the agent for a review: the first installed of primary and
-// fallback that still has room in its own review budget. With no agent
-// budgets configured this is exactly Detect(primary, fallback). When every
-// installed agent is out of budget it returns the *ReviewBudgetError that
-// frees up first, so the caller defers instead of failing.
-func (p *Pipeline) selectCLI(primary, fallback string, opts RunOptions, ticket *budgetTicket) (string, error) {
-	now := time.Now().UTC()
-	if len(opts.Budgets.Agents) == 0 {
-		cli, err := p.executor.Detect(primary, fallback)
-		if err == nil {
-			p.budget.assignAgent(p.store, ticket, cli, ReviewWindowLimits{}, now)
-		}
-		return cli, err
+// ErrNoFlowAgent means the review flow matched no available agent (every
+// rule's conditions failed, or its agents are not installed). The review is
+// deferred: the next poll re-evaluates the flow.
+var ErrNoFlowAgent = errors.New("pipeline: the review flow selected no available agent")
+
+// agentFits reports, without charging it, whether one more review fits in
+// cli's own budget.
+func (b *reviewBudget) agentFits(st *store.Store, ticket *budgetTicket, cli string, limits ReviewWindowLimits, now time.Time) *ReviewBudgetError {
+	if !limits.any() {
+		return nil
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	blocked, err := b.check(st, ReviewBudgetScope{Kind: "agent", Key: cli, Limits: limits}, ticket, now)
+	if err != nil {
+		slog.Warn("pipeline: agent review budget check failed, admitting", "agent", cli, "err", err)
+		return nil
+	}
+	return blocked
+}
+
+// selectCLIs returns the agents to try for a review, in order: the flow's
+// candidates (RunOptions.Candidates) or primary then fallback, keeping those
+// that are installed and still have room in their own review budget. The
+// first one reviews; the others take over if it runs out of quota. When
+// every installed agent is out of budget it returns the *ReviewBudgetError
+// that frees first, so the caller defers instead of failing.
+func (p *Pipeline) selectCLIs(primary, fallback string, opts RunOptions, ticket *budgetTicket) ([]string, error) {
+	now := time.Now().UTC()
+	var candidates []string
+	if opts.Candidates != nil {
+		candidates = opts.Candidates()
+		if len(candidates) == 0 {
+			return nil, ErrNoFlowAgent
+		}
+	} else if len(opts.Budgets.Agents) == 0 {
+		// Legacy callers without a flow or agent budgets: exactly the old
+		// Detect(primary, fallback) behaviour.
+		cli, err := p.executor.Detect(primary, fallback)
+		if err != nil {
+			return nil, err
+		}
+		return []string{cli}, nil
+	} else {
+		candidates = []string{primary, fallback}
+	}
+
+	var usable []string
 	var soonest *ReviewBudgetError
 	seen := map[string]bool{}
-	for _, candidate := range []string{primary, fallback} {
+	for _, candidate := range candidates {
 		if candidate == "" || seen[candidate] {
 			continue
 		}
 		seen[candidate] = true
 		cli, err := p.executor.Detect(candidate, "")
-		if err != nil {
+		if err != nil || seen[cli+"\x00resolved"] {
 			continue
 		}
+		seen[cli+"\x00resolved"] = true
 		limits := opts.Budgets.Agents[cli]
 		if opts.Force {
 			// Charge the agent but never defer an operator's manual run.
 			limits = ReviewWindowLimits{}
 		}
-		blocked := p.budget.assignAgent(p.store, ticket, cli, limits, now)
-		if blocked == nil {
-			return cli, nil
+		if blocked := p.budget.agentFits(p.store, ticket, cli, limits, now); blocked != nil {
+			slog.Info("pipeline: agent out of review budget, trying the next one",
+				"agent", cli, "scope", blocked.Scope, "window", blocked.Window, "retry_at", blocked.RetryAt)
+			if soonest == nil || blocked.RetryAt.Before(soonest.RetryAt) {
+				soonest = blocked
+			}
+			continue
 		}
-		slog.Info("pipeline: agent out of review budget, trying the next one",
-			"agent", cli, "scope", blocked.Scope, "window", blocked.Window, "retry_at", blocked.RetryAt)
-		if soonest == nil || blocked.RetryAt.Before(soonest.RetryAt) {
-			soonest = blocked
-		}
+		usable = append(usable, cli)
+	}
+	if len(usable) > 0 {
+		return usable, nil
 	}
 	if soonest != nil {
-		return "", soonest
+		return nil, soonest
+	}
+	if opts.Candidates != nil {
+		return nil, ErrNoFlowAgent
 	}
 	// Nothing installed: keep Detect's own error for the caller.
-	return p.executor.Detect(primary, fallback)
+	_, err := p.executor.Detect(primary, fallback)
+	if err == nil {
+		err = fmt.Errorf("pipeline: no AI agent available (tried %q, %q)", primary, fallback)
+	}
+	return nil, err
+}
+
+// execOptionsFor returns the execution options for cli: its own settings
+// when the caller resolved them per agent (flows), otherwise the primary's
+// options with provider-specific fields dropped for a different agent.
+func execOptionsFor(cli, primary string, opts RunOptions) executor.ExecOptions {
+	if o, ok := opts.AgentExecOpts[cli]; ok {
+		return o
+	}
+	return executor.OptionsForSelectedCLI(primary, cli, opts.ExecOpts)
 }
 
 // deferForBudget publishes the review_limit skip for a review that did not

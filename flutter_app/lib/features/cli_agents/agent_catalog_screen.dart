@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/models/cli_agent.dart';
+import '../../core/models/flow.dart' show AgentQuota;
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
@@ -16,6 +17,18 @@ final cliAgentCatalogProvider = FutureProvider.autoDispose<CliAgentCatalog>((
 ) {
   return ref.watch(apiClientProvider).fetchCliAgents();
 });
+
+/// Every agent's remaining quota (GET /quotas); empty on older daemons.
+final agentQuotasProvider = FutureProvider.autoDispose<Map<String, AgentQuota>>(
+  (ref) async {
+    try {
+      final list = await ref.watch(apiClientProvider).fetchQuotas();
+      return {for (final q in list) q.agent: q};
+    } catch (_) {
+      return const {};
+    }
+  },
+);
 
 String agentEmoji(String id) => switch (id) {
   'claude' => '🔷',
@@ -56,6 +69,7 @@ class _AgentCatalogScreenState extends ConsumerState<AgentCatalogScreen> {
   @override
   Widget build(BuildContext context) {
     final async = ref.watch(cliAgentCatalogProvider);
+    final quotas = ref.watch(agentQuotasProvider).value ?? const {};
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -103,6 +117,7 @@ class _AgentCatalogScreenState extends ConsumerState<AgentCatalogScreen> {
                       width: width,
                       child: AgentCatalogCard(
                         agent: a,
+                        quota: quotas[a.id],
                         onTap: () => context.go('/cli-agents/${a.configAgent}'),
                       ),
                     ),
@@ -119,9 +134,15 @@ class _AgentCatalogScreenState extends ConsumerState<AgentCatalogScreen> {
 /// One catalog entry.
 class AgentCatalogCard extends StatelessWidget {
   final CliAgentInfo agent;
+  final AgentQuota? quota;
   final VoidCallback onTap;
 
-  const AgentCatalogCard({super.key, required this.agent, required this.onTap});
+  const AgentCatalogCard({
+    super.key,
+    required this.agent,
+    required this.onTap,
+    this.quota,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -187,6 +208,45 @@ class AgentCatalogCard extends StatelessWidget {
                   ),
               ],
             ),
+            if (quota != null &&
+                quota!.available &&
+                quota!.windows.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              for (final w in quota!.windows.take(3))
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 56,
+                        child: Text(
+                          w.shortLabel,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                      ),
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(
+                            key: ValueKey('quota-${agent.id}-${w.shortLabel}'),
+                            value: w.usedPercent / 100,
+                            minHeight: 5,
+                            color: w.usedPercent >= 90
+                                ? Colors.red.shade400
+                                : null,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '${w.usedPercent.round()}%',
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
           ],
         ),
       ),

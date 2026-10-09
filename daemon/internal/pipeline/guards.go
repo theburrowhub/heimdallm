@@ -39,6 +39,11 @@ const (
 	// the PR still has a pending request, so the next poll after retry_at
 	// reviews it.
 	SkipReasonReviewLimit SkipReason = "review_limit"
+	// SkipReasonNoFlowAgent is emitted when the review flow selected no
+	// available agent: every rule's conditions failed (outside its schedule,
+	// quota thresholds not met) or its agents are not installed. Deferred,
+	// like review_limit: the next poll evaluates the flow again.
+	SkipReasonNoFlowAgent SkipReason = "no_flow_agent"
 	// SkipReasonHeadChanged is emitted when a stored unpublished review was
 	// generated for an older commit. Publishing it against the current HEAD
 	// would misrepresent stale findings, so the pending row is retired and a

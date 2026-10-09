@@ -23,7 +23,9 @@ func fakeClaude(t *testing.T, out string) (argsFile string) {
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake claude: %v", err)
 	}
-	t.Setenv("PATH", binDir)
+	// Prepend, not replace: the executor caches the first environment it
+	// builds, and a PATH without system dirs would leak into later tests.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return argsFile
 }
 

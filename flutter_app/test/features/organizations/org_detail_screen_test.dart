@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/agent.dart';
 import 'package:heimdallm/core/models/config_model.dart';
+import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/agents/agents_screen.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
@@ -24,6 +25,7 @@ class _ErrorConfigNotifier extends ConfigNotifier {
 Map<String, dynamic> _configJson({
   Map<String, dynamic> orgMergeTracking = const {},
   List<String> nonMonitored = const [],
+  Map<String, dynamic> orgExtra = const {},
 }) => {
   'repositories': <String>[],
   'non_monitored': nonMonitored,
@@ -39,6 +41,7 @@ Map<String, dynamic> _configJson({
       'clone_dir': '/work/acme',
       'never_approve_with_issues': true,
       'never_approve_min_severity': 'high',
+      ...orgExtra,
     },
   },
   'merge_tracking': {
@@ -66,11 +69,21 @@ Future<MockApiClient> _pumpOrgDetail(
   WidgetTester tester, {
   Map<String, dynamic> orgMergeTracking = const {},
   List<String> nonMonitored = const [],
+  Map<String, dynamic> orgExtra = const {},
 }) async {
   final mockApi = MockApiClient();
   final config = _configJson(
     orgMergeTracking: orgMergeTracking,
     nonMonitored: nonMonitored,
+    orgExtra: orgExtra,
+  );
+  when(() => mockApi.fetchFlows()).thenAnswer(
+    (_) async => FlowListing.fromJson(const {
+      'flows': {
+        'default': {'rules': {}},
+        'night': {'rules': {}},
+      },
+    }),
   );
   when(() => mockApi.fetchConfig()).thenAnswer((_) async => config);
   when(
@@ -370,5 +383,37 @@ void main() {
         .onRemove();
     await tester.pump();
     verify(() => mockApi.deleteOrgField('acme', 'review_limits')).called(1);
+  });
+
+  testWidgets('the org picks a review flow; legacy agents show while set', (
+    tester,
+  ) async {
+    final mockApi = await _pumpOrgDetail(
+      tester,
+      orgExtra: {'primary': 'codex'},
+    );
+    when(
+      () => mockApi.deleteOrgField('acme', any()),
+    ).thenAnswer((_) async => _configJson());
+    final dropdown = tester.widget<OverrideDropdown>(
+      find.byKey(const ValueKey('org-review-flow')),
+    );
+    expect(dropdown.options, ['default', 'night']);
+    expect(dropdown.globalValue, 'default');
+    expect(find.widgetWithText(OverrideDropdown, 'Primary'), findsOneWidget);
+
+    dropdown.onChanged('night');
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pump();
+    final patch =
+        verify(() => mockApi.patchOrgConfig('acme', captureAny())).captured.last
+            as Map<String, dynamic>;
+    expect(patch['flow'], 'night');
+
+    tester
+        .widget<OverrideDropdown>(find.byKey(const ValueKey('org-review-flow')))
+        .onReset!();
+    await tester.pump();
+    verify(() => mockApi.deleteOrgField('acme', 'flow')).called(1);
   });
 }

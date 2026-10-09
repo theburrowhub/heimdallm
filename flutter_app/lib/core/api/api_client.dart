@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/activity.dart';
 import '../models/cli_agent.dart';
+import '../models/flow.dart';
 import '../models/merge_tracking.dart';
 import '../models/pr.dart';
 import '../models/review.dart';
@@ -769,6 +770,75 @@ class ApiClient {
       }
     } catch (_) {}
     return fallback;
+  }
+
+  /// Every review flow, the default one included, and the global choice.
+  Future<FlowListing> fetchFlows() async {
+    final resp = await _client.get(_uri('/flows'), headers: await _authHeaders());
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /flows failed: ${resp.statusCode}');
+    }
+    return FlowListing.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  /// Creates or replaces a flow. Returns the config after the write.
+  Future<Map<String, dynamic>> putFlow(String id, ReviewFlow flow) async {
+    final resp = await _client.put(
+      _uri('/flows/${Uri.encodeComponent(id)}'),
+      headers: await _authHeaders(),
+      body: jsonEncode(flow.toJson()),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(_errorMessage(resp.body, 'Could not save the flow'));
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Deletes a flow; repos and orgs that used it fall back to their parent's.
+  Future<Map<String, dynamic>> deleteFlow(String id) async {
+    final resp = await _client.delete(
+      _uri('/flows/${Uri.encodeComponent(id)}'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(_errorMessage(resp.body, 'Could not delete the flow'));
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Evaluates a flow (or the flow [repo] resolves to) now or at [at].
+  Future<FlowDecision> simulateFlow({
+    String? flow,
+    String? repo,
+    DateTime? at,
+  }) async {
+    final resp = await _client.post(
+      _uri('/flows/simulate'),
+      headers: await _authHeaders(),
+      body: jsonEncode({
+        'flow': ?flow,
+        'repo': ?repo,
+        if (at != null) 'at': at.toUtc().toIso8601String(),
+      }),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(_errorMessage(resp.body, 'Could not simulate the flow'));
+    }
+    return FlowDecision.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  /// Every agent's remaining quota.
+  Future<List<AgentQuota>> fetchQuotas() async {
+    final resp = await _client.get(_uri('/quotas'), headers: await _authHeaders());
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /quotas failed: ${resp.statusCode}');
+    }
+    final decoded = jsonDecode(resp.body);
+    if (decoded is! List) return const [];
+    return decoded
+        .whereType<Map<String, dynamic>>()
+        .map(AgentQuota.fromJson)
+        .toList();
   }
 
   /// Live usage of every configured review budget. Empty when no
