@@ -349,6 +349,14 @@ func parseVersion(out string) string {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		// A runtime warning can carry another program's version ("Node.js
+		// v18.19.0 is deprecated"); it is never the agent's.
+		if isWarningLine(line) {
+			if seen++; seen >= versionProbeLines {
+				break
+			}
+			continue
+		}
 		if v := strings.TrimRight(versionPattern.FindString(line), "."); v != "" {
 			if len(v) > maxVersionLen {
 				// The pattern only matches ASCII, so a byte cut is a rune cut.
@@ -361,6 +369,13 @@ func parseVersion(out string) string {
 		}
 	}
 	return ""
+}
+
+// isWarningLine reports whether a --version output line is a runtime notice
+// (a node warning or a deprecation) rather than the CLI's own output.
+func isWarningLine(line string) bool {
+	l := strings.ToLower(strings.TrimSpace(line))
+	return strings.HasPrefix(l, "(node:") || strings.Contains(l, "warn") || strings.Contains(l, "deprecat")
 }
 
 func (d Detector) models(ctx context.Context, path string, e Entry) []string {

@@ -127,6 +127,6 @@ func printTokenStats(w io.Writer, t api.TokenStats) {
 	// Reviews that outgrew limit_exploration's turn cap ran twice; if this
 	// is a large share of the reviews, the cap costs more than it saves.
 	if t.TurnCapRetries > 0 {
-		fmt.Fprintf(w, "    Turn-cap retries: %d\n", t.TurnCapRetries)
+		fmt.Fprintf(w, "    Cap retries:  %d\n", t.TurnCapRetries)
 	}
 }

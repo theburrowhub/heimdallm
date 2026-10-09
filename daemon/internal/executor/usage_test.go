@@ -96,7 +96,7 @@ func TestExecute_SoftMaxTurnsRetriesWithoutTheCap(t *testing.T) {
 		t.Fatalf("runs = %q, want a capped run then an uncapped retry", lines)
 	}
 	// Both runs were billed, so the review reports both.
-	if u := res.Usage; u == nil || u.InputTokens != 1500 || u.OutputTokens != 150 || u.CostUSD != 0.75 || u.TurnCapRetries != 1 {
+	if u := res.Usage; u == nil || u.InputTokens != 1500 || u.OutputTokens != 150 || u.CostUSD != 0.75 || u.TurnCapRetries != 1 || u.Estimated {
 		t.Fatalf("usage = %+v, want both runs and one retry", u)
 	}
 
@@ -148,8 +148,8 @@ func TestExecute_SoftMaxTurnsRetryOutcomes(t *testing.T) {
 	if err != nil || res.Summary != "plain" {
 		t.Fatalf("retry with a plain answer: res=%+v err=%v", res, err)
 	}
-	if u := res.Usage; u == nil || u.InputTokens != 700 || u.OutputTokens != 70 || u.TurnCapRetries != 1 {
-		t.Fatalf("usage = %+v, want the capped run's usage and one retry", u)
+	if u := res.Usage; u == nil || u.InputTokens != 700 || u.OutputTokens != 70 || u.TurnCapRetries != 1 || !u.Estimated {
+		t.Fatalf("usage = %+v, want the capped run's usage, one retry, marked estimated", u)
 	}
 
 	fakeCappedClaude(t, `echo 'boom' >&2; exit 3`)

@@ -180,6 +180,11 @@ func TestParseVersion(t *testing.T) {
 		"v" + strings.Repeat("1.", 60) + "1": strings.Repeat("1.", 40),
 		// A runtime warning or banner before the version.
 		"(node:42) DeprecationWarning: punycode\n\n1.4.2\n": "1.4.2",
+		// A warning that carries another program's version is skipped.
+		"Warning: Node.js v18.19.0 is deprecated\n2.0.1 (Claude Code)": "2.0.1",
+		"npm WARN config 10.2.4\n0.9.0":                                "0.9.0",
+		// Warnings count towards the lines searched.
+		strings.Repeat("(node:1) Warning\n", versionProbeLines) + "3.3.3": "",
 		// Only the first few non-empty lines are searched.
 		strings.Repeat("noise\n", versionProbeLines) + "9.9.9": "",
 	}

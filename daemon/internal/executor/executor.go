@@ -1596,6 +1596,8 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 	if opts.SoftMaxTurns && !reportsUsage(cli, opts) {
 		// Without Claude's JSON envelope a run that ran out of turns cannot be
 		// told apart, so it could not be retried: a default cap would be hard.
+		slog.Debug("executor: limit_exploration turn cap skipped: the agent's output format cannot report running out of turns",
+			"cli", cli)
 		opts.MaxTurns, opts.SoftMaxTurns = 0, false
 	}
 	start := time.Now()
@@ -1625,9 +1627,14 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 				return nil, err
 			}
 			// Both runs were billed: report them together. u is the capped
-			// run's envelope, which unwrapClaudeEnvelope always fills.
+			// run's envelope, which unwrapClaudeEnvelope always fills. A
+			// retry that reported nothing leaves the total short, so it is
+			// marked estimated rather than passed off as exact.
 			total := u.plus(result.Usage)
 			total.TurnCapRetries++
+			if result.Usage == nil {
+				total.Estimated = true
+			}
 			result.Usage = &total
 			return result, nil
 		case !errors.Is(envErr, errNotEnvelope):

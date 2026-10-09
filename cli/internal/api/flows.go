@@ -185,10 +185,11 @@ func (r FlowRule) Describe() string {
 	for _, k := range sortedKeys(r.Quota) {
 		q := r.Quota[k]
 		// Show an op this CLI does not know as the daemon sent it, rather
-		// than as a comparison the daemon may not be making.
+		// than as a comparison the daemon may not be making. An empty op is
+		// "below", as the daemon evaluates it.
 		op := q.Op
 		switch q.Op {
-		case "below":
+		case "below", "":
 			op = "<"
 		case "above":
 			op = ">"

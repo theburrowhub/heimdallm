@@ -18,7 +18,7 @@ func TestPrintTokenStats(t *testing.T) {
 	for _, want := range []string{
 		"Tokens (last 7 days):", "Reviews:      4 (1 estimated)", "Input:        4000",
 		"Output:       400", "Cache reads:  900", "Per review:   1100 (includes estimates)", "Avg prompt:   3.0 KB", "Cost:         $0.42 (reported reviews only)",
-		"Turn-cap retries: 2",
+		"Cap retries:  2",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -26,7 +26,7 @@ func TestPrintTokenStats(t *testing.T) {
 	}
 	buf.Reset()
 	printTokenStats(&buf, api.TokenStats{Reviews: 1, InputTokens: 10})
-	if strings.Contains(buf.String(), "Cost") || strings.Contains(buf.String(), "Cache") || strings.Contains(buf.String(), "estimate") || strings.Contains(buf.String(), "Turn-cap") {
+	if strings.Contains(buf.String(), "Cost") || strings.Contains(buf.String(), "Cache") || strings.Contains(buf.String(), "estimate") || strings.Contains(buf.String(), "Cap retries") {
 		t.Errorf("zero fields must be omitted:\n%s", buf.String())
 	}
 	buf.Reset()
