@@ -316,6 +316,7 @@ class _TokenUsageSection extends StatelessWidget {
     final output = _int('output_tokens');
     final cost = (tokens['cost_usd'] as num?)?.toDouble() ?? 0;
     final avgPrompt = (tokens['avg_prompt_bytes'] as num?)?.toDouble() ?? 0;
+    final turnCapRetries = _int('turn_cap_retries');
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -357,6 +358,10 @@ class _TokenUsageSection extends StatelessWidget {
             if (cost > 0) '\$${cost.toStringAsFixed(2)} reported cost',
             if (estimated > 0)
               '$estimated estimated (agent does not report usage)',
+            // Reviews that outgrew the turn cap ran twice: if most long
+            // reviews do, limit_exploration costs more than it saves.
+            if (turnCapRetries > 0)
+              '$turnCapRetries retried without the turn cap',
           ].join(' · '),
         ),
       ],

@@ -26,6 +26,10 @@ import (
 // reasoning effort, so the default must leave enough room for a normal review
 // to complete instead of terminating healthy work mid-analysis.
 const DefaultExecutionTimeout = 20 * time.Minute
+
+// minTurnCapRetryBudget is the least time worth giving a review retried
+// without limit_exploration's turn cap; with less left, the review fails.
+const minTurnCapRetryBudget = 30 * time.Second
 const cliHelpTimeout = 2 * time.Second
 
 // maxCancelledExecutionOutputRunes bounds the CLI detail retained in a manual
@@ -1589,6 +1593,12 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 		}
 		return e.executeHTTP(agent, cli, prompt, opts)
 	}
+	if opts.SoftMaxTurns && !reportsUsage(cli, opts) {
+		// Without Claude's JSON envelope a run that ran out of turns cannot be
+		// told apart, so it could not be retried: a default cap would be hard.
+		opts.MaxTurns, opts.SoftMaxTurns = 0, false
+	}
+	start := time.Now()
 	raw, err := e.ExecuteRaw(cli, prompt, opts)
 	if err != nil {
 		return nil, err
@@ -1601,11 +1611,25 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 			raw, usage = payload, u
 		case errors.Is(envErr, ErrClaudeMaxTurns) && opts.SoftMaxTurns && opts.MaxTurns > 0:
 			// The cap came from limit_exploration, not the operator: a
-			// review that needed more turns used to finish, so finish it.
+			// review that needed more turns used to finish, so finish it,
+			// within what is left of the review's own timeout.
+			remaining := effectiveExecutionTimeout(opts.Timeout) - time.Since(start)
+			if remaining < minTurnCapRetryBudget {
+				return nil, fmt.Errorf("%w (no time left to retry without the turn cap)", envErr)
+			}
 			slog.Warn("executor: claude ran out of the token-saving turn cap, retrying without it",
-				"max_turns", opts.MaxTurns)
-			opts.MaxTurns, opts.SoftMaxTurns = 0, false
-			return e.Execute(cli, prompt, opts)
+				"max_turns", opts.MaxTurns, "time_left", remaining.Round(time.Second))
+			opts.MaxTurns, opts.SoftMaxTurns, opts.Timeout = 0, false, remaining
+			result, err := e.Execute(cli, prompt, opts)
+			if err != nil {
+				return nil, err
+			}
+			// Both runs were billed: report them together. u is the capped
+			// run's envelope, which unwrapClaudeEnvelope always fills.
+			total := u.plus(result.Usage)
+			total.TurnCapRetries++
+			result.Usage = &total
+			return result, nil
 		case !errors.Is(envErr, errNotEnvelope):
 			return nil, envErr
 		}

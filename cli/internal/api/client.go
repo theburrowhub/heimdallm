@@ -283,6 +283,7 @@ type TokenStats struct {
 	CacheReadTokens  int64   `json:"cache_read_tokens"`
 	CostUSD          float64 `json:"cost_usd"`
 	AvgPromptBytes   float64 `json:"avg_prompt_bytes"`
+	TurnCapRetries   int     `json:"turn_cap_retries"`
 }
 
 type ActivityEntry struct {

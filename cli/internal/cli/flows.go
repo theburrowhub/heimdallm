@@ -50,7 +50,7 @@ func newFlowsSimulateCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("simulating flow: %w", err)
 			}
-			printFlowDecision(os.Stdout, d)
+			printFlowDecision(os.Stdout, d, at == "")
 			return nil
 		},
 	}
@@ -109,8 +109,10 @@ func printFlows(w io.Writer, l *api.FlowListing) {
 	}
 }
 
-// printFlowDecision explains a simulated flow rule by rule.
-func printFlowDecision(w io.Writer, d *api.FlowDecision) {
+// printFlowDecision explains a simulated flow rule by rule. now is false when
+// the flow was evaluated at another time (--at), so the outcome is not
+// described as the present.
+func printFlowDecision(w io.Writer, d *api.FlowDecision, now bool) {
 	name := api.DisplayText(d.FlowID, 64)
 	if d.FlowName != "" {
 		name += " — " + api.DisplayText(d.FlowName, 120)
@@ -123,7 +125,11 @@ func printFlowDecision(w io.Writer, d *api.FlowDecision) {
 	fmt.Fprintln(w)
 	switch len(d.Candidates) {
 	case 0:
-		fmt.Fprintln(w, "  No agent would review now (no rule matches with an available agent): the review would wait.")
+		when := "now"
+		if !now {
+			when = "at that time"
+		}
+		fmt.Fprintf(w, "  No agent would review %s (no rule matches with an available agent): the review would wait.\n", when)
 	default:
 		names := make([]string, len(d.Candidates))
 		for i, c := range d.Candidates {

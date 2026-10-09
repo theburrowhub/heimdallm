@@ -218,10 +218,10 @@ func TestServiceCachesAndCoalesces(t *testing.T) {
 		t.Errorf("MaxUsed = %+v", w)
 	}
 	now = now.Add(3 * time.Minute)
-	svc.Get(context.Background(), "x")
-	if n := src.calls.Load(); n != 2 {
-		t.Errorf("after the TTL reads = %d, want 2", n)
+	if stale := svc.Get(context.Background(), "x"); stale.FetchedAt != p.FetchedAt {
+		t.Errorf("past the TTL the last reading is returned while it refreshes, got %+v", stale)
 	}
+	waitForCalls(t, src, 2)
 	snap := svc.Snapshot(context.Background())
 	if len(snap) != 2 || snap[1].Windows[0].Kind != KindCredit || snap[1].Windows[0].UsedPercent != 25 {
 		t.Errorf("snapshot = %+v", snap)
@@ -237,6 +237,70 @@ func TestServiceCachesAndCoalesces(t *testing.T) {
 	}
 	if clampPercent(-5) != 0 {
 		t.Error("clamp low")
+	}
+}
+
+func waitForCalls(t *testing.T, src *countingSource, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for src.calls.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("reads = %d, want %d", src.calls.Load(), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A slow provider must not hold up reviews: a recent-enough reading is served
+// while it refreshes, and a caller with nothing usable waits only as long as
+// its ctx allows.
+func TestServiceDoesNotWaitOnASlowProvider(t *testing.T) {
+	src := &countingSource{delay: 300 * time.Millisecond}
+	svc := NewService(src)
+	var mu sync.Mutex
+	now := time.Now()
+	svc.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+
+	// Nothing cached and the caller gives up first: no reading, fail closed.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if p := svc.Get(ctx, "x"); p.Available || p.Error != ErrUnavailable {
+		t.Fatalf("abandoned wait = %+v, want unavailable", p)
+	}
+	// The read it started still lands, for the next caller.
+	first := svc.Get(context.Background(), "x")
+	if !first.Available || src.calls.Load() != 1 {
+		t.Fatalf("first reading = %+v after %d reads", first, src.calls.Load())
+	}
+
+	// Stale but recent: served at once, one background refresh.
+	advance(cacheTTL + time.Second)
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if p := svc.Get(context.Background(), "x"); p.FetchedAt != first.FetchedAt {
+			t.Fatalf("stale reading = %+v", p)
+		}
+	}
+	if waited := time.Since(start); waited > 100*time.Millisecond {
+		t.Errorf("serving a stale reading took %s", waited)
+	}
+	waitForCalls(t, src, 2)
+	deadline := time.Now().Add(5 * time.Second)
+	for svc.Get(context.Background(), "x").FetchedAt == first.FetchedAt {
+		if time.Now().After(deadline) {
+			t.Fatal("the background refresh never landed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := src.calls.Load(); n != 2 {
+		t.Fatalf("three stale reads started %d refreshes, want 1", n-1)
+	}
+
+	// Too old to trust: the caller waits for the fresh read.
+	advance(maxStale + time.Minute)
+	if p := svc.Get(context.Background(), "x"); !p.Available || src.calls.Load() != 3 {
+		t.Fatalf("after maxStale = %+v with %d reads, want a fresh read", p, src.calls.Load())
 	}
 }
 

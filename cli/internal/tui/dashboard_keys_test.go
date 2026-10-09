@@ -69,6 +69,10 @@ func TestRenderHelpPerTab(t *testing.T) {
 func TestConfigLinesShowReviewFlow(t *testing.T) {
 	d := NewDashboard("http://localhost:0", "", "test")
 	d.config = map[string]any{"ai_primary": "claude"}
+	if got := strings.Join(d.buildConfigLines(), "\n"); strings.Contains(got, "Flow") {
+		t.Errorf("a daemon without flows sends no ai_flow, so no Flow line:\n%s", got)
+	}
+	d.config["ai_flow"] = ""
 	if got := strings.Join(d.buildConfigLines(), "\n"); !strings.Contains(got, "Flow") || !strings.Contains(got, "default") {
 		t.Errorf("no flow selected:\n%s", got)
 	}

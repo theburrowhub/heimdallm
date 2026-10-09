@@ -131,7 +131,10 @@ func cfgRepoLines(cfg map[string]any) []string {
 
 func cfgAILines(cfg map[string]any) []string {
 	var out []string
-	out = cfgKV(out, "Flow", cfgFlowName(cfg["ai_flow"]))
+	// A daemon without review flows sends no ai_flow at all.
+	if flow, hasFlows := cfg["ai_flow"]; hasFlows {
+		out = cfgKV(out, "Flow", cfgFlowName(flow))
+	}
 	out = cfgKV(out, "Primary", cfg["ai_primary"])
 	out = cfgKV(out, "Fallback", cfg["ai_fallback"])
 	out = cfgKV(out, "Review mode", cfg["review_mode"])

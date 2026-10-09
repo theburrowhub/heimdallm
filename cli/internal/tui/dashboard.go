@@ -233,29 +233,40 @@ func (d *Dashboard) fetchData() tea.Msg {
 const agentsRefreshEvery = time.Minute
 
 // agentsCache holds the last /cli-agents answer. fetchData runs off the UI
-// goroutine, hence the mutex.
+// goroutine, hence the mutex; it is never held during the HTTP request.
 type agentsCache struct {
-	mu      sync.Mutex
-	at      time.Time
-	agents  []api.CLIAgent
-	nowFunc func() time.Time
+	mu       sync.Mutex
+	at       time.Time
+	agents   []api.CLIAgent
+	fetching bool
+	nowFunc  func() time.Time
 }
 
 // get returns the cached catalog, refetching it once it is older than
 // agentsRefreshEvery. Fetching is best-effort: older daemons have no
-// /cli-agents, and a failure keeps the previous list.
+// /cli-agents, and a failure keeps the previous list. While one call fetches,
+// overlapping calls (a manual refresh during a tick) return the current list
+// instead of waiting for it.
 func (c *agentsCache) get(fetch func() (*api.CLIAgentCatalog, error)) []api.CLIAgent {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	now := time.Now
 	if c.nowFunc != nil {
 		now = c.nowFunc
 	}
-	if !c.at.IsZero() && now().Sub(c.at) < agentsRefreshEvery {
-		return c.agents
+	if c.fetching || (!c.at.IsZero() && now().Sub(c.at) < agentsRefreshEvery) {
+		agents := c.agents
+		c.mu.Unlock()
+		return agents
 	}
-	c.at = now()
-	if cat, err := fetch(); err == nil {
+	c.at, c.fetching = now(), true
+	c.mu.Unlock()
+
+	cat, err := fetch()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fetching = false
+	if err == nil {
 		c.agents = cat.Agents
 	}
 	return c.agents
@@ -1374,11 +1385,15 @@ func (d *Dashboard) buildConfigLines() []string {
 
 	// ── AI ──
 	section("AI")
-	flow := str("ai_flow")
-	if flow == "—" {
-		flow = "default (primary/fallback)"
+	// A daemon without review flows sends no ai_flow at all; only a daemon
+	// that has them runs the default flow when none is selected.
+	if _, hasFlows := d.config["ai_flow"]; hasFlows {
+		flow := str("ai_flow")
+		if flow == "—" {
+			flow = "default (primary/fallback)"
+		}
+		kv("Flow", flow)
 	}
-	kv("Flow", flow)
 	kv("Primary", str("ai_primary"))
 	kv("Fallback", str("ai_fallback"))
 	kv("Mode", str("review_mode"))

@@ -22,9 +22,10 @@ type TokenSavingConfig struct {
 	// CompactPrompt uses the terse built-in template, trims long comment
 	// bodies, skips bot chatter and caps the re-review context.
 	CompactPrompt *bool `toml:"compact_prompt,omitempty"`
-	// LimitExploration caps agent effort when the agent has no explicit
-	// setting: Claude gets --max-turns DefaultLimitedMaxTurns and --effort
-	// DefaultLimitedEffort.
+	// LimitExploration caps how long an agent with no explicit turn limit
+	// explores: Claude gets --max-turns DefaultLimitedMaxTurns, and a review
+	// that needs more turns is retried once without the cap. Effort is left
+	// as configured.
 	LimitExploration *bool `toml:"limit_exploration,omitempty"`
 }
 
@@ -47,11 +48,9 @@ var DefaultNoiseGlobs = []string{
 	"**/*.snap",
 }
 
-// Caps LimitExploration applies to an agent with no explicit setting.
-const (
-	DefaultLimitedMaxTurns = 20
-	DefaultLimitedEffort   = "medium"
-)
+// DefaultLimitedMaxTurns is the turn cap LimitExploration gives an agent
+// with no max_turns of its own.
+const DefaultLimitedMaxTurns = 20
 
 // maxNoiseGlobs and maxNoiseGlobLen bound the operator-supplied glob list.
 const (

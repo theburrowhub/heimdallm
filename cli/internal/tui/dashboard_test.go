@@ -768,3 +768,39 @@ func TestAgentsCacheThrottlesAndKeepsLastGood(t *testing.T) {
 		t.Errorf("no catalog yet = %v", got)
 	}
 }
+
+// A slow /cli-agents must not hold up an overlapping refresh: the second call
+// returns the current list while the first is still fetching.
+func TestAgentsCacheDoesNotBlockOverlappingCalls(t *testing.T) {
+	var c agentsCache
+	release := make(chan struct{})
+	started := make(chan struct{})
+	slow := func() (*api.CLIAgentCatalog, error) {
+		close(started)
+		<-release
+		return &api.CLIAgentCatalog{Agents: []api.CLIAgent{{ID: "claude"}}}, nil
+	}
+	done := make(chan []api.CLIAgent)
+	go func() { done <- c.get(slow) }()
+	<-started
+
+	returned := make(chan []api.CLIAgent)
+	go func() {
+		returned <- c.get(func() (*api.CLIAgentCatalog, error) {
+			t.Error("an overlapping call must not fetch again")
+			return nil, errors.New("unexpected")
+		})
+	}()
+	select {
+	case got := <-returned:
+		if got != nil {
+			t.Errorf("overlapping call = %v, want the (still empty) current list", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an overlapping call waited for the slow fetch")
+	}
+	close(release)
+	if got := <-done; len(got) != 1 {
+		t.Errorf("slow fetch = %v", got)
+	}
+}

@@ -8,23 +8,21 @@ import (
 
 func TestLimitedExploration(t *testing.T) {
 	cases := []struct {
-		cli        string
-		turns      int
-		effort     string
-		limit      bool
-		wantTurns  int
-		wantEffort string
-		wantSoft   bool
+		cli       string
+		turns     int
+		limit     bool
+		wantTurns int
+		wantSoft  bool
 	}{
-		{"claude", 0, "", true, config.DefaultLimitedMaxTurns, config.DefaultLimitedEffort, true},
-		{"claude", 5, "high", true, 5, "high", false},
-		{"claude", 0, "", false, 0, "", false},
-		{"codex", 0, "", true, 0, "", false},
+		{"claude", 0, true, config.DefaultLimitedMaxTurns, true},
+		{"claude", 5, true, 5, false},
+		{"claude", 0, false, 0, false},
+		{"codex", 0, true, 0, false},
 	}
 	for _, c := range cases {
-		turns, effort, soft := limitedExploration(c.cli, c.turns, c.effort, c.limit)
-		if turns != c.wantTurns || effort != c.wantEffort || soft != c.wantSoft {
-			t.Errorf("%+v → (%d, %q, %v)", c, turns, effort, soft)
+		turns, soft := limitedExploration(c.cli, c.turns, c.limit)
+		if turns != c.wantTurns || soft != c.wantSoft {
+			t.Errorf("%+v → (%d, %v)", c, turns, soft)
 		}
 	}
 }
