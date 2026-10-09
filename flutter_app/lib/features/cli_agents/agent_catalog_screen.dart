@@ -151,7 +151,9 @@ class AgentCatalogCard extends StatelessWidget {
               runSpacing: 6,
               children: [
                 AppBadge(
-                  label: agent.installed
+                  label: agent.isProvider
+                      ? (agent.installed ? 'API key set' : 'No API key')
+                      : agent.installed
                       ? (agent.version.isEmpty
                             ? 'Installed'
                             : 'Installed ${agent.version}')
@@ -162,9 +164,16 @@ class AgentCatalogCard extends StatelessWidget {
                       : AppColors.surfaceRaised.resolve(context),
                   border: agent.installed ? ok.withValues(alpha: 0.35) : border,
                 ),
-                if (agent.configured)
+                if (agent.configured && !agent.isProvider)
                   AppBadge(
                     label: 'Signed in / configured',
+                    foreground: muted,
+                    background: AppColors.surfaceRaised.resolve(context),
+                    border: border,
+                  ),
+                if (agent.isProvider)
+                  AppBadge(
+                    label: 'Runs in Heimdallm',
                     foreground: muted,
                     background: AppColors.surfaceRaised.resolve(context),
                     border: border,
@@ -220,7 +229,11 @@ class AgentConfigScreen extends ConsumerWidget {
             discoveredModels: {
               if (info != null && info.models.isNotEmpty) agentId: info.models,
             },
-            header: info == null ? null : AgentDetectionCard(agent: info),
+            header: info == null
+                ? null
+                : info.isProvider
+                ? ProviderKeyCard(agent: info)
+                : AgentDetectionCard(agent: info),
           ),
         ),
       ],
@@ -288,6 +301,173 @@ class AgentDetectionCard extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// Provider account usage (OpenRouter GET /key), refreshed with the page.
+final agentUsageProvider = FutureProvider.autoDispose
+    .family<Map<String, dynamic>, String>((ref, agentId) {
+      return ref.watch(apiClientProvider).fetchAgentUsage(agentId);
+    });
+
+/// API key management for an in-process provider. The key is write-only: the
+/// daemon only ever reports whether one is set and where it comes from.
+class ProviderKeyCard extends ConsumerStatefulWidget {
+  final CliAgentInfo agent;
+
+  const ProviderKeyCard({super.key, required this.agent});
+
+  @override
+  ConsumerState<ProviderKeyCard> createState() => _ProviderKeyCardState();
+}
+
+class _ProviderKeyCardState extends ConsumerState<ProviderKeyCard> {
+  final _keyCtrl = TextEditingController();
+  AgentKeyStatus? _status;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // After the first frame: a failure shows a toast, which must not happen
+    // while the tree is still building.
+    Future.microtask(_load);
+  }
+
+  @override
+  void dispose() {
+    _keyCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final s = await ref.read(apiClientProvider).fetchAgentKey(widget.agent.id);
+      if (mounted) setState(() => _status = s);
+    } catch (e) {
+      if (mounted) showToast(context, 'Error: $e', isError: true);
+    }
+  }
+
+  Future<void> _run(Future<AgentKeyStatus> Function() action, String done) async {
+    setState(() => _busy = true);
+    try {
+      final s = await action();
+      if (!mounted) return;
+      _keyCtrl.clear();
+      setState(() => _status = s);
+      ref.invalidate(cliAgentCatalogProvider);
+      ref.invalidate(agentUsageProvider(widget.agent.id));
+      showToast(context, done);
+    } catch (e) {
+      if (mounted) showToast(context, 'Error: $e', isError: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final api = ref.read(apiClientProvider);
+    final id = widget.agent.id;
+    final status = _status;
+    final sourceText = switch (status?.source) {
+      'stored' => 'Key saved in Heimdallm',
+      'env' => 'Key from the daemon environment (OPENROUTER_API_KEY)',
+      _ => 'No API key',
+    };
+    return AppSurface(
+      elevation: AppSurfaceElevation.canvas,
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                status?.configured == true ? Icons.key : Icons.key_off,
+                size: 18,
+              ),
+              const SizedBox(width: 8),
+              Expanded(child: Text(status == null ? 'Checking…' : sourceText)),
+              if (status?.source == 'stored')
+                TextButton(
+                  key: const ValueKey('provider-key-remove'),
+                  onPressed: _busy
+                      ? null
+                      : () => _run(() => api.deleteAgentKey(id), 'Key removed'),
+                  child: const Text('Remove'),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  key: const ValueKey('provider-key-field'),
+                  controller: _keyCtrl,
+                  obscureText: true,
+                  enableSuggestions: false,
+                  autocorrect: false,
+                  decoration: InputDecoration(
+                    labelText: status?.configured == true
+                        ? 'Replace API key'
+                        : 'API key',
+                    hintText: 'sk-or-…',
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(
+                key: const ValueKey('provider-key-save'),
+                onPressed: _busy
+                    ? null
+                    : () {
+                        final key = _keyCtrl.text.trim();
+                        if (key.isEmpty) return;
+                        _run(() => api.setAgentKey(id, key), 'Key saved');
+                      },
+                child: const Text('Save key'),
+              ),
+            ],
+          ),
+          if (status?.configured == true) ...[
+            const SizedBox(height: 10),
+            _ProviderUsage(agentId: id),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ProviderUsage extends ConsumerWidget {
+  final String agentId;
+
+  const _ProviderUsage({required this.agentId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(agentUsageProvider(agentId));
+    return async.when(
+      loading: () => const LinearProgressIndicator(minHeight: 2),
+      error: (e, _) => AppText.muted('Usage unavailable: $e'),
+      data: (u) {
+        String money(Object? v) =>
+            v is num ? '\$${v.toStringAsFixed(2)}' : 'no limit';
+        final parts = [
+          'Spent ${money(u['usage'])}',
+          if (u['usage_daily'] is num) 'today ${money(u['usage_daily'])}',
+          'limit ${money(u['limit'])}',
+          if (u['limit_remaining'] is num)
+            '${money(u['limit_remaining'])} left',
+        ];
+        return AppText.muted(parts.join(' · '));
+      },
     );
   }
 }

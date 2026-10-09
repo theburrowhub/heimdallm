@@ -150,17 +150,89 @@ type Executor struct {
 	// and the process being attached to its already-registered execution. It is
 	// immutable after construction in production.
 	startProcess func(*exec.Cmd) (*procgroup.Process, error)
+
+	// httpAgents are the in-process agents, keyed by agent id.
+	httpAgentsMu sync.RWMutex
+	httpAgents   map[string]HTTPAgent
+	// inFlightHTTP tracks running HTTP agent runs so TerminateAll reaches
+	// them even without an execution ID.
+	inFlightHTTP map[*trackedExecution]struct{}
 }
 
 type trackedExecution struct {
 	process           *procgroup.Process
 	executionID       string
 	manuallyCancelled bool
+	// cancel stops an in-process (HTTP) agent run; nil for subprocesses.
+	cancel context.CancelFunc
 }
 
 // New creates a new Executor.
 func New() *Executor {
 	return &Executor{startProcess: procgroup.Start}
+}
+
+// RegisterHTTPAgent makes an in-process agent available under name, which
+// must be one of the http-only agent ids.
+func (e *Executor) RegisterHTTPAgent(name string, agent HTTPAgent) error {
+	if !httpOnlyCLIs[name] {
+		return fmt.Errorf("executor: %q is not an in-process agent", name)
+	}
+	e.httpAgentsMu.Lock()
+	defer e.httpAgentsMu.Unlock()
+	if e.httpAgents == nil {
+		e.httpAgents = make(map[string]HTTPAgent)
+	}
+	e.httpAgents[name] = agent
+	return nil
+}
+
+func (e *Executor) httpAgent(name string) HTTPAgent {
+	e.httpAgentsMu.RLock()
+	defer e.httpAgentsMu.RUnlock()
+	return e.httpAgents[name]
+}
+
+// executeHTTP runs an in-process agent with the same timeout and manual
+// cancellation contract as a subprocess run.
+func (e *Executor) executeHTTP(agent HTTPAgent, cli, prompt string, opts ExecOptions) (*ReviewResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), effectiveExecutionTimeout(opts.Timeout))
+	defer cancel()
+	tracked := e.registerExecution(opts.ExecutionID)
+	e.groupsMu.Lock()
+	tracked.cancel = cancel
+	if e.inFlightHTTP == nil {
+		e.inFlightHTTP = make(map[*trackedExecution]struct{})
+	}
+	e.inFlightHTTP[tracked] = struct{}{}
+	cancelledEarly := tracked.manuallyCancelled
+	e.groupsMu.Unlock()
+	defer func() {
+		e.groupsMu.Lock()
+		delete(e.inFlightHTTP, tracked)
+		e.groupsMu.Unlock()
+		e.untrackExecution(tracked)
+	}()
+	if cancelledEarly {
+		return nil, fmt.Errorf("executor: run %s: %w", cli, ErrExecutionCancelled)
+	}
+
+	answer, usage, err := agent.Review(ctx, prompt, opts)
+	if e.executionCancelled(tracked) {
+		return nil, fmt.Errorf("executor: run %s: %w", cli, ErrExecutionCancelled)
+	}
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("executor: %s timed out after %s: %w", cli, effectiveExecutionTimeout(opts.Timeout), err)
+		}
+		return nil, fmt.Errorf("executor: %s: %w", cli, err)
+	}
+	result, err := parseResult([]byte(answer))
+	if err != nil {
+		return nil, err
+	}
+	result.Usage = usage
+	return result, nil
 }
 
 // registerExecution makes an execution cancellable before procgroup.Start.
@@ -256,6 +328,9 @@ func (e *Executor) TerminateExecution(executionID string) (bool, error) {
 	for tracked := range correlated {
 		if tracked.process == nil {
 			tracked.manuallyCancelled = true
+			if tracked.cancel != nil {
+				tracked.cancel()
+			}
 			active = true
 			continue
 		}
@@ -283,6 +358,14 @@ func (e *Executor) TerminateAll() {
 	groups := make([]*procgroup.Process, 0, len(e.inFlightGroups))
 	for _, tracked := range e.inFlightGroups {
 		groups = append(groups, tracked.process)
+	}
+	// In-process agents stop by cancelling their request context, reported
+	// as ErrExecutionCancelled like TerminateExecution.
+	for tracked := range e.inFlightHTTP {
+		tracked.manuallyCancelled = true
+		if tracked.cancel != nil {
+			tracked.cancel()
+		}
 	}
 	e.groupsMu.Unlock()
 
@@ -314,12 +397,33 @@ func (e *Executor) TerminateAll() {
 // SECURITY: Detect validates each name against the CLI allowlist before
 // resolving it, preventing shell injection (issue #2).
 func (e *Executor) Detect(primary, fallback string) (string, error) {
+	return e.detect(primary, fallback, false)
+}
+
+// DetectRaw is Detect for free-form runs (ExecuteRaw, e.g. merge-conflict
+// resolution): review-only in-process agents are skipped, so a configured
+// openrouter primary falls through to the fallback CLI instead of being
+// picked and then refused with ErrReviewOnlyAgent.
+func (e *Executor) DetectRaw(primary, fallback string) (string, error) {
+	return e.detect(primary, fallback, true)
+}
+
+func (e *Executor) detect(primary, fallback string, raw bool) (string, error) {
 	for _, name := range []string{primary, fallback} {
 		if name == "" {
 			continue
 		}
 		if err := validateCLIName(name); err != nil {
 			return "", err // reject unknown / potentially-injected names early
+		}
+		if httpOnlyCLIs[name] {
+			if raw {
+				continue
+			}
+			if agent := e.httpAgent(name); agent != nil && agent.Configured() {
+				return name, nil
+			}
+			continue
 		}
 		if resolveCLIPath(name) != "" {
 			return name, nil
@@ -338,7 +442,26 @@ var allowedCLIs = map[string]struct{}{
 	"opencode":   {},
 	"copilot":    {},
 	"cursor_cli": {},
+	"openrouter": {},
 }
+
+// httpOnlyCLIs are agents implemented in-process over HTTP rather than as a
+// CLI subprocess. They have no executable to resolve: they are available
+// when registered with RegisterHTTPAgent and configured.
+var httpOnlyCLIs = map[string]bool{"openrouter": true}
+
+// HTTPAgent is a review agent the daemon runs in-process (an API client plus
+// its own harness) instead of spawning a CLI.
+type HTTPAgent interface {
+	// Configured reports whether the agent can run (e.g. has an API key).
+	Configured() bool
+	// Review runs one review and returns the model's answer and its usage.
+	Review(ctx context.Context, prompt string, opts ExecOptions) (string, *Usage, error)
+}
+
+// ErrReviewOnlyAgent is returned when an HTTP agent is asked for a free-form
+// run (conflict resolution): it only reviews, and never writes code.
+var ErrReviewOnlyAgent = errors.New("executor: this agent only runs reviews")
 
 // cliBinaries maps an agent id to the executable names that implement it,
 // tried in order. Agents not listed run a binary named like their id. The
@@ -913,6 +1036,8 @@ var allowedExtraFlagsByCLI = map[string]map[string]extraFlagArity{
 	// Cursor's tuning lives in the model string ('model[effort=high]'); every
 	// other option changes trust, workspace or permissions.
 	"cursor_cli": {},
+	// The OpenRouter harness takes no command-line flags at all.
+	"openrouter": {},
 }
 
 // dangerousFlagValues are flag values that must never appear regardless of position.
@@ -1222,7 +1347,7 @@ func resolveCLIPath(name string) string {
 // ResolveCLIPath reports where an agent's executable is, or "" when it is not
 // installed. name must be a supported agent id.
 func ResolveCLIPath(name string) string {
-	if ValidateCLIName(name) != nil {
+	if ValidateCLIName(name) != nil || httpOnlyCLIs[name] {
 		return ""
 	}
 	return resolveCLIPath(name)
@@ -1454,6 +1579,16 @@ func pathWithin(base, target string) bool {
 // none — the merge-conflict resolver only wants the side effects) should use
 // ExecuteRaw instead of re-implementing the subprocess plumbing.
 func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult, error) {
+	if httpOnlyCLIs[cli] {
+		if err := validateExecutionRequest(cli, opts); err != nil {
+			return nil, err
+		}
+		agent := e.httpAgent(cli)
+		if agent == nil || !agent.Configured() {
+			return nil, fmt.Errorf("executor: %s is not configured", cli)
+		}
+		return e.executeHTTP(agent, cli, prompt, opts)
+	}
 	raw, err := e.ExecuteRaw(cli, prompt, opts)
 	if err != nil {
 		return nil, err
@@ -1493,6 +1628,9 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	// and future call paths must not be able to bypass the execution policy.
 	if err := validateExecutionRequest(cli, opts); err != nil {
 		return nil, err
+	}
+	if httpOnlyCLIs[cli] {
+		return nil, fmt.Errorf("executor: %s: %w", cli, ErrReviewOnlyAgent)
 	}
 
 	timeout := effectiveExecutionTimeout(opts.Timeout)

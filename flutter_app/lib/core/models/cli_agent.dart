@@ -38,6 +38,10 @@ class CliAgentInfo {
 
   bool get isIde => kind == 'ide';
 
+  /// An API the daemon calls in-process; it needs a key instead of an
+  /// installed binary.
+  bool get isProvider => kind == 'provider';
+
   factory CliAgentInfo.fromJson(Map<String, dynamic> json) {
     final id = (json['id'] as String?) ?? '';
     return CliAgentInfo(
@@ -81,4 +85,19 @@ class CliAgentCatalog {
             .toList(),
         scannedAt: DateTime.tryParse((json['scanned_at'] as String?) ?? ''),
       );
+}
+
+/// Whether an in-process agent has an API key (GET /cli-agents/{id}/key).
+class AgentKeyStatus {
+  final bool configured;
+
+  /// 'stored' (set from the app), 'env' (daemon environment) or ''.
+  final String source;
+
+  const AgentKeyStatus({required this.configured, this.source = ''});
+
+  factory AgentKeyStatus.fromJson(Map<String, dynamic> json) => AgentKeyStatus(
+    configured: (json['configured'] as bool?) ?? false,
+    source: (json['source'] as String?) ?? '',
+  );
 }

@@ -43,13 +43,7 @@ func printAgents(w io.Writer, cat *api.CLIAgentCatalog) {
 	fmt.Fprintln(w, "AI Agents")
 	fmt.Fprintln(w, "═════════")
 	for _, a := range cat.Agents {
-		state := "not installed"
-		if a.Installed {
-			state = "installed"
-			if a.Version != "" {
-				state += " " + api.DisplayText(a.Version, 40)
-			}
-		}
+		state := a.StateLabel()
 		notes := ""
 		if a.Configured {
 			notes = "configured"

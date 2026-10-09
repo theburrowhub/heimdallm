@@ -711,6 +711,66 @@ class ApiClient {
     );
   }
 
+  /// Whether an in-process agent (OpenRouter) has an API key, and where it
+  /// comes from ('env' or 'stored'). The key itself is never returned.
+  Future<AgentKeyStatus> fetchAgentKey(String agentId) async {
+    final resp = await _client.get(
+      _uri('/cli-agents/${Uri.encodeComponent(agentId)}/key'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('GET agent key failed: ${resp.statusCode}');
+    }
+    return AgentKeyStatus.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  /// Stores an API key for an in-process agent.
+  Future<AgentKeyStatus> setAgentKey(String agentId, String apiKey) async {
+    final resp = await _client.put(
+      _uri('/cli-agents/${Uri.encodeComponent(agentId)}/key'),
+      headers: await _authHeaders(),
+      body: jsonEncode({'api_key': apiKey}),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(_errorMessage(resp.body, 'Could not save the key'));
+    }
+    return AgentKeyStatus.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  /// Removes an in-process agent's stored API key.
+  Future<AgentKeyStatus> deleteAgentKey(String agentId) async {
+    final resp = await _client.delete(
+      _uri('/cli-agents/${Uri.encodeComponent(agentId)}/key'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('DELETE agent key failed: ${resp.statusCode}');
+    }
+    return AgentKeyStatus.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  /// The provider account's spend and limit (OpenRouter GET /key).
+  Future<Map<String, dynamic>> fetchAgentUsage(String agentId) async {
+    final resp = await _client.get(
+      _uri('/cli-agents/${Uri.encodeComponent(agentId)}/usage'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(_errorMessage(resp.body, 'Could not read usage'));
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  static String _errorMessage(String body, String fallback) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['error'] is String) {
+        return decoded['error'] as String;
+      }
+    } catch (_) {}
+    return fallback;
+  }
+
   /// Live usage of every configured review budget. Empty when no
   /// review_limits are set anywhere.
   Future<List<ReviewLimitStatus>> fetchReviewLimits() async {

@@ -46,3 +46,18 @@ func TestCLIAgentsClient(t *testing.T) {
 		t.Error("503 must error on rescan")
 	}
 }
+
+func TestCLIAgentStateLabel(t *testing.T) {
+	cases := map[string]api.CLIAgent{
+		"API key set":     {Kind: "provider", Installed: true},
+		"no API key":      {Kind: "provider"},
+		"not installed":   {Kind: "agent"},
+		"installed":       {Kind: "agent", Installed: true},
+		"installed 1.0.0": {Kind: "agent", Installed: true, Version: "1.0.0"},
+	}
+	for want, a := range cases {
+		if got := a.StateLabel(); got != want {
+			t.Errorf("%+v → %q, want %q", a, got, want)
+		}
+	}
+}

@@ -96,6 +96,8 @@ type Server struct {
 	meFn         func() (string, error)
 	// agentCatalog serves GET /cli-agents. Nil until main wires it.
 	agentCatalog *agentcatalog.Store
+	// apiKeyProviders manage in-process agents' API keys, keyed by agent id.
+	apiKeyProviders map[string]APIKeyProvider
 	// reviewLimitsFn returns live usage of every configured review budget
 	// for GET /review-limits. Nil until main wires it.
 	reviewLimitsFn func() (any, error)
@@ -412,6 +414,25 @@ func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
 // SetRateLimitFn wires the live GitHub rate-limit lookup for GET /github/rate_limit.
 func (srv *Server) SetRateLimitFn(fn func() (any, error)) { srv.rateLimitFn = fn }
 
+// APIKeyProvider manages the API key of an in-process agent (OpenRouter).
+// Implementations must never return or log the key.
+type APIKeyProvider interface {
+	SetKey(key string) error
+	ClearKey() error
+	// KeySource is "" (none), "env" or "stored".
+	KeySource() string
+	// Usage reports the account's spend and limit.
+	Usage(ctx context.Context) (any, error)
+}
+
+// SetAPIKeyProvider wires /cli-agents/{id}/key and /cli-agents/{id}/usage.
+func (srv *Server) SetAPIKeyProvider(id string, p APIKeyProvider) {
+	if srv.apiKeyProviders == nil {
+		srv.apiKeyProviders = make(map[string]APIKeyProvider)
+	}
+	srv.apiKeyProviders[id] = p
+}
+
 // SetAgentCatalog wires the installed-agents discovery for /cli-agents.
 func (srv *Server) SetAgentCatalog(c *agentcatalog.Store) { srv.agentCatalog = c }
 
@@ -688,6 +709,10 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/cli-agents", srv.handleListCLIAgents)
 	r.Post("/cli-agents/rescan", srv.handleRescanCLIAgents)
 	r.Get("/cli-agents/{id}", srv.handleGetCLIAgent)
+	r.Get("/cli-agents/{id}/key", srv.handleGetAgentKey)
+	r.Put("/cli-agents/{id}/key", srv.handlePutAgentKey)
+	r.Delete("/cli-agents/{id}/key", srv.handleDeleteAgentKey)
+	r.Get("/cli-agents/{id}/usage", srv.handleAgentUsage)
 	r.Get("/agents", srv.handleListAgents)
 	r.Post("/agents", srv.handleUpsertAgent)
 	r.Delete("/agents/{id}", srv.handleDeleteAgent)
@@ -2362,6 +2387,93 @@ func (srv *Server) handleGetCLIAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, agent)
+}
+
+func (srv *Server) apiKeyProvider(w http.ResponseWriter, r *http.Request) (APIKeyProvider, bool) {
+	p, ok := srv.apiKeyProviders[chi.URLParam(r, "id")]
+	if !ok {
+		http.Error(w, `{"error":"this agent has no API key"}`, http.StatusNotFound)
+	}
+	return p, ok
+}
+
+// agentKeyStatus is the only key information the API ever returns.
+type agentKeyStatus struct {
+	Configured bool   `json:"configured"`
+	Source     string `json:"source"`
+}
+
+func (srv *Server) refreshCatalogAsync() {
+	if srv.agentCatalog == nil {
+		return
+	}
+	go srv.agentCatalog.Refresh(context.Background())
+}
+
+// handleGetAgentKey reports whether an API key is set and where it comes
+// from. The key itself is never returned.
+func (srv *Server) handleGetAgentKey(w http.ResponseWriter, r *http.Request) {
+	p, ok := srv.apiKeyProvider(w, r)
+	if !ok {
+		return
+	}
+	src := p.KeySource()
+	writeJSON(w, http.StatusOK, agentKeyStatus{Configured: src != "", Source: src})
+}
+
+// handlePutAgentKey stores an API key. Body: {"api_key": "..."}.
+func (srv *Server) handlePutAgentKey(w http.ResponseWriter, r *http.Request) {
+	p, ok := srv.apiKeyProvider(w, r)
+	if !ok {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	var body struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if err := p.SetKey(body.APIKey); err != nil {
+		// Validation errors describe the shape, never echo the value.
+		slog.Warn("agent key: store failed", "agent", chi.URLParam(r, "id"), "err", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	srv.refreshCatalogAsync()
+	writeJSON(w, http.StatusOK, agentKeyStatus{Configured: true, Source: p.KeySource()})
+}
+
+// handleDeleteAgentKey removes the stored key.
+func (srv *Server) handleDeleteAgentKey(w http.ResponseWriter, r *http.Request) {
+	p, ok := srv.apiKeyProvider(w, r)
+	if !ok {
+		return
+	}
+	if err := p.ClearKey(); err != nil {
+		slog.Error("agent key: clear failed", "agent", chi.URLParam(r, "id"), "err", err)
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		return
+	}
+	srv.refreshCatalogAsync()
+	src := p.KeySource()
+	writeJSON(w, http.StatusOK, agentKeyStatus{Configured: src != "", Source: src})
+}
+
+// handleAgentUsage returns the provider account's spend and limit.
+func (srv *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request) {
+	p, ok := srv.apiKeyProvider(w, r)
+	if !ok {
+		return
+	}
+	usage, err := p.Usage(r.Context())
+	if err != nil {
+		slog.Warn("agent usage: lookup failed", "agent", chi.URLParam(r, "id"), "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not read usage from the provider"})
+		return
+	}
+	writeJSON(w, http.StatusOK, usage)
 }
 
 // handleReviewLimits returns current usage of every configured review budget

@@ -32,7 +32,9 @@ type GitOps interface {
 
 // CLIExecutor runs the configured AI agent.
 type CLIExecutor interface {
-	Detect(primary, fallback string) (string, error)
+	// DetectRaw picks an agent that can run free-form prompts (not a
+	// review-only in-process agent).
+	DetectRaw(primary, fallback string) (string, error)
 	ExecuteRaw(cli, prompt string, opts executor.ExecOptions) ([]byte, error)
 }
 
@@ -122,7 +124,7 @@ func (r *ConflictResolver) Resolve(ctx context.Context, req ConflictRequest) (Co
 		return ConflictResult{}, fmt.Errorf("mergetrack: conflict resolution requires head and base refs")
 	}
 
-	cli, err := r.exec.Detect(req.CLIPrimary, req.CLIFallback)
+	cli, err := r.exec.DetectRaw(req.CLIPrimary, req.CLIFallback)
 	if err != nil {
 		return ConflictResult{}, fmt.Errorf("mergetrack: detect CLI: %w", err)
 	}

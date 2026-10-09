@@ -18,6 +18,7 @@ const reviewAgentIds = [
   'copilot',
   'cursor_cli',
   'opencode',
+  'openrouter',
 ];
 
 /// Per-agent CLI execution settings.
@@ -128,6 +129,13 @@ class CLIAgentConfig {
       'gemini-2.5-pro',
       'gemini-2.5-flash',
       'gemini-2.5-flash-lite',
+    ],
+    // Used until the daemon reports the account's tool-capable models.
+    'openrouter': [
+      'anthropic/claude-sonnet-4.5',
+      'anthropic/claude-opus-4.1',
+      'openai/gpt-5',
+      'google/gemini-2.5-pro',
     ],
     'codex': [
       'gpt-5.6-sol',

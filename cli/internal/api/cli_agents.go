@@ -52,3 +52,21 @@ func (c *Client) RescanCLIAgents() (*CLIAgentCatalog, error) {
 	}
 	return decodeCatalog(data)
 }
+
+// StateLabel is how the agent's detection reads in a list: installed with
+// its version, or whether a provider has an API key.
+func (a CLIAgent) StateLabel() string {
+	if a.Kind == "provider" {
+		if a.Installed {
+			return "API key set"
+		}
+		return "no API key"
+	}
+	if !a.Installed {
+		return "not installed"
+	}
+	if a.Version != "" {
+		return "installed " + DisplayText(a.Version, 40)
+	}
+	return "installed"
+}

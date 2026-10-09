@@ -37,6 +37,48 @@ void main() {
       expect(client.rescanCliAgents(), throwsA(isA<ApiException>()));
     });
 
+    test('agent key and usage endpoints', () async {
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+        token: 'abc-123',
+      );
+      var status = 200;
+      final seen = <String>[];
+      final client = ApiClient(
+        httpClient: MockClient((request) async {
+          seen.add('${request.method} ${request.url.path} ${request.body}');
+          if (status != 200) {
+            return http.Response('{"error":"openrouter: API key is empty"}', status);
+          }
+          if (request.url.path.endsWith('/usage')) {
+            return http.Response('{"usage":1.5}', 200);
+          }
+          return http.Response('{"configured":true,"source":"stored"}', 200);
+        }),
+        platform: platform,
+      );
+      expect((await client.fetchAgentKey('openrouter')).source, 'stored');
+      expect((await client.setAgentKey('openrouter', 'sk-or-x')).configured, isTrue);
+      expect((await client.deleteAgentKey('openrouter')).configured, isTrue);
+      expect((await client.fetchAgentUsage('openrouter'))['usage'], 1.5);
+      expect(seen[1], 'PUT /cli-agents/openrouter/key {"api_key":"sk-or-x"}');
+      status = 400;
+      await expectLater(
+        client.setAgentKey('openrouter', ''),
+        throwsA(
+          isA<ApiException>().having(
+            (e) => e.toString(),
+            'message',
+            contains('API key is empty'),
+          ),
+        ),
+      );
+      expect(client.fetchAgentKey('openrouter'), throwsA(isA<ApiException>()));
+      expect(client.deleteAgentKey('openrouter'), throwsA(isA<ApiException>()));
+      status = 502;
+      expect(client.fetchAgentUsage('openrouter'), throwsA(isA<ApiException>()));
+    });
+
     test('fetchReviewLimits parses budgets and surfaces errors', () async {
       final platform = FakePlatformServices(
         apiBaseUrl: 'http://127.0.0.1:7842',

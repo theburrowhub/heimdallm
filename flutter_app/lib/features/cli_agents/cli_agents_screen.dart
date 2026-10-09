@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/config_model.dart';
 import '../../shared/design_system/components/components.dart';
@@ -502,9 +503,33 @@ class _AgentSectionState extends State<_AgentSection> {
             ),
             const SizedBox(height: 12),
           ],
-          if (name == 'copilot') ...[
+          if (name == 'copilot' || name == 'openrouter') ...[
+            if (name == 'openrouter') ...[
+              TextFormField(
+                key: const ValueKey('openrouter-tool-rounds'),
+                initialValue: s.maxTurns > 0 ? '${s.maxTurns}' : '',
+                decoration: const InputDecoration(
+                  labelText: 'Max tool rounds',
+                  hintText: '12',
+                  helperText:
+                      'How many rounds of repository reads (files, grep) the '
+                      'reviewer may do before answering. 40 at most.',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                onChanged: (v) {
+                  setState(() => s.maxTurns = int.tryParse(v) ?? 0);
+                  widget.onChanged(s);
+                },
+              ),
+              const SizedBox(height: 12),
+            ],
             _tipDropdown<String>(
-              label: '--reasoning-effort',
+              label: name == 'openrouter'
+                  ? 'Reasoning effort'
+                  : '--reasoning-effort',
               value: s.effort.isEmpty ? null : s.effort,
               tooltip:
                   'How hard Copilot reasons before answering. Higher effort '
@@ -877,6 +902,8 @@ class _AgentSectionState extends State<_AgentSection> {
         return '🖱️';
       case 'opencode':
         return '⬛';
+      case 'openrouter':
+        return '🔀';
       default:
         return '🤖';
     }

@@ -20,8 +20,9 @@ import (
 
 // Kind classifies a catalog entry.
 const (
-	KindAgent = "agent" // a CLI that can run reviews
-	KindIDE   = "ide"   // detected for information; reviews go through another entry
+	KindAgent    = "agent"    // a CLI that can run reviews
+	KindIDE      = "ide"      // detected for information; reviews go through another entry
+	KindProvider = "provider" // an API the daemon calls in-process (needs a key)
 )
 
 // Entry is the static description of one supported agent.
@@ -92,6 +93,11 @@ var Catalog = []Entry{
 		parseModels: parseCopilotModels,
 	},
 	{
+		ID: "openrouter", Name: "OpenRouter", Kind: KindProvider, ConfigAgent: "openrouter",
+		Homepage:    "https://openrouter.ai",
+		InstallHint: "Create a key at https://openrouter.ai/keys and add it on this page, or set OPENROUTER_API_KEY for the daemon.",
+	},
+	{
 		ID: "opencode", Name: "OpenCode", Kind: KindAgent, ConfigAgent: "opencode",
 		Roots:       []string{".config/opencode", ".local/share/opencode"},
 		Homepage:    "https://opencode.ai",
@@ -129,6 +135,9 @@ type Detector struct {
 	Getenv   func(key string) string
 	// Run executes path with args and returns its combined output.
 	Run func(ctx context.Context, path string, args ...string) (string, error)
+	// Provider reports an in-process provider's state (key configured and
+	// the models it offers). Nil leaves providers undetected.
+	Provider func(ctx context.Context, id string) (configured bool, models []string)
 }
 
 // RefreshInterval is how often the daemon rescans the catalog in the
@@ -214,7 +223,17 @@ func (d Detector) scanOne(ctx context.Context, e Entry) Agent {
 	a := Agent{
 		ID: e.ID, Name: e.Name, Kind: e.Kind, ConfigAgent: e.ConfigAgent,
 		Homepage: e.Homepage, InstallHint: e.InstallHint,
-		Executable: e.Kind == KindAgent,
+		Executable: e.Kind != KindIDE,
+	}
+	if e.Kind == KindProvider {
+		if d.Provider != nil {
+			configured, models := d.Provider(ctx, e.ID)
+			a.Installed, a.Configured = configured, configured
+			if configured {
+				a.Models = capModels(models)
+			}
+		}
+		return a
 	}
 	path := d.binaryPath(e)
 	if path != "" {
