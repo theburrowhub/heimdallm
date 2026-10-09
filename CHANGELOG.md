@@ -10,6 +10,23 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.10.3](https://github.com/theburrowhub/heimdallm/compare/v0.10.2...v0.10.3) (2026-10-09)
+
+
+### Features
+
+* agent autodiscovery, Copilot and Cursor CLI reviews, agent catalog ([#841](https://github.com/theburrowhub/heimdallm/issues/841)) ([a508130](https://github.com/theburrowhub/heimdallm/commit/a50813035da98c9312e8217fda2e085bc8209e77))
+* OpenRouter review agent with Heimdallm's own review harness ([#843](https://github.com/theburrowhub/heimdallm/issues/843)) ([1b75bb9](https://github.com/theburrowhub/heimdallm/commit/1b75bb964a7b36065eccaf1436da3659a2965741))
+* review flows that pick the agent by schedule and remaining quota ([#845](https://github.com/theburrowhub/heimdallm/issues/845)) ([77f9747](https://github.com/theburrowhub/heimdallm/commit/77f97470134da46e8a3d8c1cd42f7afdfdcbfdb3))
+* review limits per minute, hour and day ([#837](https://github.com/theburrowhub/heimdallm/issues/837)) ([8539924](https://github.com/theburrowhub/heimdallm/commit/8539924389e6815eeb765b24a9aa0c2d31486a2d))
+* token-saving measures and per-review token usage ([#839](https://github.com/theburrowhub/heimdallm/issues/839)) ([8128839](https://github.com/theburrowhub/heimdallm/commit/81288397a3bf77542c2f3504f3e4ed14ed41ea65))
+
+
+### Bug Fixes
+
+* resolve the residual review findings from [#849](https://github.com/theburrowhub/heimdallm/issues/849) ([#850](https://github.com/theburrowhub/heimdallm/issues/850)) ([227b23d](https://github.com/theburrowhub/heimdallm/commit/227b23d0d82210ebd5aeb077eab5a69e3a07f8fb))
+* stop re-evaluating PRs that have no re-review request ([#835](https://github.com/theburrowhub/heimdallm/issues/835)) ([b0a4733](https://github.com/theburrowhub/heimdallm/commit/b0a47336426101f4cd909cf41b9e32b58a3dfa7b)), closes [#834](https://github.com/theburrowhub/heimdallm/issues/834)
+
 ## [0.10.2](https://github.com/theburrowhub/heimdallm/compare/v0.10.1...v0.10.2) (2026-10-06)
 
 
