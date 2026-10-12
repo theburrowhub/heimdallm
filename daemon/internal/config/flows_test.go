@@ -115,14 +115,14 @@ func TestValidateFlows(t *testing.T) {
 	for i := 0; i <= maxRulesPerFlow; i++ {
 		many.Rules[strings.Repeat("1", 1)+string(rune('a'+i%26))+string(rune('a'+i/26))] = FlowRule{Agent: "claude"}
 	}
-	if ValidateFlow("x", many) == nil {
+	if validateLegacyRules("x", many) == nil {
 		t.Error("too many rules accepted")
 	}
 	conds := FlowRule{Agent: "claude", Schedule: map[string]ScheduleCondition{}}
 	for i := 0; i <= maxConditionsPerRu; i++ {
 		conds.Schedule[string(rune('a'+i))] = ScheduleCondition{From: "01:00", To: "02:00"}
 	}
-	if ValidateFlow("x", FlowConfig{Rules: map[string]FlowRule{"1": conds}}) == nil {
+	if validateLegacyRules("x", FlowConfig{Rules: map[string]FlowRule{"1": conds}}) == nil {
 		t.Error("too many conditions accepted")
 	}
 	c := &Config{AI: AIConfig{Flows: map[string]FlowConfig{}}}
