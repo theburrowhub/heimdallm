@@ -497,11 +497,6 @@ func (c *Config) validateFlows() error {
 				return err
 			}
 		}
-		if len(f.Rules) > 0 {
-			if err := validateLegacyRules(id, f); err != nil {
-				return err
-			}
-		}
 		if err := ValidateFlow(id, f); err != nil {
 			return err
 		}

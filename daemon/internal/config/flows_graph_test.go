@@ -34,20 +34,24 @@ func TestCheckFlowRejects(t *testing.T) {
 		node   string
 		want   string
 	}{
-		"missing start":     {func(f *FlowConfig) { f.Start = "zz" }, "", "start"},
-		"empty start":       {func(f *FlowConfig) { f.Start = "" }, "", "start"},
-		"dangling yes":      {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Yes = "nope"; f.Nodes["c1"] = n }, "c1", "nope"},
-		"dangling next":     {func(f *FlowConfig) { n := f.Nodes["a1"]; n.Next = "nope"; f.Nodes["a1"] = n }, "a1", "nope"},
-		"cycle":             {func(f *FlowConfig) { n := f.Nodes["a2"]; n.Next = "c1"; f.Nodes["a2"] = n }, "", "cycle"},
-		"self loop":         {func(f *FlowConfig) { n := f.Nodes["a2"]; n.Next = "a2"; f.Nodes["a2"] = n }, "a2", "cycle"},
-		"bad type":          {func(f *FlowConfig) { n := f.Nodes["a2"]; n.Type = "tool"; f.Nodes["a2"] = n }, "a2", "type"},
-		"agent on cond":     {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Agent = "codex"; f.Nodes["c1"] = n }, "c1", "agent"},
-		"yes on agent":      {func(f *FlowConfig) { n := f.Nodes["a1"]; n.Yes = "a2"; f.Nodes["a1"] = n }, "a1", "yes"},
-		"unknown agent":     {func(f *FlowConfig) { n := f.Nodes["a2"]; n.Agent = "skynet"; f.Nodes["a2"] = n }, "a2", "skynet"},
-		"no conditions":     {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Schedule = nil; f.Nodes["c1"] = n }, "c1", "condition"},
-		"bad schedule":      {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Schedule = map[string]ScheduleCondition{"s1": {From: "25:00", To: "06:00"}}; f.Nodes["c1"] = n }, "c1", "HH:MM"},
-		"bad node id":       {func(f *FlowConfig) { f.Nodes["Bad Id"] = FlowNode{Type: NodeAgent, Agent: "claude"} }, "Bad Id", "id"},
-		"bad match":         {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Match = "some"; f.Nodes["c1"] = n }, "c1", "match"},
+		"missing start": {func(f *FlowConfig) { f.Start = "zz" }, "", "start"},
+		"empty start":   {func(f *FlowConfig) { f.Start = "" }, "", "start"},
+		"dangling yes":  {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Yes = "nope"; f.Nodes["c1"] = n }, "c1", "nope"},
+		"dangling next": {func(f *FlowConfig) { n := f.Nodes["a1"]; n.Next = "nope"; f.Nodes["a1"] = n }, "a1", "nope"},
+		"cycle":         {func(f *FlowConfig) { n := f.Nodes["a2"]; n.Next = "c1"; f.Nodes["a2"] = n }, "", "cycle"},
+		"self loop":     {func(f *FlowConfig) { n := f.Nodes["a2"]; n.Next = "a2"; f.Nodes["a2"] = n }, "a2", "cycle"},
+		"bad type":      {func(f *FlowConfig) { n := f.Nodes["a2"]; n.Type = "tool"; f.Nodes["a2"] = n }, "a2", "type"},
+		"agent on cond": {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Agent = "codex"; f.Nodes["c1"] = n }, "c1", "agent"},
+		"yes on agent":  {func(f *FlowConfig) { n := f.Nodes["a1"]; n.Yes = "a2"; f.Nodes["a1"] = n }, "a1", "yes"},
+		"unknown agent": {func(f *FlowConfig) { n := f.Nodes["a2"]; n.Agent = "skynet"; f.Nodes["a2"] = n }, "a2", "skynet"},
+		"no conditions": {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Schedule = nil; f.Nodes["c1"] = n }, "c1", "condition"},
+		"bad schedule": {func(f *FlowConfig) {
+			n := f.Nodes["c1"]
+			n.Schedule = map[string]ScheduleCondition{"s1": {From: "25:00", To: "06:00"}}
+			f.Nodes["c1"] = n
+		}, "c1", "HH:MM"},
+		"bad node id": {func(f *FlowConfig) { f.Nodes["Bad Id"] = FlowNode{Type: NodeAgent, Agent: "claude"} }, "Bad Id", "id"},
+		"bad match":   {func(f *FlowConfig) { n := f.Nodes["c1"]; n.Match = "some"; f.Nodes["c1"] = n }, "c1", "match"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
