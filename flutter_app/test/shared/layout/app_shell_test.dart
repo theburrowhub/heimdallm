@@ -118,6 +118,14 @@ GoRouter minimalRouter({String initialLocation = '/'}) => GoRouter(
             ),
           ],
         ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/flows',
+              builder: (_, _) => const Scaffold(body: Text('Flows content')),
+            ),
+          ],
+        ),
       ],
     ),
     GoRoute(
@@ -320,6 +328,61 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Merge content'), findsOneWidget);
+  });
+
+  // The rail lists destinations in display order, which is not branch order
+  // (Flows is shown before Stats but is the last branch), so a rail position
+  // must never be used as a branch index.
+  testWidgets('every rail destination opens and highlights its own branch', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(platform: platform, api: api),
+    );
+
+    const contentByLabel = {
+      'Activity': 'Dashboard content',
+      'Activity log': 'Activity log content',
+      'My PRs': 'Merge content',
+      'Repositories': 'Repositories content',
+      'Organizations': 'Organizations content',
+      'Prompts': 'Prompts content',
+      'Agents': 'Agents content',
+      'Flows': 'Flows content',
+      'Stats': 'Stats content',
+      'Instances': 'Instances content',
+    };
+    expect(
+      appDestinations.map((d) => d.label),
+      unorderedEquals(contentByLabel.keys),
+    );
+
+    for (final (position, destination) in appDestinations.indexed) {
+      await tester.tap(
+        find.descendant(
+          of: find.byType(NavigationRail),
+          matching: find.text(destination.label),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(contentByLabel[destination.label]!),
+        findsOneWidget,
+        reason: '${destination.label} must open its own screen',
+      );
+      expect(
+        tester
+            .widget<NavigationRail>(find.byType(NavigationRail))
+            .selectedIndex,
+        position,
+        reason: '${destination.label} must be the highlighted rail entry',
+      );
+    }
   });
 
   testWidgets('when stopped, the toolbar start action is wired', (
