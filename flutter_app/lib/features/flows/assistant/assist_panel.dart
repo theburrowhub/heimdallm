@@ -55,7 +55,7 @@ class _AssistPanelState extends ConsumerState<AssistPanel> {
   List<String> _errorDetails = const [];
 
   List<FlowAgent> get _runnable =>
-      widget.agents.where((a) => a.installed && !a.reviewOnly).toList();
+      widget.agents.where((a) => a.installed && a.canDraft).toList();
 
   @override
   void initState() {

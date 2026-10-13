@@ -96,6 +96,8 @@ type FlowAgent struct {
 	Installed    bool   `json:"installed"`
 	ReviewOnly   bool   `json:"review_only"`
 	WriteCapable bool   `json:"write_capable"`
+	// CanDraft: the assistant can run this agent (flows.CanDraft).
+	CanDraft bool `json:"can_draft"`
 }
 
 // installedAgents maps every review agent the catalog found installed (or,
@@ -127,6 +129,7 @@ func flowListing(c *config.Config, installed map[string]bool) map[string]any {
 			Installed:    installed[id],
 			ReviewOnly:   executor.IsHTTPOnly(id),
 			WriteCapable: executor.WriteCapable(id),
+			CanDraft:     flows.CanDraft(id),
 		})
 	}
 	return map[string]any{
@@ -184,9 +187,11 @@ type rawExecutor interface {
 const assistCancelPoll = 25 * time.Millisecond
 
 // execRunner runs the assistant prompt through the executor with the
-// agent's own model and limits, but none of its review permission settings
-// (drafting a flow needs no tools), in an empty workspace, and kills the
-// process group when ctx ends.
+// agent's own model and limits, but none of its review permission settings,
+// in an empty temp workspace, and kills the process group when ctx ends.
+// That is all the daemon enforces: whether the agent may still use tools
+// depends on its CLI's own settings (agents whose defaults allow everything
+// are refused, see flows.CanDraft).
 type execRunner struct {
 	exec rawExecutor
 	opts func(agent, workDir string) executor.ExecOptions
@@ -197,7 +202,7 @@ func (r execRunner) Run(ctx context.Context, agent, prompt, workDir string) ([]b
 		return nil, err
 	}
 	opts := r.opts(agent, workDir)
-	// Drafting reads nothing and writes nothing: drop everything that widens
+	// Drafting needs no tools: clear every permission flag that would widen
 	// what the agent may do, the same fields OptionsForSelectedCLI scrubs.
 	opts.DangerouslySkipPerms = false
 	opts.PermissionMode = ""
@@ -247,7 +252,7 @@ func assistContext(ctx context.Context, agents []agentcatalog.Agent, quotas []qu
 		out.Agents = append(out.Agents, flows.AssistAgent{
 			ID:       a.ConfigAgent,
 			Models:   a.Models,
-			Runnable: !executor.IsHTTPOnly(a.ConfigAgent),
+			Runnable: flows.CanDraft(a.ConfigAgent),
 		})
 	}
 	return out

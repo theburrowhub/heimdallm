@@ -168,6 +168,9 @@ func TestFlowListingMarksInstalledAgents(t *testing.T) {
 	if !byID["openrouter"].ReviewOnly || byID["claude"].ReviewOnly {
 		t.Fatalf("review_only flags wrong: %+v", agents)
 	}
+	if !byID["claude"].CanDraft || byID["opencode"].CanDraft || byID["openrouter"].CanDraft {
+		t.Fatalf("can_draft flags wrong: %+v", agents)
+	}
 }
 
 func TestInstalledAgents(t *testing.T) {
@@ -198,8 +201,9 @@ func TestAssistContextRunnableAgents(t *testing.T) {
 		{ConfigAgent: "openrouter", Configured: true},
 		{ConfigAgent: "cursor_cli", Kind: agentcatalog.KindIDE, Installed: true},
 		{ConfigAgent: "gemini"},
+		{ConfigAgent: "opencode", Installed: true},
 	}, nil)
-	if len(got.Agents) != 2 || !got.Agents[0].Runnable || got.Agents[1].Runnable {
+	if len(got.Agents) != 3 || !got.Agents[0].Runnable || got.Agents[1].Runnable || got.Agents[2].Runnable {
 		t.Fatalf("%+v", got.Agents)
 	}
 }

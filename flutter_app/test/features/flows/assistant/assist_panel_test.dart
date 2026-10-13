@@ -20,6 +20,7 @@ const _agents = [
   FlowAgent(id: 'codex', installed: true),
   FlowAgent(id: 'gemini'),
   FlowAgent(id: 'openrouter', installed: true, reviewOnly: true),
+  FlowAgent(id: 'opencode', installed: true, canDraft: false),
 ];
 
 final _current = ReviewFlow(
@@ -100,6 +101,7 @@ void main() {
     expect(find.text('codex'), findsWidgets);
     expect(find.text('gemini'), findsNothing);
     expect(find.text('openrouter'), findsNothing);
+    expect(find.text('opencode'), findsNothing);
   });
 
   testWidgets('remembers the last agent', (tester) async {

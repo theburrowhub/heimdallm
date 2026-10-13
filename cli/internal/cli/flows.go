@@ -109,7 +109,7 @@ func newFlowsAssistCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&flowID, "flow", "", "flow id to change (and, with --apply, to save as)")
-	cmd.Flags().StringVar(&agent, "agent", "", "installed CLI agent that drafts the flow (default claude)")
+	cmd.Flags().StringVar(&agent, "agent", "", "installed CLI agent that drafts the flow (default claude; HTTP agents and opencode cannot draft)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "save the draft with PUT /flows/<id>")
 	return cmd
 }

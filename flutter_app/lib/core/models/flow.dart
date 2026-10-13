@@ -305,19 +305,28 @@ class FlowAgent {
   final bool reviewOnly;
   final bool writeCapable;
 
+  /// The flow assistant can run this agent.
+  final bool canDraft;
+
   const FlowAgent({
     required this.id,
     this.installed = false,
     this.reviewOnly = false,
     this.writeCapable = false,
-  });
+    bool? canDraft,
+  }) : canDraft = canDraft ?? !reviewOnly;
 
-  factory FlowAgent.fromJson(Map<String, dynamic> j) => FlowAgent(
-    id: (j['id'] as String?) ?? '',
-    installed: (j['installed'] as bool?) ?? false,
-    reviewOnly: (j['review_only'] as bool?) ?? false,
-    writeCapable: (j['write_capable'] as bool?) ?? false,
-  );
+  factory FlowAgent.fromJson(Map<String, dynamic> j) {
+    final reviewOnly = (j['review_only'] as bool?) ?? false;
+    return FlowAgent(
+      id: (j['id'] as String?) ?? '',
+      installed: (j['installed'] as bool?) ?? false,
+      reviewOnly: reviewOnly,
+      writeCapable: (j['write_capable'] as bool?) ?? false,
+      // A daemon that predates can_draft runs every CLI agent.
+      canDraft: (j['can_draft'] as bool?) ?? !reviewOnly,
+    );
+  }
 }
 
 /// GET /flows.

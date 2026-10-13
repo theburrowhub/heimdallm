@@ -69,10 +69,14 @@ void main() {
           'write_capable': true,
         },
         {'id': 'openrouter', 'installed': false, 'review_only': true},
+        {'id': 'opencode', 'installed': true, 'can_draft': false},
       ],
     });
     expect(l.agents.first.installed, isTrue);
-    expect(l.agents.last.reviewOnly, isTrue);
+    expect(l.agents.first.canDraft, isTrue, reason: 'no can_draft: a CLI');
+    expect(l.agents[1].reviewOnly, isTrue);
+    expect(l.agents[1].canDraft, isFalse);
+    expect(l.agents.last.canDraft, isFalse);
     expect(l.flows['night']!.nodes.length, 3);
   });
 

@@ -21,6 +21,20 @@ import (
 // MaxInstructionRunes caps the operator's request.
 const MaxInstructionRunes = 4000
 
+// MaxPlanRunes caps the plan returned with a draft: it comes from the agent.
+const MaxPlanRunes = 4000
+
+// noDraftAgents are CLI agents the assistant does not run. opencode's
+// `opencode run` keeps its own allow-all tool defaults, which the cleared
+// permission flags cannot narrow.
+var noDraftAgents = map[string]bool{"opencode": true}
+
+// CanDraft reports whether the assistant may run agent: a CLI agent (HTTP
+// agents only run reviews) whose tool use the daemon does not leave open.
+func CanDraft(agent string) bool {
+	return !executor.IsHTTPOnly(agent) && !noDraftAgents[agent]
+}
+
 // DefaultAssistTimeout bounds one agent run.
 const DefaultAssistTimeout = 180 * time.Second
 
@@ -45,7 +59,7 @@ type AssistRequest struct {
 }
 
 // AssistAgent is an installed agent. Runnable agents can run the assistant
-// (CLI agents); the rest can only appear in the generated flow.
+// (see CanDraft); the rest can only appear in the generated flow.
 type AssistAgent struct {
 	ID       string
 	Models   []string
@@ -152,7 +166,7 @@ func (a *Assistant) Assist(ctx context.Context, req AssistRequest, actx AssistCo
 	}
 	return AssistResult{
 		Flow:       answer.Flow,
-		Plan:       strings.TrimSpace(answer.Plan),
+		Plan:       truncateRunes(strings.TrimSpace(answer.Plan), MaxPlanRunes),
 		Warnings:   assistWarnings(answer.Flow, actx),
 		Agent:      req.Agent,
 		DurationMS: now().Sub(start).Milliseconds(),
@@ -182,13 +196,24 @@ func checkAssistRequest(req AssistRequest, actx AssistContext) error {
 	}
 	for _, a := range actx.Agents {
 		if a.ID == req.Agent {
-			if !a.Runnable {
+			switch {
+			case executor.IsHTTPOnly(req.Agent):
 				return bad(req.Agent + " only runs reviews; pick a CLI agent to draft flows")
+			case !a.Runnable || !CanDraft(req.Agent):
+				return bad(req.Agent + " cannot draft flows")
 			}
 			return nil
 		}
 	}
 	return bad(req.Agent + " is not installed")
+}
+
+// truncateRunes keeps the first max runes of s.
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
 }
 
 // parseAssistAnswer extracts and validates the agent's JSON. Every problem

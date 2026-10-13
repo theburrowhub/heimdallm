@@ -183,3 +183,35 @@ func TestAssistPromptCarriesCurrentFlow(t *testing.T) {
 		}
 	}
 }
+
+func TestAssistRefusesAgentsThatCannotDraft(t *testing.T) {
+	// opencode runs with its own allow-all tool defaults: the assistant's
+	// "no tools" promise would not hold, so it is refused even when the
+	// caller's context lists it as runnable.
+	if CanDraft("opencode") || CanDraft("openrouter") || !CanDraft("claude") || !CanDraft("codex") {
+		t.Fatal("CanDraft: opencode and HTTP agents must be refused, CLI agents allowed")
+	}
+	ctx := AssistContext{Agents: append([]AssistAgent{{ID: "opencode", Runnable: true}}, actx.Agents...)}
+	r := &scriptRunner{outputs: []string{goodOutput}}
+	_, err := (&Assistant{Runner: r}).Assist(context.Background(), AssistRequest{Agent: "opencode", Instruction: "x"}, ctx)
+	var ae *AssistError
+	if !errors.As(err, &ae) || ae.Status != http.StatusBadRequest || ae.Message != "opencode cannot draft flows" {
+		t.Fatalf("%v", err)
+	}
+	if len(r.prompts) != 0 {
+		t.Fatal("opencode must not be run")
+	}
+}
+
+func TestAssistCapsThePlan(t *testing.T) {
+	long := strings.Repeat("ñ", MaxPlanRunes+500)
+	out := strings.Replace(goodOutput, "Codex at night, Claude otherwise.", long, 1)
+	res, err := (&Assistant{Runner: &scriptRunner{outputs: []string{out}}}).Assist(context.Background(),
+		AssistRequest{Agent: "claude", Instruction: "x"}, actx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(res.Plan)); n != MaxPlanRunes {
+		t.Fatalf("plan has %d runes, want %d", n, MaxPlanRunes)
+	}
+}
