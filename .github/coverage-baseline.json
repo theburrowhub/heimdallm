@@ -4,8 +4,8 @@
   "diff_percent": 90,
   "modules": {
     "daemon": {
-      "covered": 14315,
-      "total": 16565
+      "covered": 14321,
+      "total": 16570
     },
     "cli": {
       "covered": 1858,
