@@ -1465,7 +1465,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		//     each one.
 		failures = append(failures, fmt.Errorf("%s: %w", cli, err))
 		quota := executor.IsQuotaError(err)
-		cancelled := errors.Is(err, executor.ErrExecutionCancelled) || errors.Is(err, context.Canceled)
+		cancelled := errors.Is(err, executor.ErrExecutionCancelled) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 		handOff := quota || opts.Force || priorAttempts == 0
 		if i+1 < len(agentsToTry) && handOff && !cancelled {
 			reason := "error"
@@ -1489,7 +1489,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		}
 		if len(failures) > 1 {
 			// Keep every agent's failure: the first one is usually the cause.
-			return nil, fmt.Errorf("pipeline: every agent in the flow failed: %w", errors.Join(failures...))
+			return nil, fmt.Errorf("pipeline: %d agents of the flow failed: %w", len(failures), errors.Join(failures...))
 		}
 		runErr := fmt.Errorf("pipeline: execute %s: %w", cli, err)
 		return nil, runErr

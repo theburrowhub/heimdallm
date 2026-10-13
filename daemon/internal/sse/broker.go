@@ -14,7 +14,8 @@ const (
 
 	// EventReviewAgentFallback fires when a review flow hands a review to its
 	// next agent because the current one failed: its quota ran out
-	// (reason "quota") or the run failed for any other reason ("error").
+	// (reason "quota"), it timed out ("timeout") or the run failed for any
+	// other reason ("error").
 	// Payload: {"repo", "pr_number", "from", "to", "reason"}.
 	EventReviewAgentFallback = "review_agent_fallback"
 

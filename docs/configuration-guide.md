@@ -390,8 +390,8 @@ for OpenRouter, has a key) reviews. The later matching rules are the
 fallbacks: if the chosen agent fails — because it ran out of quota (a usage
 limit, rate limit, HTTP 402 or 429) or for any other reason, such as output
 that is not valid JSON or a crash — the review moves on to the next one in the
-same run, and the activity log records `review fallback: claude → codex` (the
-`review_agent_fallback` event carries the reason: `quota`, `timeout` or
+same run, and the activity log records `review fallback: claude → codex`; the
+`review_agent_fallback` event carries the reason (`quota`, `timeout` or
 `error`). Each
 agent is tried at most once; the review fails only when every agent in the
 flow failed, and a cancelled review never moves on. A failure that is not

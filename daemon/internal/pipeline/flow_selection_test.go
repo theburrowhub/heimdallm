@@ -147,6 +147,11 @@ func TestRun_FlowStopsOnContextCancellationAndLabelsTimeouts(t *testing.T) {
 		t.Fatalf("a cancelled context must stop: err=%v ran=%v", err, exec.ran)
 	}
 	exec.ran = nil
+	exec.failWith["claude"] = fmt.Errorf("run: %w", context.DeadlineExceeded)
+	if _, err := p.Run(budgetPR(60), opts); err == nil || strings.Join(exec.ran, ",") != "claude" {
+		t.Fatalf("an expired parent deadline must stop: err=%v ran=%v", err, exec.ran)
+	}
+	exec.ran = nil
 	exec.failWith["claude"] = fmt.Errorf("run: %w", executor.ErrExecutionTimedOut)
 	if _, err := p.Run(budgetPR(59), opts); err != nil || strings.Join(exec.ran, ",") != "claude,codex" {
 		t.Fatalf("a timeout moves on: err=%v ran=%v", err, exec.ran)
