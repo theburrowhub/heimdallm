@@ -31,7 +31,8 @@ class EdgeSelection extends Selection {
   final EdgePort port;
   const EdgeSelection(this.from, this.port);
   @override
-  bool operator ==(Object other) => other is EdgeSelection && other.from == from && other.port == port;
+  bool operator ==(Object other) =>
+      other is EdgeSelection && other.from == from && other.port == port;
   @override
   int get hashCode => Object.hash(from, port);
 }
@@ -42,7 +43,12 @@ class FlowDraft {
   final String plan;
   final List<String> warnings;
   final FlowDiff diff;
-  const FlowDraft({required this.flow, required this.plan, required this.warnings, required this.diff});
+  const FlowDraft({
+    required this.flow,
+    required this.plan,
+    required this.warnings,
+    required this.diff,
+  });
 }
 
 class FlowEditorState {
@@ -84,30 +90,54 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     return FlowEditorState(flow: empty, saved: empty, check: checkGraph(empty));
   }
 
-  FlowEditorState _with(ReviewFlow flow, {Selection? selection, FlowDraft? draft, bool clearDraft = false, ReviewFlow? saved}) =>
-      FlowEditorState(
-        flow: flow,
-        saved: saved ?? state.saved,
-        selection: selection ?? state.selection,
-        draft: clearDraft ? null : (draft ?? state.draft),
-        check: checkGraph(flow),
-        simulation: null,
-        undoDepth: _undo.length,
-        redoDepth: _redo.length,
-      );
+  FlowEditorState _with(
+    ReviewFlow flow, {
+    Selection? selection,
+    FlowDraft? draft,
+    bool clearDraft = false,
+    ReviewFlow? saved,
+  }) => FlowEditorState(
+    flow: flow,
+    saved: saved ?? state.saved,
+    selection: selection ?? state.selection,
+    draft: clearDraft ? null : (draft ?? state.draft),
+    check: checkGraph(flow),
+    simulation: null,
+    undoDepth: _undo.length,
+    redoDepth: _redo.length,
+  );
 
-  /// Records the current flow for undo, then applies [next].
-  void _commit(ReviewFlow next, {Selection? selection}) {
+  /// Pushes the flow to restore on undo (the pre-drag flow while a drag is in
+  /// progress), caps the stack and drops the redo history.
+  void _pushUndo() {
     _undo.add(_dragOrigin ?? state.flow);
     _dragOrigin = null;
     if (_undo.length > _maxUndo) _undo.removeAt(0);
     _redo.clear();
+  }
+
+  /// The selection if it still points at something in [f], else none.
+  Selection _validSelection(ReviewFlow f) {
+    final sel = state.selection;
+    final ok = switch (sel) {
+      NodeSelection(:final id) => f.nodes.containsKey(id),
+      EdgeSelection(:final from, :final port) =>
+        port == EdgePort.start ? f.start.isNotEmpty : f.nodes.containsKey(from),
+      NoSelection() => true,
+    };
+    return ok ? sel : const NoSelection();
+  }
+
+  /// Records the current flow for undo, then applies [next].
+  void _commit(ReviewFlow next, {Selection? selection}) {
+    _pushUndo();
     state = _with(next, selection: selection);
   }
 
   void load(ReviewFlow flow) {
     _undo.clear();
     _redo.clear();
+    _dragOrigin = null;
     final laid = autoLayout(flow, onlyMissing: true);
     state = FlowEditorState(flow: laid, saved: laid, check: checkGraph(laid));
   }
@@ -124,16 +154,26 @@ class FlowEditorController extends Notifier<FlowEditorState> {
       id: id,
       type: type,
       position: at,
-      schedule: type == FlowNodeType.condition ? const [ScheduleCondition()] : const [],
+      schedule: type == FlowNodeType.condition
+          ? const [ScheduleCondition()]
+          : const [],
     );
-    _commit(state.flow.copyWith(nodes: {...state.flow.nodes, id: node}), selection: NodeSelection(id));
+    _commit(
+      state.flow.copyWith(nodes: {...state.flow.nodes, id: node}),
+      selection: NodeSelection(id),
+    );
     return id;
   }
 
   void moveNode(String id, Offset to, {bool commit = true}) {
     final n = state.flow.nodes[id];
     if (n == null) return;
-    final next = state.flow.copyWith(nodes: {...state.flow.nodes, id: n.copyWith(position: to)});
+    final next = state.flow.copyWith(
+      nodes: {
+        ...state.flow.nodes,
+        id: n.copyWith(position: to),
+      },
+    );
     if (!commit) {
       _dragOrigin ??= state.flow;
       state = _with(next);
@@ -151,9 +191,13 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     }
     final n = f.nodes[from];
     if (n == null) return false;
-    final validPort = n.isCondition ? (port == EdgePort.yes || port == EdgePort.no) : port == EdgePort.next;
+    final validPort = n.isCondition
+        ? (port == EdgePort.yes || port == EdgePort.no)
+        : port == EdgePort.next;
     if (!validPort) return false;
-    final cleared = f.copyWith(nodes: {...f.nodes, from: _setPort(n, port, '')});
+    final cleared = f.copyWith(
+      nodes: {...f.nodes, from: _setPort(n, port, '')},
+    );
     if (wouldCreateCycle(cleared, from, to)) return false;
     _commit(f.copyWith(nodes: {...f.nodes, from: _setPort(n, port, to)}));
     return true;
@@ -167,15 +211,19 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     }
     final n = f.nodes[from];
     if (n == null) return;
-    _commit(f.copyWith(nodes: {...f.nodes, from: _setPort(n, port, '')}), selection: const NoSelection());
+    _commit(
+      f.copyWith(nodes: {...f.nodes, from: _setPort(n, port, '')}),
+      selection: const NoSelection(),
+    );
   }
 
-  static FlowNode _setPort(FlowNode n, EdgePort port, String to) => switch (port) {
-    EdgePort.yes => n.copyWith(yes: to),
-    EdgePort.no => n.copyWith(no: to),
-    EdgePort.next => n.copyWith(next: to),
-    EdgePort.start => n,
-  };
+  static FlowNode _setPort(FlowNode n, EdgePort port, String to) =>
+      switch (port) {
+        EdgePort.yes => n.copyWith(yes: to),
+        EdgePort.no => n.copyWith(no: to),
+        EdgePort.next => n.copyWith(next: to),
+        EdgePort.start => n,
+      };
 
   void deleteNode(String id) {
     final f = state.flow;
@@ -184,7 +232,10 @@ class FlowEditorController extends Notifier<FlowEditorState> {
       for (final e in f.nodes.entries)
         if (e.key != id) e.key: e.value.withoutEdgesTo(id),
     };
-    _commit(f.copyWith(nodes: nodes, start: f.start == id ? '' : f.start), selection: const NoSelection());
+    _commit(
+      f.copyWith(nodes: nodes, start: f.start == id ? '' : f.start),
+      selection: const NoSelection(),
+    );
   }
 
   void deleteSelection() {
@@ -206,35 +257,53 @@ class FlowEditorController extends Notifier<FlowEditorState> {
   void arrange() => _commit(autoLayout(state.flow));
 
   void undo() {
+    if (_dragOrigin != null) {
+      // A drag in progress counts as a step: undo returns to before the drag.
+      _undo.add(_dragOrigin!);
+      _dragOrigin = null;
+    }
     if (_undo.isEmpty) return;
     _redo.add(state.flow);
-    state = _with(_undo.removeLast());
+    final prev = _undo.removeLast();
+    state = _with(prev, selection: _validSelection(prev));
   }
 
   void redo() {
+    _dragOrigin = null;
     if (_redo.isEmpty) return;
     _undo.add(state.flow);
-    state = _with(_redo.removeLast());
+    final next = _redo.removeLast();
+    state = _with(next, selection: _validSelection(next));
   }
 
   void showDraft(FlowAssistResult r) {
     // Keep the positions of steps the draft did not change, lay out the rest.
-    final keep = r.flow.copyWith(nodes: {
-      for (final e in r.flow.nodes.entries)
-        e.key: e.value.position == null && state.flow.nodes[e.key]?.position != null
-            ? e.value.copyWith(position: state.flow.nodes[e.key]!.position)
-            : e.value,
-    });
+    final keep = r.flow.copyWith(
+      nodes: {
+        for (final e in r.flow.nodes.entries)
+          e.key:
+              e.value.position == null &&
+                  state.flow.nodes[e.key]?.position != null
+              ? e.value.copyWith(position: state.flow.nodes[e.key]!.position)
+              : e.value,
+      },
+    );
     final laid = autoLayout(keep, onlyMissing: true);
-    state = _with(state.flow, draft: FlowDraft(flow: laid, plan: r.plan, warnings: r.warnings, diff: diffFlows(state.flow, laid)));
+    state = _with(
+      state.flow,
+      draft: FlowDraft(
+        flow: laid,
+        plan: r.plan,
+        warnings: r.warnings,
+        diff: diffFlows(state.flow, laid),
+      ),
+    );
   }
 
   void acceptDraft() {
     final d = state.draft;
     if (d == null) return;
-    _undo.add(state.flow);
-    if (_undo.length > _maxUndo) _undo.removeAt(0);
-    _redo.clear();
+    _pushUndo();
     state = _with(d.flow, clearDraft: true, selection: const NoSelection());
   }
 
@@ -252,4 +321,7 @@ class FlowEditorController extends Notifier<FlowEditorState> {
   );
 }
 
-final flowEditorProvider = NotifierProvider.autoDispose<FlowEditorController, FlowEditorState>(FlowEditorController.new);
+final flowEditorProvider =
+    NotifierProvider.autoDispose<FlowEditorController, FlowEditorState>(
+      FlowEditorController.new,
+    );

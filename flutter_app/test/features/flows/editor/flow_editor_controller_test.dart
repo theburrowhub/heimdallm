@@ -11,7 +11,10 @@ void main() {
 
   setUp(() {
     c = ProviderContainer();
-    c.listen(flowEditorProvider, (_, _) {}); // keep the autoDispose provider alive
+    c.listen(
+      flowEditorProvider,
+      (_, _) {},
+    ); // keep the autoDispose provider alive
     ctl().load(const ReviewFlow(name: 'x'));
   });
   tearDown(() => c.dispose());
@@ -46,7 +49,10 @@ void main() {
     ctl().connect(cnd, EdgePort.no, a);
     expect(st().flow.nodes[cnd]!.yes, a);
     expect(st().flow.nodes[cnd]!.no, a);
-    expect(ctl().connect(a, EdgePort.yes, cnd), isFalse); // agents have no yes port
+    expect(
+      ctl().connect(a, EdgePort.yes, cnd),
+      isFalse,
+    ); // agents have no yes port
   });
 
   test('deleting a node clears incoming edges and start', () {
@@ -93,35 +99,129 @@ void main() {
     expect(undos, 100);
   });
 
-  test('draft: show computes diff and lays out, accept is one undo step, discard keeps flow', () {
-    final a = ctl().addNode(FlowNodeType.agent, Offset.zero);
-    ctl().connect('', EdgePort.start, a);
-    final before = st().flow;
-    final draftFlow = ReviewFlow(name: 'x', start: 'a9', nodes: {
-      'a9': const FlowNode(id: 'a9', type: FlowNodeType.agent, agent: 'codex'),
-    });
-    ctl().showDraft(FlowAssistResult(flow: draftFlow, plan: 'p', warnings: const ['w']));
-    expect(st().draft!.diff.nodes, {'a9': DiffKind.added, a: DiffKind.removed});
-    expect(st().draft!.flow.nodes['a9']!.position, isNotNull);
-    expect(st().flow.toJson(), before.toJson()); // canvas unchanged until accepted
-    ctl().discardDraft();
-    expect(st().draft, isNull);
-    ctl().showDraft(FlowAssistResult(flow: draftFlow));
-    ctl().acceptDraft();
-    expect(st().flow.start, 'a9');
-    ctl().undo();
-    expect(st().flow.toJson(), before.toJson());
-  });
+  test(
+    'draft: show computes diff and lays out, accept is one undo step, discard keeps flow',
+    () {
+      final a = ctl().addNode(FlowNodeType.agent, Offset.zero);
+      ctl().connect('', EdgePort.start, a);
+      final before = st().flow;
+      final draftFlow = ReviewFlow(
+        name: 'x',
+        start: 'a9',
+        nodes: {
+          'a9': const FlowNode(
+            id: 'a9',
+            type: FlowNodeType.agent,
+            agent: 'codex',
+          ),
+        },
+      );
+      ctl().showDraft(
+        FlowAssistResult(flow: draftFlow, plan: 'p', warnings: const ['w']),
+      );
+      expect(st().draft!.diff.nodes, {
+        'a9': DiffKind.added,
+        a: DiffKind.removed,
+      });
+      expect(st().draft!.flow.nodes['a9']!.position, isNotNull);
+      expect(
+        st().flow.toJson(),
+        before.toJson(),
+      ); // canvas unchanged until accepted
+      ctl().discardDraft();
+      expect(st().draft, isNull);
+      ctl().showDraft(FlowAssistResult(flow: draftFlow));
+      ctl().acceptDraft();
+      expect(st().flow.start, 'a9');
+      ctl().undo();
+      expect(st().flow.toJson(), before.toJson());
+    },
+  );
 
   test('markSaved clears dirty; load lays out nodes without positions', () {
-    ctl().load(ReviewFlow(start: 'a1', nodes: {
-      'a1': const FlowNode(id: 'a1', type: FlowNodeType.agent, agent: 'claude'),
-    }));
+    ctl().load(
+      ReviewFlow(
+        start: 'a1',
+        nodes: {
+          'a1': const FlowNode(
+            id: 'a1',
+            type: FlowNodeType.agent,
+            agent: 'claude',
+          ),
+        },
+      ),
+    );
     expect(st().flow.nodes['a1']!.position, isNotNull);
     expect(st().dirty, isFalse);
     ctl().rename('y');
     expect(st().dirty, isTrue);
     ctl().markSaved();
     expect(st().dirty, isFalse);
+  });
+
+  test('cancelled drag then load does not leak into the next undo', () {
+    final a = ctl().addNode(FlowNodeType.agent, Offset.zero);
+    ctl().moveNode(a, const Offset(5, 5), commit: false);
+    final other = ReviewFlow(
+      name: 'other',
+      start: 'a1',
+      nodes: {
+        'a1': const FlowNode(
+          id: 'a1',
+          type: FlowNodeType.agent,
+          agent: 'claude',
+          position: Offset(7, 7),
+        ),
+      },
+    );
+    ctl().load(other);
+    ctl().rename('edited');
+    ctl().undo();
+    expect(st().flow.toJson(), other.toJson());
+    expect(st().canUndo, isFalse);
+  });
+
+  test('undo during a drag returns to before the drag', () {
+    final a = ctl().addNode(FlowNodeType.agent, const Offset(1, 1));
+    ctl().moveNode(a, const Offset(9, 9), commit: false);
+    ctl().undo();
+    expect(st().flow.nodes[a]!.position, const Offset(1, 1));
+    ctl().redo();
+    expect(st().flow.nodes[a]!.position, const Offset(9, 9));
+  });
+
+  test('acceptDraft mid-drag undoes to the pre-drag flow', () {
+    final a = ctl().addNode(FlowNodeType.agent, Offset.zero);
+    final before = st().flow;
+    ctl().moveNode(a, const Offset(4, 4), commit: false);
+    ctl().showDraft(
+      FlowAssistResult(
+        flow: ReviewFlow(
+          name: 'x',
+          start: 'a9',
+          nodes: {
+            'a9': const FlowNode(
+              id: 'a9',
+              type: FlowNodeType.agent,
+              agent: 'codex',
+            ),
+          },
+        ),
+      ),
+    );
+    ctl().acceptDraft();
+    ctl().undo();
+    expect(st().flow.toJson(), before.toJson());
+  });
+
+  test('undo that removes the selected node clears the selection', () {
+    final a = ctl().addNode(FlowNodeType.agent, Offset.zero);
+    expect(st().selection, NodeSelection(a));
+    ctl().undo();
+    expect(st().selection, isA<NoSelection>());
+    ctl().redo();
+    ctl().select(NodeSelection(a));
+    ctl().redo();
+    expect(st().selection, NodeSelection(a));
   });
 }
