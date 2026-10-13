@@ -30,6 +30,9 @@ const kQuotaRefreshInterval = Duration(minutes: 1);
 /// last good reading instead of blanking the cards; with no reading yet
 /// (older daemons) the cards show no usage.
 final agentQuotasProvider = FutureProvider.autoDispose<Map<String, AgentQuota>>(
+  // No automatic retry: the timer re-reads every minute anyway, and a
+  // failure keeps the last reading on screen.
+  retry: (_, _) => null,
   (ref) async {
     final timer = Timer(kQuotaRefreshInterval, ref.invalidateSelf);
     ref.onDispose(timer.cancel);
@@ -244,7 +247,6 @@ class AgentCatalogCard extends StatelessWidget {
             ],
             if (quota != null &&
                 quota!.available &&
-                quota!.windows.isEmpty &&
                 quota!.detail.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(

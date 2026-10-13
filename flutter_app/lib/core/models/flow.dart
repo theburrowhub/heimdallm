@@ -357,7 +357,7 @@ class AgentQuota {
   final List<QuotaWindow> windows;
   final String error;
 
-  /// An allowance with no window, e.g. "$3.00 spent · no limit".
+  /// An allowance with no window, e.g. "3.00 USD spent · no limit".
   final String detail;
 
   const AgentQuota({

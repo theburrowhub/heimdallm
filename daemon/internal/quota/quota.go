@@ -53,7 +53,7 @@ type Provider struct {
 	FetchedAt time.Time `json:"fetched_at,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	// Detail describes an allowance with no window, e.g. an OpenRouter key
-	// with no limit: "$3.00 spent · no limit".
+	// with no limit: "3.00 USD spent · no limit".
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -70,22 +70,24 @@ func (p Provider) Window(kind, label string) (Window, bool) {
 
 // MaxUsed is the most-spent window, for "any window" conditions.
 //
-// Per-model windows count only when the provider has nothing else (Gemini's
-// buckets): for Claude, one model's full weekly window must not make the
-// whole agent look exhausted while the model reviews use has headroom. Flows
-// target a model window explicitly with "model:<label>".
+// Per-model and credit windows count only when the provider has nothing
+// else (Gemini's buckets, an OpenRouter key's spend). For Claude, one
+// model's full weekly window or spent overflow credits must not make the
+// whole agent look exhausted while its plan windows have headroom. Flows
+// target those windows explicitly with "model:<label>" or "credit".
 func (p Provider) MaxUsed() (Window, bool) {
-	onlyModels := true
+	secondary := func(w Window) bool { return w.Kind == KindModel || w.Kind == KindCredit }
+	onlySecondary := true
 	for _, w := range p.Windows {
-		if w.Kind != KindModel {
-			onlyModels = false
+		if !secondary(w) {
+			onlySecondary = false
 			break
 		}
 	}
 	var best Window
 	found := false
 	for _, w := range p.Windows {
-		if w.Kind == KindModel && !onlyModels {
+		if secondary(w) && !onlySecondary {
 			continue
 		}
 		if !found || w.UsedPercent > best.UsedPercent {

@@ -224,6 +224,7 @@ void main() {
           AgentQuota.fromJson({
             'agent': 'claude',
             'available': true,
+            'detail': '1.00 EUR extra usage spent · no limit',
             'windows': [
               {'kind': 'session', 'used_percent': 61},
               {'kind': 'weekly', 'used_percent': 46},
@@ -261,6 +262,11 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('3.00 USD spent · no limit'), findsOneWidget);
+      // A provider detail shows next to windows too (uncapped Claude credits).
+      expect(
+        find.text('1.00 EUR extra usage spent · no limit'),
+        findsOneWidget,
+      );
       expect(
         find.text('Usage unavailable: provider not reachable'),
         findsOneWidget,

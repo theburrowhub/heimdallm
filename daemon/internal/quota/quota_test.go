@@ -186,6 +186,7 @@ func TestMaxUsedIgnoresModelWindowsUnlessTheyAreAll(t *testing.T) {
 	claude := Provider{Windows: []Window{
 		{Kind: KindSession, UsedPercent: 20},
 		{Kind: KindModel, Label: "Opus", UsedPercent: 100},
+		{Kind: KindCredit, UsedPercent: 100},
 	}}
 	if w, _ := claude.MaxUsed(); w.Kind != KindSession {
 		t.Errorf("claude MaxUsed = %+v, want the session window", w)
@@ -196,6 +197,10 @@ func TestMaxUsedIgnoresModelWindowsUnlessTheyAreAll(t *testing.T) {
 	}}
 	if w, _ := gemini.MaxUsed(); w.Label != "b" {
 		t.Errorf("gemini MaxUsed = %+v, want the fullest bucket", w)
+	}
+	openrouter := Provider{Windows: []Window{{Kind: KindCredit, UsedPercent: 40}}}
+	if w, ok := openrouter.MaxUsed(); !ok || w.Kind != KindCredit {
+		t.Errorf("openrouter MaxUsed = %+v, want its credit window", w)
 	}
 }
 
