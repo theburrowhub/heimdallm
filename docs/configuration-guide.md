@@ -364,7 +364,7 @@ max_turns = 12                              # max tool rounds
 effort    = "medium"                        # reasoning effort, for models that support it
 ```
 
-**`model` is required.** OpenRouter has no default model: its catalog changes too often for a built-in id to stay valid. Until you pick a model, OpenRouter counts as unavailable, just like when it has no API key: a flow skips it and reviews with its next agent, and the flow simulator shows it as unavailable. A review that still reaches OpenRouter without a model (for example, set as the legacy primary agent) fails straight away with `openrouter: no model selected — pick one in Agents → OpenRouter`, and that error shows on the PR like any other failed review. The OpenRouter card on the **Agents** screen says **Choose a model**.
+**`model` is required.** OpenRouter has no default model: its catalog changes too often for a built-in id to stay valid. Until you pick a model, OpenRouter counts as unavailable, just like when it has no API key: a flow skips it and reviews with its next agent, and the flow simulator shows it as unavailable. A review that still reaches OpenRouter without a model (for example, set as the legacy primary agent) fails straight away with `openrouter: no model selected — set [ai.agents.openrouter] model, or pick one in Agents → OpenRouter`, and that error shows on the PR like any other failed review. The OpenRouter card on the **Agents** screen says **Choose a model**, and the daemon logs a warning at startup and on every config reload.
 
 Set the key on the **Agents → OpenRouter** page. The key is write-only:
 
