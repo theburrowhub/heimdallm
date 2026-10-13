@@ -1444,14 +1444,25 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		if err == nil {
 			break
 		}
-		if i+1 < len(agentsToTry) && executor.IsQuotaError(err) {
-			slog.Warn("pipeline: agent out of quota, handing the review to the next agent in the flow",
-				"repo", pr.Repo, "pr", pr.Number, "agent", cli, "next", agentsToTry[i+1], "err", err)
+		// Any failure of this agent — spent quota, unparseable output, a
+		// crash — hands the review to the next agent in the flow. Retrying
+		// the same agent first would fail the same way on every retry while
+		// the next one could review. Each agent runs at most once, and a
+		// cancelled review stops here.
+		if i+1 < len(agentsToTry) && !errors.Is(err, executor.ErrExecutionCancelled) {
+			reason := "error"
+			msg := "pipeline: agent failed, handing the review to the next agent in the flow"
+			if executor.IsQuotaError(err) {
+				reason = "quota"
+				msg = "pipeline: agent out of quota, handing the review to the next agent in the flow"
+			}
+			slog.Warn(msg, "repo", pr.Repo, "pr", pr.Number, "agent", cli, "next", agentsToTry[i+1], "err", err)
 			p.publish(sse.EventReviewAgentFallback, map[string]any{
 				"repo":      pr.Repo,
 				"pr_number": pr.Number,
 				"from":      cli,
 				"to":        agentsToTry[i+1],
+				"reason":    reason,
 			})
 			continue
 		}

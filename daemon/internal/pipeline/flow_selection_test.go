@@ -89,21 +89,54 @@ func TestRun_FlowFallsBackOnQuotaError(t *testing.T) {
 	}
 }
 
-func TestRun_FlowStopsOnNonQuotaError(t *testing.T) {
+func TestRun_FlowFallsBackOnAgentFailure(t *testing.T) {
+	// An agent that fails for its own reasons (unparseable output, a crash)
+	// must not pin the review to itself: retrying the same agent first would
+	// fail the same way on every retry while the next agent could review.
+	exec := &scriptedExec{
+		installed: map[string]bool{"copilot": true, "claude": true},
+		failWith:  map[string]error{"copilot": errors.New(`executor: parse JSON result: invalid character '\n' in string literal`)},
+	}
+	p, pub := flowPipeline(t, exec)
+	rev, err := p.Run(budgetPR(51), pipeline.RunOptions{Primary: "copilot", Candidates: func() []string { return []string{"copilot", "claude"} }})
+	if err != nil || rev == nil || rev.CLIUsed != "claude" || strings.Join(exec.ran, ",") != "copilot,claude" {
+		t.Fatalf("rev=%v err=%v ran=%v, want claude to review after copilot failed", rev, err, exec.ran)
+	}
+	if ev, ok := pub.firstOf("review_agent_fallback"); !ok || !strings.Contains(ev.Data, `"reason":"error"`) {
+		t.Errorf("fallback event = %+v (%v), want reason error", ev, ok)
+	}
+}
+
+func TestRun_FlowFailsAfterEveryAgentFailed(t *testing.T) {
 	exec := &scriptedExec{
 		installed: map[string]bool{"claude": true, "codex": true},
-		failWith:  map[string]error{"claude": errors.New("parse JSON result: invalid character")},
+		failWith: map[string]error{
+			"claude": errors.New("rate limit"),
+			"codex":  errors.New("exit status 1"),
+		},
+	}
+	p, pub := flowPipeline(t, exec)
+	_, err := p.Run(budgetPR(52), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }})
+	if err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("every agent failing must fail after trying each once: err=%v ran=%v", err, exec.ran)
+	}
+	if !strings.Contains(err.Error(), "codex") {
+		t.Errorf("err = %v, want the last agent's failure", err)
+	}
+	if ev, ok := pub.firstOf("review_agent_fallback"); !ok || !strings.Contains(ev.Data, `"reason":"quota"`) {
+		t.Errorf("fallback event = %+v (%v), want reason quota", ev, ok)
+	}
+}
+
+func TestRun_FlowDoesNotFallBackWhenCancelled(t *testing.T) {
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true},
+		failWith:  map[string]error{"claude": fmt.Errorf("run: %w", executor.ErrExecutionCancelled)},
 	}
 	p, _ := flowPipeline(t, exec)
-	_, err := p.Run(budgetPR(51), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }})
+	_, err := p.Run(budgetPR(56), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }})
 	if err == nil || strings.Join(exec.ran, ",") != "claude" {
-		t.Fatalf("a broken review must not spend another agent: err=%v ran=%v", err, exec.ran)
-	}
-	exec.failWith["codex"] = errors.New("429 too many requests")
-	exec.failWith["claude"] = errors.New("rate limit")
-	exec.ran = nil
-	if _, err := p.Run(budgetPR(52), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }}); err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
-		t.Fatalf("every agent out of quota must fail after trying all: err=%v ran=%v", err, exec.ran)
+		t.Fatalf("a cancelled review must stop: err=%v ran=%v", err, exec.ran)
 	}
 }
 

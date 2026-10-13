@@ -387,10 +387,12 @@ A **flow** decides which agent reviews a PR. It is an ordered list of rules;
 each rule names an agent and optional conditions. Rules are evaluated in
 order: the first rule whose conditions hold and whose agent is installed (or,
 for OpenRouter, has a key) reviews. The later matching rules are the
-fallbacks: if the chosen agent fails **because it ran out of quota** (a usage
-limit, rate limit, HTTP 402 or 429), the review moves on to the next one in
-the same run, and the activity log records `review fallback: claude → codex`.
-Any other failure fails the review as before.
+fallbacks: if the chosen agent fails — because it ran out of quota (a usage
+limit, rate limit, HTTP 402 or 429) or for any other reason, such as output
+that is not valid JSON or a crash — the review moves on to the next one in the
+same run, and the activity log records `review fallback: claude → codex`. Each
+agent is tried at most once; the review fails only when every agent in the
+flow failed, and a cancelled review never moves on.
 
 Conditions:
 
@@ -447,7 +449,7 @@ available from `POST /flows/simulate` and `heimdallm-cli flows simulate`.
 
 **The default flow.** With no flow selected, Heimdallm uses the flow
 `default`, built from the classic `primary` / `fallback` settings, so configs
-written before flows behave as they did (plus the quota fallback):
+written before flows behave as they did (plus the fallback on failure):
 
 ```bash
 HEIMDALLM_AI_PRIMARY=claude     # claude | codex | gemini | copilot | cursor_cli | opencode | openrouter

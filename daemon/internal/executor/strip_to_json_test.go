@@ -193,3 +193,53 @@ func TestStripToJSON_MultipleObjectsTakesTheFirst(t *testing.T) {
 		t.Errorf("got %q, want the first complete object %q", got, `{"a":1}`)
 	}
 }
+
+func TestStripToJSON_EscapesRawControlCharsInStrings(t *testing.T) {
+	// Some agents (Copilot) emit literal newlines and tabs inside string
+	// values, which is not JSON. The repair pass escapes them so the review
+	// parses instead of failing on every retry.
+	in := []byte("{\"summary\": \"line one\nline two\twith a tab\r\n\", \"severity\": \"low\"}")
+	got := executor.StripToJSON(in)
+	want := `{"summary": "line one\nline two\twith a tab\r\n", "severity": "low"}`
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripToJSON_RepairKeepsStructuralWhitespace(t *testing.T) {
+	// Newlines between tokens are legal JSON and must stay as they are; only
+	// the ones inside the string literal are escaped.
+	in := []byte("Here is the review:\n{\n  \"summary\": \"a\nb\",\n  \"issues\": []\n}\nThanks")
+	got := executor.StripToJSON(in)
+	want := "{\n  \"summary\": \"a\\nb\",\n  \"issues\": []\n}"
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripToJSON_RepairLeavesEscapedSequencesAlone(t *testing.T) {
+	// An already-escaped \n next to a raw newline: only the raw one changes,
+	// and an escaped quote does not end the string early.
+	in := []byte("{\"summary\": \"say \\\"hi\\\"\\n\nnext\"}")
+	got := executor.StripToJSON(in)
+	want := `{"summary": "say \"hi\"\n\nnext"}`
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripToJSON_ValidJSONIsNotRewritten(t *testing.T) {
+	in := []byte("{\n\t\"a\": \"b\"\n}")
+	if got := executor.StripToJSON(in); string(got) != string(in) {
+		t.Errorf("got %q, want the input unchanged", got)
+	}
+}
+
+func TestStripToJSON_EscapesOtherControlCharsAsUnicode(t *testing.T) {
+	in := []byte("{\"summary\": \"bell\x07here\"}")
+	got := executor.StripToJSON(in)
+	want := `{"summary": "bell\u0007here"}`
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

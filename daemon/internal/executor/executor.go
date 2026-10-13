@@ -2145,6 +2145,13 @@ func StripToJSON(data []byte) []byte {
 	if obj, ok := firstJSONObject(s); ok {
 		return []byte(obj)
 	}
+	// Some agents (Copilot) write literal newlines or tabs inside string
+	// values. Escaping them is lossless, so try once more before giving up.
+	if repaired := escapeControlCharsInStrings(s); repaired != s {
+		if obj, ok := firstJSONObject(repaired); ok {
+			return []byte(obj)
+		}
+	}
 
 	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
@@ -2218,6 +2225,43 @@ func matchObjectEnd(s string, start int) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// escapeControlCharsInStrings rewrites the raw control characters (below
+// 0x20) found inside double-quoted strings as JSON escapes. Characters
+// outside strings are structural whitespace or prose and stay untouched;
+// existing escapes are copied as they are, so an escaped quote does not end
+// the string.
+func escapeControlCharsInStrings(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inString := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case c == '"':
+			inString = !inString
+		case inString && c < 0x20:
+			switch c {
+			case '\n':
+				b.WriteString(`\n`)
+			case '\r':
+				b.WriteString(`\r`)
+			case '\t':
+				b.WriteString(`\t`)
+			default:
+				fmt.Fprintf(&b, `\u%04x`, c)
+			}
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 func parseResult(data []byte) (*ReviewResult, error) {
