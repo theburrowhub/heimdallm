@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -5,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
@@ -243,4 +246,152 @@ void main() {
       findsOneWidget,
     );
   });
+
+  ProviderContainer containerOf(WidgetTester tester) =>
+      ProviderScope.containerOf(tester.element(find.byType(FlowEditorScreen)));
+
+  testWidgets('an edit made while the save is in flight stays unsaved', (
+    tester,
+  ) async {
+    final (api, _) = await pumpEditor(tester);
+    final put = Completer<Map<String, dynamic>>();
+    when(() => api.putFlow(any(), any())).thenAnswer((_) => put.future);
+    await tester.enterText(find.byKey(const ValueKey('flow-name')), 'Sent');
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('flow-save')));
+    await tester.pump();
+    await tester.enterText(find.byKey(const ValueKey('flow-name')), 'Later');
+    await tester.pump();
+    put.complete(<String, dynamic>{});
+    await tester.pumpAndSettle();
+    final sent =
+        verify(() => api.putFlow('night', captureAny())).captured.single
+            as ReviewFlow;
+    expect(sent.name, 'Sent');
+    final state = containerOf(tester).read(flowEditorProvider);
+    expect(state.saved.name, 'Sent');
+    expect(state.dirty, isTrue);
+    expect(find.byKey(const ValueKey('flow-unsaved')), findsOneWidget);
+  });
+
+  testWidgets('daemon findings survive moving a step and Arrange', (
+    tester,
+  ) async {
+    final (api, _) = await pumpEditor(tester);
+    when(() => api.putFlow(any(), any())).thenThrow(
+      FlowValidationException('nodes.a1: bad', const [
+        FlowIssue(node: 'a1', message: 'bad agent'),
+      ]),
+    );
+    await tester.tap(find.byKey(const ValueKey('flow-save')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('bad agent'), findsWidgets);
+    final ctl = containerOf(tester).read(flowEditorProvider.notifier);
+    ctl.moveNode('a1', const Offset(900, 600));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('bad agent'), findsWidgets);
+    ctl.arrange();
+    await tester.pumpAndSettle();
+    expect(find.textContaining('bad agent'), findsWidgets);
+    final a1 = containerOf(tester).read(flowEditorProvider).flow.nodes['a1']!;
+    ctl.updateNode(a1.copyWith(agent: 'codex'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('bad agent'), findsNothing);
+  });
+
+  testWidgets('Use globally waits for the flow to exist and for the PATCH', (
+    tester,
+  ) async {
+    final (api, _) = await pumpEditor(tester, id: 'fresh');
+    Switch sw() =>
+        tester.widget<Switch>(find.byKey(const ValueKey('flow-use-globally')));
+    expect(sw().onChanged, isNull);
+
+    final (api2, _) = await pumpEditor(tester);
+    final patch = Completer<Map<String, dynamic>>();
+    when(() => api2.patchConfig(any())).thenAnswer((_) => patch.future);
+    await tester.tap(find.byKey(const ValueKey('flow-use-globally')));
+    await tester.pump();
+    expect(sw().onChanged, isNull);
+    await tester.tap(
+      find.byKey(const ValueKey('flow-use-globally')),
+      warnIfMissed: false,
+    );
+    await tester.pump();
+    patch.complete(<String, dynamic>{});
+    await tester.pumpAndSettle();
+    verify(() => api2.patchConfig(any())).called(1);
+    verifyNever(() => api.patchConfig(any()));
+    expect(sw().onChanged, isNotNull);
+  });
+
+  testWidgets('a failed listing refresh after a save keeps the save', (
+    tester,
+  ) async {
+    final (api, _) = await pumpEditor(tester);
+    when(
+      () => api.putFlow(any(), any()),
+    ).thenAnswer((_) async => <String, dynamic>{});
+    when(() => api.fetchFlows()).thenThrow(ApiException('daemon gone'));
+    await tester.enterText(find.byKey(const ValueKey('flow-name')), 'Night 2');
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('flow-save')));
+    await tester.pump();
+    expect(find.text('Flow saved'), findsOneWidget);
+    expect(find.text('daemon gone'), findsNothing);
+    expect(containerOf(tester).read(flowEditorProvider).dirty, isFalse);
+    await tester.pumpAndSettle(const Duration(seconds: 4));
+  });
+
+  testWidgets('any load failure offers Retry', (tester) async {
+    tester.view.physicalSize = const Size(1800, 1100);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final api = _MockApi();
+    var calls = 0;
+    when(() => api.fetchFlows()).thenAnswer((_) async {
+      if (calls++ == 0) throw const FormatException('bad json');
+      return _listing();
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [apiClientProvider.overrideWithValue(api)],
+        child: MaterialApp(
+          builder: (context, child) => HeimdallmTheme.scope(child: child!),
+          home: const FlowEditorScreen(flowId: 'night'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('bad json'), findsOneWidget);
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('node-a1')), findsOneWidget);
+  });
+
+  testWidgets(
+    'double-click adds the step in the middle of the visible canvas',
+    (tester) async {
+      await pumpEditor(tester);
+      final view = tester.getRect(find.byKey(const ValueKey('flow-canvas')));
+      await tester.dragFrom(
+        view.center + const Offset(200, 200),
+        const Offset(-400, -300),
+      );
+      await tester.pumpAndSettle();
+      Future<void> doubleTap() async {
+        await tester.tap(find.byKey(const ValueKey('palette-condition')));
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.tap(find.byKey(const ValueKey('palette-condition')));
+        await tester.pumpAndSettle();
+      }
+
+      await doubleTap();
+      final c1 = tester.getRect(find.byKey(const ValueKey('node-c1')));
+      expect((c1.center - view.center).distance, lessThan(1));
+      await doubleTap();
+      final c2 = tester.getRect(find.byKey(const ValueKey('node-c2')));
+      expect(c2.topLeft - c1.topLeft, const Offset(30, 30));
+    },
+  );
 }

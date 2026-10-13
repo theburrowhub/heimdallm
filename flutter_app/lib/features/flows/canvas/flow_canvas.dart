@@ -20,6 +20,15 @@ const _canvasSize = Size(6000, 4000);
 const _portHit = 24.0;
 const _cutSize = 28.0;
 
+/// Lets the editor ask the canvas what part of the graph is in view.
+class FlowCanvasController {
+  _FlowCanvasState? _state;
+
+  /// The canvas position at the centre of the visible viewport (after pan
+  /// and zoom), or null before the canvas is laid out.
+  Offset? get viewportCentre => _state?._viewportCentre();
+}
+
 /// The flow graph on a pannable, zoomable canvas. While the assistant's
 /// draft is shown, the draft is drawn (with removed steps as ghosts) and
 /// editing is disabled until it is accepted or discarded.
@@ -34,11 +43,14 @@ class FlowCanvas extends ConsumerStatefulWidget {
   /// last validation findings).
   final Set<String> errorNodes;
 
+  final FlowCanvasController? controller;
+
   const FlowCanvas({
     super.key,
     this.onDropFromPalette,
     this.readOnly = false,
     this.errorNodes = const {},
+    this.controller,
   });
 
   @override
@@ -72,10 +84,27 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
   void initState() {
     super.initState();
     GestureBinding.instance.pointerRouter.addGlobalRoute(_trackPointer);
+    widget.controller?._state = this;
+  }
+
+  @override
+  void didUpdateWidget(FlowCanvas old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) {
+      if (old.controller?._state == this) old.controller!._state = null;
+      widget.controller?._state = this;
+    }
+  }
+
+  Offset? _viewportCentre() {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return _transform.toScene(box.size.center(Offset.zero));
   }
 
   @override
   void dispose() {
+    if (widget.controller?._state == this) widget.controller!._state = null;
     GestureBinding.instance.pointerRouter.removeGlobalRoute(_trackPointer);
     _transform.dispose();
     _focus.dispose();

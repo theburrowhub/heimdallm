@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,6 +17,7 @@ import 'package:heimdallm/features/flows/editor/inspector/flow_inspector.dart';
 import 'package:heimdallm/features/flows/editor/palette.dart';
 import 'package:heimdallm/features/flows/editor/test_panel.dart';
 import 'package:heimdallm/features/flows/flows_list_screen.dart';
+import 'package:heimdallm/features/flows/graph/auto_layout.dart';
 import 'package:heimdallm/shared/design_system/color_resolver.dart';
 import 'package:heimdallm/shared/design_system/components/components.dart';
 import 'package:heimdallm/shared/design_system/tokens.dart';
@@ -55,6 +58,16 @@ Future<bool> flowEditorOnExit(BuildContext context) async {
   return confirmDiscardFlowChanges(context);
 }
 
+/// Whether [a] and [b] are the same step apart from where it sits, so a
+/// daemon finding survives moving the step or Arrange.
+bool _sameIgnoringPosition(FlowNode a, FlowNode? b) {
+  if (identical(a, b)) return true;
+  if (b == null) return false;
+  String key(FlowNode n) =>
+      jsonEncode(n.copyWith(clearPosition: true).toJson());
+  return key(a) == key(b);
+}
+
 /// Where a flow is selected: globally, and by each org and repo override.
 List<String> flowUsedBy(String flowId, String globalFlow, AppConfig? config) {
   final orgs = config?.orgConfigs.entries.toList() ?? const [];
@@ -83,7 +96,9 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
   FlowListing? _listing;
   String? _loadError;
   bool _saving = false;
+  bool _settingGlobal = false;
   bool _testOpen = false;
+  final _canvas = FlowCanvasController();
 
   /// The daemon's findings from the last rejected save, and the flow they
   /// were about: a step's findings show until that step changes.
@@ -125,12 +140,20 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
       setState(() => _listing = listing);
     } on ApiException catch (e) {
       if (mounted) setState(() => _loadError = e.message);
+    } catch (e) {
+      if (mounted) setState(() => _loadError = '$e');
     }
   }
 
+  /// Refreshes the listing after a change already made on the daemon. A
+  /// failure keeps the old listing: the change itself went through.
   Future<void> _reloadListingOnly() async {
-    final listing = await ref.read(apiClientProvider).fetchFlows();
-    if (mounted) setState(() => _listing = listing);
+    try {
+      final listing = await ref.read(apiClientProvider).fetchFlows();
+      if (mounted) setState(() => _listing = listing);
+    } catch (e) {
+      debugPrint('flow editor: could not refresh the flow listing: $e');
+    }
   }
 
   void _afterServerChange(Map<String, dynamic> json) {
@@ -156,7 +179,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
           .putFlow(widget.flowId, state.flow);
       if (!mounted) return;
       _afterServerChange(json);
-      ctl.markSaved();
+      // The flow that was sent: edits made while the PUT ran stay unsaved.
+      ctl.markSaved(state.flow);
       setState(() => _serverIssues = const []);
       await _reloadListingOnly();
       if (mounted) showToast(context, 'Flow saved');
@@ -213,6 +237,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
   }
 
   Future<void> _useGlobally(bool use) async {
+    if (_settingGlobal) return;
+    setState(() => _settingGlobal = true);
     try {
       final json = await ref.read(apiClientProvider).patchConfig({
         'ai': {'flow': use ? widget.flowId : ''},
@@ -222,6 +248,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
       await _reloadListingOnly();
     } on ApiException catch (e) {
       if (mounted) showToast(context, e.message, isError: true);
+    } finally {
+      if (mounted) setState(() => _settingGlobal = false);
     }
   }
 
@@ -241,14 +269,20 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
     }
   }
 
+  /// Adds a step centred in the visible part of the canvas, stepping
+  /// diagonally past steps already there.
   void _addAtCentre(FlowNodeType type) {
-    final count = ref.read(flowEditorProvider).flow.nodes.length;
-    ref
-        .read(flowEditorProvider.notifier)
-        .addNode(
-          type,
-          Offset(400 + 30.0 * (count % 8), 400 + 30.0 * (count % 8)),
-        );
+    final nodes = ref.read(flowEditorProvider).flow.nodes.values;
+    final centre = _canvas.viewportCentre ?? const Offset(510, 438);
+    var at = centre - Offset(kNodeSize.width / 2, kNodeSize.height / 2);
+    for (var i = 0; i < 50; i++) {
+      final taken = nodes.any(
+        (n) => n.position != null && (n.position! - at).distance < 16,
+      );
+      if (!taken) break;
+      at += const Offset(30, 30);
+    }
+    ref.read(flowEditorProvider.notifier).addNode(type, at);
   }
 
   @override
@@ -286,8 +320,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
       for (final i in _serverIssues)
         if (i.node.isEmpty ||
             (state.flow.nodes.containsKey(i.node) &&
-                identical(
-                  state.flow.nodes[i.node],
+                _sameIgnoringPosition(
+                  state.flow.nodes[i.node]!,
                   _issuesAgainst.nodes[i.node],
                 )))
           i,
@@ -361,6 +395,7 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
               children: [
                 Positioned.fill(
                   child: FlowCanvas(
+                    controller: _canvas,
                     readOnly: readOnly,
                     errorNodes: {
                       for (final i in liveServer)
@@ -449,6 +484,10 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
                   canRedo: canEdit && state.canRedo,
                   canArrange: canEdit && state.flow.nodes.isNotEmpty,
                   canDelete: listing.flows.containsKey(widget.flowId),
+                  // Only a flow the daemon has can be selected globally.
+                  canUseGlobally:
+                      listing.flows.containsKey(widget.flowId) &&
+                      !_settingGlobal,
                   canSave: !_saving && state.draft == null,
                   saving: _saving,
                   testOpen: _testOpen,
@@ -519,6 +558,7 @@ class _TopBar extends StatelessWidget {
   final bool canRedo;
   final bool canArrange;
   final bool canDelete;
+  final bool canUseGlobally;
   final bool canSave;
   final bool saving;
   final bool testOpen;
@@ -543,6 +583,7 @@ class _TopBar extends StatelessWidget {
     required this.canRedo,
     required this.canArrange,
     required this.canDelete,
+    required this.canUseGlobally,
     required this.canSave,
     required this.saving,
     required this.testOpen,
@@ -644,7 +685,7 @@ class _TopBar extends StatelessWidget {
                   Switch(
                     key: const ValueKey('flow-use-globally'),
                     value: usedGlobally,
-                    onChanged: onUseGlobally,
+                    onChanged: canUseGlobally ? onUseGlobally : null,
                   ),
                 ],
               ),

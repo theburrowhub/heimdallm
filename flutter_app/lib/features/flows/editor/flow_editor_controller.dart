@@ -142,7 +142,10 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     state = FlowEditorState(flow: laid, saved: laid, check: checkGraph(laid));
   }
 
-  void markSaved() => state = _with(state.flow, saved: state.flow);
+  /// Records [saved] (the flow the daemon accepted; the current flow when
+  /// omitted) as the saved baseline. Edits made after it was sent stay dirty.
+  void markSaved([ReviewFlow? saved]) =>
+      state = _with(state.flow, saved: saved ?? state.flow);
 
   void select(Selection s) => state = _with(state.flow, selection: s);
 
