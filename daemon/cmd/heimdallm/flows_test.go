@@ -144,3 +144,48 @@ func TestOverrideMapsCarryTheFlow(t *testing.T) {
 		t.Error("no flow selected must not project one")
 	}
 }
+
+// OpenRouter has no default model: like a missing key, a missing model makes
+// it unavailable, so flows skip it instead of failing every review on it.
+func TestFlowAgentAvailable_OpenRouterNeedsAModel(t *testing.T) {
+	model := ""
+	installed := map[string]bool{"openrouter": true, "claude": true}
+	available := flowAgentAvailable(
+		func(agent string) bool { return installed[agent] },
+		func(agent string) string {
+			if agent == "openrouter" {
+				return model
+			}
+			return ""
+		},
+	)
+	if available("openrouter") {
+		t.Error("openrouter without a model must be unavailable")
+	}
+	model = "   "
+	if available("openrouter") {
+		t.Error("a blank model is no model")
+	}
+	if !available("claude") {
+		t.Error("CLI agents keep their CLI default model")
+	}
+	model = "vendor/model"
+	if !available("openrouter") {
+		t.Error("openrouter with a model and a key is available")
+	}
+	installed["openrouter"] = false
+	if available("openrouter") {
+		t.Error("openrouter without a key stays unavailable")
+	}
+
+	f := config.FlowConfig{Name: "F", Rules: map[string]config.FlowRule{
+		"10": {Agent: "openrouter"},
+		"20": {Agent: "claude"},
+	}}
+	installed["openrouter"] = true
+	model = ""
+	got := flowCandidates("f", f, "o/r", staticQuotas{}, available)()
+	if strings.Join(got, ",") != "claude" {
+		t.Errorf("candidates = %v, want claude only", got)
+	}
+}

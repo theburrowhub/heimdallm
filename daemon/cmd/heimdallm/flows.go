@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -75,6 +76,22 @@ func flowAgents(f config.FlowConfig) []string {
 		}
 	}
 	return out
+}
+
+// modelRequiredAgents have no default model: without one configured they
+// cannot review (OpenRouter's catalog changes too often for a built-in id).
+var modelRequiredAgents = map[string]bool{"openrouter": true}
+
+// flowAgentAvailable reports whether a flow may pick an agent: it is
+// installed or configured (detected), and an agent that needs a model has
+// one. modelFor returns the agent's live configured model.
+func flowAgentAvailable(detected func(string) bool, modelFor func(string) string) func(string) bool {
+	return func(agent string) bool {
+		if !detected(agent) {
+			return false
+		}
+		return !modelRequiredAgents[agent] || strings.TrimSpace(modelFor(agent)) != ""
+	}
 }
 
 // flowCandidates evaluates repo's flow now and logs the decision, for the
