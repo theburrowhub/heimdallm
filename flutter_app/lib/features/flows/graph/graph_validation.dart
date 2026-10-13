@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:heimdallm/core/models/flow.dart';
 
 /// Client-side mirror of the daemon's flow checks, so the canvas can mark
@@ -28,11 +30,14 @@ const _quotaWindows = {'session', 'weekly', 'monthly', 'credit', 'any'};
 const _modelWindowPrefix = 'model:';
 const _maxWindowLength = 128;
 
+// The daemon measures lengths with Go's len(), which counts UTF-8 bytes.
+int _bytes(String s) => utf8.encode(s).length;
+
 bool _validWindow(String w) =>
     _quotaWindows.contains(w) ||
     (w.startsWith(_modelWindowPrefix) &&
-        w.length > _modelWindowPrefix.length &&
-        w.length <= _maxWindowLength);
+        _bytes(w) > _modelWindowPrefix.length &&
+        _bytes(w) <= _maxWindowLength);
 
 Set<String> reachableFrom(ReviewFlow f) {
   final seen = <String>{};
@@ -90,7 +95,7 @@ GraphCheck checkGraph(ReviewFlow f) {
   void err(String node, String msg, {String field = ''}) =>
       errors.add(FlowIssue(node: node, field: field, message: msg));
 
-  if (f.name.length > 120) {
+  if (_bytes(f.name) > 120) {
     err('', 'Name is longer than 120 characters.', field: 'name');
   }
   if (f.nodes.length > _maxNodes) {

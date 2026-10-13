@@ -101,10 +101,25 @@ void main() {
       errs(q(QuotaCondition(agent: 'claude', window: 'model:${'x' * 122}'))),
       isEmpty,
     );
+    // Caps count UTF-8 bytes: 'model:' + 63 x 2-byte chars is 132 bytes.
+    expect(
+      errs(q(QuotaCondition(agent: 'claude', window: 'model:${'é' * 63}'))),
+      {'c1'},
+    );
+    expect(
+      errs(q(QuotaCondition(agent: 'claude', window: 'model:${'é' * 61}'))),
+      isEmpty,
+    );
     expect(errs(q(const QuotaCondition(agent: 'claude', op: 'equal'))), {'c1'});
     expect(errs(q(const QuotaCondition(agent: 'claude'), match: 'some')), {
       'c1',
     });
+  });
+
+  test('name cap counts UTF-8 bytes', () {
+    ReviewFlow named(String n) => ReviewFlow(name: n, nodes: const {});
+    expect(checkGraph(named('é' * 61)).ok, isFalse); // 122 bytes
+    expect(checkGraph(named('é' * 60)).ok, isTrue); // 120 bytes
   });
 
   test(
