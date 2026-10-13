@@ -262,6 +262,21 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
     }
   }
 
+  /// Changes the global primary or fallback agent, then reloads the default
+  /// flow, which the daemon builds from them.
+  Future<void> _setDefaultAgent(String key, String agent) async {
+    try {
+      final json = await ref.read(apiClientProvider).patchConfig({
+        'ai': {key: agent},
+      });
+      if (!mounted) return;
+      _afterServerChange(json);
+      await _load();
+    } on ApiException catch (e) {
+      if (mounted) showToast(context, e.message, isError: true);
+    }
+  }
+
   Future<void> _duplicate() async {
     final flow = ref.read(flowEditorProvider).flow;
     final id = await askNewFlowId(context, _listing!);
@@ -369,6 +384,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
           for (final i in liveServer)
             if (i.node.isEmpty) i,
         ],
+        agents: listing.agents,
+        onSetDefaultAgent: readOnly ? _setDefaultAgent : null,
       ),
     };
     // While a draft is shown or drafted, the inspector would edit the flow
@@ -476,18 +493,17 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
               body = Column(
                 children: [
                   Expanded(child: canvas),
-                  if (!readOnly)
-                    Container(
-                      height: 280,
-                      decoration: BoxDecoration(
-                        color: panel,
-                        border: Border(top: BorderSide(color: border)),
-                      ),
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.all(16),
-                        child: inspectorPane,
-                      ),
+                  Container(
+                    height: 280,
+                    decoration: BoxDecoration(
+                      color: panel,
+                      border: Border(top: BorderSide(color: border)),
                     ),
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(16),
+                      child: inspectorPane,
+                    ),
+                  ),
                 ],
               );
             } else {
@@ -549,7 +565,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
                   },
                   onDelete: _delete,
                   onSave: _save,
-                  onDuplicate: _duplicate,
+                  // An empty default flow (no primary set) has nothing to copy.
+                  onDuplicate: state.flow.nodes.isEmpty ? null : _duplicate,
                 ),
                 Divider(height: 1, thickness: 1, color: border),
                 Expanded(child: body),
@@ -640,7 +657,7 @@ class _TopBar extends StatelessWidget {
   final VoidCallback onToggleTest;
   final VoidCallback onDelete;
   final VoidCallback onSave;
-  final VoidCallback onDuplicate;
+  final VoidCallback? onDuplicate;
 
   const _TopBar({
     required this.compact,

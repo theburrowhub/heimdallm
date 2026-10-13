@@ -160,7 +160,20 @@ void main() {
     );
     await tester.tap(find.byKey(const ValueKey('flow-test')));
     await tester.pumpAndSettle();
+    // A graph is tested as sent: the daemon ignores a repository with it.
+    expect(find.textContaining('Repository'), findsNothing);
     await tester.tap(find.byKey(const ValueKey('flow-test-run')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Reviews with claude'), findsOneWidget);
+    verify(
+      () => api.simulateFlow(
+        graph: any(named: 'graph'),
+        at: any(named: 'at'),
+      ),
+    ).called(1);
+
+    // Selecting a step keeps the path highlighted.
+    await tester.tap(find.byKey(const ValueKey('node-a1')));
     await tester.pumpAndSettle();
     expect(find.textContaining('Reviews with claude'), findsOneWidget);
   });
@@ -530,5 +543,89 @@ void main() {
     pending.completeError(ApiException('gone'));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('assist-drafting')), findsNothing);
+  });
+
+  ReviewFlow defaultFlow(String primary, String fallback) => ReviewFlow(
+    name: 'Default',
+    start: 'a1',
+    nodes: {
+      'a1': FlowNode(
+        id: 'a1',
+        type: FlowNodeType.agent,
+        agent: primary,
+        next: fallback.isEmpty ? '' : 'a2',
+      ),
+      if (fallback.isNotEmpty)
+        'a2': FlowNode(id: 'a2', type: FlowNodeType.agent, agent: fallback),
+    },
+  );
+
+  testWidgets('the default flow edits the global primary and fallback', (
+    tester,
+  ) async {
+    final (api, _) = await pumpEditor(
+      tester,
+      id: 'default',
+      listing: _listing(flows: {'default': defaultFlow('claude', 'codex')}),
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('node-a1')),
+        matching: find.text('claude'),
+      ),
+      findsOneWidget,
+    );
+    when(
+      () => api.patchConfig(any()),
+    ).thenAnswer((_) async => <String, dynamic>{});
+    when(() => api.fetchFlows()).thenAnswer(
+      (_) async => _listing(flows: {'default': defaultFlow('codex', 'codex')}),
+    );
+    await tester.tap(find.byKey(const ValueKey('default-flow-primary')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('codex').last);
+    await tester.pumpAndSettle();
+    verify(
+      () => api.patchConfig({
+        'ai': {'primary': 'codex'},
+      }),
+    ).called(1);
+    // The default graph is reloaded from the daemon and redrawn.
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('node-a1')),
+        matching: find.text('codex'),
+      ),
+      findsOneWidget,
+    );
+
+    when(() => api.fetchFlows()).thenAnswer(
+      (_) async => _listing(flows: {'default': defaultFlow('codex', '')}),
+    );
+    await tester.tap(find.byKey(const ValueKey('default-flow-fallback')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('none').last);
+    await tester.pumpAndSettle();
+    verify(
+      () => api.patchConfig({
+        'ai': {'fallback': ''},
+      }),
+    ).called(1);
+    expect(find.byKey(const ValueKey('node-a2')), findsNothing);
+  });
+
+  testWidgets('an empty default flow cannot be duplicated', (tester) async {
+    await pumpEditor(
+      tester,
+      id: 'default',
+      listing: _listing(flows: {'default': const ReviewFlow(name: 'Default')}),
+    );
+    final dup = tester.widget<ButtonStyleButton>(
+      find.ancestor(
+        of: find.text('Duplicate as a new flow'),
+        matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
+      ),
+    );
+    expect(dup.onPressed, isNull);
   });
 }

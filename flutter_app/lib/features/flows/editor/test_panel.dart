@@ -8,8 +8,8 @@ import 'package:heimdallm/shared/design_system/color_resolver.dart';
 import 'package:heimdallm/shared/design_system/components/components.dart';
 import 'package:heimdallm/shared/design_system/tokens.dart';
 
-/// Runs the flow being edited (saved or not) for a moment and an optional
-/// repository, and highlights the path it takes on the canvas.
+/// Runs the flow being edited (saved or not) for a moment, and highlights
+/// the path it takes on the canvas.
 class FlowTestPanel extends ConsumerStatefulWidget {
   final VoidCallback? onClose;
   const FlowTestPanel({super.key, this.onClose});
@@ -20,15 +20,8 @@ class FlowTestPanel extends ConsumerStatefulWidget {
 
 class _FlowTestPanelState extends ConsumerState<FlowTestPanel> {
   DateTime _at = DateTime.now();
-  final _repo = TextEditingController();
   String? _error;
   bool _running = false;
-
-  @override
-  void dispose() {
-    _repo.dispose();
-    super.dispose();
-  }
 
   Future<void> _pick() async {
     final d = await showDatePicker(
@@ -52,14 +45,9 @@ class _FlowTestPanelState extends ConsumerState<FlowTestPanel> {
       _error = null;
     });
     try {
-      final repo = _repo.text.trim();
       final d = await ref
           .read(apiClientProvider)
-          .simulateFlow(
-            graph: ref.read(flowEditorProvider).flow,
-            at: _at,
-            repo: repo.isEmpty ? null : repo,
-          );
+          .simulateFlow(graph: ref.read(flowEditorProvider).flow, at: _at);
       if (!mounted) return;
       ref.read(flowEditorProvider.notifier).setSimulation(d);
     } on ApiException catch (e) {
@@ -105,16 +93,6 @@ class _FlowTestPanelState extends ConsumerState<FlowTestPanel> {
           label: Text(
             '${local.formatShortDate(_at)} · '
             '${local.formatTimeOfDay(TimeOfDay.fromDateTime(_at))}',
-          ),
-        ),
-        const SizedBox(height: 10),
-        TextField(
-          controller: _repo,
-          decoration: const InputDecoration(
-            labelText: 'Repository (optional)',
-            hintText: 'owner/name',
-            isDense: true,
-            border: OutlineInputBorder(),
           ),
         ),
         const SizedBox(height: 10),

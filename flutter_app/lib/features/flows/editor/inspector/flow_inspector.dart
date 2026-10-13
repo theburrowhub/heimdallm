@@ -16,12 +16,21 @@ class FlowInspector extends ConsumerWidget {
   /// Flow-level problems the daemon reported (not pinned to a step).
   final List<FlowIssue> issues;
 
+  /// The agents to offer as the global primary and fallback.
+  final List<FlowAgent> agents;
+
+  /// Set on the default flow: changes the global `primary` or `fallback`
+  /// agent ('' for no fallback). The default graph is built from them.
+  final void Function(String key, String agent)? onSetDefaultAgent;
+
   const FlowInspector({
     super.key,
     required this.flowId,
     required this.usedBy,
     this.readOnly = false,
     this.issues = const [],
+    this.agents = const [],
+    this.onSetDefaultAgent,
   });
 
   @override
@@ -39,8 +48,8 @@ class FlowInspector extends ConsumerWidget {
           title: 'Flow',
           id: flowId,
           description: readOnly
-              ? 'Built from the primary and fallback agents. Duplicate it to '
-                    'make an editable copy.'
+              ? 'Built from the primary and fallback agents below. Duplicate '
+                    'it to make an editable copy.'
               : 'Select a step to edit it, or click empty canvas to come '
                     'back here.',
         ),
@@ -53,6 +62,8 @@ class FlowInspector extends ConsumerWidget {
           label: 'Name',
           onChanged: (v) => ref.read(flowEditorProvider.notifier).rename(v),
         ),
+        if (onSetDefaultAgent case final set?)
+          ..._defaultAgents(context, state.flow, set),
         const InspectorLabel('Used by'),
         if (usedBy.isEmpty)
           AppText.muted('Not selected anywhere yet.')
@@ -99,5 +110,62 @@ class FlowInspector extends ConsumerWidget {
         ),
       ],
     );
+  }
+
+  /// The primary and fallback dropdowns, read off the default graph: Start
+  /// leads to the primary, whose fallback is the fallback agent.
+  List<Widget> _defaultAgents(
+    BuildContext context,
+    ReviewFlow flow,
+    void Function(String, String) set,
+  ) {
+    final first = flow.nodes[flow.start];
+    final primary = first?.isCondition == false ? first!.agent : '';
+    final fallback = flow.nodes[first?.next ?? '']?.agent ?? '';
+    final ids = [
+      for (final a in agents)
+        if (a.installed) a.id,
+    ];
+    InputDecoration deco(String label) => InputDecoration(
+      labelText: label,
+      isDense: true,
+      border: const OutlineInputBorder(),
+    );
+    final style = Theme.of(context).textTheme.bodyMedium;
+    return [
+      const InspectorLabel('Agents'),
+      DropdownButtonFormField<String>(
+        key: const ValueKey('default-flow-primary'),
+        // `value` so the field follows the graph reloaded after a change.
+        // ignore: deprecated_member_use
+        value: ids.contains(primary) ? primary : null,
+        isExpanded: true,
+        style: style,
+        decoration: deco('Primary agent'),
+        items: [
+          for (final id in ids) DropdownMenuItem(value: id, child: Text(id)),
+        ],
+        onChanged: (v) {
+          if (v != null && v != primary) set('primary', v);
+        },
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        key: const ValueKey('default-flow-fallback'),
+        // ignore: deprecated_member_use
+        value: ids.contains(fallback) ? fallback : 'none',
+        isExpanded: true,
+        style: style,
+        decoration: deco('Fallback agent'),
+        items: [
+          const DropdownMenuItem(value: 'none', child: Text('none')),
+          for (final id in ids) DropdownMenuItem(value: id, child: Text(id)),
+        ],
+        onChanged: (v) {
+          final next = v == null || v == 'none' ? '' : v;
+          if (next != fallback) set('fallback', next);
+        },
+      ),
+    ];
   }
 }

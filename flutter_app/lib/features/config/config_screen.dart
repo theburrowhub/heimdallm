@@ -1815,8 +1815,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     circuitBreaker: _circuitBreaker,
     reviewLimits: _reviewLimits,
     tokenSaving: _tokenSaving,
-    // Primary/fallback are edited in the default flow (Flows), not here, so
-    // the server's current values are kept rather than a stale copy.
+    // Primary/fallback are edited from the default flow's inspector (Flows),
+    // not here, so the server's current values are kept rather than a stale
+    // copy.
     aiFlow: _aiFlow,
     reviewMode: _reviewMode,
     clusterRole: _clusterRole,
