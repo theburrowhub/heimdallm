@@ -20,25 +20,35 @@ final cliAgentCatalogProvider = FutureProvider.autoDispose<CliAgentCatalog>((
   return ref.watch(apiClientProvider).fetchCliAgents();
 });
 
-/// How often the catalog re-reads quotas while it is on screen. The agents
-/// branch stays mounted in the shell, so without this the cards kept the
-/// first reading for as long as the app ran.
+/// How often the catalog re-reads quotas. The agents branch stays mounted in
+/// the shell, so this runs for as long as the app does; the daemon caches
+/// each provider's reading for two minutes, so it never adds provider calls.
 const kQuotaRefreshInterval = Duration(minutes: 1);
 
-/// Every agent's remaining quota (GET /quotas); empty on older daemons.
-/// Re-read every [kQuotaRefreshInterval] while anything watches it.
+/// Every agent's remaining quota (GET /quotas), re-read every
+/// [kQuotaRefreshInterval]. A failed read throws so the AsyncValue keeps the
+/// last good reading instead of blanking the cards; with no reading yet
+/// (older daemons) the cards show no usage.
 final agentQuotasProvider = FutureProvider.autoDispose<Map<String, AgentQuota>>(
   (ref) async {
     final timer = Timer(kQuotaRefreshInterval, ref.invalidateSelf);
     ref.onDispose(timer.cancel);
-    try {
-      final list = await ref.watch(apiClientProvider).fetchQuotas();
-      return {for (final q in list) q.agent: q};
-    } catch (_) {
-      return const {};
-    }
+    final list = await ref.watch(apiClientProvider).fetchQuotas();
+    return {for (final q in list) q.agent: q};
   },
 );
+
+/// Width of the window label column on a catalog card; the money detail
+/// under a bar is indented by the same amount.
+const _quotaLabelWidth = 56.0;
+
+/// Readable copy for the daemon's closed set of quota errors.
+String quotaErrorText(String error) => switch (error) {
+  'expired' => 'Usage unavailable: sign-in expired',
+  'unavailable' => 'Usage unavailable: provider not reachable',
+  'unsupported' => 'This agent reports no usage',
+  _ => 'Usage unavailable',
+};
 
 String agentEmoji(String id) => switch (id) {
   'claude' => '🔷',
@@ -227,7 +237,7 @@ class AgentCatalogCard extends StatelessWidget {
                 quota!.error != 'not_configured') ...[
               const SizedBox(height: 8),
               Text(
-                'Usage unavailable (${quota!.error.replaceAll('_', ' ')})',
+                quotaErrorText(quota!.error),
                 key: ValueKey('quota-${agent.id}-unavailable'),
                 style: TextStyle(fontSize: 11, color: muted),
               ),
@@ -247,13 +257,13 @@ class AgentCatalogCard extends StatelessWidget {
                 quota!.available &&
                 quota!.windows.isNotEmpty) ...[
               const SizedBox(height: 8),
-              for (final w in quota!.windows.take(4)) ...[
+              for (final w in quota!.windows) ...[
                 Padding(
                   padding: const EdgeInsets.only(top: 3),
                   child: Row(
                     children: [
                       SizedBox(
-                        width: 56,
+                        width: _quotaLabelWidth,
                         child: Text(
                           w.shortLabel,
                           overflow: TextOverflow.ellipsis,
@@ -283,7 +293,10 @@ class AgentCatalogCard extends StatelessWidget {
                 ),
                 if (w.detail.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(left: 56, top: 1),
+                    padding: const EdgeInsets.only(
+                      left: _quotaLabelWidth,
+                      top: 1,
+                    ),
                     child: Text(
                       w.detail,
                       key: ValueKey('quota-${agent.id}-${w.shortLabel}-detail'),

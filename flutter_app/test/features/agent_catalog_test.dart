@@ -228,6 +228,7 @@ void main() {
               {'kind': 'session', 'used_percent': 61},
               {'kind': 'weekly', 'used_percent': 46},
               {'kind': 'model', 'label': 'Fable', 'used_percent': 3},
+              {'kind': 'model', 'label': 'Opus', 'used_percent': 12},
               {
                 'kind': 'credit',
                 'used_percent': 4.22,
@@ -238,7 +239,7 @@ void main() {
           AgentQuota.fromJson({
             'agent': 'openrouter',
             'available': true,
-            'detail': r'$3.00 spent · no limit',
+            'detail': '3.00 USD spent · no limit',
           }),
           AgentQuota.fromJson({'agent': 'copilot', 'error': 'unavailable'}),
         ],
@@ -250,14 +251,27 @@ void main() {
       expect(find.text('61%'), findsOneWidget);
       expect(find.text('34%'), findsNothing);
       expect(find.byKey(const ValueKey('quota-claude-Fable')), findsOneWidget);
+      // Five windows: none is cut, the credit row included.
+      expect(find.byKey(const ValueKey('quota-claude-Opus')), findsOneWidget);
+      expect(find.byKey(const ValueKey('quota-claude-credit')), findsOneWidget);
       expect(find.text('31.65 / 750.00 EUR'), findsOneWidget);
       expect(find.text('4%'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('quota-openrouter-detail')),
         findsOneWidget,
       );
-      expect(find.text(r'$3.00 spent · no limit'), findsOneWidget);
-      expect(find.text('Usage unavailable (unavailable)'), findsOneWidget);
+      expect(find.text('3.00 USD spent · no limit'), findsOneWidget);
+      expect(
+        find.text('Usage unavailable: provider not reachable'),
+        findsOneWidget,
+      );
+
+      // A failed refresh keeps the last good reading instead of blanking it.
+      when(() => api.fetchQuotas()).thenThrow(ApiException('boom'));
+      await tester.pump(kQuotaRefreshInterval);
+      await tester.pumpAndSettle();
+      expect(find.text('61%'), findsOneWidget);
+      expect(find.text('31.65 / 750.00 EUR'), findsOneWidget);
     },
   );
 

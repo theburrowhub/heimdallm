@@ -144,15 +144,75 @@ func TestClaudeSourceLimitsEdgeCases(t *testing.T) {
 	}
 }
 
+func TestClaudeSourceMergesLegacyDedupesAndPrefersIDs(t *testing.T) {
+	// limits gives only per-model windows: session and weekly come from the
+	// legacy objects. A scoped model with an id is labelled by the id, a
+	// repeated (kind, label) is kept once, and other scoped kinds are
+	// skipped. Uncapped extra usage shows its spend as a detail.
+	srv := server(t, nil, 200, `{
+	 "five_hour":{"utilization":20},
+	 "seven_day":{"utilization":30},
+	 "extra_usage":{"is_enabled":true,"monthly_limit":0,"used_credits":1234,"currency":"EUR","decimal_places":2},
+	 "limits":[
+	  {"kind":"weekly_all","percent":null},
+	  {"kind":"weekly_scoped","percent":5,"scope":{"model":{"id":"claude-opus","display_name":"Opus"}}},
+	  {"kind":"weekly_scoped","percent":6,"scope":{"model":{"id":"claude-opus","display_name":"Opus"}}},
+	  {"kind":"session_scoped","percent":9,"scope":{"model":{"id":"claude-opus","display_name":"Opus"}}}
+	 ]}`)
+	s := &ClaudeSource{
+		BaseURL:         srv.URL,
+		ReadKeychain:    func(context.Context) (string, error) { return `{"claudeAiOauth":{"accessToken":"t"}}`, nil },
+		CredentialsPath: filepath.Join(t.TempDir(), "missing"),
+	}
+	p := s.Read(context.Background())
+	if len(p.Windows) != 3 {
+		t.Fatalf("windows = %+v", p.Windows)
+	}
+	if w, _ := p.Window(KindSession, ""); w.UsedPercent != 20 {
+		t.Errorf("session from legacy = %+v", w)
+	}
+	if w, _ := p.Window(KindWeekly, ""); w.UsedPercent != 30 {
+		t.Errorf("weekly from legacy = %+v", w)
+	}
+	if w, ok := p.Window(KindModel, "claude-opus"); !ok || w.UsedPercent != 5 {
+		t.Errorf("model by id = %+v (%v)", w, ok)
+	}
+	if p.Detail != "12.34 EUR extra usage spent · no limit" {
+		t.Errorf("detail = %q", p.Detail)
+	}
+}
+
+func TestMaxUsedIgnoresModelWindowsUnlessTheyAreAll(t *testing.T) {
+	claude := Provider{Windows: []Window{
+		{Kind: KindSession, UsedPercent: 20},
+		{Kind: KindModel, Label: "Opus", UsedPercent: 100},
+	}}
+	if w, _ := claude.MaxUsed(); w.Kind != KindSession {
+		t.Errorf("claude MaxUsed = %+v, want the session window", w)
+	}
+	gemini := Provider{Windows: []Window{
+		{Kind: KindModel, Label: "a", UsedPercent: 10},
+		{Kind: KindModel, Label: "b", UsedPercent: 70},
+	}}
+	if w, _ := gemini.MaxUsed(); w.Label != "b" {
+		t.Errorf("gemini MaxUsed = %+v, want the fullest bucket", w)
+	}
+}
+
 func TestCreditProviderDetail(t *testing.T) {
 	limit := 250.0
 	p := CreditProvider("openrouter", 12.5, &limit)
-	if w, ok := p.Window(KindCredit, ""); !ok || w.UsedPercent != 5 || w.Detail != "$12.50 / $250.00" {
+	if w, ok := p.Window(KindCredit, ""); !ok || w.UsedPercent != 5 || w.Detail != "12.50 / 250.00 USD" {
 		t.Fatalf("limited = %+v", p)
 	}
 	p = CreditProvider("openrouter", 3, nil)
-	if len(p.Windows) != 0 || p.Detail != "$3.00 spent · no limit" {
+	if len(p.Windows) != 0 || p.Detail != "3.00 USD spent · no limit" {
 		t.Fatalf("unlimited = %+v", p)
+	}
+	zero := 0.0
+	p = CreditProvider("openrouter", 1, &zero)
+	if w, ok := p.Window(KindCredit, ""); !ok || w.UsedPercent != 100 || p.Detail != "" {
+		t.Fatalf("zero limit must be exhausted, not unlimited: %+v", p)
 	}
 }
 

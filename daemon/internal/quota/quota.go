@@ -69,10 +69,25 @@ func (p Provider) Window(kind, label string) (Window, bool) {
 }
 
 // MaxUsed is the most-spent window, for "any window" conditions.
+//
+// Per-model windows count only when the provider has nothing else (Gemini's
+// buckets): for Claude, one model's full weekly window must not make the
+// whole agent look exhausted while the model reviews use has headroom. Flows
+// target a model window explicitly with "model:<label>".
 func (p Provider) MaxUsed() (Window, bool) {
+	onlyModels := true
+	for _, w := range p.Windows {
+		if w.Kind != KindModel {
+			onlyModels = false
+			break
+		}
+	}
 	var best Window
 	found := false
 	for _, w := range p.Windows {
+		if w.Kind == KindModel && !onlyModels {
+			continue
+		}
 		if !found || w.UsedPercent > best.UsedPercent {
 			best, found = w, true
 		}
