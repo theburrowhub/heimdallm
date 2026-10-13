@@ -116,8 +116,9 @@ type agentModels struct {
 
 func (m *agentModels) store(c *config.Config) {
 	snap := map[string]string{}
-	for id, a := range c.AI.Agents {
-		snap[id] = a.Model
+	for id := range c.AI.Agents {
+		// The same lookup buildRunOpts uses for an agent's options.
+		snap[id] = c.AgentConfigFor(id).Model
 	}
 	m.p.Store(&snap)
 }

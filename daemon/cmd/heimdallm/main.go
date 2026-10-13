@@ -805,13 +805,16 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 
 	// Remaining quota of each agent, for review flows (cached 2 minutes).
 	quotaSvc := newQuotaService(openRouterAdmin)
-	// Never called with cfgMu held: flows evaluate after buildRunOpts and
-	// the simulator have released it.
+	// Flow availability reads the agents' models from a lock-free snapshot
+	// (never cfgMu), refreshed on every config load and reload.
 	var models agentModels
-	models.store(cfg)
-	warnModelRequiredWithoutModel(cfg, func(agent string) bool {
-		return agent == "openrouter" && openRouterAdmin.KeySource() != ""
-	})
+	refreshAgentModels := func(c *config.Config) {
+		models.store(c)
+		warnModelRequiredWithoutModel(c, func(agent string) bool {
+			return agent == "openrouter" && openRouterAdmin.KeySource() != ""
+		})
+	}
+	refreshAgentModels(cfg)
 	agentAvailable := flowAgentAvailable(detectedBy(exec.Detect), models.model)
 
 	buildRunOpts := func(pr *gh.PullRequest, aiCfg config.RepoAI) pipeline.RunOptions {
@@ -2230,10 +2233,8 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			go propagatePartition(runtimeCtx, clusterSt)
 		}
 
-		models.store(newCfg)
-		warnModelRequiredWithoutModel(newCfg, func(agent string) bool {
-			return agent == "openrouter" && openRouterAdmin.KeySource() != ""
-		})
+		// newCfg is already validated and is applied below on every path.
+		refreshAgentModels(newCfg)
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
 		if !restartPollers {

@@ -333,8 +333,11 @@ class AgentConfigScreen extends ConsumerWidget {
               if (info != null && info.isProvider && !info.configured) agentId,
             },
             onReloadModels: () async {
-              await ref.read(apiClientProvider).rescanCliAgents();
-              ref.invalidate(cliAgentCatalogProvider);
+              // The page can be left while the rescan runs: invalidate
+              // through the container, not this widget's ref.
+              final container = ProviderScope.containerOf(context);
+              await container.read(apiClientProvider).rescanCliAgents();
+              container.invalidate(cliAgentCatalogProvider);
             },
             header: info == null
                 ? null
