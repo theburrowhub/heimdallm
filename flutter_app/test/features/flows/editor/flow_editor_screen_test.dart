@@ -11,6 +11,7 @@ import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class _MockApi extends Mock implements ApiClient {}
 
@@ -394,4 +395,40 @@ void main() {
       expect(c2.topLeft - c1.topLeft, const Offset(30, 30));
     },
   );
+
+  testWidgets('a new flow opens with the assistant', (tester) async {
+    SharedPreferences.setMockInitialValues(const {});
+    await pumpEditor(tester, id: 'brand-new');
+    expect(find.byKey(const ValueKey('assist-input')), findsOneWidget);
+    expect(find.byKey(const ValueKey('assist-open')), findsNothing);
+  });
+
+  testWidgets('an existing flow opens the assistant from its button', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(const {});
+    await pumpEditor(tester);
+    expect(find.byKey(const ValueKey('assist-input')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('assist-open')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('assist-input')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('assist-close')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('assist-input')), findsNothing);
+    expect(find.byKey(const ValueKey('assist-open')), findsOneWidget);
+  });
+
+  testWidgets('the default flow offers no assistant', (tester) async {
+    await pumpEditor(
+      tester,
+      id: 'default',
+      listing: FlowListing(
+        flows: {'night': _night},
+        selected: 'default',
+        defaultId: 'default',
+      ),
+    );
+    expect(find.byKey(const ValueKey('assist-open')), findsNothing);
+    expect(find.byKey(const ValueKey('assist-input')), findsNothing);
+  });
 }

@@ -9,6 +9,7 @@ import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/features/flows/assistant/assist_panel.dart';
 import 'package:heimdallm/features/flows/canvas/flow_canvas.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
 import 'package:heimdallm/features/flows/editor/inspector/agent_inspector.dart';
@@ -98,6 +99,7 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
   bool _saving = false;
   bool _settingGlobal = false;
   bool _testOpen = false;
+  bool _assistOpen = false;
   final _canvas = FlowCanvasController();
 
   /// The daemon's findings from the last rejected save, and the flow they
@@ -122,6 +124,7 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
         _listing = null;
         _serverIssues = const [];
         _testOpen = false;
+        _assistOpen = false;
       });
       _load();
     }
@@ -137,7 +140,13 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
           .load(
             listing.flows[widget.flowId] ?? ReviewFlow(name: widget.flowId),
           );
-      setState(() => _listing = listing);
+      setState(() {
+        _listing = listing;
+        // A new flow opens with the assistant.
+        _assistOpen =
+            !listing.flows.containsKey(widget.flowId) &&
+            widget.flowId != listing.defaultId;
+      });
     } on ApiException catch (e) {
       if (mounted) setState(() => _loadError = e.message);
     } catch (e) {
@@ -312,6 +321,7 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
     }
     final ctl = ref.read(flowEditorProvider.notifier);
     final config = ref.watch(configNotifierProvider).value;
+    final defaultAgent = config?.aiPrimary ?? '';
     final readOnly = _isDefault;
     final canEdit = !readOnly && state.draft == null;
 
@@ -391,6 +401,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
             final compact = c.maxWidth < 900;
             final border = resolveAppColor(context, AppColors.border);
             final panel = AppColors.surface.resolve(context);
+            // The canvas sits between the palette (240) and inspector (340).
+            final canvasWidth = compact ? c.maxWidth : c.maxWidth - 580;
             final canvas = Stack(
               children: [
                 Positioned.fill(
@@ -421,7 +433,31 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
                       ),
                     ),
                   ),
-                // Task 12 adds the assistant button and panel here.
+                if (!readOnly && !_assistOpen)
+                  Positioned(
+                    right: 16,
+                    bottom: 16,
+                    child: FloatingActionButton.extended(
+                      key: const ValueKey('assist-open'),
+                      onPressed: () => setState(() => _assistOpen = true),
+                      icon: const Icon(Icons.auto_awesome),
+                      label: const Text('Adjust with AI'),
+                    ),
+                  ),
+                if (!readOnly && _assistOpen)
+                  Positioned(
+                    right: 16,
+                    bottom: 16,
+                    width: (canvasWidth - 32).clamp(280, 420).toDouble(),
+                    child: _FloatingPanel(
+                      maxHeight: c.maxHeight - 120,
+                      child: AssistPanel(
+                        agents: listing.agents,
+                        defaultAgent: defaultAgent,
+                        onClose: () => setState(() => _assistOpen = false),
+                      ),
+                    ),
+                  ),
               ],
             );
             final Widget body;
