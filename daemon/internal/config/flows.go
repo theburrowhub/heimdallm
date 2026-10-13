@@ -412,12 +412,10 @@ func validateQuotaCondition(q QuotaCondition) error {
 	return nil
 }
 
+// validateScheduleCondition accepts from == to: that is the whole day.
 func validateScheduleCondition(sc ScheduleCondition) error {
 	if !hhmmPattern.MatchString(sc.From) || !hhmmPattern.MatchString(sc.To) {
 		return fmt.Errorf("from/to must be HH:MM")
-	}
-	if sc.From == sc.To {
-		return fmt.Errorf("from and to must differ")
 	}
 	for _, d := range sc.Days {
 		if _, ok := Weekday(d); !ok {

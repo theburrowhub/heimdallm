@@ -235,6 +235,19 @@ class _ScheduleEditor extends StatelessWidget {
             ),
           ],
         ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            key: ValueKey('schedule-$index-allday'),
+            onPressed: () =>
+                onChanged(value.copyWith(from: '00:00', to: '00:00')),
+            child: const Text('All day'),
+          ),
+        ),
+        Text(
+          'Same start and end = all day',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
         const SizedBox(height: 12),
         SyncedTextField(
           key: ValueKey('schedule-$index-tz'),

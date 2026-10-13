@@ -163,3 +163,33 @@ func TestQuotaConditions(t *testing.T) {
 		t.Errorf("unavailable without error = %v %s", ok, why)
 	}
 }
+
+func TestScheduleAllDay(t *testing.T) {
+	weekend := config.ScheduleCondition{Days: []string{"sat", "sun"}, From: "00:00", To: "00:00", TZ: "UTC"}
+	cases := map[string]bool{
+		"2026-10-10T00:00:00Z": true,  // Saturday, first minute
+		"2026-10-10T12:00:00Z": true,  // Saturday noon
+		"2026-10-10T23:59:00Z": true,  // Saturday, last minute
+		"2026-10-11T00:00:00Z": true,  // Sunday: no "started yesterday" shift
+		"2026-10-12T00:00:00Z": false, // Monday, first minute
+		"2026-10-09T23:59:00Z": false, // Friday
+	}
+	for at, want := range cases {
+		ts, _ := time.Parse(time.RFC3339, at)
+		if got, why := scheduleHolds(weekend, ts); got != want {
+			t.Errorf("%s: holds=%v want %v (%s)", at, got, want, why)
+		}
+	}
+	ts, _ := time.Parse(time.RFC3339, "2026-10-10T12:00:00Z")
+	_, why := scheduleHolds(config.ScheduleCondition{Days: []string{"sat", "sun"}, From: "00:00", To: "00:00"}, ts.In(time.Local))
+	if !strings.Contains(why, "schedule sat,sun all day daemon time") {
+		t.Errorf("reason = %q", why)
+	}
+	every := config.ScheduleCondition{From: "09:00", To: "09:00", TZ: "UTC"}
+	for _, at := range []string{"2026-10-10T08:00:00Z", "2026-10-12T23:59:00Z"} {
+		ts, _ := time.Parse(time.RFC3339, at)
+		if ok, why := scheduleHolds(every, ts); !ok {
+			t.Errorf("empty days must always hold: %s", why)
+		}
+	}
+}

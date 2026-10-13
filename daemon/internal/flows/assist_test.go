@@ -177,7 +177,7 @@ func TestAssistCancellationRemovesTempDir(t *testing.T) {
 func TestAssistPromptCarriesCurrentFlow(t *testing.T) {
 	cur := config.FlowConfig{Name: "Mine", Start: "a1", Nodes: map[string]config.FlowNode{"a1": {Type: config.NodeAgent, Agent: "claude"}}}
 	p := BuildAssistPrompt(AssistRequest{Agent: "claude", Instruction: "add codex as fallback", Flow: &cur}, actx)
-	for _, want := range []string{`"Mine"`, "add codex as fallback", "2026-10-12", "CURRENT FLOW"} {
+	for _, want := range []string{`"Mine"`, "add codex as fallback", "2026-10-12", "CURRENT FLOW", "whole day"} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("prompt lacks %q", want)
 		}

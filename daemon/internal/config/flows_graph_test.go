@@ -121,3 +121,18 @@ func TestCheckFlowConditionLimit(t *testing.T) {
 		t.Fatalf("errs=%v", errs)
 	}
 }
+
+func TestCheckFlowAcceptsAllDaySchedule(t *testing.T) {
+	f := validGraph()
+	n := f.Nodes["c1"]
+	n.Schedule = map[string]ScheduleCondition{"s1": {Days: []string{"sat", "sun"}, From: "00:00", To: "00:00"}}
+	f.Nodes["c1"] = n
+	if errs, warns := CheckFlow("weekend", f); len(errs) != 0 || len(warns) != 0 {
+		t.Fatalf("from == to means all day: errs=%v warns=%v", errs, warns)
+	}
+	n.Schedule = map[string]ScheduleCondition{"s1": {From: "0:00", To: "0:00"}}
+	f.Nodes["c1"] = n
+	if errs, _ := CheckFlow("weekend", f); len(errs) == 0 {
+		t.Fatal("equal but malformed times must still be rejected")
+	}
+}

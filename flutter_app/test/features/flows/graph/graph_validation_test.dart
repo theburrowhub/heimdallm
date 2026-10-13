@@ -64,7 +64,8 @@ void main() {
       type: FlowNodeType.condition,
       schedule: const [ScheduleCondition(from: '06:00', to: '06:00')],
     );
-    expect(checkGraph(g({'c1': same}, start: 'c1')).errorNodes, {'c1'});
+    // Same start and end means all day, as in the daemon.
+    expect(checkGraph(g({'c1': same}, start: 'c1')).errorNodes, isEmpty);
     final badQuota = FlowNode(
       id: 'c1',
       type: FlowNodeType.condition,

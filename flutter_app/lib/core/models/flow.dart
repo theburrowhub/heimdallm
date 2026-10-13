@@ -97,7 +97,8 @@ class ScheduleCondition {
 
   String describe() {
     final d = days.isEmpty ? 'every day' : days.join(', ');
-    return '$d $from–$to ${tz.isEmpty ? 'daemon time' : tz}';
+    final window = from == to ? 'all day' : '$from–$to';
+    return '$d $window ${tz.isEmpty ? 'daemon time' : tz}';
   }
 }
 

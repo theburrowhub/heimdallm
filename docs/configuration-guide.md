@@ -404,7 +404,7 @@ Conditions:
 
 | Condition | Holds when |
 |---|---|
-| `schedule` | today is one of `days` (`mon`…`sun`; empty = every day) and the time is within `[from, to)` in `tz` (IANA zone; empty = the daemon's). `from > to` spans midnight, e.g. `22:00`–`06:00`. |
+| `schedule` | today is one of `days` (`mon`…`sun`; empty = every day) and the time is within `[from, to)` in `tz` (IANA zone; empty = the daemon's). `from > to` spans midnight, e.g. `22:00`–`06:00`; `from == to` (e.g. `00:00`–`00:00`) covers the whole day, so `days = ["sat", "sun"]` with it means "all weekend". |
 | `quota` | `agent`'s used `window` is `below` / `above` `percent`. Windows: `session` (5h), `weekly`, `monthly`, `credit`, `any` (the most used window) or `model:<id>` (a per-model bucket, Gemini). |
 
 A condition step with several conditions needs all of them (`match = "all"`,

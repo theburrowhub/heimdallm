@@ -37,7 +37,7 @@ Decisions taken during brainstorming:
 | Existing | Reused for |
 |---|---|
 | `config.FlowConfig` / `FlowRule` (`daemon/internal/config/flows.go`) | Replaced by the node-based `FlowConfig` / `FlowNode`; the rule-list format is deleted |
-| `config.ScheduleCondition`, `config.QuotaCondition` + their validation | Unchanged, now carried by condition nodes |
+| `config.ScheduleCondition`, `config.QuotaCondition` + their validation | Carried by condition nodes. One change: a schedule with `from == to` is valid and means the whole day (24-hour window on the listed `days`, or every day), so "weekends" is expressible |
 | `config.Config.FlowForRepo` (repo > org > global, `legacyFlow`) | Same resolution; `legacyFlow` now builds a graph |
 | `flows.Evaluate`, `scheduleHolds`, `quotaHolds` (`daemon/internal/flows/flows.go`) | Condition evaluation reused verbatim; the walk over rules becomes a walk over the graph |
 | `exec.Detect` availability check | Same "available" notion while walking agent nodes |

@@ -143,7 +143,7 @@ func minutesOf(hhmm string) int {
 }
 
 // scheduleHolds checks a weekday + time-of-day window. A window that crosses
-// midnight belongs to the day it starts on.
+// midnight belongs to the day it starts on. from == to is the whole day.
 func scheduleHolds(s config.ScheduleCondition, now time.Time) (bool, string) {
 	loc := time.Local
 	if s.TZ != "" {
@@ -156,7 +156,10 @@ func scheduleHolds(s config.ScheduleCondition, now time.Time) (bool, string) {
 	from, to := minutesOf(s.From), minutesOf(s.To)
 	day := t.Weekday()
 	inWindow := false
+	allDay := from == to
 	switch {
+	case allDay:
+		inWindow = true
 	case from < to:
 		inWindow = cur >= from && cur < to
 	case cur >= from:
@@ -173,6 +176,9 @@ func scheduleHolds(s config.ScheduleCondition, now time.Time) (bool, string) {
 		}
 	}
 	desc := fmt.Sprintf("%s-%s", s.From, s.To)
+	if allDay {
+		desc = "all day"
+	}
 	if len(s.Days) > 0 {
 		desc = strings.Join(s.Days, ",") + " " + desc
 	}

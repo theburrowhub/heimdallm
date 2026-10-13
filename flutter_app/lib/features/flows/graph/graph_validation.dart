@@ -132,8 +132,6 @@ GraphCheck checkGraph(ReviewFlow f) {
       for (final s in n.schedule) {
         if (!_hhmmPattern.hasMatch(s.from) || !_hhmmPattern.hasMatch(s.to)) {
           err(id, 'Times must be HH:MM.');
-        } else if (s.from == s.to) {
-          err(id, 'A schedule needs different start and end times.');
         }
         if (s.days.any((d) => !_weekdays.contains(d))) {
           err(id, 'Days must be mon to sun.');

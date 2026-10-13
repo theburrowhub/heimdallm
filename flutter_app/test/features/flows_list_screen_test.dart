@@ -105,6 +105,15 @@ void main() {
       'every day 08:00–15:00 daemon time',
     );
     expect(
+      const ScheduleCondition(
+        days: ['sat', 'sun'],
+        from: '00:00',
+        to: '00:00',
+        tz: '',
+      ).describe(),
+      'sat, sun all day daemon time',
+    );
+    expect(
       const QuotaCondition(agent: 'x', op: 'above', percent: 90).describe(),
       'x session quota > 90%',
     );

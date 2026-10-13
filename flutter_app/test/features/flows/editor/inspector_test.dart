@@ -93,6 +93,15 @@ void main() {
     expect(c.read(flowEditorProvider).flow.nodes['c1']!.schedule, hasLength(2));
   });
 
+  testWidgets('schedule explains and sets an all-day window', (tester) async {
+    final c = await pumpInspector(tester, condition: true);
+    expect(find.text('Same start and end = all day'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('schedule-0-allday')));
+    await tester.pumpAndSettle();
+    final s = c.read(flowEditorProvider).flow.nodes['c1']!.schedule[0];
+    expect((s.from, s.to), ('00:00', '00:00'));
+  });
+
   testWidgets('agent inspector marks agents that are not installed', (
     tester,
   ) async {

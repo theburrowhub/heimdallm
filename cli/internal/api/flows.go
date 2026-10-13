@@ -274,7 +274,11 @@ func describeSchedule(s ScheduleCondition) string {
 	if tz == "" {
 		tz = "daemon time"
 	}
-	return DisplayText(fmt.Sprintf("%s %s-%s %s", days, s.From, s.To, tz), 80)
+	window := s.From + "-" + s.To
+	if s.From == s.To {
+		window = "all day"
+	}
+	return DisplayText(fmt.Sprintf("%s %s %s", days, window, tz), 80)
 }
 
 func describeQuota(q QuotaCondition) string {

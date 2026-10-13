@@ -94,7 +94,6 @@ func TestPutFlowValidation(t *testing.T) {
 		"bad percent":   {"/flows/x", condFlow(`"quota":{"a":{"agent":"claude","window":"session","op":"below","percent":500}}`)},
 		"bad op":        {"/flows/x", condFlow(`"quota":{"a":{"agent":"claude","window":"session","op":"near","percent":5}}`)},
 		"bad time":      {"/flows/x", condFlow(`"schedule":{"a":{"from":"8am","to":"15:00"}}`)},
-		"same times":    {"/flows/x", condFlow(`"schedule":{"a":{"from":"08:00","to":"08:00"}}`)},
 		"bad day":       {"/flows/x", condFlow(`"schedule":{"a":{"days":["funday"],"from":"08:00","to":"09:00"}}`)},
 		"bad tz":        {"/flows/x", condFlow(`"schedule":{"a":{"from":"08:00","to":"09:00","tz":"Mars/Base"}}`)},
 		"bad match":     {"/flows/x", condFlow(`"match":"some","schedule":{"a":{"from":"08:00","to":"09:00"}}`)},
@@ -102,7 +101,7 @@ func TestPutFlowValidation(t *testing.T) {
 	// Malformed requests are 400; a well-formed graph that fails validation
 	// is 422 with its issues.
 	graphInvalid := map[string]bool{"unknown agent": true, "bad window": true, "bad percent": true,
-		"bad op": true, "bad time": true, "same times": true, "bad day": true, "bad tz": true, "bad match": true}
+		"bad op": true, "bad time": true, "bad day": true, "bad tz": true, "bad match": true}
 	for name, c := range cases {
 		want := http.StatusBadRequest
 		if graphInvalid[name] {
@@ -111,6 +110,10 @@ func TestPutFlowValidation(t *testing.T) {
 		if w := doReq(t, srv, http.MethodPut, c[0], c[1]); w.Code != want {
 			t.Errorf("%s: %d %s, want %d", name, w.Code, w.Body, want)
 		}
+	}
+	// from == to is a whole-day window, not an error.
+	if w := doReq(t, srv, http.MethodPut, "/flows/x", condFlow(`"schedule":{"a":{"days":["sat","sun"],"from":"00:00","to":"00:00"}}`)); w.Code != 200 {
+		t.Errorf("all-day schedule = %d %s", w.Code, w.Body)
 	}
 	if w := doReq(t, srv, http.MethodDelete, "/flows/Bad%20Id", ""); w.Code != http.StatusBadRequest {
 		t.Errorf("delete bad id = %d", w.Code)

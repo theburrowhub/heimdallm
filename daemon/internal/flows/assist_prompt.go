@@ -21,7 +21,7 @@ Evaluation starts at "start". A condition follows "yes" when its conditions hold
 else "no". An agent step adds its agent to the ordered list of reviewers (skipped if not installed or already listed)
 and continues through "next", its fallback: the next agent to try, or another condition. "" ends the walk.
 The first agent in the list reviews; the rest are fallbacks if it runs out of quota.
-A schedule with from > to crosses midnight (22:00-06:00). A quota condition is false when the quota is unknown.
+A schedule with from > to crosses midnight (22:00-06:00); from equal to to (use "00:00" and "00:00") means the whole day, e.g. for "on weekends". A quota condition is false when the quota is unknown.
 Rules: no cycles; every edge points at an existing node; a condition has at least one schedule or quota entry and
 at most 20; at most 200 nodes. Do not include "x"/"y" positions.`
 
