@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,45 +27,70 @@ type ScheduleCondition struct {
 	TZ   string   `json:"tz"`
 }
 
-// FlowRule picks Agent when its conditions hold.
-type FlowRule struct {
-	Agent    string                       `json:"agent"`
-	Match    string                       `json:"match"`
-	Quota    map[string]QuotaCondition    `json:"quota"`
-	Schedule map[string]ScheduleCondition `json:"schedule"`
+// FlowNode is one step of a flow graph.
+type FlowNode struct {
+	Type     string                       `json:"type"`
+	Match    string                       `json:"match,omitempty"`
+	Quota    map[string]QuotaCondition    `json:"quota,omitempty"`
+	Schedule map[string]ScheduleCondition `json:"schedule,omitempty"`
+	Yes      string                       `json:"yes,omitempty"`
+	No       string                       `json:"no,omitempty"`
+	Agent    string                       `json:"agent,omitempty"`
+	Next     string                       `json:"next,omitempty"`
+	X        *float64                     `json:"x,omitempty"`
+	Y        *float64                     `json:"y,omitempty"`
 }
 
-// Flow is a review flow: rules keyed by order ("10", "20", …).
+// Flow is a review flow: a decision graph walked from Start.
 type Flow struct {
 	Name  string              `json:"name"`
-	Rules map[string]FlowRule `json:"rules"`
+	Start string              `json:"start"`
+	Nodes map[string]FlowNode `json:"nodes"`
+}
+
+// FlowAgent is an agent the flow editor offers.
+type FlowAgent struct {
+	ID           string `json:"id"`
+	Installed    bool   `json:"installed"`
+	ReviewOnly   bool   `json:"review_only"`
+	WriteCapable bool   `json:"write_capable"`
 }
 
 // FlowListing is the GET /flows body.
 type FlowListing struct {
-	Flows        map[string]Flow `json:"flows"`
-	Selected     string          `json:"selected"`
-	DefaultID    string          `json:"default_id"`
-	Agents       []string        `json:"agents"`
-	WriteCapable []string        `json:"write_capable"`
+	Flows     map[string]Flow `json:"flows"`
+	Selected  string          `json:"selected"`
+	DefaultID string          `json:"default_id"`
+	Agents    []FlowAgent     `json:"agents"`
 }
 
-// FlowRuleResult explains one rule of a simulated flow.
-type FlowRuleResult struct {
-	Key       string   `json:"key"`
+// PathStep is one node a simulated flow visited.
+type PathStep struct {
+	Node      string   `json:"node"`
+	Type      string   `json:"type"`
 	Agent     string   `json:"agent"`
-	Matched   bool     `json:"matched"`
-	Available bool     `json:"available"`
+	Holds     *bool    `json:"holds"`
+	Available *bool    `json:"available"`
+	Added     bool     `json:"added"`
 	Reasons   []string `json:"reasons"`
 }
 
 // FlowDecision is the POST /flows/simulate body.
 type FlowDecision struct {
-	FlowID     string           `json:"flow_id"`
-	FlowName   string           `json:"flow_name"`
-	At         time.Time        `json:"at"`
-	Candidates []string         `json:"candidates"`
-	Rules      []FlowRuleResult `json:"rules"`
+	FlowID     string     `json:"flow_id"`
+	FlowName   string     `json:"flow_name"`
+	At         time.Time  `json:"at"`
+	Candidates []string   `json:"candidates"`
+	Path       []PathStep `json:"path"`
+}
+
+// AssistResult is the POST /flows/assist body: an unsaved draft.
+type AssistResult struct {
+	Flow       Flow     `json:"flow"`
+	Plan       string   `json:"plan"`
+	Warnings   []string `json:"warnings"`
+	Agent      string   `json:"agent"`
+	DurationMS int64    `json:"duration_ms"`
 }
 
 // QuotaWindow is one rate-limit window of an agent.
@@ -97,7 +123,7 @@ func (c *Client) ListFlows() (*FlowListing, error) {
 }
 
 // SimulateFlow evaluates flow (or, when empty, the flow repo resolves to) at
-// at (zero = now) and explains every rule.
+// at (zero = now) and returns the path it walked.
 func (c *Client) SimulateFlow(flow, repo string, at time.Time) (*FlowDecision, error) {
 	body := map[string]any{}
 	if flow != "" {
@@ -120,6 +146,38 @@ func (c *Client) SimulateFlow(flow, repo string, at time.Time) (*FlowDecision, e
 	return &out, nil
 }
 
+// PutFlow creates or replaces a flow.
+func (c *Client) PutFlow(id string, f Flow) error {
+	_, err := c.doJSON(http.MethodPut, "/flows/"+url.PathEscape(id), f)
+	return err
+}
+
+// assistTimeout covers the longest the daemon may hold an assist response
+// (its 180 s agent budget plus a 30 s margin) with a little headroom.
+const assistTimeout = 220 * time.Second
+
+// AssistFlow asks an installed agent to draft a flow from instruction,
+// optionally changing current. The draft is not saved.
+func (c *Client) AssistFlow(agent, instruction string, current *Flow) (*AssistResult, error) {
+	body := map[string]any{"agent": agent, "instruction": instruction}
+	if current != nil {
+		body["flow"] = current
+	}
+	slow := *c
+	hc := *c.HTTPClient
+	hc.Timeout = assistTimeout
+	slow.HTTPClient = &hc
+	data, err := slow.doJSON(http.MethodPost, "/flows/assist", body)
+	if err != nil {
+		return nil, err
+	}
+	var out AssistResult
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("decoding assist result: %w", err)
+	}
+	return &out, nil
+}
+
 // GetQuotas returns every agent's remaining quota.
 func (c *Client) GetQuotas() ([]AgentQuota, error) {
 	data, err := c.do(http.MethodGet, "/quotas")
@@ -131,15 +189,6 @@ func (c *Client) GetQuotas() ([]AgentQuota, error) {
 		return nil, fmt.Errorf("decoding quotas: %w", err)
 	}
 	return out, nil
-}
-
-// OrderedRuleKeys returns the rule keys in evaluation order (see orderKeys).
-func (f Flow) OrderedRuleKeys() []string {
-	keys := make([]string, 0, len(f.Rules))
-	for k := range f.Rules {
-		keys = append(keys, k)
-	}
-	return orderKeys(keys)
 }
 
 // orderKeys sorts flow map keys like the daemon: numeric keys ascending, then
@@ -165,46 +214,81 @@ func keyLess(a, b string) bool {
 	return a < b
 }
 
-// Describe reads a rule as "<agent> when <conditions>". Daemon-supplied text
-// goes through DisplayText.
-func (r FlowRule) Describe() string {
+// Describe renders the reachable steps in walk order (depth-first from Start,
+// yes before no before next), one line each.
+func (f Flow) Describe() []string {
+	var out []string
+	seen := map[string]bool{}
+	var walk func(id string)
+	walk = func(id string) {
+		n, ok := f.Nodes[id]
+		if id == "" || !ok || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, DisplayText(id, 64)+": "+n.Describe())
+		walk(n.Yes)
+		walk(n.No)
+		walk(n.Next)
+	}
+	walk(f.Start)
+	return out
+}
+
+func edgeName(id string) string {
+	if id == "" {
+		return "end"
+	}
+	return DisplayText(id, 64)
+}
+
+// Describe summarises one step. Daemon-supplied text goes through DisplayText.
+func (n FlowNode) Describe() string {
+	if n.Type == "agent" {
+		next := "end"
+		if n.Next != "" {
+			next = "fallback: " + edgeName(n.Next)
+		}
+		return DisplayText(n.Agent, 24) + " → " + next
+	}
 	var conds []string
-	for _, k := range sortedKeys(r.Schedule) {
-		s := r.Schedule[k]
-		days := "every day"
-		if len(s.Days) > 0 {
-			days = strings.Join(s.Days, ",")
-		}
-		tz := s.TZ
-		if tz == "" {
-			tz = "daemon time"
-		}
-		d := fmt.Sprintf("%s %s-%s %s", days, s.From, s.To, tz)
-		conds = append(conds, DisplayText(d, 80))
+	for _, k := range sortedKeys(n.Schedule) {
+		conds = append(conds, describeSchedule(n.Schedule[k]))
 	}
-	for _, k := range sortedKeys(r.Quota) {
-		q := r.Quota[k]
-		// Show an op this CLI does not know as the daemon sent it, rather
-		// than as a comparison the daemon may not be making. An empty op is
-		// "below", as the daemon evaluates it.
-		op := q.Op
-		switch q.Op {
-		case "below", "":
-			op = "<"
-		case "above":
-			op = ">"
-		}
-		conds = append(conds, DisplayText(fmt.Sprintf("%s %s quota %s %g%%", q.Agent, q.Window, op, q.Percent), 80))
-	}
-	agent := DisplayText(r.Agent, 24)
-	if len(conds) == 0 {
-		return agent + " always"
+	for _, k := range sortedKeys(n.Quota) {
+		conds = append(conds, describeQuota(n.Quota[k]))
 	}
 	join := " and "
-	if r.Match == "any" {
+	if n.Match == "any" {
 		join = " or "
 	}
-	return agent + " when " + strings.Join(conds, join)
+	return "if " + strings.Join(conds, join) + " → yes: " + edgeName(n.Yes) + " / no: " + edgeName(n.No)
+}
+
+func describeSchedule(s ScheduleCondition) string {
+	days := "every day"
+	if len(s.Days) > 0 {
+		days = strings.Join(s.Days, ",")
+	}
+	tz := s.TZ
+	if tz == "" {
+		tz = "daemon time"
+	}
+	return DisplayText(fmt.Sprintf("%s %s-%s %s", days, s.From, s.To, tz), 80)
+}
+
+func describeQuota(q QuotaCondition) string {
+	// Show an op this CLI does not know as the daemon sent it, rather than as
+	// a comparison the daemon may not be making. An empty op is "below", as
+	// the daemon evaluates it.
+	op := q.Op
+	switch q.Op {
+	case "below", "":
+		op = "<"
+	case "above":
+		op = ">"
+	}
+	return DisplayText(fmt.Sprintf("%s %s quota %s %g%%", q.Agent, q.Window, op, q.Percent), 80)
 }
 
 // Summary reads an agent's quota windows as "5h 34% · 7d 80%".
