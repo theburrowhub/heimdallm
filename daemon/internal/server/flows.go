@@ -241,6 +241,7 @@ func (srv *Server) handleAssistFlow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"the flow assistant is not available"}`, http.StatusServiceUnavailable)
 		return
 	}
+	extendAssistDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
 	var req flows.AssistRequest
 	dec := json.NewDecoder(r.Body)
@@ -263,5 +264,15 @@ func (srv *Server) handleAssistFlow(w http.ResponseWriter, r *http.Request) {
 	default:
 		slog.Error("POST /flows/assist failed", "err", err)
 		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+	}
+}
+
+// extendAssistDeadline lifts the server's 60 s WriteTimeout for a drafting
+// request, which legitimately runs up to flows.AssistWriteBudget. Writers
+// without deadline support (tests) keep working unchanged.
+func extendAssistDeadline(w http.ResponseWriter) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(flows.AssistWriteBudget)); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		slog.Warn("flows: could not extend the write deadline for /flows/assist", "err", err)
 	}
 }

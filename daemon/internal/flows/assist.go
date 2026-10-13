@@ -24,6 +24,11 @@ const MaxInstructionRunes = 4000
 // DefaultAssistTimeout bounds one agent run.
 const DefaultAssistTimeout = 180 * time.Second
 
+// AssistWriteBudget is how long an HTTP response may take to be written: the
+// whole assist run (both attempts share one Timeout) plus a margin. It
+// replaces the server's short WriteTimeout for this one route.
+const AssistWriteBudget = DefaultAssistTimeout + 30*time.Second
+
 // ErrAssistBusy is returned while another assist request runs.
 var ErrAssistBusy = errors.New("flows: an assist request is already running")
 

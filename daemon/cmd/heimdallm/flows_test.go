@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/agentcatalog"
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/harness/openrouter"
 	"github.com/heimdallm/daemon/internal/quota"
 	"github.com/heimdallm/daemon/internal/server"
@@ -199,5 +201,91 @@ func TestAssistContextRunnableAgents(t *testing.T) {
 	}, nil)
 	if len(got.Agents) != 2 || !got.Agents[0].Runnable || got.Agents[1].Runnable {
 		t.Fatalf("%+v", got.Agents)
+	}
+}
+
+type fakeRawExec struct {
+	mu        sync.Mutex
+	opts      executor.ExecOptions
+	registerA time.Time // Terminate only succeeds after this instant
+	terminate int
+	done      chan struct{}
+	started   chan struct{}
+}
+
+func (f *fakeRawExec) ExecuteRaw(cli, prompt string, opts executor.ExecOptions) ([]byte, error) {
+	f.mu.Lock()
+	f.opts = opts
+	f.mu.Unlock()
+	if f.started != nil {
+		close(f.started)
+	}
+	if f.done == nil {
+		return []byte("ok"), nil
+	}
+	<-f.done
+	return nil, context.Canceled
+}
+
+func (f *fakeRawExec) TerminateExecution(string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.terminate++
+	if time.Now().Before(f.registerA) {
+		return false, nil
+	}
+	close(f.done)
+	return true, nil
+}
+
+func TestExecRunnerStripsPermissionsAndCodexWorkDir(t *testing.T) {
+	for _, agent := range []string{"claude", "codex"} {
+		f := &fakeRawExec{}
+		r := execRunner{exec: f, opts: func(_, workDir string) executor.ExecOptions {
+			return executor.ExecOptions{WorkDir: workDir, Model: "m", DangerouslySkipPerms: true,
+				PermissionMode: "bypassPermissions", ApprovalMode: "full-auto", ExtraFlags: "--x"}
+		}}
+		if _, err := r.Run(context.Background(), agent, "p", "/tmp/ws"); err != nil {
+			t.Fatal(err)
+		}
+		o := f.opts
+		if o.DangerouslySkipPerms || o.PermissionMode != "" || o.ApprovalMode != "" || o.ExtraFlags != "" || o.Model != "m" {
+			t.Fatalf("%s: %+v", agent, o)
+		}
+		if wantDir := map[string]string{"claude": "/tmp/ws", "codex": ""}[agent]; o.WorkDir != wantDir {
+			t.Fatalf("%s WorkDir = %q, want %q", agent, o.WorkDir, wantDir)
+		}
+	}
+}
+
+func TestExecRunnerCancelBeforeRegisterStillTerminates(t *testing.T) {
+	f := &fakeRawExec{done: make(chan struct{}), registerA: time.Now().Add(150 * time.Millisecond)}
+	r := execRunner{exec: f, opts: func(_, d string) executor.ExecOptions { return executor.ExecOptions{WorkDir: d} }}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(10 * time.Millisecond); cancel() }()
+	finished := make(chan struct{})
+	go func() { _, _ = r.Run(ctx, "claude", "p", "/tmp/ws"); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancel landed before the execution registered and was lost")
+	}
+	if f.terminate < 2 {
+		t.Fatalf("terminate attempts = %d, want a retry", f.terminate)
+	}
+}
+
+func TestExecRunnerReturnsEarlyWhenAlreadyCancelled(t *testing.T) {
+	f := &fakeRawExec{started: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := execRunner{exec: f, opts: func(_, d string) executor.ExecOptions { return executor.ExecOptions{} }}
+	if _, err := r.Run(ctx, "claude", "p", "/tmp/ws"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("%v", err)
+	}
+	select {
+	case <-f.started:
+		t.Fatal("ExecuteRaw must not start for a cancelled context")
+	default:
 	}
 }

@@ -173,16 +173,42 @@ func simulateFlow(ctx context.Context, c *config.Config, req server.FlowSimulati
 	return flows.Evaluate(ctx, id, f, at, quotas, available), nil
 }
 
+// rawExecutor is the part of the executor the assistant runner needs.
+type rawExecutor interface {
+	ExecuteRaw(cli, prompt string, opts executor.ExecOptions) ([]byte, error)
+	TerminateExecution(executionID string) (bool, error)
+}
+
+// assistCancelPoll is how often a cancelled run retries TerminateExecution
+// until the executor has registered the execution.
+const assistCancelPoll = 25 * time.Millisecond
+
 // execRunner runs the assistant prompt through the executor with the
-// agent's own settings (the same read-only posture as a review), in an
-// empty workspace, and kills the process group when ctx ends.
+// agent's own model and limits, but none of its review permission settings
+// (drafting a flow needs no tools), in an empty workspace, and kills the
+// process group when ctx ends.
 type execRunner struct {
-	exec *executor.Executor
+	exec rawExecutor
 	opts func(agent, workDir string) executor.ExecOptions
 }
 
 func (r execRunner) Run(ctx context.Context, agent, prompt, workDir string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	opts := r.opts(agent, workDir)
+	// Drafting reads nothing and writes nothing: drop everything that widens
+	// what the agent may do, the same fields OptionsForSelectedCLI scrubs.
+	opts.DangerouslySkipPerms = false
+	opts.PermissionMode = ""
+	opts.ApprovalMode = ""
+	opts.ExtraFlags = ""
+	if agent == "codex" {
+		// With no WorkDir the executor gives codex its own empty workspace and
+		// waives the git-repo check; a plain temp dir would make codex abort
+		// with "Not inside a trusted directory".
+		opts.WorkDir = ""
+	}
 	opts.ExecutionID = "flow-assist-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	opts.Timeout = flows.DefaultAssistTimeout
 	stop := make(chan struct{})
@@ -190,8 +216,22 @@ func (r execRunner) Run(ctx context.Context, agent, prompt, workDir string) ([]b
 	go func() {
 		select {
 		case <-ctx.Done():
-			_, _ = r.exec.TerminateExecution(opts.ExecutionID)
 		case <-stop:
+			return
+		}
+		// The executor registers an execution only after resolving the CLI, so
+		// a cancel that lands earlier finds nothing: retry until it takes.
+		t := time.NewTicker(assistCancelPoll)
+		defer t.Stop()
+		for {
+			if ok, _ := r.exec.TerminateExecution(opts.ExecutionID); ok {
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+			}
 		}
 	}()
 	return r.exec.ExecuteRaw(agent, prompt, opts)
