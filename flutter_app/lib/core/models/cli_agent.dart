@@ -1,5 +1,6 @@
 /// Agents known to be in-process providers. The catalog's `kind` is the
 /// source of truth; this only covers a catalog that has not loaded (yet).
+/// Keep in sync with modelRequiredAgents in daemon/cmd/heimdallm/flows.go.
 const knownProviderAgentIds = {'openrouter'};
 
 /// One agent from the daemon's installed-agent catalog (GET /cli-agents).

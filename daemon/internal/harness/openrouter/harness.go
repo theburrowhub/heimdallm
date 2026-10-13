@@ -14,7 +14,7 @@ import (
 // ErrNoModel is returned when the agent has no model configured. OpenRouter
 // has no default model: the catalog changes too often for a hard-coded id to
 // stay valid, so the operator picks one from the live list.
-var ErrNoModel = errors.New("openrouter: no model selected — pick one in Agents → OpenRouter")
+var ErrNoModel = errors.New("openrouter: no model selected — set [ai.agents.openrouter] model, or pick one in Agents → OpenRouter")
 
 // Harness bounds. MaxTurns from the agent settings overrides the tool-round
 // budget.

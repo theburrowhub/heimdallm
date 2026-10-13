@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -202,17 +204,40 @@ func TestDetectedByAndLiveAgentModel(t *testing.T) {
 		t.Error("detectedBy must follow Detect's error")
 	}
 
-	var mu sync.Mutex
-	cfg := &config.Config{AI: config.AIConfig{Agents: map[string]config.CLIAgentConfig{
-		"openrouter": {Model: "vendor/model"},
-	}}}
-	model := liveAgentModel(&mu, &cfg)
-	if model("openrouter") != "vendor/model" || model("claude") != "" {
-		t.Error("liveAgentModel must read the configured models")
+	var models agentModels
+	if models.model("openrouter") != "" {
+		t.Error("an empty snapshot has no models")
 	}
-	// A config reload swaps the pointer: the reader follows it.
-	cfg = &config.Config{}
-	if model("openrouter") != "" {
-		t.Error("liveAgentModel must read the live config")
+	models.store(&config.Config{AI: config.AIConfig{Agents: map[string]config.CLIAgentConfig{
+		"openrouter": {Model: "vendor/model"},
+	}}})
+	if models.model("openrouter") != "vendor/model" || models.model("claude") != "" {
+		t.Error("the snapshot must hold the configured models")
+	}
+	// A config reload stores a new snapshot: readers follow it.
+	models.store(&config.Config{})
+	if models.model("openrouter") != "" {
+		t.Error("the snapshot must follow a reload")
+	}
+}
+
+func TestWarnModelRequiredWithoutModel(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	configured := func(a string) bool { return a == "openrouter" }
+	warnModelRequiredWithoutModel(&config.Config{}, configured)
+	if !strings.Contains(buf.String(), "agent=openrouter") {
+		t.Errorf("want a warning for openrouter without a model, got %q", buf.String())
+	}
+	buf.Reset()
+	warnModelRequiredWithoutModel(&config.Config{AI: config.AIConfig{Agents: map[string]config.CLIAgentConfig{
+		"openrouter": {Model: "vendor/model"},
+	}}}, configured)
+	warnModelRequiredWithoutModel(&config.Config{}, func(string) bool { return false })
+	if buf.Len() != 0 {
+		t.Errorf("no warning with a model or without a key, got %q", buf.String())
 	}
 }

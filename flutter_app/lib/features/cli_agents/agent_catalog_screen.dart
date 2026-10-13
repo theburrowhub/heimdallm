@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -121,9 +123,11 @@ class _AgentCatalogScreenState extends ConsumerState<AgentCatalogScreen> {
                         agent: a,
                         quota: quotas[a.id],
                         // A provider has no default model: until one is
-                        // chosen it cannot review.
+                        // chosen it cannot review. Without a key the card
+                        // already says "No API key", the first thing to fix.
                         needsModel:
                             a.isProvider &&
+                            a.configured &&
                             agentConfigs != null &&
                             (agentConfigs[a.configAgent]?.model ?? '')
                                 .trim()
@@ -463,19 +467,27 @@ class _ProviderKeyCardState extends ConsumerState<ProviderKeyCard> {
     setState(() => _busy = true);
     try {
       final s = await action();
-      // The daemon refreshes the catalog in the background after a key
-      // change; rescan now so the model list reflects the new key.
-      try {
-        await ref.read(apiClientProvider).rescanCliAgents();
-      } catch (_) {
-        // The background refresh still catches up.
-      }
       if (!mounted) return;
       _keyCtrl.clear();
       setState(() => _status = s);
-      ref.invalidate(cliAgentCatalogProvider);
       ref.invalidate(agentUsageProvider(widget.agent.id));
       showToast(context, done);
+      // Rescan so the model list reflects the new key, without holding the
+      // button: a rescan probes every agent and can take seconds. The
+      // daemon's own background refresh covers a failed rescan.
+      final api = ref.read(apiClientProvider);
+      unawaited(
+        Future<CliAgentCatalog>(api.rescanCliAgents)
+            .then<void>(
+              (_) {},
+              onError: (Object e) {
+                debugPrint('agents rescan after a key change failed: $e');
+              },
+            )
+            .whenComplete(() {
+              if (mounted) ref.invalidate(cliAgentCatalogProvider);
+            }),
+      );
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);
     } finally {

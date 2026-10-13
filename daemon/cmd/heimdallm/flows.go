@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -81,6 +81,8 @@ func flowAgents(f config.FlowConfig) []string {
 
 // modelRequiredAgents have no default model: without one configured they
 // cannot review (OpenRouter's catalog changes too often for a built-in id).
+// Keep in sync with knownProviderAgentIds in
+// flutter_app/lib/core/models/cli_agent.dart.
 var modelRequiredAgents = map[string]bool{"openrouter": true}
 
 // flowAgentAvailable reports whether a flow may pick an agent: it is
@@ -103,13 +105,40 @@ func detectedBy(detect func(primary, fallback string) (string, error)) func(stri
 	}
 }
 
-// liveAgentModel reads an agent's configured model from the live config,
-// which reloads replace under mu. Callers must not hold mu.
-func liveAgentModel(mu *sync.Mutex, cfg **config.Config) func(string) string {
-	return func(agent string) string {
-		mu.Lock()
-		defer mu.Unlock()
-		return (*cfg).AgentConfigFor(agent).Model
+// agentModels is a lock-free snapshot of every agent's configured model.
+// Flow evaluation reads it from callbacks that run deep inside agent
+// selection, so it must never take the config mutex: a caller that already
+// held it would deadlock the daemon. Every config load and reload stores a
+// fresh snapshot.
+type agentModels struct {
+	p atomic.Pointer[map[string]string]
+}
+
+func (m *agentModels) store(c *config.Config) {
+	snap := map[string]string{}
+	for id, a := range c.AI.Agents {
+		snap[id] = a.Model
+	}
+	m.p.Store(&snap)
+}
+
+func (m *agentModels) model(agent string) string {
+	if snap := m.p.Load(); snap != nil {
+		return (*snap)[agent]
+	}
+	return ""
+}
+
+// warnModelRequiredWithoutModel logs, at startup and on every reload, each
+// configured agent that needs a model and has none: flows skip it, and as
+// the legacy primary it fails every review until a model is set.
+func warnModelRequiredWithoutModel(c *config.Config, configured func(agent string) bool) {
+	for agent := range modelRequiredAgents {
+		if !configured(agent) || strings.TrimSpace(c.AgentConfigFor(agent).Model) != "" {
+			continue
+		}
+		slog.Warn("config: agent has no model; review flows skip it and it cannot review until one is set",
+			"agent", agent, "set", "[ai.agents."+agent+"] model")
 	}
 }
 

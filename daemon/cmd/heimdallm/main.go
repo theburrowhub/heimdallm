@@ -807,7 +807,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	quotaSvc := newQuotaService(openRouterAdmin)
 	// Never called with cfgMu held: flows evaluate after buildRunOpts and
 	// the simulator have released it.
-	agentAvailable := flowAgentAvailable(detectedBy(exec.Detect), liveAgentModel(&cfgMu, &cfg))
+	var models agentModels
+	models.store(cfg)
+	warnModelRequiredWithoutModel(cfg, func(agent string) bool {
+		return agent == "openrouter" && openRouterAdmin.KeySource() != ""
+	})
+	agentAvailable := flowAgentAvailable(detectedBy(exec.Detect), models.model)
 
 	buildRunOpts := func(pr *gh.PullRequest, aiCfg config.RepoAI) pipeline.RunOptions {
 		cli := aiCfg.Primary
@@ -2225,6 +2230,10 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			go propagatePartition(runtimeCtx, clusterSt)
 		}
 
+		models.store(newCfg)
+		warnModelRequiredWithoutModel(newCfg, func(agent string) bool {
+			return agent == "openrouter" && openRouterAdmin.KeySource() != ""
+		})
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
 		if !restartPollers {
