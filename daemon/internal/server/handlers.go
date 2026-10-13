@@ -99,7 +99,7 @@ type Server struct {
 	// apiKeyProviders manage in-process agents' API keys, keyed by agent id.
 	apiKeyProviders map[string]APIKeyProvider
 	// Review flows and quotas (see flows.go). Nil until main wires them.
-	flowsListFn    func() any
+	flowsListFn    func(ctx context.Context) any
 	flowSimulateFn func(ctx context.Context, req FlowSimulation) (any, error)
 	quotasFn       func(ctx context.Context) any
 	// reviewLimitsFn returns live usage of every configured review budget

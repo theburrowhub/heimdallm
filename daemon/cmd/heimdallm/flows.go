@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/agentcatalog"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/flows"
@@ -88,18 +89,50 @@ func flowCandidates(flowID string, flow config.FlowConfig, repo string, quotas f
 	}
 }
 
-// flowListing is the GET /flows body: every flow (the default one included)
-// and the global selection.
-func flowListing(c *config.Config) map[string]any {
+// FlowAgent is one agent offered by the flow editor.
+type FlowAgent struct {
+	ID           string `json:"id"`
+	Installed    bool   `json:"installed"`
+	ReviewOnly   bool   `json:"review_only"`
+	WriteCapable bool   `json:"write_capable"`
+}
+
+// installedAgents maps every review agent the catalog found installed (or,
+// for API providers, configured) by its config agent id.
+func installedAgents(agents []agentcatalog.Agent) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range agents {
+		if a.Kind == agentcatalog.KindIDE {
+			continue
+		}
+		if a.Installed || a.Configured {
+			out[a.ConfigAgent] = true
+		}
+	}
+	return out
+}
+
+// flowListing is the GET /flows body: every flow (the default one
+// included), the global selection and the agents the editor can offer.
+func flowListing(c *config.Config, installed map[string]bool) map[string]any {
 	selected := c.AI.Flow
 	if selected == "" {
 		selected = config.DefaultFlowID
+	}
+	var agents []FlowAgent
+	for _, id := range executor.SupportedCLIs() {
+		agents = append(agents, FlowAgent{
+			ID:           id,
+			Installed:    installed[id],
+			ReviewOnly:   executor.IsHTTPOnly(id),
+			WriteCapable: executor.WriteCapable(id),
+		})
 	}
 	return map[string]any{
 		"flows":         c.AllFlows(),
 		"selected":      selected,
 		"default_id":    config.DefaultFlowID,
-		"agents":        executor.SupportedCLIs(),
+		"agents":        agents,
 		"write_capable": writeCapableAgents(),
 	}
 }
@@ -120,6 +153,13 @@ func simulateFlow(ctx context.Context, c *config.Config, req server.FlowSimulati
 	at := req.At
 	if at.IsZero() {
 		at = time.Now()
+	}
+	if req.Graph != nil {
+		name := req.Flow
+		if name == "" {
+			name = "draft"
+		}
+		return flows.Evaluate(ctx, name, *req.Graph, at, quotas, available), nil
 	}
 	if req.Flow != "" {
 		f, ok := c.AllFlows()[req.Flow]

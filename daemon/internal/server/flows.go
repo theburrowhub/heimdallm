@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -13,17 +15,19 @@ import (
 	"github.com/heimdallm/daemon/internal/config"
 )
 
-// FlowSimulation is a POST /flows/simulate request: evaluate Flow (or, when
-// empty, the flow Repo resolves to) at At (default now).
+// FlowSimulation is a POST /flows/simulate request: evaluate Graph (an
+// unsaved flow from the editor) or the flow named Flow, or, when both are
+// empty, the flow Repo resolves to, at At (default now).
 type FlowSimulation struct {
-	Flow string    `json:"flow"`
-	Repo string    `json:"repo"`
-	At   time.Time `json:"at"`
+	Flow  string             `json:"flow"`
+	Repo  string             `json:"repo"`
+	At    time.Time          `json:"at"`
+	Graph *config.FlowConfig `json:"graph,omitempty"`
 }
 
 // SetFlowFns wires the flow listing and simulation, which need the live
 // config, the agent availability and the quota service that main owns.
-func (srv *Server) SetFlowFns(list func() any, simulate func(ctx context.Context, req FlowSimulation) (any, error)) {
+func (srv *Server) SetFlowFns(list func(ctx context.Context) any, simulate func(ctx context.Context, req FlowSimulation) (any, error)) {
 	srv.flowsListFn = list
 	srv.flowSimulateFn = simulate
 }
@@ -47,7 +51,7 @@ func (srv *Server) handleListFlows(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"flows not available"}`, http.StatusServiceUnavailable)
 		return
 	}
-	writeJSON(w, http.StatusOK, srv.flowsListFn())
+	writeJSON(w, http.StatusOK, srv.flowsListFn(r.Context()))
 }
 
 // handleSimulateFlow evaluates a flow now (or at a given time) and explains
@@ -57,7 +61,7 @@ func (srv *Server) handleSimulateFlow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"flows not available"}`, http.StatusServiceUnavailable)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
 	var req FlowSimulation
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
@@ -75,12 +79,26 @@ func (srv *Server) handleSimulateFlow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Graph != nil {
+		if errs, _ := config.CheckFlow("draft", *req.Graph); len(errs) > 0 {
+			writeFlowIssues(w, errs)
+			return
+		}
+	}
 	out, err := srv.flowSimulateFn(r.Context(), req)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// writeFlowIssues answers 422 with every issue, pinned to its node.
+func writeFlowIssues(w http.ResponseWriter, errs []config.FlowIssue) {
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+		"error":  errs[0].Error(),
+		"errors": errs,
+	})
 }
 
 func childMap(m map[string]any, key string) map[string]any {
@@ -111,19 +129,35 @@ func (srv *Server) handlePutFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid flow: " + err.Error()})
+		return
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(body, &probe); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid flow: " + err.Error()})
+		return
+	}
+	if _, legacy := probe["rules"]; legacy {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "flows are node graphs; the rules format is not supported",
+		})
+		return
+	}
 	var flow config.FlowConfig
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&flow); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid flow: " + err.Error()})
 		return
 	}
-	if flow.Start == "" || len(flow.Nodes) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a flow needs a start step"})
+	if len(flow.Nodes) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a flow needs at least one step"})
 		return
 	}
-	if err := config.ValidateFlow(id, flow); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	if errs, _ := config.CheckFlow(id, flow); len(errs) > 0 {
+		writeFlowIssues(w, errs)
 		return
 	}
 	flowMap, err := config.FlowToMap(flow)

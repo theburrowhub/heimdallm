@@ -99,9 +99,17 @@ func TestPutFlowValidation(t *testing.T) {
 		"bad tz":        {"/flows/x", condFlow(`"schedule":{"a":{"from":"08:00","to":"09:00","tz":"Mars/Base"}}`)},
 		"bad match":     {"/flows/x", condFlow(`"match":"some","schedule":{"a":{"from":"08:00","to":"09:00"}}`)},
 	}
+	// Malformed requests are 400; a well-formed graph that fails validation
+	// is 422 with its issues.
+	graphInvalid := map[string]bool{"unknown agent": true, "bad window": true, "bad percent": true,
+		"bad op": true, "bad time": true, "same times": true, "bad day": true, "bad tz": true, "bad match": true}
 	for name, c := range cases {
-		if w := doReq(t, srv, http.MethodPut, c[0], c[1]); w.Code != http.StatusBadRequest {
-			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		want := http.StatusBadRequest
+		if graphInvalid[name] {
+			want = http.StatusUnprocessableEntity
+		}
+		if w := doReq(t, srv, http.MethodPut, c[0], c[1]); w.Code != want {
+			t.Errorf("%s: %d %s, want %d", name, w.Code, w.Body, want)
 		}
 	}
 	if w := doReq(t, srv, http.MethodDelete, "/flows/Bad%20Id", ""); w.Code != http.StatusBadRequest {
@@ -131,7 +139,7 @@ func TestFlowsReadEndpoints(t *testing.T) {
 
 	var got server.FlowSimulation
 	srv.SetFlowFns(
-		func() any { return map[string]any{"selected": "default"} },
+		func(context.Context) any { return map[string]any{"selected": "default"} },
 		func(_ context.Context, req server.FlowSimulation) (any, error) {
 			got = req
 			if req.Flow == "ghost" {

@@ -1962,11 +1962,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Review flows and agent quotas for the app's flow editor and agent pages.
 	srv.SetQuotasFn(func(ctx context.Context) any { return quotaSvc.Snapshot(ctx) })
 	srv.SetFlowFns(
-		func() any {
+		func(ctx context.Context) any {
 			cfgMu.Lock()
 			c := cfg
 			cfgMu.Unlock()
-			return flowListing(c)
+			agents, _ := agentCatalog.Snapshot(ctx)
+			return flowListing(c, installedAgents(agents))
 		},
 		func(ctx context.Context, req server.FlowSimulation) (any, error) {
 			cfgMu.Lock()

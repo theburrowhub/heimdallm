@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/agentcatalog"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/harness/openrouter"
 	"github.com/heimdallm/daemon/internal/quota"
@@ -84,7 +86,7 @@ func (s staticQuotas) Get(_ context.Context, agent string) quota.Provider { retu
 
 func TestFlowListingAndSimulation(t *testing.T) {
 	c := testFlowConfig()
-	listing := flowListing(c)
+	listing := flowListing(c, nil)
 	if listing["selected"] != config.DefaultFlowID || len(listing["flows"].(map[string]config.FlowConfig)) != 2 {
 		t.Errorf("listing = %+v", listing)
 	}
@@ -92,7 +94,7 @@ func TestFlowListingAndSimulation(t *testing.T) {
 		t.Errorf("write_capable = %v", listing["write_capable"])
 	}
 	c.AI.Flow = "mixed"
-	if flowListing(c)["selected"] != "mixed" {
+	if flowListing(c, nil)["selected"] != "mixed" {
 		t.Error("selected flow")
 	}
 
@@ -146,5 +148,44 @@ func TestOverrideMapsCarryTheFlow(t *testing.T) {
 	}
 	if _, ok := repoAIOverrideMap(config.RepoAI{})["flow"]; ok {
 		t.Error("no flow selected must not project one")
+	}
+}
+
+func TestFlowListingMarksInstalledAgents(t *testing.T) {
+	c := &config.Config{}
+	c.AI.Primary = "claude"
+	out := flowListing(c, map[string]bool{"claude": true, "openrouter": true})
+	agents := out["agents"].([]FlowAgent)
+	byID := map[string]FlowAgent{}
+	for _, a := range agents {
+		byID[a.ID] = a
+	}
+	if !byID["claude"].Installed || byID["codex"].Installed {
+		t.Fatalf("installed flags wrong: %+v", agents)
+	}
+	if !byID["openrouter"].ReviewOnly || byID["claude"].ReviewOnly {
+		t.Fatalf("review_only flags wrong: %+v", agents)
+	}
+}
+
+func TestInstalledAgents(t *testing.T) {
+	got := installedAgents([]agentcatalog.Agent{
+		{ID: "claude", ConfigAgent: "claude", Installed: true},
+		{ID: "cursor", ConfigAgent: "cursor_cli", Installed: true, Kind: agentcatalog.KindIDE},
+		{ID: "openrouter", ConfigAgent: "openrouter", Configured: true},
+		{ID: "gemini", ConfigAgent: "gemini"},
+	})
+	want := map[string]bool{"claude": true, "openrouter": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestSimulateFlowUsesUnsavedGraph(t *testing.T) {
+	c := &config.Config{}
+	g := config.FlowConfig{Name: "draft", Start: "a1", Nodes: map[string]config.FlowNode{"a1": {Type: config.NodeAgent, Agent: "gemini"}}}
+	d, err := simulateFlow(context.Background(), c, server.FlowSimulation{Graph: &g}, nil, nil)
+	if err != nil || d.FlowID != "draft" || !reflect.DeepEqual(d.Candidates, []string{"gemini"}) {
+		t.Fatalf("%+v %v", d, err)
 	}
 }
