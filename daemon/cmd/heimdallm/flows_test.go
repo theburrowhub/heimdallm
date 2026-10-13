@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -187,5 +188,31 @@ func TestFlowAgentAvailable_OpenRouterNeedsAModel(t *testing.T) {
 	got := flowCandidates("f", f, "o/r", staticQuotas{}, available)()
 	if strings.Join(got, ",") != "claude" {
 		t.Errorf("candidates = %v, want claude only", got)
+	}
+}
+
+func TestDetectedByAndLiveAgentModel(t *testing.T) {
+	detected := detectedBy(func(primary, fallback string) (string, error) {
+		if primary == "claude" && fallback == "" {
+			return "claude", nil
+		}
+		return "", errors.New("not installed")
+	})
+	if !detected("claude") || detected("gemini") {
+		t.Error("detectedBy must follow Detect's error")
+	}
+
+	var mu sync.Mutex
+	cfg := &config.Config{AI: config.AIConfig{Agents: map[string]config.CLIAgentConfig{
+		"openrouter": {Model: "vendor/model"},
+	}}}
+	model := liveAgentModel(&mu, &cfg)
+	if model("openrouter") != "vendor/model" || model("claude") != "" {
+		t.Error("liveAgentModel must read the configured models")
+	}
+	// A config reload swaps the pointer: the reader follows it.
+	cfg = &config.Config{}
+	if model("openrouter") != "" {
+		t.Error("liveAgentModel must read the live config")
 	}
 }

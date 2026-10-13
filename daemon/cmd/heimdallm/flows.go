@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -91,6 +92,24 @@ func flowAgentAvailable(detected func(string) bool, modelFor func(string) string
 			return false
 		}
 		return !modelRequiredAgents[agent] || strings.TrimSpace(modelFor(agent)) != ""
+	}
+}
+
+// detectedBy adapts an executor's Detect to flowAgentAvailable's probe.
+func detectedBy(detect func(primary, fallback string) (string, error)) func(string) bool {
+	return func(agent string) bool {
+		_, err := detect(agent, "")
+		return err == nil
+	}
+}
+
+// liveAgentModel reads an agent's configured model from the live config,
+// which reloads replace under mu. Callers must not hold mu.
+func liveAgentModel(mu *sync.Mutex, cfg **config.Config) func(string) string {
+	return func(agent string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		return (*cfg).AgentConfigFor(agent).Model
 	}
 }
 
