@@ -1,5 +1,5 @@
-// Package flows evaluates review flows: the ordered rules that decide which
-// agent reviews a PR from the time of day and each agent's remaining quota.
+// Package flows evaluates review flows: the decision graphs that decide which
+// agents review a PR from the time of day and each agent's remaining quota.
 package flows
 
 import (
@@ -18,67 +18,99 @@ type QuotaReader interface {
 	Get(ctx context.Context, agent string) quota.Provider
 }
 
-// RuleResult explains one rule's outcome.
-type RuleResult struct {
-	Key       string   `json:"key"`
-	Agent     string   `json:"agent"`
-	Matched   bool     `json:"matched"`
-	Available bool     `json:"available"`
+// PathStep is one node visited while evaluating a flow.
+type PathStep struct {
+	Node      string   `json:"node"`
+	Type      string   `json:"type"`
+	Agent     string   `json:"agent,omitempty"`
+	Holds     *bool    `json:"holds,omitempty"`
+	Available *bool    `json:"available,omitempty"`
+	Added     bool     `json:"added,omitempty"`
 	Reasons   []string `json:"reasons"`
 }
 
 // Decision is a flow evaluated at one moment: the agents to try, in order,
-// and why each rule did or did not apply.
+// and the path the walk took to choose them.
 type Decision struct {
-	FlowID     string       `json:"flow_id"`
-	FlowName   string       `json:"flow_name"`
-	At         time.Time    `json:"at"`
-	Candidates []string     `json:"candidates"`
-	Rules      []RuleResult `json:"rules"`
+	FlowID     string     `json:"flow_id"`
+	FlowName   string     `json:"flow_name"`
+	At         time.Time  `json:"at"`
+	Candidates []string   `json:"candidates"`
+	Path       []PathStep `json:"path"`
 }
 
-// Evaluate walks the flow's rules in order. A rule contributes its agent to
-// the candidates when its conditions hold and the agent is available
-// (installed or configured). The first candidate reviews; the rest are the
+// Evaluate walks the flow graph from its start node. A condition node
+// follows yes or no; an agent node adds its agent to the candidates when it
+// is available (installed or configured) and not already a candidate, then
+// follows its fallback edge. The first candidate reviews; the rest are the
 // fallbacks if it runs out of quota mid-review.
 //
 // Quota conditions fail closed: an agent whose quota cannot be read does not
 // satisfy "below 50%" or "above 50%", so the flow moves on rather than guess.
+// Validation forbids cycles and dangling edges; the walk still stops on
+// either so a hand-edited file can never hang review selection.
 func Evaluate(ctx context.Context, id string, f config.FlowConfig, now time.Time, q QuotaReader, available func(agent string) bool) Decision {
-	d := Decision{FlowID: id, FlowName: f.Name, At: now, Candidates: []string{}}
+	d := Decision{FlowID: id, FlowName: f.Name, At: now, Candidates: []string{}, Path: []PathStep{}}
 	seen := map[string]bool{}
-	for _, key := range f.OrderedRuleKeys() {
-		rule := f.Rules[key]
-		res := RuleResult{Key: key, Agent: rule.Agent}
-		res.Matched, res.Reasons = matches(ctx, rule, now, q)
-		res.Available = available == nil || available(rule.Agent)
-		if res.Matched && !res.Available {
-			res.Reasons = append(res.Reasons, rule.Agent+" is not installed or not configured")
+	visited := map[string]bool{}
+	for node := f.Start; node != ""; {
+		if visited[node] {
+			d.Path = append(d.Path, PathStep{Node: node, Reasons: []string{"revisits a step (cycle); stopping"}})
+			break
 		}
-		if res.Matched && res.Available && !seen[rule.Agent] {
-			seen[rule.Agent] = true
-			d.Candidates = append(d.Candidates, rule.Agent)
+		visited[node] = true
+		n, ok := f.Nodes[node]
+		if !ok {
+			d.Path = append(d.Path, PathStep{Node: node, Reasons: []string{"no such step; stopping"}})
+			break
 		}
-		d.Rules = append(d.Rules, res)
+		switch n.Type {
+		case config.NodeCondition:
+			holds, reasons := matches(ctx, n, now, q)
+			d.Path = append(d.Path, PathStep{Node: node, Type: n.Type, Holds: &holds, Reasons: reasons})
+			if holds {
+				node = n.Yes
+			} else {
+				node = n.No
+			}
+		case config.NodeAgent:
+			avail := available == nil || available(n.Agent)
+			step := PathStep{Node: node, Type: n.Type, Agent: n.Agent, Available: &avail, Reasons: []string{}}
+			switch {
+			case !avail:
+				step.Reasons = append(step.Reasons, n.Agent+" is not installed or not configured")
+			case seen[n.Agent]:
+				step.Reasons = append(step.Reasons, n.Agent+" is already a candidate")
+			default:
+				seen[n.Agent] = true
+				step.Added = true
+				d.Candidates = append(d.Candidates, n.Agent)
+			}
+			d.Path = append(d.Path, step)
+			node = n.Next
+		default:
+			d.Path = append(d.Path, PathStep{Node: node, Type: n.Type, Reasons: []string{"unknown step type; stopping"}})
+			node = ""
+		}
 	}
 	return d
 }
 
-func matches(ctx context.Context, r config.FlowRule, now time.Time, q QuotaReader) (bool, []string) {
+func matches(ctx context.Context, n config.FlowNode, now time.Time, q QuotaReader) (bool, []string) {
 	var outcomes []bool
 	var reasons []string
-	for _, key := range sortedKeys(r.Schedule) {
-		ok, why := scheduleHolds(r.Schedule[key], now)
+	for _, key := range sortedKeys(n.Schedule) {
+		ok, why := scheduleHolds(n.Schedule[key], now)
 		outcomes, reasons = append(outcomes, ok), append(reasons, why)
 	}
-	for _, key := range sortedKeys(r.Quota) {
-		ok, why := quotaHolds(ctx, r.Quota[key], q)
+	for _, key := range sortedKeys(n.Quota) {
+		ok, why := quotaHolds(ctx, n.Quota[key], q)
 		outcomes, reasons = append(outcomes, ok), append(reasons, why)
 	}
 	if len(outcomes) == 0 {
 		return true, []string{"no conditions (always applies)"}
 	}
-	if r.Match == "any" {
+	if n.Match == "any" {
 		for _, ok := range outcomes {
 			if ok {
 				return true, reasons

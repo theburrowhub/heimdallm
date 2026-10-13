@@ -83,20 +83,6 @@ func (srv *Server) handleSimulateFlow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// flowToMap converts a flow to the TOML map shape (rules keyed by order).
-func flowToMap(f config.FlowConfig) (map[string]any, error) {
-	buf, err := json.Marshal(f)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(buf, &m); err != nil {
-		return nil, err
-	}
-	config.NormalizeNumbers(m)
-	return m, nil
-}
-
 func childMap(m map[string]any, key string) map[string]any {
 	child, ok := m[key].(map[string]any)
 	if !ok {
@@ -107,7 +93,7 @@ func childMap(m map[string]any, key string) map[string]any {
 }
 
 // handlePutFlow creates or replaces a flow. Replacing (not merging) is what
-// lets the editor remove rules and conditions.
+// lets the editor remove steps and conditions.
 func (srv *Server) handlePutFlow(w http.ResponseWriter, r *http.Request) {
 	if srv.configPath == "" {
 		http.Error(w, `{"error":"flows cannot be edited — configPath not set"}`, http.StatusServiceUnavailable)
@@ -132,15 +118,15 @@ func (srv *Server) handlePutFlow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid flow: " + err.Error()})
 		return
 	}
-	if len(flow.Rules) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a flow needs at least one rule"})
+	if flow.Start == "" || len(flow.Nodes) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a flow needs a start step"})
 		return
 	}
 	if err := config.ValidateFlow(id, flow); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	flowMap, err := flowToMap(flow)
+	flowMap, err := config.FlowToMap(flow)
 	if err != nil {
 		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 		return

@@ -13,10 +13,23 @@ import (
 	"github.com/heimdallm/daemon/internal/server"
 )
 
-const exampleFlowJSON = `{"name":"Weekday copilot","rules":{
- "10":{"agent":"claude","quota":{"a":{"agent":"claude","window":"session","op":"below","percent":50}}},
- "20":{"agent":"copilot","schedule":{"a":{"days":["mon","fri"],"from":"08:00","to":"15:00","tz":"Europe/Madrid"}}},
- "99":{"agent":"codex"}}}`
+const exampleFlowJSON = `{"name":"Weekday copilot","start":"c10","nodes":{
+ "c10":{"type":"condition","yes":"a10","no":"c20","quota":{"a":{"agent":"claude","window":"session","op":"below","percent":50}}},
+ "a10":{"type":"agent","agent":"claude","next":"c20"},
+ "c20":{"type":"condition","yes":"a20","no":"a99","schedule":{"a":{"days":["mon","fri"],"from":"08:00","to":"15:00","tz":"Europe/Madrid"}}},
+ "a20":{"type":"agent","agent":"copilot","next":"a99"},
+ "a99":{"type":"agent","agent":"codex"}}}`
+
+// agentOnlyFlow is the smallest valid flow: one agent node.
+func agentOnlyFlow(agent string) string {
+	return `{"start":"a","nodes":{"a":{"type":"agent","agent":"` + agent + `"}}}`
+}
+
+// condFlow is a flow whose start is a condition node carrying cond (the
+// inside of a node's JSON object, after its type), yes-ing to a claude node.
+func condFlow(cond string) string {
+	return `{"start":"c","nodes":{"c":{"type":"condition","yes":"a",` + cond + `},"a":{"type":"agent","agent":"claude"}}}`
+}
 
 func doReq(t *testing.T, srv *server.Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -36,17 +49,17 @@ func TestPutAndDeleteFlow(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	f := cfg.AI.Flows["weekday"]
-	if f.Name != "Weekday copilot" || len(f.Rules) != 3 || f.Rules["20"].Schedule["a"].TZ != "Europe/Madrid" || f.Rules["10"].Quota["a"].Percent != 50 {
+	if f.Name != "Weekday copilot" || len(f.Nodes) != 5 || f.Start != "c10" || f.Nodes["c20"].Schedule["a"].TZ != "Europe/Madrid" || f.Nodes["c10"].Quota["a"].Percent != 50 {
 		t.Fatalf("stored flow = %+v", f)
 	}
 
-	// Replacing drops rules the editor removed.
-	if w := doReq(t, srv, http.MethodPut, "/flows/weekday", `{"name":"Only codex","rules":{"1":{"agent":"codex"}}}`); w.Code != 200 {
+	// Replacing drops steps the editor removed.
+	if w := doReq(t, srv, http.MethodPut, "/flows/weekday", `{"name":"Only codex","start":"a","nodes":{"a":{"type":"agent","agent":"codex"}}}`); w.Code != 200 {
 		t.Fatalf("replace = %d %s", w.Code, w.Body)
 	}
 	cfg, _ = config.Load(cfgPath)
-	if len(cfg.AI.Flows["weekday"].Rules) != 1 {
-		t.Fatalf("replace must drop old rules: %+v", cfg.AI.Flows["weekday"])
+	if len(cfg.AI.Flows["weekday"].Nodes) != 1 {
+		t.Fatalf("replace must drop old steps: %+v", cfg.AI.Flows["weekday"])
 	}
 
 	// Select it globally and for a repo, then delete: the selections go too.
@@ -71,20 +84,20 @@ func TestPutAndDeleteFlow(t *testing.T) {
 func TestPutFlowValidation(t *testing.T) {
 	srv, _ := newPatchServer(t)
 	cases := map[string][2]string{
-		"bad id":        {"/flows/Bad%20Id", `{"rules":{"1":{"agent":"claude"}}}`},
-		"default id":    {"/flows/default", `{"rules":{"1":{"agent":"claude"}}}`},
+		"bad id":        {"/flows/Bad%20Id", agentOnlyFlow("claude")},
+		"default id":    {"/flows/default", agentOnlyFlow("claude")},
 		"bad json":      {"/flows/x", `{`},
-		"unknown field": {"/flows/x", `{"rules":{"1":{"agent":"claude"}},"extra":1}`},
-		"no rules":      {"/flows/x", `{"name":"x"}`},
-		"unknown agent": {"/flows/x", `{"rules":{"1":{"agent":"rm -rf"}}}`},
-		"bad window":    {"/flows/x", `{"rules":{"1":{"agent":"claude","quota":{"a":{"agent":"claude","window":"hourly","op":"below","percent":5}}}}}`},
-		"bad percent":   {"/flows/x", `{"rules":{"1":{"agent":"claude","quota":{"a":{"agent":"claude","window":"session","op":"below","percent":500}}}}}`},
-		"bad op":        {"/flows/x", `{"rules":{"1":{"agent":"claude","quota":{"a":{"agent":"claude","window":"session","op":"near","percent":5}}}}}`},
-		"bad time":      {"/flows/x", `{"rules":{"1":{"agent":"claude","schedule":{"a":{"from":"8am","to":"15:00"}}}}}`},
-		"same times":    {"/flows/x", `{"rules":{"1":{"agent":"claude","schedule":{"a":{"from":"08:00","to":"08:00"}}}}}`},
-		"bad day":       {"/flows/x", `{"rules":{"1":{"agent":"claude","schedule":{"a":{"days":["funday"],"from":"08:00","to":"09:00"}}}}}`},
-		"bad tz":        {"/flows/x", `{"rules":{"1":{"agent":"claude","schedule":{"a":{"from":"08:00","to":"09:00","tz":"Mars/Base"}}}}}`},
-		"bad match":     {"/flows/x", `{"rules":{"1":{"agent":"claude","match":"some"}}}`},
+		"unknown field": {"/flows/x", `{"start":"a","nodes":{"a":{"type":"agent","agent":"claude"}},"extra":1}`},
+		"no start":      {"/flows/x", `{"name":"x"}`},
+		"unknown agent": {"/flows/x", agentOnlyFlow("rm -rf")},
+		"bad window":    {"/flows/x", condFlow(`"quota":{"a":{"agent":"claude","window":"hourly","op":"below","percent":5}}`)},
+		"bad percent":   {"/flows/x", condFlow(`"quota":{"a":{"agent":"claude","window":"session","op":"below","percent":500}}`)},
+		"bad op":        {"/flows/x", condFlow(`"quota":{"a":{"agent":"claude","window":"session","op":"near","percent":5}}`)},
+		"bad time":      {"/flows/x", condFlow(`"schedule":{"a":{"from":"8am","to":"15:00"}}`)},
+		"same times":    {"/flows/x", condFlow(`"schedule":{"a":{"from":"08:00","to":"08:00"}}`)},
+		"bad day":       {"/flows/x", condFlow(`"schedule":{"a":{"days":["funday"],"from":"08:00","to":"09:00"}}`)},
+		"bad tz":        {"/flows/x", condFlow(`"schedule":{"a":{"from":"08:00","to":"09:00","tz":"Mars/Base"}}`)},
+		"bad match":     {"/flows/x", condFlow(`"match":"some","schedule":{"a":{"from":"08:00","to":"09:00"}}`)},
 	}
 	for name, c := range cases {
 		if w := doReq(t, srv, http.MethodPut, c[0], c[1]); w.Code != http.StatusBadRequest {
@@ -171,7 +184,7 @@ func TestPutFlowWriteFailure(t *testing.T) {
 	if err := os.Mkdir(cfgPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if w := doReq(t, srv, http.MethodPut, "/flows/x", `{"rules":{"1":{"agent":"claude"}}}`); w.Code != http.StatusInternalServerError {
+	if w := doReq(t, srv, http.MethodPut, "/flows/x", agentOnlyFlow("claude")); w.Code != http.StatusInternalServerError {
 		t.Errorf("unreadable config = %d %s", w.Code, w.Body)
 	}
 }

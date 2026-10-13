@@ -65,17 +65,7 @@ func agentExecOptions(cli string, agentCfg config.CLIAgentConfig, globalTimeout,
 }
 
 // flowAgents lists the distinct agents a flow can pick.
-func flowAgents(f config.FlowConfig) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, key := range f.OrderedRuleKeys() {
-		if a := f.Rules[key].Agent; !seen[a] {
-			seen[a] = true
-			out = append(out, a)
-		}
-	}
-	return out
-}
+func flowAgents(f config.FlowConfig) []string { return config.TopoAgentOrder(f) }
 
 // flowCandidates evaluates repo's flow now and logs the decision, for the
 // pipeline's agent selection.
@@ -90,9 +80,9 @@ func flowCandidates(flowID string, flow config.FlowConfig, repo string, quotas f
 		defer cancel()
 		d := flows.Evaluate(ctx, flowID, flow, time.Now(), quotas, available)
 		slog.Info("review flow evaluated", "repo", repo, "flow", flowID, "candidates", d.Candidates)
-		for _, r := range d.Rules {
-			slog.Debug("review flow rule", "repo", repo, "flow", flowID, "rule", r.Key, "agent", r.Agent,
-				"matched", r.Matched, "available", r.Available, "reasons", r.Reasons)
+		for _, s := range d.Path {
+			slog.Debug("review flow step", "repo", repo, "flow", flowID, "node", s.Node, "type", s.Type,
+				"agent", s.Agent, "added", s.Added, "reasons", s.Reasons)
 		}
 		return d.Candidates
 	}

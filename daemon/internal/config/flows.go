@@ -20,9 +20,6 @@ type FlowConfig struct {
 	Name  string              `toml:"name" json:"name"`
 	Start string              `toml:"start,omitempty" json:"start"`
 	Nodes map[string]FlowNode `toml:"nodes,omitempty" json:"nodes"`
-	// Rules is the pre-graph format. It is read only to migrate (see
-	// MigrateLegacyFlow) and never written back; it is not part of the API.
-	Rules map[string]FlowRule `toml:"rules,omitempty" json:"-"`
 }
 
 // Node types.
@@ -89,16 +86,6 @@ func (i FlowIssue) Error() string {
 	return i.Message
 }
 
-// FlowRule picks Agent when its conditions hold. No conditions means "always"
-// (the catch-all at the end of a flow).
-type FlowRule struct {
-	Agent string `toml:"agent" json:"agent"`
-	// Match is "all" (default: every condition holds) or "any".
-	Match    string                       `toml:"match,omitempty" json:"match,omitempty"`
-	Quota    map[string]QuotaCondition    `toml:"quota,omitempty" json:"quota,omitempty"`
-	Schedule map[string]ScheduleCondition `toml:"schedule,omitempty" json:"schedule,omitempty"`
-}
-
 // QuotaCondition compares an agent's used quota with a threshold.
 type QuotaCondition struct {
 	Agent string `toml:"agent" json:"agent"`
@@ -126,7 +113,6 @@ const DefaultFlowID = "default"
 // Flow limits.
 const (
 	maxFlows           = 50
-	maxRulesPerFlow    = 50
 	maxNodesPerFlow    = 200
 	maxConditionsPerRu = 20
 )
@@ -145,16 +131,6 @@ var (
 func Weekday(name string) (time.Weekday, bool) {
 	d, ok := validWeekdays[strings.ToLower(strings.TrimSpace(name))]
 	return d, ok
-}
-
-// OrderedRuleKeys returns a flow's rule keys in evaluation order (see
-// OrderKeys).
-func (f FlowConfig) OrderedRuleKeys() []string {
-	keys := make([]string, 0, len(f.Rules))
-	for k := range f.Rules {
-		keys = append(keys, k)
-	}
-	return OrderKeys(keys)
 }
 
 // OrderKeys sorts flow map keys in evaluation order: numeric keys ascending,
@@ -198,12 +174,12 @@ func (c *Config) FlowNameForRepo(repo string) string {
 }
 
 // FlowForRepo resolves the flow that decides which agent reviews repo. A
-// selected flow that exists wins; otherwise the flow is synthesised from the
-// legacy primary/fallback settings (repo > org > global), so configs written
-// before flows keep their behaviour unchanged.
+// selected flow that exists and has a start node wins; otherwise the flow is
+// synthesised from the legacy primary/fallback settings (repo > org >
+// global), so configs written before flows keep their behaviour unchanged.
 func (c *Config) FlowForRepo(repo string) (string, FlowConfig) {
 	if name := c.FlowNameForRepo(repo); name != "" {
-		if f, ok := c.AI.Flows[name]; ok && len(f.Rules) > 0 {
+		if f, ok := c.AI.Flows[name]; ok && f.Start != "" {
 			return name, f
 		}
 	}
@@ -212,12 +188,20 @@ func (c *Config) FlowForRepo(repo string) (string, FlowConfig) {
 
 func (c *Config) legacyFlow(repo string) FlowConfig {
 	ai := c.AIForRepo(repo)
-	f := FlowConfig{Name: "Primary and fallback", Rules: map[string]FlowRule{}}
+	f := FlowConfig{Name: "Primary and fallback", Nodes: map[string]FlowNode{}}
 	if ai.Primary != "" {
-		f.Rules["10"] = FlowRule{Agent: ai.Primary}
+		f.Nodes["a10"] = FlowNode{Type: NodeAgent, Agent: ai.Primary}
+		f.Start = "a10"
 	}
 	if ai.Fallback != "" && ai.Fallback != ai.Primary {
-		f.Rules["20"] = FlowRule{Agent: ai.Fallback}
+		f.Nodes["a20"] = FlowNode{Type: NodeAgent, Agent: ai.Fallback}
+		if f.Start == "" {
+			f.Start = "a20"
+		} else {
+			n := f.Nodes["a10"]
+			n.Next = "a20"
+			f.Nodes["a10"] = n
+		}
 	}
 	return f
 }
@@ -448,42 +432,6 @@ func validateScheduleCondition(sc ScheduleCondition) error {
 	return nil
 }
 
-// validateLegacyRules checks a pre-graph flow before migrating it, so a
-// broken legacy file fails with the rule path the operator wrote.
-func validateLegacyRules(id string, f FlowConfig) error {
-	path := "ai.flows." + id
-	if len(f.Rules) > maxRulesPerFlow {
-		return fmt.Errorf("config: %s has %d rules, at most %d allowed", path, len(f.Rules), maxRulesPerFlow)
-	}
-	for _, key := range f.OrderedRuleKeys() {
-		r := f.Rules[key]
-		rp := path + ".rules." + key
-		if len(key) == 0 || len(key) > 16 {
-			return fmt.Errorf("config: %s: rule key must be 1-16 characters", rp)
-		}
-		if err := executor.ValidateCLIName(r.Agent); err != nil {
-			return fmt.Errorf("config: %s.agent: %w", rp, err)
-		}
-		if !validMatchModes[r.Match] {
-			return fmt.Errorf("config: %s.match must be all or any", rp)
-		}
-		if len(r.Quota)+len(r.Schedule) > maxConditionsPerRu {
-			return fmt.Errorf("config: %s has too many conditions (max %d)", rp, maxConditionsPerRu)
-		}
-		for _, ck := range OrderKeys(mapKeys(r.Quota)) {
-			if err := validateQuotaCondition(r.Quota[ck]); err != nil {
-				return fmt.Errorf("config: %s.quota.%s: %w", rp, ck, err)
-			}
-		}
-		for _, ck := range OrderKeys(mapKeys(r.Schedule)) {
-			if err := validateScheduleCondition(r.Schedule[ck]); err != nil {
-				return fmt.Errorf("config: %s.schedule.%s: %w", rp, ck, err)
-			}
-		}
-	}
-	return nil
-}
-
 func (c *Config) validateFlows() error {
 	if len(c.AI.Flows) > maxFlows {
 		return fmt.Errorf("config: at most %d flows allowed", maxFlows)
@@ -491,11 +439,6 @@ func (c *Config) validateFlows() error {
 	for id, f := range c.AI.Flows {
 		if err := ValidateFlowID(id); err != nil {
 			return err
-		}
-		if len(f.Rules) > 0 {
-			if err := validateLegacyRules(id, f); err != nil {
-				return err
-			}
 		}
 		if err := ValidateFlow(id, f); err != nil {
 			return err

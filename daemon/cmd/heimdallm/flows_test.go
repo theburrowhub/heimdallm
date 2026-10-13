@@ -21,11 +21,11 @@ func testFlowConfig() *config.Config {
 			"copilot": {Model: "gpt-5.5", Effort: "high", ExtraFlags: "--allow-all-tools"},
 		},
 		Flows: map[string]config.FlowConfig{
-			"mixed": {Name: "Mixed", Rules: map[string]config.FlowRule{
-				"10": {Agent: "copilot"},
-				"20": {Agent: "openrouter"},
-				"30": {Agent: "gemini"},
-				"40": {Agent: "copilot"},
+			"mixed": {Name: "Mixed", Start: "a10", Nodes: map[string]config.FlowNode{
+				"a10": {Type: config.NodeAgent, Agent: "copilot", Next: "a20"},
+				"a20": {Type: config.NodeAgent, Agent: "openrouter", Next: "a30"},
+				"a30": {Type: config.NodeAgent, Agent: "gemini", Next: "a40"},
+				"a40": {Type: config.NodeAgent, Agent: "copilot"},
 			}},
 		},
 		Repos: map[string]config.RepoAI{"acme/api": {Flow: "mixed"}},
@@ -62,7 +62,11 @@ func TestAgentExecOptions(t *testing.T) {
 
 func TestMergeTrackAgentSpecFollowsFlow(t *testing.T) {
 	c := testFlowConfig()
-	c.AI.Flows["writers"] = config.FlowConfig{Rules: map[string]config.FlowRule{"1": {Agent: "copilot"}, "2": {Agent: "opencode"}, "3": {Agent: "codex"}}}
+	c.AI.Flows["writers"] = config.FlowConfig{Start: "a1", Nodes: map[string]config.FlowNode{
+		"a1": {Type: config.NodeAgent, Agent: "copilot", Next: "a2"},
+		"a2": {Type: config.NodeAgent, Agent: "opencode", Next: "a3"},
+		"a3": {Type: config.NodeAgent, Agent: "codex"},
+	}}
 	c.AI.Repos["acme/web"] = config.RepoAI{Flow: "writers"}
 	spec := mergeTrackAgentSpec(&c, &sync.Mutex{})("acme/web")
 	if spec.Primary != "opencode" || spec.Fallback != "codex" {
