@@ -26,7 +26,20 @@ const _cutSize = 28.0;
 class FlowCanvas extends ConsumerStatefulWidget {
   /// Called with the canvas position where a palette item was dropped.
   final void Function(FlowNodeType type, Offset at)? onDropFromPalette;
-  const FlowCanvas({super.key, this.onDropFromPalette});
+
+  /// Pan, zoom and select only: no moves, connections or deletes.
+  final bool readOnly;
+
+  /// Steps to mark as wrong besides the client check's (the daemon's
+  /// last validation findings).
+  final Set<String> errorNodes;
+
+  const FlowCanvas({
+    super.key,
+    this.onDropFromPalette,
+    this.readOnly = false,
+    this.errorNodes = const {},
+  });
 
   @override
   ConsumerState<FlowCanvas> createState() => _FlowCanvasState();
@@ -75,7 +88,8 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     }
   }
 
-  bool get _editable => ref.read(flowEditorProvider).draft == null;
+  bool get _editable =>
+      !widget.readOnly && ref.read(flowEditorProvider).draft == null;
 
   /// Ends any gesture in progress when editing becomes disabled (a draft
   /// arrived): the gesture's own callbacks will no longer act, so a node
@@ -205,7 +219,7 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     final noColor = resolveAppColor(context, AppColors.danger);
     final draft = state.draft;
     final shown = draft?.flow ?? state.flow;
-    final editable = draft == null;
+    final editable = !widget.readOnly && draft == null;
     final edges = canvasEdges(shown);
     final path = state.simulation?.path ?? const <FlowPathStep>[];
     final pathNodes = {for (final s in path) s.node};
@@ -477,7 +491,9 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
         child: FlowNodeCard(
           node: n,
           selected: selected,
-          hasError: state.check.errorNodes.contains(n.id),
+          hasError:
+              state.check.errorNodes.contains(n.id) ||
+              widget.errorNodes.contains(n.id),
           unreachable: state.check.unreachable.contains(n.id),
           onPath: onPath,
           diff: state.draft?.diff.nodes[n.id],

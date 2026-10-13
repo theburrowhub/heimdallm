@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/flows/canvas/flow_canvas.dart';
 import 'package:heimdallm/features/flows/canvas/edge_painter.dart';
+import 'package:heimdallm/features/flows/canvas/node_widgets.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
 import 'package:heimdallm/features/flows/graph/auto_layout.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
@@ -327,5 +328,44 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('edge-cut')));
     await tester.pump();
     expect(c.read(flowEditorProvider).flow.nodes['a1']!.next, '');
+  });
+
+  testWidgets('a read-only canvas selects but neither deletes nor connects', (
+    tester,
+  ) async {
+    final c = await pumpCanvas(
+      tester,
+      twoAgents,
+      body: const FlowCanvas(readOnly: true),
+    );
+    await tester.tap(find.byKey(const ValueKey('node-a2')));
+    await tester.pump();
+    expect(c.read(flowEditorProvider).selection, const NodeSelection('a2'));
+    await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+    await tester.pump();
+    expect(c.read(flowEditorProvider).flow.nodes.containsKey('a2'), isTrue);
+    final from = tester.getCenter(find.byKey(const ValueKey('port-a1-next')));
+    final to = tester.getCenter(find.byKey(const ValueKey('node-a2')));
+    final g = await tester.startGesture(from);
+    await g.moveTo(Offset.lerp(from, to, .5)!);
+    await g.moveTo(to);
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(c.read(flowEditorProvider).flow.nodes['a1']!.next, '');
+  });
+
+  testWidgets('errorNodes marks steps the daemon rejected', (tester) async {
+    await pumpCanvas(
+      tester,
+      twoAgents,
+      body: const FlowCanvas(errorNodes: {'a2'}),
+    );
+    final cards = {
+      for (final card in tester.widgetList<FlowNodeCard>(
+        find.byType(FlowNodeCard),
+      ))
+        card.node.id: card.hasError,
+    };
+    expect(cards, {'a1': false, 'a2': true});
   });
 }

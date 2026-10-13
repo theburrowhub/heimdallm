@@ -14,48 +14,56 @@ final flowsProvider = FutureProvider.autoDispose<FlowListing>((ref) {
   return ref.watch(apiClientProvider).fetchFlows();
 });
 
+/// Asks for a new flow id. Null on cancel, or when the id is taken (after
+/// telling the operator).
+Future<String?> askNewFlowId(BuildContext context, FlowListing listing) async {
+  final ctrl = TextEditingController();
+  final id = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('New flow'),
+      content: TextField(
+        key: const ValueKey('new-flow-id'),
+        controller: ctrl,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'Flow id',
+          hintText: 'e.g. weekday-copilot',
+          helperText: 'Lowercase letters, digits, - and _',
+        ),
+        inputFormatters: [
+          FilteringTextInputFormatter.allow(RegExp(r'[a-z0-9_-]')),
+          LengthLimitingTextInputFormatter(64),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey('new-flow-create'),
+          onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+          child: const Text('Create'),
+        ),
+      ],
+    ),
+  );
+  if (id == null || id.isEmpty || !context.mounted) return null;
+  if (id == listing.defaultId || listing.flows.containsKey(id)) {
+    showToast(context, 'A flow named "$id" already exists', isError: true);
+    return null;
+  }
+  return id;
+}
+
 /// List of flows.
 class FlowsScreen extends ConsumerWidget {
   const FlowsScreen({super.key});
 
   Future<void> _create(BuildContext context, FlowListing listing) async {
-    final ctrl = TextEditingController();
-    final id = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('New flow'),
-        content: TextField(
-          key: const ValueKey('new-flow-id'),
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Flow id',
-            hintText: 'e.g. weekday-copilot',
-            helperText: 'Lowercase letters, digits, - and _',
-          ),
-          inputFormatters: [
-            FilteringTextInputFormatter.allow(RegExp(r'[a-z0-9_-]')),
-            LengthLimitingTextInputFormatter(64),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            key: const ValueKey('new-flow-create'),
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: const Text('Create'),
-          ),
-        ],
-      ),
-    );
-    if (id == null || id.isEmpty || !context.mounted) return;
-    if (id == listing.defaultId || listing.flows.containsKey(id)) {
-      showToast(context, 'A flow named "$id" already exists', isError: true);
-      return;
-    }
+    final id = await askNewFlowId(context, listing);
+    if (id == null || !context.mounted) return;
     context.go('/flows/$id');
   }
 
