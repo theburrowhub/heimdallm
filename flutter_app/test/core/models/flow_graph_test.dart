@@ -101,4 +101,13 @@ void main() {
     expect(d.path.first.holds, isTrue);
     expect(d.path.last.added, isTrue);
   });
+
+  test('schedule days are read case-insensitively, like the daemon', () {
+    final s = ScheduleCondition.fromJson({
+      'days': ['Mon', ' SAT '],
+      'from': '00:00',
+      'to': '00:00',
+    });
+    expect(s.days, ['mon', 'sat']);
+  });
 }

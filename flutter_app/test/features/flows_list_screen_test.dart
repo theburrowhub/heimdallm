@@ -111,7 +111,20 @@ void main() {
         to: '00:00',
         tz: '',
       ).describe(),
-      'sat, sun all day daemon time',
+      'sat, sun all day',
+    );
+    expect(
+      const ScheduleCondition(days: [], from: '07:00', to: '07:00').describe(),
+      'always',
+    );
+    expect(
+      const ScheduleCondition(
+        days: ['sat'],
+        from: '00:00',
+        to: '00:00',
+        tz: 'UTC',
+      ).describe(),
+      'sat all day UTC',
     );
     expect(
       const QuotaCondition(agent: 'x', op: 'above', percent: 90).describe(),

@@ -111,13 +111,14 @@ func TestFlowDescriptions(t *testing.T) {
 			"s1": {Days: []string{"mon", "fri"}, From: "08:00", To: "15:00", TZ: "Europe/Madrid"},
 			"s2": {From: "22:00", To: "06:00"},
 			"s3": {Days: []string{"sat", "sun"}, From: "00:00", To: "00:00"},
+			"s4": {From: "07:00", To: "07:00"},
 		},
 		Quota: map[string]api.QuotaCondition{
 			"q1": {Agent: "claude", Window: "weekly", Op: "above", Percent: 90.5},
 			"q2": {Agent: "claude", Window: "session", Op: "below", Percent: 50},
 		},
 	}
-	want := "if mon,fri 08:00-15:00 Europe/Madrid or every day 22:00-06:00 daemon time or sat,sun all day daemon time or claude weekly quota > 90.5% or claude session quota < 50% → yes: a1 / no: end"
+	want := "if mon,fri 08:00-15:00 Europe/Madrid or every day 22:00-06:00 daemon time or sat,sun all day or always or claude weekly quota > 90.5% or claude session quota < 50% → yes: a1 / no: end"
 	if got := n.Describe(); got != want {
 		t.Errorf("Describe =\n%q\nwant\n%q", got, want)
 	}

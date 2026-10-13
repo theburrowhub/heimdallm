@@ -80,8 +80,10 @@ class ScheduleCondition {
 
   factory ScheduleCondition.fromJson(Map<String, dynamic> j) =>
       ScheduleCondition(
+        // Normalised as the daemon reads them, so "Sat" is not flagged.
         days: ((j['days'] as List<dynamic>?) ?? const [])
             .whereType<String>()
+            .map((d) => d.trim().toLowerCase())
             .toList(),
         from: (j['from'] as String?) ?? '',
         to: (j['to'] as String?) ?? '',
@@ -96,9 +98,13 @@ class ScheduleCondition {
   };
 
   String describe() {
+    final allDay = from == to;
+    // A whole-day window on no particular days holds at every moment.
+    if (allDay && days.isEmpty) return 'always';
     final d = days.isEmpty ? 'every day' : days.join(', ');
-    final window = from == to ? 'all day' : '$from–$to';
-    return '$d $window ${tz.isEmpty ? 'daemon time' : tz}';
+    final text = allDay ? '$d all day' : '$d $from–$to';
+    if (tz.isNotEmpty) return '$text $tz';
+    return allDay ? text : '$text daemon time';
   }
 }
 

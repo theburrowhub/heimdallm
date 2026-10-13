@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// QuotaCondition is a flow rule condition on an agent's used quota.
+// QuotaCondition is a condition step's check on an agent's used quota.
 type QuotaCondition struct {
 	Agent   string  `json:"agent"`
 	Window  string  `json:"window"`
@@ -19,7 +19,7 @@ type QuotaCondition struct {
 	Percent float64 `json:"percent"`
 }
 
-// ScheduleCondition is a flow rule condition on weekday and time of day.
+// ScheduleCondition is a condition step's check on weekday and time of day.
 type ScheduleCondition struct {
 	Days []string `json:"days"`
 	From string   `json:"from"`
@@ -266,19 +266,25 @@ func (n FlowNode) Describe() string {
 }
 
 func describeSchedule(s ScheduleCondition) string {
+	// A whole-day window on no particular days holds at every moment.
+	if s.From == s.To && len(s.Days) == 0 {
+		return "always"
+	}
 	days := "every day"
 	if len(s.Days) > 0 {
 		days = strings.Join(s.Days, ",")
 	}
-	tz := s.TZ
-	if tz == "" {
-		tz = "daemon time"
-	}
-	window := s.From + "-" + s.To
+	text := days + " " + s.From + "-" + s.To
 	if s.From == s.To {
-		window = "all day"
+		text = days + " all day"
 	}
-	return DisplayText(fmt.Sprintf("%s %s %s", days, window, tz), 80)
+	switch {
+	case s.TZ != "":
+		text += " " + s.TZ
+	case s.From != s.To:
+		text += " daemon time"
+	}
+	return DisplayText(text, 80)
 }
 
 func describeQuota(q QuotaCondition) string {

@@ -126,8 +126,8 @@ func matches(ctx context.Context, n config.FlowNode, now time.Time, q QuotaReade
 	return true, reasons
 }
 
-// sortedKeys orders condition keys like rule keys, so reasons read in a
-// stable order.
+// sortedKeys orders a condition step's keys in config.OrderKeys order, so
+// reasons read in a stable order.
 func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -182,9 +182,12 @@ func scheduleHolds(s config.ScheduleCondition, now time.Time) (bool, string) {
 	if len(s.Days) > 0 {
 		desc = strings.Join(s.Days, ",") + " " + desc
 	}
-	if s.TZ != "" {
+	switch {
+	case allDay && len(s.Days) == 0:
+		desc = "always"
+	case s.TZ != "":
 		desc += " " + s.TZ
-	} else {
+	case !allDay:
 		desc += " daemon time"
 	}
 	now24 := t.Format("Mon 15:04")
