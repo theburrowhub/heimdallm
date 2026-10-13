@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/agentcatalog"
@@ -170,4 +171,44 @@ func simulateFlow(ctx context.Context, c *config.Config, req server.FlowSimulati
 	}
 	id, f := c.FlowForRepo(req.Repo)
 	return flows.Evaluate(ctx, id, f, at, quotas, available), nil
+}
+
+// execRunner runs the assistant prompt through the executor with the
+// agent's own settings (the same read-only posture as a review), in an
+// empty workspace, and kills the process group when ctx ends.
+type execRunner struct {
+	exec *executor.Executor
+	opts func(agent, workDir string) executor.ExecOptions
+}
+
+func (r execRunner) Run(ctx context.Context, agent, prompt, workDir string) ([]byte, error) {
+	opts := r.opts(agent, workDir)
+	opts.ExecutionID = "flow-assist-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	opts.Timeout = flows.DefaultAssistTimeout
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_, _ = r.exec.TerminateExecution(opts.ExecutionID)
+		case <-stop:
+		}
+	}()
+	return r.exec.ExecuteRaw(agent, prompt, opts)
+}
+
+// assistContext lists the installed agents and their quotas for the prompt.
+func assistContext(ctx context.Context, agents []agentcatalog.Agent, quotas []quota.Provider) flows.AssistContext {
+	out := flows.AssistContext{Quotas: quotas, Now: time.Now()}
+	for _, a := range agents {
+		if a.Kind == agentcatalog.KindIDE || !(a.Installed || a.Configured) {
+			continue
+		}
+		out.Agents = append(out.Agents, flows.AssistAgent{
+			ID:       a.ConfigAgent,
+			Models:   a.Models,
+			Runnable: !executor.IsHTTPOnly(a.ConfigAgent),
+		})
+	}
+	return out
 }

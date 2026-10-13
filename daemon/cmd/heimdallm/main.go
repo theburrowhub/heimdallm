@@ -30,6 +30,7 @@ import (
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/flows"
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/gitops"
 	"github.com/heimdallm/daemon/internal/harness/openrouter"
@@ -1976,6 +1977,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			return simulateFlow(ctx, c, req, quotaSvc, agentAvailable)
 		},
 	)
+	assistant := &flows.Assistant{Runner: execRunner{exec: exec, opts: func(agent, workDir string) executor.ExecOptions {
+		cfgMu.Lock()
+		defer cfgMu.Unlock()
+		return agentExecOptions(agent, cfg.AgentConfigFor(agent), cfg.AI.ExecutionTimeout, workDir, false)
+	}}}
+	srv.SetFlowAssist(func(ctx context.Context, req flows.AssistRequest) (flows.AssistResult, error) {
+		agents, _ := agentCatalog.Snapshot(ctx)
+		return assistant.Assist(ctx, req, assistContext(ctx, agents, quotaSvc.Snapshot(ctx)))
+	})
 
 	// Live review budget usage for GET /review-limits: stored reviews plus
 	// the ones the pipeline has admitted and is still running.

@@ -28,6 +28,7 @@ import (
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/flows"
 	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
@@ -101,6 +102,7 @@ type Server struct {
 	// Review flows and quotas (see flows.go). Nil until main wires them.
 	flowsListFn    func(ctx context.Context) any
 	flowSimulateFn func(ctx context.Context, req FlowSimulation) (any, error)
+	flowAssistFn   func(ctx context.Context, req flows.AssistRequest) (flows.AssistResult, error)
 	quotasFn       func(ctx context.Context) any
 	// reviewLimitsFn returns live usage of every configured review budget
 	// for GET /review-limits. Nil until main wires it.
@@ -722,6 +724,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/quotas", srv.handleQuotas)
 	r.Get("/flows", srv.handleListFlows)
 	r.Post("/flows/simulate", srv.handleSimulateFlow)
+	r.Post("/flows/assist", srv.handleAssistFlow)
 	r.Put("/flows/{id}", srv.handlePutFlow)
 	r.Delete("/flows/{id}", srv.handleDeleteFlow)
 	r.Get("/agents", srv.handleListAgents)

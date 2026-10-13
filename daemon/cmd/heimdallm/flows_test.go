@@ -189,3 +189,15 @@ func TestSimulateFlowUsesUnsavedGraph(t *testing.T) {
 		t.Fatalf("%+v %v", d, err)
 	}
 }
+
+func TestAssistContextRunnableAgents(t *testing.T) {
+	got := assistContext(context.Background(), []agentcatalog.Agent{
+		{ConfigAgent: "claude", Installed: true, Models: []string{"opus"}},
+		{ConfigAgent: "openrouter", Configured: true},
+		{ConfigAgent: "cursor_cli", Kind: agentcatalog.KindIDE, Installed: true},
+		{ConfigAgent: "gemini"},
+	}, nil)
+	if len(got.Agents) != 2 || !got.Agents[0].Runnable || got.Agents[1].Runnable {
+		t.Fatalf("%+v", got.Agents)
+	}
+}

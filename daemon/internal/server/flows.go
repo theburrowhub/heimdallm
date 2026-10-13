@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/flows"
 )
 
 // FlowSimulation is a POST /flows/simulate request: evaluate Graph (an
@@ -226,4 +227,41 @@ func (srv *Server) writeConfigResult(w http.ResponseWriter, op string, result ma
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// SetFlowAssist wires POST /flows/assist.
+func (srv *Server) SetFlowAssist(fn func(ctx context.Context, req flows.AssistRequest) (flows.AssistResult, error)) {
+	srv.flowAssistFn = fn
+}
+
+// handleAssistFlow drafts a flow with an installed agent. The draft is never
+// saved here; the editor shows it for the operator to accept.
+func (srv *Server) handleAssistFlow(w http.ResponseWriter, r *http.Request) {
+	if srv.flowAssistFn == nil {
+		http.Error(w, `{"error":"the flow assistant is not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+	var req flows.AssistRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
+		return
+	}
+	res, err := srv.flowAssistFn(r.Context(), req)
+	var ae *flows.AssistError
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, res)
+	case errors.Is(err, flows.ErrAssistBusy):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "another flow is being drafted; try again when it finishes"})
+	case errors.As(err, &ae):
+		writeJSON(w, ae.Status, ae)
+	case errors.Is(err, context.Canceled):
+		// The client went away; nobody reads the answer.
+	default:
+		slog.Error("POST /flows/assist failed", "err", err)
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+	}
 }
