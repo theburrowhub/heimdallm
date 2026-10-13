@@ -70,6 +70,21 @@ class InspectorLabel extends StatelessWidget {
   );
 }
 
+/// Tells the operator why a step's fields are locked on the built-in default
+/// flow, and where its agents are changed instead.
+class InspectorReadOnlyNote extends StatelessWidget {
+  const InspectorReadOnlyNote({super.key});
+
+  @override
+  Widget build(BuildContext context) => const Padding(
+    padding: EdgeInsets.only(top: 12),
+    child: AppText.muted(
+      'The default flow follows the global primary and fallback — change '
+      'them in the flow panel.',
+    ),
+  );
+}
+
 /// Problems with the selected step, from the client check or the daemon.
 class InspectorIssues extends StatelessWidget {
   final List<FlowIssue> issues;

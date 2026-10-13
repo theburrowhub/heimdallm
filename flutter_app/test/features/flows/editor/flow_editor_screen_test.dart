@@ -628,4 +628,125 @@ void main() {
     );
     expect(dup.onPressed, isNull);
   });
+
+  ReviewFlow readOnlyGraph() => const ReviewFlow(
+    name: 'Default',
+    start: 'c1',
+    nodes: {
+      'c1': FlowNode(
+        id: 'c1',
+        type: FlowNodeType.condition,
+        yes: 'a1',
+        schedule: [ScheduleCondition(from: '07:00')],
+        quota: [QuotaCondition(agent: 'claude')],
+        position: Offset(300, 200),
+      ),
+      'a1': FlowNode(
+        id: 'a1',
+        type: FlowNodeType.agent,
+        agent: 'claude',
+        position: Offset(700, 200),
+      ),
+    },
+  );
+
+  testWidgets('the default flow\'s steps show their values but cannot change', (
+    tester,
+  ) async {
+    final (_, router) = await pumpEditor(
+      tester,
+      id: 'default',
+      listing: _listing(flows: {'default': readOnlyGraph()}),
+    );
+    bool disabled(String key) =>
+        tester
+            .widget<DropdownButtonFormField<String>>(find.byKey(ValueKey(key)))
+            .onChanged ==
+        null;
+    final read = containerOf(tester);
+
+    await tester.tap(find.byKey(const ValueKey('node-a1')));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('change them in the flow panel'),
+      findsOneWidget,
+    );
+    expect(disabled('inspector-agent'), isTrue);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('inspector-agent')),
+        matching: find.text('claude'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('node-c1')));
+    await tester.pumpAndSettle();
+    expect(disabled('inspector-match'), isTrue);
+    expect(disabled('quota-0-agent'), isTrue);
+    expect(disabled('quota-0-window'), isTrue);
+    expect(disabled('quota-0-op'), isTrue);
+    for (final k in ['schedule-0-from', 'schedule-0-to', 'schedule-0-tz']) {
+      expect(
+        tester
+            .widget<TextField>(
+              find.descendant(
+                of: find.byKey(ValueKey(k)),
+                matching: find.byType(TextField),
+              ),
+            )
+            .enabled,
+        isFalse,
+      );
+    }
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('schedule-0-from')),
+        matching: find.text('07:00'),
+      ),
+      findsOneWidget,
+    );
+    for (final k in [
+      'inspector-add-schedule',
+      'inspector-add-quota',
+      'schedule-0-allday',
+    ]) {
+      await tester.tap(find.byKey(ValueKey(k)), warnIfMissed: false);
+    }
+    await tester.tap(find.byTooltip('Remove').first, warnIfMissed: false);
+    await tester.tap(find.text('mon'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(read.read(flowEditorProvider).dirty, isFalse);
+
+    router.go('/flows');
+    await tester.pumpAndSettle();
+    expect(find.text('list'), findsOneWidget);
+    expect(find.text('Discard unsaved changes?'), findsNothing);
+  });
+
+  testWidgets('the default agents wait for a change in flight', (tester) async {
+    final (api, _) = await pumpEditor(
+      tester,
+      id: 'default',
+      listing: _listing(flows: {'default': defaultFlow('claude', 'codex')}),
+    );
+    final pending = Completer<Map<String, dynamic>>();
+    when(() => api.patchConfig(any())).thenAnswer((_) => pending.future);
+    bool busy(String key) =>
+        tester
+            .widget<DropdownButtonFormField<String>>(find.byKey(ValueKey(key)))
+            .onChanged ==
+        null;
+    await tester.tap(find.byKey(const ValueKey('default-flow-primary')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('codex').last);
+    await tester.pump();
+    expect(busy('default-flow-primary'), isTrue);
+    expect(busy('default-flow-fallback'), isTrue);
+    pending.complete(<String, dynamic>{});
+    await tester.pumpAndSettle();
+    verify(() => api.patchConfig(any())).called(1);
+    expect(busy('default-flow-primary'), isFalse);
+    expect(busy('default-flow-fallback'), isFalse);
+  });
 }

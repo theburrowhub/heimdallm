@@ -16,17 +16,24 @@ class ConditionInspector extends ConsumerWidget {
   final List<FlowAgent> agents;
   final List<FlowIssue> issues;
 
+  /// The built-in default flow: values show, nothing can be changed.
+  final bool readOnly;
+
   const ConditionInspector({
     super.key,
     required this.node,
     required this.agents,
     this.issues = const [],
+    this.readOnly = false,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final ctl = ref.read(flowEditorProvider.notifier);
-    void update(FlowNode n) => ctl.updateNode(n);
+    void update(FlowNode n) {
+      if (!readOnly) ctl.updateNode(n);
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -39,6 +46,7 @@ class ConditionInspector extends ConsumerWidget {
               'Continues through "yes" when its conditions hold, "no" '
               'otherwise. Unknown quota counts as not holding.',
         ),
+        if (readOnly) const InspectorReadOnlyNote(),
         const InspectorLabel('Holds when'),
         DropdownButtonFormField<String>(
           key: const ValueKey('inspector-match'),
@@ -54,12 +62,15 @@ class ConditionInspector extends ConsumerWidget {
             DropdownMenuItem(value: 'all', child: Text('All conditions')),
             DropdownMenuItem(value: 'any', child: Text('Any condition')),
           ],
-          onChanged: (v) => update(node.copyWith(match: v ?? 'all')),
+          onChanged: readOnly
+              ? null
+              : (v) => update(node.copyWith(match: v ?? 'all')),
         ),
         const InspectorLabel('Schedule'),
         for (var i = 0; i < node.schedule.length; i++)
           _ScheduleEditor(
             index: i,
+            readOnly: readOnly,
             value: node.schedule[i],
             onChanged: (s) =>
                 update(node.copyWith(schedule: [...node.schedule]..[i] = s)),
@@ -71,11 +82,13 @@ class ConditionInspector extends ConsumerWidget {
           alignment: Alignment.centerLeft,
           child: TextButton.icon(
             key: const ValueKey('inspector-add-schedule'),
-            onPressed: () => update(
-              node.copyWith(
-                schedule: [...node.schedule, const ScheduleCondition()],
-              ),
-            ),
+            onPressed: readOnly
+                ? null
+                : () => update(
+                    node.copyWith(
+                      schedule: [...node.schedule, const ScheduleCondition()],
+                    ),
+                  ),
             icon: const Icon(Icons.schedule, size: 18),
             label: const Text('Add schedule'),
           ),
@@ -84,6 +97,7 @@ class ConditionInspector extends ConsumerWidget {
         for (var i = 0; i < node.quota.length; i++)
           _QuotaEditor(
             index: i,
+            readOnly: readOnly,
             value: node.quota[i],
             agents: agents,
             onChanged: (q) =>
@@ -95,18 +109,23 @@ class ConditionInspector extends ConsumerWidget {
           alignment: Alignment.centerLeft,
           child: TextButton.icon(
             key: const ValueKey('inspector-add-quota'),
-            onPressed: () => update(
-              node.copyWith(
-                quota: [
-                  ...node.quota,
-                  QuotaCondition(
-                    agent:
-                        agents.where((a) => a.installed).firstOrNull?.id ??
-                        'claude',
+            onPressed: readOnly
+                ? null
+                : () => update(
+                    node.copyWith(
+                      quota: [
+                        ...node.quota,
+                        QuotaCondition(
+                          agent:
+                              agents
+                                  .where((a) => a.installed)
+                                  .firstOrNull
+                                  ?.id ??
+                              'claude',
+                        ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
-            ),
             icon: const Icon(Icons.data_usage, size: 18),
             label: const Text('Add quota condition'),
           ),
@@ -120,7 +139,7 @@ class ConditionInspector extends ConsumerWidget {
 /// A bordered group for one condition, with a remove button in its corner.
 class _ConditionCard extends StatelessWidget {
   final String title;
-  final VoidCallback onRemove;
+  final VoidCallback? onRemove;
   final List<Widget> children;
 
   const _ConditionCard({
@@ -164,12 +183,14 @@ class _ConditionCard extends StatelessWidget {
 
 class _ScheduleEditor extends StatelessWidget {
   final int index;
+  final bool readOnly;
   final ScheduleCondition value;
   final ValueChanged<ScheduleCondition> onChanged;
   final VoidCallback onRemove;
 
   const _ScheduleEditor({
     required this.index,
+    required this.readOnly,
     required this.value,
     required this.onChanged,
     required this.onRemove,
@@ -183,7 +204,7 @@ class _ScheduleEditor extends StatelessWidget {
     ];
     return _ConditionCard(
       title: value.days.isEmpty ? 'Every day' : 'On selected days',
-      onRemove: onRemove,
+      onRemove: readOnly ? null : onRemove,
       children: [
         Wrap(
           spacing: 4,
@@ -195,17 +216,19 @@ class _ScheduleEditor extends StatelessWidget {
                 visualDensity: VisualDensity.compact,
                 showCheckmark: false,
                 selected: value.days.contains(d),
-                onSelected: (on) => onChanged(
-                  value.copyWith(
-                    days: on
-                        ? [
-                            ..._days.where(
-                              (x) => x == d || value.days.contains(x),
-                            ),
-                          ]
-                        : value.days.where((x) => x != d).toList(),
-                  ),
-                ),
+                onSelected: readOnly
+                    ? null
+                    : (on) => onChanged(
+                        value.copyWith(
+                          days: on
+                              ? [
+                                  ..._days.where(
+                                    (x) => x == d || value.days.contains(x),
+                                  ),
+                                ]
+                              : value.days.where((x) => x != d).toList(),
+                        ),
+                      ),
               ),
           ],
         ),
@@ -219,6 +242,7 @@ class _ScheduleEditor extends StatelessWidget {
                 label: 'From',
                 hint: 'HH:MM',
                 inputFormatters: hhmm,
+                enabled: !readOnly,
                 onChanged: (v) => onChanged(value.copyWith(from: v)),
               ),
             ),
@@ -230,6 +254,7 @@ class _ScheduleEditor extends StatelessWidget {
                 label: 'To',
                 hint: 'HH:MM',
                 inputFormatters: hhmm,
+                enabled: !readOnly,
                 onChanged: (v) => onChanged(value.copyWith(to: v)),
               ),
             ),
@@ -239,8 +264,9 @@ class _ScheduleEditor extends StatelessWidget {
           alignment: Alignment.centerLeft,
           child: TextButton(
             key: ValueKey('schedule-$index-allday'),
-            onPressed: () =>
-                onChanged(value.copyWith(from: '00:00', to: '00:00')),
+            onPressed: readOnly
+                ? null
+                : () => onChanged(value.copyWith(from: '00:00', to: '00:00')),
             child: const Text('All day'),
           ),
         ),
@@ -254,6 +280,7 @@ class _ScheduleEditor extends StatelessWidget {
           value: value.tz,
           label: 'Time zone',
           hint: 'IANA, e.g. Europe/Madrid · empty = daemon time',
+          enabled: !readOnly,
           same: (text, v) => text.trim() == v,
           onChanged: (v) => onChanged(value.copyWith(tz: v.trim())),
         ),
@@ -264,6 +291,7 @@ class _ScheduleEditor extends StatelessWidget {
 
 class _QuotaEditor extends StatelessWidget {
   final int index;
+  final bool readOnly;
   final QuotaCondition value;
   final List<FlowAgent> agents;
   final ValueChanged<QuotaCondition> onChanged;
@@ -271,6 +299,7 @@ class _QuotaEditor extends StatelessWidget {
 
   const _QuotaEditor({
     required this.index,
+    required this.readOnly,
     required this.value,
     required this.agents,
     required this.onChanged,
@@ -292,7 +321,7 @@ class _QuotaEditor extends StatelessWidget {
     ];
     return _ConditionCard(
       title: value.describe(),
-      onRemove: onRemove,
+      onRemove: readOnly ? null : onRemove,
       children: [
         DropdownButtonFormField<String>(
           key: ValueKey('quota-$index-agent'),
@@ -304,7 +333,9 @@ class _QuotaEditor extends StatelessWidget {
           items: [
             for (final id in ids) DropdownMenuItem(value: id, child: Text(id)),
           ],
-          onChanged: (v) => onChanged(value.copyWith(agent: v)),
+          onChanged: readOnly
+              ? null
+              : (v) => onChanged(value.copyWith(agent: v)),
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
@@ -317,7 +348,9 @@ class _QuotaEditor extends StatelessWidget {
           items: [
             for (final w in windows) DropdownMenuItem(value: w, child: Text(w)),
           ],
-          onChanged: (v) => onChanged(value.copyWith(window: v)),
+          onChanged: readOnly
+              ? null
+              : (v) => onChanged(value.copyWith(window: v)),
         ),
         const SizedBox(height: 12),
         Row(
@@ -334,7 +367,9 @@ class _QuotaEditor extends StatelessWidget {
                   DropdownMenuItem(value: 'below', child: Text('below')),
                   DropdownMenuItem(value: 'above', child: Text('above')),
                 ],
-                onChanged: (v) => onChanged(value.copyWith(op: v)),
+                onChanged: readOnly
+                    ? null
+                    : (v) => onChanged(value.copyWith(op: v)),
               ),
             ),
             const SizedBox(width: 8),
@@ -344,6 +379,7 @@ class _QuotaEditor extends StatelessWidget {
                 key: ValueKey('quota-$index-percent'),
                 value: formatPercent(value.percent),
                 label: '%',
+                enabled: !readOnly,
                 keyboardType: const TextInputType.numberWithOptions(
                   decimal: true,
                 ),

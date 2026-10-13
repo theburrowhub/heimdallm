@@ -23,6 +23,9 @@ class FlowInspector extends ConsumerWidget {
   /// agent ('' for no fallback). The default graph is built from them.
   final void Function(String key, String agent)? onSetDefaultAgent;
 
+  /// A change of the global agents is in flight: the dropdowns wait for it.
+  final bool defaultAgentsBusy;
+
   const FlowInspector({
     super.key,
     required this.flowId,
@@ -31,6 +34,7 @@ class FlowInspector extends ConsumerWidget {
     this.issues = const [],
     this.agents = const [],
     this.onSetDefaultAgent,
+    this.defaultAgentsBusy = false,
   });
 
   @override
@@ -63,7 +67,7 @@ class FlowInspector extends ConsumerWidget {
           onChanged: (v) => ref.read(flowEditorProvider.notifier).rename(v),
         ),
         if (onSetDefaultAgent case final set?)
-          ..._defaultAgents(context, state.flow, set),
+          ..._defaultAgents(context, state.flow, set, defaultAgentsBusy),
         const InspectorLabel('Used by'),
         if (usedBy.isEmpty)
           AppText.muted('Not selected anywhere yet.')
@@ -118,6 +122,7 @@ class FlowInspector extends ConsumerWidget {
     BuildContext context,
     ReviewFlow flow,
     void Function(String, String) set,
+    bool busy,
   ) {
     final first = flow.nodes[flow.start];
     final primary = first?.isCondition == false ? first!.agent : '';
@@ -145,9 +150,11 @@ class FlowInspector extends ConsumerWidget {
         items: [
           for (final id in ids) DropdownMenuItem(value: id, child: Text(id)),
         ],
-        onChanged: (v) {
-          if (v != null && v != primary) set('primary', v);
-        },
+        onChanged: busy
+            ? null
+            : (v) {
+                if (v != null && v != primary) set('primary', v);
+              },
       ),
       const SizedBox(height: 12),
       DropdownButtonFormField<String>(
@@ -161,10 +168,12 @@ class FlowInspector extends ConsumerWidget {
           const DropdownMenuItem(value: 'none', child: Text('none')),
           for (final id in ids) DropdownMenuItem(value: id, child: Text(id)),
         ],
-        onChanged: (v) {
-          final next = v == null || v == 'none' ? '' : v;
-          if (next != fallback) set('fallback', next);
-        },
+        onChanged: busy
+            ? null
+            : (v) {
+                final next = v == null || v == 'none' ? '' : v;
+                if (next != fallback) set('fallback', next);
+              },
       ),
     ];
   }

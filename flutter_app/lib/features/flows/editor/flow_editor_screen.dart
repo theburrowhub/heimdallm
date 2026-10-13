@@ -265,6 +265,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
   /// Changes the global primary or fallback agent, then reloads the default
   /// flow, which the daemon builds from them.
   Future<void> _setDefaultAgent(String key, String agent) async {
+    if (_settingGlobal) return;
+    setState(() => _settingGlobal = true);
     try {
       final json = await ref.read(apiClientProvider).patchConfig({
         'ai': {key: agent},
@@ -274,6 +276,8 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
       await _load();
     } on ApiException catch (e) {
       if (mounted) showToast(context, e.message, isError: true);
+    } finally {
+      if (mounted) setState(() => _settingGlobal = false);
     }
   }
 
@@ -369,12 +373,14 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
         node: n,
         agents: listing.agents,
         issues: issuesFor[n.id] ?? const [],
+        readOnly: readOnly,
       ),
       final FlowNode n => AgentInspector(
         key: ValueKey('inspector-${n.id}'),
         node: n,
         agents: listing.agents,
         issues: issuesFor[n.id] ?? const [],
+        readOnly: readOnly,
       ),
       null => FlowInspector(
         flowId: widget.flowId,
@@ -386,6 +392,7 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
         ],
         agents: listing.agents,
         onSetDefaultAgent: readOnly ? _setDefaultAgent : null,
+        defaultAgentsBusy: _settingGlobal,
       ),
     };
     // While a draft is shown or drafted, the inspector would edit the flow

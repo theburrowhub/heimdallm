@@ -10,11 +10,15 @@ class AgentInspector extends ConsumerWidget {
   final List<FlowAgent> agents;
   final List<FlowIssue> issues;
 
+  /// The built-in default flow: values show, nothing can be changed.
+  final bool readOnly;
+
   const AgentInspector({
     super.key,
     required this.node,
     required this.agents,
     this.issues = const [],
+    this.readOnly = false,
   });
 
   @override
@@ -43,6 +47,7 @@ class AgentInspector extends ConsumerWidget {
               'Adds this agent to the reviewers, then continues through its '
               'fallback when the agent is unavailable.',
         ),
+        if (readOnly) const InspectorReadOnlyNote(),
         const InspectorLabel('Reviewer'),
         DropdownButtonFormField<String>(
           key: const ValueKey('inspector-agent'),
@@ -66,7 +71,9 @@ class AgentInspector extends ConsumerWidget {
                 ),
               ),
           ],
-          onChanged: (v) => ctl.updateNode(node.copyWith(agent: v ?? '')),
+          onChanged: readOnly
+              ? null
+              : (v) => ctl.updateNode(node.copyWith(agent: v ?? '')),
         ),
         InspectorIssues(issues: issues),
       ],
