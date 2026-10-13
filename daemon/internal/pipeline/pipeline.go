@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1425,6 +1426,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	slog.Info("pipeline: prompt built", "repo", pr.Repo, "pr", pr.Number,
 		"prompt_bytes", len(prompt), "incremental", incrementalFrom != "", "compact", compact)
 	var result *executor.ReviewResult
+	var failures []error
 	for i, agent := range agentsToTry {
 		execOpts := execOptionsFor(agent, primary, opts)
 		if cliFlags != "" && execOpts.ExtraFlags == "" {
@@ -1461,14 +1463,19 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		//     (e.g. a diff no agent can handle), so automatic retries go back
 		//     to one agent per attempt instead of spending the whole flow on
 		//     each one.
+		failures = append(failures, fmt.Errorf("%s: %w", cli, err))
 		quota := executor.IsQuotaError(err)
+		cancelled := errors.Is(err, executor.ErrExecutionCancelled) || errors.Is(err, context.Canceled)
 		handOff := quota || opts.Force || priorAttempts == 0
-		if i+1 < len(agentsToTry) && handOff && !errors.Is(err, executor.ErrExecutionCancelled) {
+		if i+1 < len(agentsToTry) && handOff && !cancelled {
 			reason := "error"
 			msg := "pipeline: agent failed, handing the review to the next agent in the flow"
-			if quota {
+			switch {
+			case quota:
 				reason = "quota"
 				msg = "pipeline: agent out of quota, handing the review to the next agent in the flow"
+			case errors.Is(err, executor.ErrExecutionTimedOut):
+				reason = "timeout"
 			}
 			slog.Warn(msg, "repo", pr.Repo, "pr", pr.Number, "agent", cli, "next", agentsToTry[i+1], "err", err)
 			p.publish(sse.EventReviewAgentFallback, map[string]any{
@@ -1479,6 +1486,10 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 				"reason":    reason,
 			})
 			continue
+		}
+		if len(failures) > 1 {
+			// Keep every agent's failure: the first one is usually the cause.
+			return nil, fmt.Errorf("pipeline: every agent in the flow failed: %w", errors.Join(failures...))
 		}
 		runErr := fmt.Errorf("pipeline: execute %s: %w", cli, err)
 		return nil, runErr

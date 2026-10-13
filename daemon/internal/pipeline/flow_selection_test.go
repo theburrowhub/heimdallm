@@ -1,6 +1,7 @@
 package pipeline_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -127,11 +128,31 @@ func TestRun_FlowFailsAfterEveryAgentFailed(t *testing.T) {
 	if err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
 		t.Fatalf("every agent failing must fail after trying each once: err=%v ran=%v", err, exec.ran)
 	}
-	if !strings.Contains(err.Error(), "codex") {
-		t.Errorf("err = %v, want the last agent's failure", err)
+	if !strings.Contains(err.Error(), "claude: rate limit") || !strings.Contains(err.Error(), "codex: exit status 1") {
+		t.Errorf("err = %v, want every agent's failure", err)
 	}
 	if ev, ok := pub.firstOf("review_agent_fallback"); !ok || !strings.Contains(ev.Data, `"reason":"quota"`) {
 		t.Errorf("fallback event = %+v (%v), want reason quota", ev, ok)
+	}
+}
+
+func TestRun_FlowStopsOnContextCancellationAndLabelsTimeouts(t *testing.T) {
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true},
+		failWith:  map[string]error{"claude": fmt.Errorf("run: %w", context.Canceled)},
+	}
+	p, pub := flowPipeline(t, exec)
+	opts := pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }}
+	if _, err := p.Run(budgetPR(58), opts); err == nil || strings.Join(exec.ran, ",") != "claude" {
+		t.Fatalf("a cancelled context must stop: err=%v ran=%v", err, exec.ran)
+	}
+	exec.ran = nil
+	exec.failWith["claude"] = fmt.Errorf("run: %w", executor.ErrExecutionTimedOut)
+	if _, err := p.Run(budgetPR(59), opts); err != nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("a timeout moves on: err=%v ran=%v", err, exec.ran)
+	}
+	if ev, ok := pub.firstOf("review_agent_fallback"); !ok || !strings.Contains(ev.Data, `"reason":"timeout"`) {
+		t.Errorf("fallback event = %+v (%v), want reason timeout", ev, ok)
 	}
 }
 

@@ -2145,13 +2145,6 @@ func StripToJSON(data []byte) []byte {
 	if obj, ok := firstJSONObject(s); ok {
 		return []byte(obj)
 	}
-	// Some agents (Copilot) write literal newlines or tabs inside string
-	// values. Escaping them is lossless, so try once more before giving up.
-	if repaired := escapeControlCharsInStrings(s); repaired != s {
-		if obj, ok := firstJSONObject(repaired); ok {
-			return []byte(obj)
-		}
-	}
 
 	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
@@ -2172,8 +2165,18 @@ func firstJSONObject(s string) (string, bool) {
 		if !ok {
 			continue
 		}
-		if candidate := s[i : end+1]; json.Valid([]byte(candidate)) {
+		candidate := s[i : end+1]
+		if json.Valid([]byte(candidate)) {
 			return candidate, true
+		}
+		// Some agents (Copilot) write literal newlines or tabs inside string
+		// values. Escaping them is lossless; doing it per candidate keeps a
+		// valid nested object (one issue) from being taken for the whole
+		// review, and starts quote tracking at the object, not at any prose
+		// before it.
+		if repaired := escapeControlCharsInStrings(candidate); repaired != candidate && json.Valid([]byte(repaired)) {
+			slog.Debug("executor: repaired raw control characters in agent JSON")
+			return repaired, true
 		}
 	}
 	return "", false

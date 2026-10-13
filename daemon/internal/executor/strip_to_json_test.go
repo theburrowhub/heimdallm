@@ -243,3 +243,23 @@ func TestStripToJSON_EscapesOtherControlCharsAsUnicode(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+func TestStripToJSON_RepairKeepsTheOuterObjectWithValidNestedIssues(t *testing.T) {
+	// The common Copilot shape: a multi-line summary and single-line issues.
+	// The first valid object is an issue; the repair must still return the
+	// whole review, not that issue.
+	in := []byte("{\"summary\": \"line one\nline two\", \"issues\": [{\"file\":\"a.go\",\"line\":3,\"severity\":\"high\"}], \"severity\": \"medium\"}")
+	got := string(executor.StripToJSON(in))
+	want := `{"summary": "line one\nline two", "issues": [{"file":"a.go","line":3,"severity":"high"}], "severity": "medium"}`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripToJSON_RepairIgnoresQuotesInProseBeforeTheObject(t *testing.T) {
+	in := []byte("Reviewing \"main.go:\n{\"summary\": \"a\nb\"}")
+	got := string(executor.StripToJSON(in))
+	if got != `{"summary": "a\nb"}` {
+		t.Errorf("got %q", got)
+	}
+}
