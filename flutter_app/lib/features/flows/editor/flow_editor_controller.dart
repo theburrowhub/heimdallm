@@ -58,6 +58,9 @@ class FlowEditorState {
   final FlowDraft? draft;
   final GraphCheck check;
   final FlowDecision? simulation;
+
+  /// The assistant is drafting: its answer will replace what is shown.
+  final bool drafting;
   final int undoDepth;
   final int redoDepth;
 
@@ -68,16 +71,20 @@ class FlowEditorState {
     this.draft,
     required this.check,
     this.simulation,
+    this.drafting = false,
     this.undoDepth = 0,
     this.redoDepth = 0,
   });
 
+  /// Editing is paused while a draft is shown or being drafted.
+  bool get locked => draft != null || drafting;
   bool get dirty => jsonEncode(flow.toJson()) != jsonEncode(saved.toJson());
   bool get canUndo => undoDepth > 0;
   bool get canRedo => redoDepth > 0;
 }
 
 const _maxUndo = 100;
+const _same = Object();
 
 class FlowEditorController extends Notifier<FlowEditorState> {
   final _undo = <ReviewFlow>[];
@@ -103,6 +110,7 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     draft: clearDraft ? null : (draft ?? state.draft),
     check: checkGraph(flow),
     simulation: null,
+    drafting: state.drafting,
     undoDepth: _undo.length,
     redoDepth: _redo.length,
   );
@@ -312,16 +320,25 @@ class FlowEditorController extends Notifier<FlowEditorState> {
 
   void discardDraft() => state = _with(state.flow, clearDraft: true);
 
-  void setSimulation(FlowDecision? d) => state = FlowEditorState(
-    flow: state.flow,
-    saved: state.saved,
-    selection: state.selection,
-    draft: state.draft,
-    check: state.check,
-    simulation: d,
-    undoDepth: _undo.length,
-    redoDepth: _redo.length,
-  );
+  void setSimulation(FlowDecision? d) => _keep(simulation: d);
+
+  void setDrafting(bool on) => _keep(drafting: on);
+
+  /// The current state with only the simulation or the drafting flag changed.
+  void _keep({Object? simulation = _same, bool? drafting}) =>
+      state = FlowEditorState(
+        flow: state.flow,
+        saved: state.saved,
+        selection: state.selection,
+        draft: state.draft,
+        check: state.check,
+        simulation: identical(simulation, _same)
+            ? state.simulation
+            : simulation as FlowDecision?,
+        drafting: drafting ?? state.drafting,
+        undoDepth: _undo.length,
+        redoDepth: _redo.length,
+      );
 }
 
 final flowEditorProvider =

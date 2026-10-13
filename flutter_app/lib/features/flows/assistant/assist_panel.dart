@@ -37,7 +37,14 @@ class _AssistPanelState extends ConsumerState<AssistPanel> {
   String? _agent;
   bool _restored = false;
 
-  /// The open request: closing it cancels the request.
+  /// The remembered agent, and whether the operator picked one here: either
+  /// wins over the daemon's primary arriving later.
+  String? _stored;
+  bool _picked = false;
+
+  /// The open request: closing it cancels the request. While it is open the
+  /// editor is locked (`FlowEditorState.drafting`); the screen resets that
+  /// when it loads another flow.
   http.Client? _inflight;
 
   /// Bumped by every run and cancel, so a stale answer is ignored.
@@ -57,28 +64,44 @@ class _AssistPanelState extends ConsumerState<AssistPanel> {
   }
 
   Future<void> _restoreAgent() async {
-    String? stored;
     try {
-      stored = (await SharedPreferences.getInstance()).getString(
+      _stored = (await SharedPreferences.getInstance()).getString(
         kAssistAgentPrefKey,
       );
     } catch (e) {
       debugPrint('assist panel: could not read the last agent: $e');
     }
     if (!mounted) return;
-    final ids = _runnable.map((a) => a.id).toList();
     setState(() {
-      _agent = ids.contains(stored)
-          ? stored
-          : ids.contains(widget.defaultAgent)
-          ? widget.defaultAgent
-          : (ids.isEmpty ? null : ids.first);
+      _agent = _preferred();
       _restored = true;
     });
   }
 
+  /// The remembered agent if still runnable, else the daemon's primary, else
+  /// the first runnable one.
+  String? _preferred() {
+    final ids = _runnable.map((a) => a.id).toList();
+    if (ids.contains(_stored)) return _stored;
+    if (ids.contains(widget.defaultAgent)) return widget.defaultAgent;
+    return ids.isEmpty ? null : ids.first;
+  }
+
+  @override
+  void didUpdateWidget(AssistPanel old) {
+    super.didUpdateWidget(old);
+    // The config (and with it the primary agent) may load after the panel.
+    if (_restored && !_picked) {
+      final next = _preferred();
+      if (next != _agent) setState(() => _agent = next);
+    }
+  }
+
   Future<void> _setAgent(String? id) async {
-    setState(() => _agent = id);
+    setState(() {
+      _agent = id;
+      _picked = true;
+    });
     if (id == null) return;
     try {
       await (await SharedPreferences.getInstance()).setString(
@@ -113,15 +136,17 @@ class _AssistPanelState extends ConsumerState<AssistPanel> {
     final current = state.draft?.flow ?? state.flow;
     final client = http.Client();
     final generation = ++_generation;
+    final ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _elapsed++);
+    });
     setState(() {
       _inflight = client;
+      _ticker = ticker;
       _elapsed = 0;
       _error = null;
       _errorDetails = const [];
-      _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted) setState(() => _elapsed++);
-      });
     });
+    ref.read(flowEditorProvider.notifier).setDrafting(true);
     String? error;
     var details = const <String>[];
     try {
@@ -157,6 +182,7 @@ class _AssistPanelState extends ConsumerState<AssistPanel> {
           _error = error;
           _errorDetails = details;
         });
+        ref.read(flowEditorProvider.notifier).setDrafting(false);
       }
     }
   }
@@ -165,9 +191,11 @@ class _AssistPanelState extends ConsumerState<AssistPanel> {
     _generation++;
     _inflight?.close();
     setState(_stopWaiting);
+    ref.read(flowEditorProvider.notifier).setDrafting(false);
   }
 
   void _close() {
+    if (_inflight != null) _cancel();
     // A draft left on the canvas would keep the editor read-only.
     ref.read(flowEditorProvider.notifier).discardDraft();
     widget.onClose();

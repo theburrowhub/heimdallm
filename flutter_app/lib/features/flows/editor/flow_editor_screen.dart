@@ -281,7 +281,9 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
   /// Adds a step centred in the visible part of the canvas, stepping
   /// diagonally past steps already there.
   void _addAtCentre(FlowNodeType type) {
-    final nodes = ref.read(flowEditorProvider).flow.nodes.values;
+    final state = ref.read(flowEditorProvider);
+    if (state.locked) return;
+    final nodes = state.flow.nodes.values;
     final centre = _canvas.viewportCentre ?? const Offset(510, 438);
     var at = centre - Offset(kNodeSize.width / 2, kNodeSize.height / 2);
     for (var i = 0; i < 50; i++) {
@@ -323,7 +325,7 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
     final config = ref.watch(configNotifierProvider).value;
     final defaultAgent = config?.aiPrimary ?? '';
     final readOnly = _isDefault;
-    final canEdit = !readOnly && state.draft == null;
+    final canEdit = !readOnly && !state.locked;
 
     // A step's daemon findings hold until that step changes.
     final liveServer = [
@@ -369,10 +371,11 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
         ],
       ),
     };
-    // While a draft is shown, the inspector would edit the flow under it.
-    final inspectorPane = IgnorePointer(
-      ignoring: state.draft != null,
-      child: inspector,
+    // While a draft is shown or drafted, the inspector would edit the flow
+    // under it: no taps, and a field that had focus loses it.
+    final inspectorPane = ExcludeFocus(
+      excluding: state.locked,
+      child: IgnorePointer(ignoring: state.locked, child: inspector),
     );
 
     void undo() {
@@ -401,64 +404,72 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
             final compact = c.maxWidth < 900;
             final border = resolveAppColor(context, AppColors.border);
             final panel = AppColors.surface.resolve(context);
-            // The canvas sits between the palette (240) and inspector (340).
-            final canvasWidth = compact ? c.maxWidth : c.maxWidth - 580;
-            final canvas = Stack(
-              children: [
-                Positioned.fill(
-                  child: FlowCanvas(
-                    controller: _canvas,
-                    readOnly: readOnly,
-                    errorNodes: {
-                      for (final i in liveServer)
-                        if (i.node.isNotEmpty) i.node,
-                    },
-                    onDropFromPalette: readOnly
-                        ? null
-                        : (t, at) => ctl.addNode(t, at),
+            // The floating panels are bounded by the canvas, not the window.
+            final canvas = LayoutBuilder(
+              builder: (context, area) => Stack(
+                children: [
+                  Positioned.fill(
+                    child: FlowCanvas(
+                      controller: _canvas,
+                      readOnly: readOnly,
+                      errorNodes: {
+                        for (final i in liveServer)
+                          if (i.node.isNotEmpty) i.node,
+                      },
+                      onDropFromPalette: readOnly
+                          ? null
+                          : (t, at) => ctl.addNode(t, at),
+                    ),
                   ),
-                ),
-                if (_testOpen)
-                  Positioned(
-                    left: 16,
-                    bottom: 16,
-                    width: 340,
-                    child: _FloatingPanel(
-                      maxHeight: c.maxHeight - 120,
-                      child: FlowTestPanel(
-                        onClose: () {
-                          ctl.setSimulation(null);
-                          setState(() => _testOpen = false);
-                        },
+                  if (_testOpen)
+                    Positioned(
+                      left: 16,
+                      bottom: 16,
+                      width: 340,
+                      child: _FloatingPanel(
+                        maxHeight: area.maxHeight - 32,
+                        child: FlowTestPanel(
+                          onClose: () {
+                            ctl.setSimulation(null);
+                            setState(() => _testOpen = false);
+                          },
+                        ),
                       ),
                     ),
-                  ),
-                if (!readOnly && !_assistOpen)
-                  Positioned(
-                    right: 16,
-                    bottom: 16,
-                    child: FloatingActionButton.extended(
-                      key: const ValueKey('assist-open'),
-                      onPressed: () => setState(() => _assistOpen = true),
-                      icon: const Icon(Icons.auto_awesome),
-                      label: const Text('Adjust with AI'),
-                    ),
-                  ),
-                if (!readOnly && _assistOpen)
-                  Positioned(
-                    right: 16,
-                    bottom: 16,
-                    width: (canvasWidth - 32).clamp(280, 420).toDouble(),
-                    child: _FloatingPanel(
-                      maxHeight: c.maxHeight - 120,
-                      child: AssistPanel(
-                        agents: listing.agents,
-                        defaultAgent: defaultAgent,
-                        onClose: () => setState(() => _assistOpen = false),
+                  if (!readOnly && !_assistOpen)
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      child: FloatingActionButton.extended(
+                        key: const ValueKey('assist-open'),
+                        onPressed: () => setState(() => _assistOpen = true),
+                        icon: const Icon(Icons.auto_awesome),
+                        label: const Text('Adjust with AI'),
                       ),
                     ),
-                  ),
-              ],
+                  if (!readOnly && _assistOpen)
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      width: (area.maxWidth - 32).clamp(280, 420).toDouble(),
+                      child: _FloatingPanel(
+                        maxHeight: area.maxHeight - 32,
+                        child: AssistPanel(
+                          agents: listing.agents,
+                          defaultAgent: defaultAgent,
+                          onClose: () => setState(() => _assistOpen = false),
+                        ),
+                      ),
+                    ),
+                  if (state.drafting)
+                    const Positioned(
+                      top: 12,
+                      left: 0,
+                      right: 0,
+                      child: Center(child: _DraftingBanner()),
+                    ),
+                ],
+              ),
             );
             final Widget body;
             if (compact) {
@@ -572,7 +583,8 @@ class _FloatingPanel extends StatelessWidget {
     child: AppSurface(
       elevation: AppSurfaceElevation.surface,
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: maxHeight.clamp(160, 640)),
+        // Never taller than the canvas: a clipped header could not be reached.
+        constraints: BoxConstraints(maxHeight: maxHeight.clamp(0, 640)),
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(14),
           child: child,
@@ -580,6 +592,28 @@ class _FloatingPanel extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// Says why the canvas and inspector ignore edits while the agent drafts.
+class _DraftingBanner extends StatelessWidget {
+  const _DraftingBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = resolveAppColor(context, AppColors.accent);
+    return AppBadge(
+      key: const ValueKey('assist-drafting'),
+      icon: Icon(Icons.auto_awesome, size: 14, color: accent),
+      label: 'The agent is drafting · editing is paused',
+      foreground: accent,
+      background: AppColors.surfaceRaised.resolve(context),
+      border: accent.withValues(alpha: .45),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      radius: 999,
+      fontSize: 12,
+      letterSpacing: 0,
+    );
+  }
 }
 
 /// The editor's bar: back, the flow's name and state, and its actions.

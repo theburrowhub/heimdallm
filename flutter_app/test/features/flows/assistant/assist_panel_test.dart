@@ -323,4 +323,149 @@ void main() {
     );
     expect(run.onPressed, isNull);
   });
+
+  testWidgets('a rejected draft lists the step issues', (tester) async {
+    final (_, api) = await pumpPanel(tester);
+    when(
+      () => api.assistFlow(
+        agent: any(named: 'agent'),
+        instruction: any(named: 'instruction'),
+        current: any(named: 'current'),
+        client: any(named: 'client'),
+      ),
+    ).thenThrow(
+      FlowValidationException('The drafted flow is not valid', const [
+        FlowIssue(node: 'a2', message: 'Pick an agent'),
+        FlowIssue(message: 'No start step'),
+      ]),
+    );
+    await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
+    await tester.tap(find.byKey(const ValueKey('assist-run')));
+    await tester.pumpAndSettle();
+    expect(find.text('The drafted flow is not valid'), findsOneWidget);
+    expect(find.text('• a2: Pick an agent'), findsOneWidget);
+    expect(find.text('• No start step'), findsOneWidget);
+  });
+
+  testWidgets('closing with a draft shown discards it', (tester) async {
+    final (c, api) = await pumpPanel(tester);
+    when(
+      () => api.assistFlow(
+        agent: any(named: 'agent'),
+        instruction: any(named: 'instruction'),
+        current: any(named: 'current'),
+        client: any(named: 'client'),
+      ),
+    ).thenAnswer((_) async => _draft);
+    await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
+    await tester.tap(find.byKey(const ValueKey('assist-run')));
+    await tester.pumpAndSettle();
+    expect(c.read(flowEditorProvider).draft, isNotNull);
+    await tester.tap(find.byKey(const ValueKey('assist-close')));
+    await tester.pumpAndSettle();
+    expect(c.read(flowEditorProvider).draft, isNull);
+    expect(c.read(flowEditorProvider).flow.start, 'a1');
+  });
+
+  testWidgets('the primary agent arriving late updates the preselection', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(const {});
+    registerFallbackValue(const ReviewFlow());
+    final api = _MockApi();
+    when(
+      () => api.assistFlow(
+        agent: any(named: 'agent'),
+        instruction: any(named: 'instruction'),
+        current: any(named: 'current'),
+        client: any(named: 'client'),
+      ),
+    ).thenAnswer((_) async => _draft);
+    final c = ProviderContainer(
+      overrides: [apiClientProvider.overrideWithValue(api)],
+    );
+    addTearDown(c.dispose);
+    c.listen(flowEditorProvider, (_, _) {});
+    c.read(flowEditorProvider.notifier).load(_current);
+    final primary = ValueNotifier('');
+    addTearDown(primary.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: c,
+        child: MaterialApp(
+          builder: (context, child) => HeimdallmTheme.scope(child: child!),
+          home: Scaffold(
+            body: ValueListenableBuilder<String>(
+              valueListenable: primary,
+              builder: (_, p, _) =>
+                  AssistPanel(agents: _agents, defaultAgent: p, onClose: () {}),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // The config has not loaded yet: the first runnable agent is shown.
+    expect(_selectedAgent('claude'), findsOneWidget);
+    primary.value = 'codex';
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
+    await tester.tap(find.byKey(const ValueKey('assist-run')));
+    await tester.pumpAndSettle();
+    verify(
+      () => api.assistFlow(
+        agent: 'codex',
+        instruction: 'x',
+        current: any(named: 'current'),
+        client: any(named: 'client'),
+      ),
+    ).called(1);
+  });
+
+  testWidgets('a run marks the editor as drafting until it ends', (
+    tester,
+  ) async {
+    final (c, api) = await pumpPanel(tester);
+    final pending = Completer<FlowAssistResult>();
+    when(
+      () => api.assistFlow(
+        agent: any(named: 'agent'),
+        instruction: any(named: 'instruction'),
+        current: any(named: 'current'),
+        client: any(named: 'client'),
+      ),
+    ).thenAnswer((_) => pending.future);
+    await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
+    await tester.tap(find.byKey(const ValueKey('assist-run')));
+    await tester.pump();
+    expect(c.read(flowEditorProvider).drafting, isTrue);
+    expect(c.read(flowEditorProvider).locked, isTrue);
+    pending.complete(_draft);
+    await tester.pumpAndSettle();
+    expect(c.read(flowEditorProvider).drafting, isFalse);
+    expect(c.read(flowEditorProvider).draft, isNotNull);
+  });
+
+  testWidgets('cancel ends drafting', (tester) async {
+    final (c, api) = await pumpPanel(tester);
+    final pending = Completer<FlowAssistResult>();
+    when(
+      () => api.assistFlow(
+        agent: any(named: 'agent'),
+        instruction: any(named: 'instruction'),
+        current: any(named: 'current'),
+        client: any(named: 'client'),
+      ),
+    ).thenAnswer((_) => pending.future);
+    await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
+    await tester.tap(find.byKey(const ValueKey('assist-run')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('assist-cancel')));
+    await tester.pump();
+    expect(c.read(flowEditorProvider).drafting, isFalse);
+    pending.complete(_draft);
+    await tester.pumpAndSettle();
+    // the answer to a cancelled request is dropped
+    expect(c.read(flowEditorProvider).draft, isNull);
+  });
 }

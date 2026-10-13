@@ -118,11 +118,12 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
   }
 
   bool get _editable =>
-      !widget.readOnly && ref.read(flowEditorProvider).draft == null;
+      !widget.readOnly && !ref.read(flowEditorProvider).locked;
 
   /// Ends any gesture in progress when editing becomes disabled (a draft
-  /// arrived): the gesture's own callbacks will no longer act, so a node
-  /// move so far becomes its own undo step and a port drag is dropped.
+  /// arrived or is being drafted): the gesture's own callbacks will no longer
+  /// act, so a node move so far becomes its own undo step and a port drag is
+  /// dropped.
   void _abortGestures() {
     final node = _dragNode;
     if (node != null) _endNodeDrag(node);
@@ -137,6 +138,7 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
 
   /// Places a palette item centred under the pointer.
   void _dropFromPalette(DragTargetDetails<FlowNodeType> d) {
+    if (!_editable) return;
     final global = _lastPointer ?? d.offset;
     final at =
         _toCanvas(global) - Offset(kNodeSize.width / 2, kNodeSize.height / 2);
@@ -240,7 +242,7 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(flowEditorProvider);
-    ref.listen(flowEditorProvider.select((s) => s.draft != null), (was, now) {
+    ref.listen(flowEditorProvider.select((s) => s.locked), (was, now) {
       if (now && was != true) _abortGestures();
     });
     final scheme = Theme.of(context).colorScheme;
@@ -248,7 +250,7 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     final noColor = resolveAppColor(context, AppColors.danger);
     final draft = state.draft;
     final shown = draft?.flow ?? state.flow;
-    final editable = !widget.readOnly && draft == null;
+    final editable = !widget.readOnly && !state.locked;
     final edges = canvasEdges(shown);
     final path = state.simulation?.path ?? const <FlowPathStep>[];
     final pathNodes = {for (final s in path) s.node};

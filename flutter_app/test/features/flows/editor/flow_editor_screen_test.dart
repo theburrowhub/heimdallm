@@ -431,4 +431,104 @@ void main() {
     expect(find.byKey(const ValueKey('assist-open')), findsNothing);
     expect(find.byKey(const ValueKey('assist-input')), findsNothing);
   });
+
+  testWidgets('in a compact window the assistant stays inside the canvas', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(const {});
+    final (api, _) = await pumpEditor(tester, id: 'brand-new');
+    tester.view.physicalSize = const Size(850, 700);
+    await tester.pumpAndSettle();
+    when(
+      () => api.assistFlow(
+        agent: any(named: 'agent'),
+        instruction: any(named: 'instruction'),
+        current: any(named: 'current'),
+        client: any(named: 'client'),
+      ),
+    ).thenAnswer(
+      (_) async => FlowAssistResult(
+        plan: List.filled(8, 'Codex first, Claude as fallback.').join(' '),
+        warnings: const ['one', 'two'],
+        flow: _night,
+      ),
+    );
+    await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
+    await tester.ensureVisible(find.byKey(const ValueKey('assist-run')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('assist-run')));
+    await tester.pumpAndSettle();
+    final scroll = tester.state<ScrollableState>(
+      find
+          .ancestor(
+            of: find.byKey(const ValueKey('assist-close')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    scroll.position.jumpTo(0);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('assist-close')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(scroll.position.maxScrollExtent, greaterThan(0));
+    scroll.position.jumpTo(scroll.position.maxScrollExtent);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('assist-run')).hitTestable(),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the editor is locked while the assistant drafts', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(const {});
+    final (api, _) = await pumpEditor(tester);
+    final pending = Completer<FlowAssistResult>();
+    when(
+      () => api.assistFlow(
+        agent: any(named: 'agent'),
+        instruction: any(named: 'instruction'),
+        current: any(named: 'current'),
+        client: any(named: 'client'),
+      ),
+    ).thenAnswer((_) => pending.future);
+    await tester.tap(find.byKey(const ValueKey('assist-open')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
+    // the name field has the keyboard when the run starts
+    await tester.showKeyboard(find.byKey(const ValueKey('flow-name')));
+    bool nameFocused() => tester
+        .widget<EditableText>(
+          find.descendant(
+            of: find.byKey(const ValueKey('flow-name')),
+            matching: find.byType(EditableText),
+          ),
+        )
+        .focusNode
+        .hasFocus;
+    expect(nameFocused(), isTrue);
+    await tester.tap(find.byKey(const ValueKey('assist-run')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('assist-drafting')), findsOneWidget);
+    expect(nameFocused(), isFalse);
+    // a palette double-tap does not add a step under the coming draft
+    await tester.tap(find.byKey(const ValueKey('palette-agent')));
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.tap(find.byKey(const ValueKey('palette-agent')));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('node-a2')), findsNothing);
+    // nor can the inspector be focused again
+    await tester.tap(
+      find.byKey(const ValueKey('flow-name')),
+      warnIfMissed: false,
+    );
+    await tester.pump();
+    expect(nameFocused(), isFalse);
+    pending.completeError(ApiException('gone'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('assist-drafting')), findsNothing);
+  });
 }
