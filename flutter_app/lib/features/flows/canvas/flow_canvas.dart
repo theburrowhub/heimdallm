@@ -463,17 +463,30 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     // An edge passing under a step does not count: its scissors would sit
     // on the card and swallow the drag meant for it.
     final overNode = hitNode(shown, p) != null;
-    final hit = editable && !overNode ? hitEdge(edges, p) : null;
+    var hit = editable && !overNode ? hitEdge(edges, p) : null;
+    if (hit != null && !_cuttable(shown, hit)) hit = null;
     var h = hit == null ? null : (hit.from, hit.port);
     // Keep the scissors while the pointer is on them, even if that is a
     // little off the line.
     final current = _edgeOf(edges, _hover);
-    if (h == null && current != null) {
+    if (h == null && current != null && _cuttable(shown, current)) {
       final mid = (current.a + current.b) / 2;
       if ((p - mid).distance <= _cutSize / 2 + 2) h = _hover;
     }
     if (h != _hover) setState(() => _hover = h);
   }
+
+  /// Whether [r] (canvas coordinates) touches any of [f]'s cards.
+  static bool _overCard(ReviewFlow f, Rect r) => f.nodes.values.any(
+    (n) => n.position != null && (n.position! & kNodeSize).overlaps(r),
+  );
+
+  /// The scissors of [e] sit at its midpoint; on a card they would take the
+  /// pointer meant for the card, so such an edge shows none.
+  static bool _cuttable(ReviewFlow f, CanvasEdge e) => !_overCard(
+    f,
+    Rect.fromCenter(center: (e.a + e.b) / 2, width: _cutSize, height: _cutSize),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -510,7 +523,9 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     // Edges whose source port is in use, so the port dot shows as filled.
     final usedPorts = {for (final e in edges) (e.from, e.port)};
     // The hovered edge as it is now; gone if it was cut or a draft is shown.
-    final hover = editable ? _edgeOf(edges, _hover) : null;
+    // Gone too once a step moved onto its scissors.
+    final hovered = editable ? _edgeOf(edges, _hover) : null;
+    final hover = hovered != null && _cuttable(shown, hovered) ? hovered : null;
 
     Offset? dragFrom;
     if (_dragPort case (final from, final port)) {
@@ -573,6 +588,13 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
         return const SizedBox.shrink();
       }
       final c = portCentre + const Offset(_portHit / 2 + _addSize / 2 + 2, 0);
+      // A "+" over a card would take that card's pointer.
+      if (_overCard(
+        shown,
+        Rect.fromCenter(center: c, width: _addSize, height: _addSize),
+      )) {
+        return const SizedBox.shrink();
+      }
       return Positioned(
         left: c.dx - _addSize / 2,
         top: c.dy - _addSize / 2,
@@ -830,7 +852,8 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     panEnabled: _dragPort == null,
     // No inertia: a fling stops where the pointer lets go. A step grabbed
     // while the canvas was still sliding moved with the canvas instead of
-    // the pointer, and was dropped somewhere else.
+    // the pointer, and was dropped somewhere else. With the smallest drag,
+    // log(drag / 100) is -inf, so the fling's end time is zero.
     interactionEndFrictionCoefficient: double.minPositive,
     child: child,
   );

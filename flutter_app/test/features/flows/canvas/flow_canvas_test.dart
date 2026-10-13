@@ -706,6 +706,70 @@ void main() {
     }
   });
 
+  group('scissors', () {
+    final crossed = twoAgents.copyWith(
+      nodes: {
+        'a1': twoAgents.nodes['a1']!.copyWith(next: 'a2'),
+        'a2': twoAgents.nodes['a2']!.copyWith(
+          position: const Offset(1100, 200),
+        ),
+        'a3': const FlowNode(
+          id: 'a3',
+          type: FlowNodeType.agent,
+          position: Offset(700, 200),
+        ),
+      },
+    );
+
+    // Hovering the edge where it is clear of a3 used to put the scissors on
+    // a3 (the edge's midpoint), where they took a3's drag.
+    testWidgets('an edge whose midpoint is under a card shows no scissors', (
+      tester,
+    ) async {
+      final c = await pumpCanvas(tester, crossed);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(600, 238));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('edge-cut')), findsNothing);
+      final g = await tester.startGesture(const Offset(810, 238));
+      await g.moveBy(const Offset(20, 0));
+      await g.moveBy(const Offset(20, 40));
+      await g.up();
+      await tester.pumpAndSettle();
+      expect(
+        c.read(flowEditorProvider).flow.nodes['a3']!.position,
+        const Offset(740, 240),
+      );
+    });
+
+    testWidgets('scissors go when a step moves onto them', (tester) async {
+      final c = await pumpCanvas(
+        tester,
+        crossed.copyWith(
+          nodes: {
+            ...crossed.nodes,
+            'a3': crossed.nodes['a3']!.copyWith(
+              position: const Offset(700, 500),
+            ),
+          },
+        ),
+      );
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(810, 238));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('edge-cut')), findsOneWidget);
+      c
+          .read(flowEditorProvider.notifier)
+          .moveNode('a3', const Offset(700, 200));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('edge-cut')), findsNothing);
+      // Nor does the "keep while on them" rule bring them back.
+      await mouse.moveTo(const Offset(812, 240));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('edge-cut')), findsNothing);
+    });
+  });
+
   group('locked', () {
     testWidgets('a shown draft is announced with Accept and Discard', (
       tester,
@@ -868,6 +932,93 @@ void main() {
       final st = c.read(flowEditorProvider);
       expect(st.flow.start, 'a3');
       expect(st.selection, const NodeSelection('a3'));
+      // Inserted between Start and the old first step, which stays reachable.
+      expect(st.flow.nodes['a3']!.next, 'a1');
+      expect(st.flow.nodes['a1']!.next, 'a2');
+      expect(st.check.unreachable, isEmpty);
+    });
+
+    testWidgets('+ on a connected agent exit inserts the step in between', (
+      tester,
+    ) async {
+      final c = await pumpCanvas(
+        tester,
+        twoAgents.copyWith(
+          nodes: {
+            ...twoAgents.nodes,
+            'a1': twoAgents.nodes['a1']!.copyWith(next: 'a2'),
+          },
+        ),
+      );
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(
+        location: tester.getCenter(find.byKey(const ValueKey('node-a1'))),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('port-add-a1-next')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('port-add-agent')));
+      await tester.pumpAndSettle();
+      var st = c.read(flowEditorProvider);
+      expect(st.flow.nodes['a1']!.next, 'a3');
+      expect(st.flow.nodes['a3']!.next, 'a2');
+      expect(st.undoDepth, 1);
+      c.read(flowEditorProvider.notifier).undo();
+      st = c.read(flowEditorProvider);
+      expect(st.flow.nodes['a1']!.next, 'a2');
+      expect(st.flow.nodes.containsKey('a3'), isFalse);
+    });
+
+    testWidgets('+ on a connected condition exit inserts through yes', (
+      tester,
+    ) async {
+      final c = await pumpCanvas(
+        tester,
+        ReviewFlow(
+          start: 'c1',
+          nodes: {
+            'c1': const FlowNode(
+              id: 'c1',
+              type: FlowNodeType.condition,
+              no: 'a1',
+              schedule: [ScheduleCondition()],
+              position: Offset(300, 200),
+            ),
+            'a1': twoAgents.nodes['a2']!.copyWith(id: 'a1'),
+          },
+        ),
+      );
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(
+        location: tester.getCenter(find.byKey(const ValueKey('node-c1'))),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('port-add-c1-no')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('port-add-condition')));
+      await tester.pumpAndSettle();
+      final st = c.read(flowEditorProvider);
+      expect(st.flow.nodes['c1']!.no, 'c2');
+      expect(st.flow.nodes['c2']!.yes, 'a1');
+      expect(st.flow.nodes['c2']!.no, '');
+      expect(st.undoDepth, 1);
+    });
+
+    testWidgets('no + is drawn over a card', (tester) async {
+      await pumpCanvas(
+        tester,
+        twoAgents.copyWith(
+          nodes: {
+            ...twoAgents.nodes,
+            // Right against a1's open exit, where its + would be drawn.
+            'a2': twoAgents.nodes['a2']!.copyWith(
+              position: const Offset(530, 200),
+            ),
+          },
+        ),
+      );
+      expect(find.byKey(const ValueKey('port-add-a1-next')), findsNothing);
+      expect(find.byKey(const ValueKey('port-add-a2-next')), findsOneWidget);
     });
 
     testWidgets('no + on a locked or read-only canvas', (tester) async {

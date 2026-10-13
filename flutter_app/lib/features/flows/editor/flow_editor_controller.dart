@@ -203,7 +203,9 @@ class FlowEditorController extends Notifier<FlowEditorState> {
   }
 
   /// Adds a step of [type] to the right of [from] ('' for Start), connects
-  /// it from [port] and selects it, as one undo step. Returns its id, or
+  /// it from [port] and selects it, as one undo step. On a connected exit
+  /// the step is inserted in between: it leads on to the old target through
+  /// its fallback (an agent) or its yes (a condition). Returns its id, or
   /// null when [from] has no such exit.
   String? addConnected(String from, EdgePort port, FlowNodeType type) {
     final f = state.flow;
@@ -227,7 +229,15 @@ class FlowEditorController extends Notifier<FlowEditorState> {
             _ => 0,
           });
     }
-    final node = _newNode(type, at);
+    final old = port == EdgePort.start
+        ? f.start
+        : edgeTarget(f.nodes[from], port);
+    final fresh = _newNode(type, at);
+    final node = !f.nodes.containsKey(old)
+        ? fresh
+        : (type == FlowNodeType.agent
+              ? fresh.copyWith(next: old)
+              : fresh.copyWith(yes: old));
     final nodes = {...f.nodes, node.id: node};
     _commit(
       port == EdgePort.start

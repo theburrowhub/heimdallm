@@ -11,8 +11,10 @@ const kStartPosition = Offset(40, 200);
 /// Size of the Start pill drawn at [kStartPosition].
 const kStartSize = Size(96, 40);
 
-/// The least room kept between a placed step and anything else on the canvas.
-const kPlaceGap = 24.0;
+/// The least room kept between a placed step and anything else on the
+/// canvas: more than the "+" buttons reach right of a step (about 32 px),
+/// so a new step never sits under one.
+const kPlaceGap = 36.0;
 
 /// The least distance a laid-out step keeps from the canvas's top edge.
 const kLayoutMargin = 40.0;

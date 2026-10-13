@@ -1,3 +1,5 @@
+import 'dart:ui' show Rect;
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/flow.dart';
@@ -404,5 +406,43 @@ void main() {
     ctl().arrange();
     expect(st().view!.reveal, isNull);
     expect(st().view, isNot(same(loaded)));
+  });
+
+  test('addConnected on a connected exit inserts in between', () {
+    final c1 = ctl().addNode(FlowNodeType.condition, const Offset(300, 200));
+    final a1 = ctl().addNode(FlowNodeType.agent, const Offset(700, 100));
+    final a2 = ctl().addNode(FlowNodeType.agent, const Offset(1100, 100));
+    ctl().connect('', EdgePort.start, c1);
+    ctl().connect(c1, EdgePort.yes, a1);
+    ctl().connect(a1, EdgePort.next, a2);
+    final depth = st().undoDepth;
+    final c2 = ctl().addConnected(c1, EdgePort.yes, FlowNodeType.condition)!;
+    expect(st().flow.nodes[c1]!.yes, c2);
+    expect(st().flow.nodes[c2]!.yes, a1);
+    final a3 = ctl().addConnected(a1, EdgePort.next, FlowNodeType.agent)!;
+    expect(st().flow.nodes[a1]!.next, a3);
+    expect(st().flow.nodes[a3]!.next, a2);
+    final s = ctl().addConnected('', EdgePort.start, FlowNodeType.agent)!;
+    expect(st().flow.start, s);
+    expect(st().flow.nodes[s]!.next, c1);
+    expect(st().check.unreachable, isEmpty);
+    expect(st().undoDepth, depth + 3);
+  });
+
+  test('a new step keeps clear of the + right of another step', () {
+    final a1 = ctl().addNode(FlowNodeType.agent, const Offset(300, 200));
+    final plus = Rect.fromCenter(
+      center:
+          st().flow.nodes[a1]!.position! +
+          Offset(kNodeSize.width + 23, kNodeSize.height / 2),
+      width: 18,
+      height: 18,
+    );
+    final a2 = ctl().addNode(FlowNodeType.agent, const Offset(530, 200));
+    expect(
+      (st().flow.nodes[a2]!.position! & kNodeSize).overlaps(plus),
+      isFalse,
+    );
+    expect(kPlaceGap, greaterThanOrEqualTo(36));
   });
 }
