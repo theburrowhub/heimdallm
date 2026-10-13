@@ -43,9 +43,7 @@ class ThrowingPlatformServices extends FakePlatformServices {
 
 Widget _configTestApp() {
   final router = GoRouter(
-    routes: [
-      GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
-    ],
+    routes: [GoRoute(path: '/', builder: (_, _) => const ConfigScreen())],
   );
   return Consumer(
     builder: (context, ref, _) => MaterialApp.router(
@@ -117,9 +115,7 @@ void main() {
     // Primary agent ('claude') moved to Agents tab — no longer in ConfigScreen
   });
 
-  testWidgets('Notifications section saves each mode locally', (
-    tester,
-  ) async {
+  testWidgets('Notifications section saves each mode locally', (tester) async {
     const config = AppConfig(
       pollInterval: '5m',
       repoConfigs: {'org/repo': RepoConfig(prEnabled: true)},
@@ -315,7 +311,9 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.daemon);
 
     final container = ProviderContainer(
       overrides: [
@@ -327,10 +325,7 @@ void main() {
     addTearDown(container.dispose);
 
     await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: _configTestApp(),
-      ),
+      UncontrolledProviderScope(container: container, child: _configTestApp()),
     );
     await tester.pumpAndSettle();
 
@@ -360,7 +355,9 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.daemon);
 
     final container = ProviderContainer(
       overrides: [
@@ -372,10 +369,7 @@ void main() {
     addTearDown(container.dispose);
 
     await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: _configTestApp(),
-      ),
+      UncontrolledProviderScope(container: container, child: _configTestApp()),
     );
     await tester.pumpAndSettle();
 
@@ -404,7 +398,9 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.daemon);
     when(() => mockApi.patchConfig(any())).thenThrow(Exception('save failed'));
 
     final container = ProviderContainer(
@@ -417,10 +413,7 @@ void main() {
     addTearDown(container.dispose);
 
     await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: _configTestApp(),
-      ),
+      UncontrolledProviderScope(container: container, child: _configTestApp()),
     );
     await tester.pumpAndSettle();
 
@@ -1289,6 +1282,12 @@ void main() {
     final updated = oldCfg.copyWith(cloneDir: '/work/x');
     final diff = computeRepoDiff(oldCfg, updated);
     expect(diff, {'clone_dir': '/work/x'});
+  });
+
+  test('OpenRouter has no hard-coded model list', () {
+    // Its models come from the daemon (OpenRouter's live /models list); a
+    // stale built-in list would offer ids OpenRouter no longer serves.
+    expect(CLIAgentConfig.modelOptions.containsKey('openrouter'), isFalse);
   });
 
   test('temporary model catalogs contain selectable unique IDs', () {

@@ -151,7 +151,11 @@ const (
 	modelsTimeout  = 15 * time.Second
 	maxVersionLen  = 80
 	maxModels      = 200
-	maxModelLen    = 120
+	// maxProviderModels bounds a provider's list, which comes from its API
+	// rather than a CLI probe: OpenRouter offers hundreds of models and the
+	// picker must see them all. It only guards memory.
+	maxProviderModels = 2000
+	maxModelLen       = 120
 	// maxProbeOutput caps what one probe may print; a scan reads at most
 	// this much per command.
 	maxProbeOutput = 256 << 10
@@ -234,7 +238,7 @@ func (d Detector) scanOne(ctx context.Context, e Entry) Agent {
 			configured, models := d.Provider(ctx, e.ID)
 			a.Installed, a.Configured = configured, configured
 			if configured {
-				a.Models = capModels(models)
+				a.Models = capModels(models, maxProviderModels)
 			}
 		}
 		return a
@@ -385,13 +389,14 @@ func (d Detector) models(ctx context.Context, path string, e Entry) []string {
 	if err != nil {
 		return nil
 	}
-	return capModels(e.parseModels(out))
+	return capModels(e.parseModels(out), maxModels)
 }
 
 var modelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/~\[\]=,@+-]*$`)
 
-// capModels keeps well-formed, distinct ids, bounded in count and length.
-func capModels(in []string) []string {
+// capModels keeps well-formed, distinct ids, at most limit of them, each
+// bounded in length.
+func capModels(in []string, limit int) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, m := range in {
@@ -401,7 +406,7 @@ func capModels(in []string) []string {
 		}
 		seen[m] = true
 		out = append(out, m)
-		if len(out) >= maxModels {
+		if len(out) >= limit {
 			break
 		}
 	}

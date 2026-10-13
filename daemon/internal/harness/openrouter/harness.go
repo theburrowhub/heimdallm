@@ -11,9 +11,10 @@ import (
 	"github.com/heimdallm/daemon/internal/executor"
 )
 
-// DefaultModel is used when the agent has no model configured: a strong,
-// tool-capable reviewer.
-const DefaultModel = "anthropic/claude-sonnet-4.5"
+// ErrNoModel is returned when the agent has no model configured. OpenRouter
+// has no default model: the catalog changes too often for a hard-coded id to
+// stay valid, so the operator picks one from the live list.
+var ErrNoModel = errors.New("openrouter: no model selected — pick one in Agents → OpenRouter")
 
 // Harness bounds. MaxTurns from the agent settings overrides the tool-round
 // budget.
@@ -69,7 +70,7 @@ func (r *Runner) Review(ctx context.Context, prompt string, opts executor.ExecOp
 	}
 	model := strings.TrimSpace(opts.Model)
 	if model == "" {
-		model = DefaultModel
+		return "", nil, ErrNoModel
 	}
 	rounds := defaultToolRounds
 	if opts.MaxTurns > 0 {

@@ -9,6 +9,7 @@ import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
 import '../../shared/widgets/review_limits_editor.dart';
+import 'provider_model_field.dart';
 
 const _defaultCliNames = ['claude', 'gemini', 'codex'];
 
@@ -25,11 +26,25 @@ class CLIAgentsScreen extends ConsumerStatefulWidget {
   /// Shown above the editor (the catalog's detection details).
   final Widget? header;
 
+  /// Agents that are in-process API providers (OpenRouter). They have no CLI
+  /// default model: the model is a required pick from [discoveredModels].
+  final Set<String> providerIds;
+
+  /// Whether [discoveredModels] is being (re)loaded.
+  final bool modelsLoading;
+
+  /// Reloads [discoveredModels] (the catalog rescan), for a provider whose
+  /// model list could not be loaded.
+  final Future<void> Function()? onReloadModels;
+
   const CLIAgentsScreen({
     super.key,
     this.agentIds = _defaultCliNames,
     this.discoveredModels = const {},
     this.header,
+    this.providerIds = const {},
+    this.modelsLoading = false,
+    this.onReloadModels,
   });
 
   @override
@@ -144,6 +159,9 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                       name: name,
                       state: _agents[name]!,
                       models: _modelsFor(name),
+                      isProvider: widget.providerIds.contains(name),
+                      modelsLoading: widget.modelsLoading,
+                      onReloadModels: widget.onReloadModels,
                       prompts: prompts,
                       onChanged: (s) {
                         setState(() => _agents[name] = s);
@@ -291,6 +309,9 @@ class _AgentSection extends StatefulWidget {
   final String name;
   final _AgentState state;
   final List<String> models;
+  final bool isProvider;
+  final bool modelsLoading;
+  final Future<void> Function()? onReloadModels;
   final List<dynamic> prompts;
   final ValueChanged<_AgentState> onChanged;
 
@@ -299,6 +320,9 @@ class _AgentSection extends StatefulWidget {
     required this.name,
     required this.state,
     required this.models,
+    this.isProvider = false,
+    this.modelsLoading = false,
+    this.onReloadModels,
     required this.prompts,
     required this.onChanged,
   });
@@ -389,7 +413,10 @@ class _AgentSectionState extends State<_AgentSection> {
         ? preservedUnlistedModel
         : null;
 
-    final accent = _cliColor(context, name);
+    final needsModel = widget.isProvider && s.model.trim().isEmpty;
+    final accent = needsModel
+        ? AppColors.warning.resolve(context)
+        : _cliColor(context, name);
     return AppSurface(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -402,7 +429,11 @@ class _AgentSectionState extends State<_AgentSection> {
               AppText.sectionTitle(name),
               const SizedBox(width: 8),
               AppBadge(
-                label: s.hasOverrides ? 'Configured' : 'CLI default',
+                label: needsModel
+                    ? 'Choose a model'
+                    : s.hasOverrides
+                    ? 'Configured'
+                    : 'CLI default',
                 foreground: accent,
                 background: accent.withValues(alpha: 0.14),
                 border: accent.withValues(alpha: 0.35),
@@ -414,33 +445,46 @@ class _AgentSectionState extends State<_AgentSection> {
           Row(
             children: [
               Expanded(
-                child: DropdownButtonFormField<String>(
-                  key: ValueKey('model-$name'),
-                  // ignore: deprecated_member_use
-                  value: s.model.isEmpty ? null : s.model,
-                  decoration: const InputDecoration(
-                    labelText: 'Model',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
-                    const DropdownMenuItem<String>(
-                      value: null,
-                      child: Text('CLI default'),
-                    ),
-                    if (unlistedModel != null)
-                      DropdownMenuItem(
-                        value: unlistedModel,
-                        child: Text('$unlistedModel (not listed)'),
+                child: widget.isProvider
+                    ? ProviderModelField(
+                        key: ValueKey('provider-model-field-$name'),
+                        fieldKey: ValueKey('model-$name'),
+                        model: s.model,
+                        models: models,
+                        loading: widget.modelsLoading,
+                        onRetry: widget.onReloadModels,
+                        onChanged: (v) {
+                          setState(() => s.model = v);
+                          widget.onChanged(s);
+                        },
+                      )
+                    : DropdownButtonFormField<String>(
+                        key: ValueKey('model-$name'),
+                        // ignore: deprecated_member_use
+                        value: s.model.isEmpty ? null : s.model,
+                        decoration: const InputDecoration(
+                          labelText: 'Model',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          const DropdownMenuItem<String>(
+                            value: null,
+                            child: Text('CLI default'),
+                          ),
+                          if (unlistedModel != null)
+                            DropdownMenuItem(
+                              value: unlistedModel,
+                              child: Text('$unlistedModel (not listed)'),
+                            ),
+                          ...models.map(
+                            (m) => DropdownMenuItem(value: m, child: Text(m)),
+                          ),
+                        ],
+                        onChanged: (v) {
+                          setState(() => s.model = v ?? '');
+                          widget.onChanged(s);
+                        },
                       ),
-                    ...models.map(
-                      (m) => DropdownMenuItem(value: m, child: Text(m)),
-                    ),
-                  ],
-                  onChanged: (v) {
-                    setState(() => s.model = v ?? '');
-                    widget.onChanged(s);
-                  },
-                ),
               ),
               if (name == 'claude') ...[
                 const SizedBox(width: 12),
@@ -535,9 +579,11 @@ class _AgentSectionState extends State<_AgentSection> {
                   'How hard Copilot reasons before answering. Higher effort '
                   'improves quality but uses more premium requests and time.',
               items: [
-                const DropdownMenuItem<String>(
+                DropdownMenuItem<String>(
                   value: null,
-                  child: Text('CLI default'),
+                  child: Text(
+                    widget.isProvider ? 'Model default' : 'CLI default',
+                  ),
                 ),
                 ...CLIAgentConfig.effortOptions.map(
                   (v) => DropdownMenuItem(value: v, child: Text(v)),
