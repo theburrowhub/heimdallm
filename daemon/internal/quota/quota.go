@@ -20,8 +20,8 @@ const (
 	KindSession = "session" // Claude 5h, Codex primary window
 	KindWeekly  = "weekly"  // Claude 7d, Codex secondary window
 	KindMonthly = "monthly" // Copilot premium requests
-	KindModel   = "model"   // Gemini per-model bucket (Label = model id)
-	KindCredit  = "credit"  // OpenRouter key spend against its limit
+	KindModel   = "model"   // per-model bucket: Gemini model id, Claude model name (Label)
+	KindCredit  = "credit"  // OpenRouter key spend, Claude extra usage credits
 )
 
 // Window is one allowance being tracked.
@@ -31,6 +31,9 @@ type Window struct {
 	// UsedPercent is how much of the window is spent, 0-100.
 	UsedPercent float64   `json:"used_percent"`
 	ResetsAt    time.Time `json:"resets_at,omitempty"`
+	// Detail is the window in money, e.g. "31.65 / 750.00 EUR", when the
+	// provider reports amounts.
+	Detail string `json:"detail,omitempty"`
 }
 
 // Error kinds: a closed set, never a raw error that could carry a path or a
@@ -49,6 +52,9 @@ type Provider struct {
 	Windows   []Window  `json:"windows,omitempty"`
 	FetchedAt time.Time `json:"fetched_at,omitempty"`
 	Error     string    `json:"error,omitempty"`
+	// Detail describes an allowance with no window, e.g. an OpenRouter key
+	// with no limit: "$3.00 spent · no limit".
+	Detail string `json:"detail,omitempty"`
 }
 
 // Window returns the window of kind (and label, for per-model kinds), or

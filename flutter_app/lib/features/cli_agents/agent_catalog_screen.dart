@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,9 +20,17 @@ final cliAgentCatalogProvider = FutureProvider.autoDispose<CliAgentCatalog>((
   return ref.watch(apiClientProvider).fetchCliAgents();
 });
 
+/// How often the catalog re-reads quotas while it is on screen. The agents
+/// branch stays mounted in the shell, so without this the cards kept the
+/// first reading for as long as the app ran.
+const kQuotaRefreshInterval = Duration(minutes: 1);
+
 /// Every agent's remaining quota (GET /quotas); empty on older daemons.
+/// Re-read every [kQuotaRefreshInterval] while anything watches it.
 final agentQuotasProvider = FutureProvider.autoDispose<Map<String, AgentQuota>>(
   (ref) async {
+    final timer = Timer(kQuotaRefreshInterval, ref.invalidateSelf);
+    ref.onDispose(timer.cancel);
     try {
       final list = await ref.watch(apiClientProvider).fetchQuotas();
       return {for (final q in list) q.agent: q};
@@ -160,7 +170,10 @@ class AgentCatalogCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Text(agentEmoji(agent.id), style: const TextStyle(fontSize: 22)),
+                Text(
+                  agentEmoji(agent.id),
+                  style: const TextStyle(fontSize: 22),
+                ),
                 const SizedBox(width: 8),
                 Expanded(child: AppText.sectionTitle(agent.name)),
                 const Icon(Icons.chevron_right, size: 18),
@@ -209,10 +222,32 @@ class AgentCatalogCard extends StatelessWidget {
               ],
             ),
             if (quota != null &&
+                !quota!.available &&
+                quota!.error.isNotEmpty &&
+                quota!.error != 'not_configured') ...[
+              const SizedBox(height: 8),
+              Text(
+                'Usage unavailable (${quota!.error.replaceAll('_', ' ')})',
+                key: ValueKey('quota-${agent.id}-unavailable'),
+                style: TextStyle(fontSize: 11, color: muted),
+              ),
+            ],
+            if (quota != null &&
+                quota!.available &&
+                quota!.windows.isEmpty &&
+                quota!.detail.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                quota!.detail,
+                key: ValueKey('quota-${agent.id}-detail'),
+                style: const TextStyle(fontSize: 11),
+              ),
+            ],
+            if (quota != null &&
                 quota!.available &&
                 quota!.windows.isNotEmpty) ...[
               const SizedBox(height: 8),
-              for (final w in quota!.windows.take(3))
+              for (final w in quota!.windows.take(4)) ...[
                 Padding(
                   padding: const EdgeInsets.only(top: 3),
                   child: Row(
@@ -246,6 +281,17 @@ class AgentCatalogCard extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (w.detail.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 56, top: 1),
+                    child: Text(
+                      w.detail,
+                      key: ValueKey('quota-${agent.id}-${w.shortLabel}-detail'),
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 10, color: muted),
+                    ),
+                  ),
+              ],
             ],
           ],
         ),
@@ -314,7 +360,8 @@ class AgentDetectionCard extends StatelessWidget {
       if (agent.version.isNotEmpty) ('Version', agent.version),
       if (agent.path.isNotEmpty) ('Executable', agent.path),
       ('Configuration', agent.configured ? 'Found' : 'Not found'),
-      if (agent.models.isNotEmpty) ('Models', '${agent.models.length} available'),
+      if (agent.models.isNotEmpty)
+        ('Models', '${agent.models.length} available'),
     ];
     return AppSurface(
       elevation: AppSurfaceElevation.canvas,
@@ -403,14 +450,19 @@ class _ProviderKeyCardState extends ConsumerState<ProviderKeyCard> {
 
   Future<void> _load() async {
     try {
-      final s = await ref.read(apiClientProvider).fetchAgentKey(widget.agent.id);
+      final s = await ref
+          .read(apiClientProvider)
+          .fetchAgentKey(widget.agent.id);
       if (mounted) setState(() => _status = s);
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);
     }
   }
 
-  Future<void> _run(Future<AgentKeyStatus> Function() action, String done) async {
+  Future<void> _run(
+    Future<AgentKeyStatus> Function() action,
+    String done,
+  ) async {
     setState(() => _busy = true);
     try {
       final s = await action();

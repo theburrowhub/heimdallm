@@ -58,6 +58,104 @@ func TestClaudeSource(t *testing.T) {
 	}
 }
 
+// claudeUsageWithLimits is the shape the usage endpoint returns today: the
+// legacy five_hour/seven_day objects plus a limits list with per-model weekly
+// windows, and extra usage credits.
+const claudeUsageWithLimits = `{
+ "five_hour":{"utilization":67.0,"resets_at":"2026-10-13T18:29:59Z"},
+ "seven_day":{"utilization":47.0,"resets_at":"2026-10-16T22:59:59Z"},
+ "extra_usage":{"is_enabled":true,"monthly_limit":75000,"used_credits":3165.0,"utilization":4.22,"currency":"EUR","decimal_places":2},
+ "limits":[
+  {"kind":"session","group":"session","percent":61,"resets_at":"2026-10-13T18:29:59Z"},
+  {"kind":"weekly_all","group":"weekly","percent":46,"resets_at":"2026-10-16T22:59:59Z"},
+  {"kind":"weekly_scoped","group":"weekly","percent":3,"resets_at":"2026-10-16T23:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"}}}
+ ]}`
+
+func TestClaudeSourceReadsLimitsModelWindowsAndCredits(t *testing.T) {
+	srv := server(t, nil, 200, claudeUsageWithLimits)
+	s := &ClaudeSource{
+		BaseURL:         srv.URL,
+		ReadKeychain:    func(context.Context) (string, error) { return `{"claudeAiOauth":{"accessToken":"t"}}`, nil },
+		CredentialsPath: filepath.Join(t.TempDir(), "missing"),
+	}
+	p := s.Read(context.Background())
+	if !p.Available || len(p.Windows) != 4 {
+		t.Fatalf("claude = %+v", p)
+	}
+	// The limits list wins over the legacy objects.
+	if w, _ := p.Window(KindSession, ""); w.UsedPercent != 61 || w.ResetsAt.IsZero() {
+		t.Errorf("session = %+v", w)
+	}
+	if w, _ := p.Window(KindWeekly, ""); w.UsedPercent != 46 {
+		t.Errorf("weekly = %+v", w)
+	}
+	if w, ok := p.Window(KindModel, "Fable"); !ok || w.UsedPercent != 3 || w.ResetsAt.IsZero() {
+		t.Errorf("model window = %+v (%v)", w, ok)
+	}
+	if w, ok := p.Window(KindCredit, ""); !ok || w.UsedPercent != 4.22 || w.Detail != "31.65 / 750.00 EUR" {
+		t.Errorf("credit = %+v (%v)", w, ok)
+	}
+}
+
+func TestClaudeSourceSkipsDisabledExtraUsage(t *testing.T) {
+	srv := server(t, nil, 200, `{"five_hour":{"utilization":5},"extra_usage":{"is_enabled":false,"monthly_limit":0,"used_credits":0,"utilization":null}}`)
+	s := &ClaudeSource{
+		BaseURL:         srv.URL,
+		ReadKeychain:    func(context.Context) (string, error) { return `{"claudeAiOauth":{"accessToken":"t"}}`, nil },
+		CredentialsPath: filepath.Join(t.TempDir(), "missing"),
+	}
+	p := s.Read(context.Background())
+	if _, ok := p.Window(KindCredit, ""); ok || len(p.Windows) != 1 {
+		t.Fatalf("claude = %+v", p)
+	}
+}
+
+func TestClaudeSourceLimitsEdgeCases(t *testing.T) {
+	// Unknown kinds, missing percents and unnamed scopes are skipped; a model
+	// scope without a name falls back to its id; a bad reset time is dropped;
+	// credits without utilization are computed from the amounts, and
+	// currency/decimal places default sensibly.
+	srv := server(t, nil, 200, `{
+	 "extra_usage":{"is_enabled":true,"monthly_limit":1000,"used_credits":250},
+	 "limits":[
+	  {"kind":"session","percent":null},
+	  {"kind":"session","percent":10,"resets_at":"not a time"},
+	  {"kind":"weekly_scoped","percent":7,"scope":{"model":{"id":"m-1","display_name":""}}},
+	  {"kind":"weekly_scoped","percent":8,"scope":{"model":{"id":null,"display_name":""}}},
+	  {"kind":"daily_something","percent":9}
+	 ]}`)
+	s := &ClaudeSource{
+		BaseURL:         srv.URL,
+		ReadKeychain:    func(context.Context) (string, error) { return `{"claudeAiOauth":{"accessToken":"t"}}`, nil },
+		CredentialsPath: filepath.Join(t.TempDir(), "missing"),
+	}
+	p := s.Read(context.Background())
+	if len(p.Windows) != 3 {
+		t.Fatalf("windows = %+v", p.Windows)
+	}
+	if w, _ := p.Window(KindSession, ""); w.UsedPercent != 10 || !w.ResetsAt.IsZero() {
+		t.Errorf("session = %+v", w)
+	}
+	if w, ok := p.Window(KindModel, "m-1"); !ok || w.UsedPercent != 7 {
+		t.Errorf("model by id = %+v (%v)", w, ok)
+	}
+	if w, ok := p.Window(KindCredit, ""); !ok || w.UsedPercent != 25 || w.Detail != "2.50 / 10.00" {
+		t.Errorf("credit = %+v (%v)", w, ok)
+	}
+}
+
+func TestCreditProviderDetail(t *testing.T) {
+	limit := 250.0
+	p := CreditProvider("openrouter", 12.5, &limit)
+	if w, ok := p.Window(KindCredit, ""); !ok || w.UsedPercent != 5 || w.Detail != "$12.50 / $250.00" {
+		t.Fatalf("limited = %+v", p)
+	}
+	p = CreditProvider("openrouter", 3, nil)
+	if len(p.Windows) != 0 || p.Detail != "$3.00 spent · no limit" {
+		t.Fatalf("unlimited = %+v", p)
+	}
+}
+
 func TestClaudeSourceCredentialsFileAndErrors(t *testing.T) {
 	ok := server(t, nil, 200, `{"five_hour":{"utilization":1}}`)
 	s := &ClaudeSource{BaseURL: ok.URL, CredentialsPath: writeFile(t, `{"claudeAiOauth":{"accessToken":"tok-file"}}`)}

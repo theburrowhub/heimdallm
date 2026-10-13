@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -156,14 +158,102 @@ func (w *claudeWindow) toWindow(kind string) (Window, bool) {
 	return out, true
 }
 
+// claudeLimit is one entry of the usage endpoint's limits list: the session
+// window, the all-models weekly window and per-model weekly windows.
+type claudeLimit struct {
+	Kind     string   `json:"kind"`
+	Percent  *float64 `json:"percent"`
+	ResetsAt *string  `json:"resets_at"`
+	Scope    *struct {
+		Model *struct {
+			ID          *string `json:"id"`
+			DisplayName string  `json:"display_name"`
+		} `json:"model"`
+	} `json:"scope"`
+}
+
+// claudeExtraUsage is the account's usage credits, in minor currency units.
+type claudeExtraUsage struct {
+	IsEnabled     bool     `json:"is_enabled"`
+	MonthlyLimit  float64  `json:"monthly_limit"`
+	UsedCredits   float64  `json:"used_credits"`
+	Utilization   *float64 `json:"utilization"`
+	Currency      string   `json:"currency"`
+	DecimalPlaces *int     `json:"decimal_places"`
+}
+
+func parseResetsAt(v *string) time.Time {
+	if v == nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, *v)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// limitsWindows maps the limits list to windows. It returns nil when the
+// list is absent so the legacy objects are used instead.
+func limitsWindows(limits []claudeLimit) []Window {
+	var out []Window
+	for _, l := range limits {
+		if l.Percent == nil {
+			continue
+		}
+		w := Window{UsedPercent: clampPercent(*l.Percent), ResetsAt: parseResetsAt(l.ResetsAt)}
+		switch {
+		case l.Kind == "session":
+			w.Kind = KindSession
+		case l.Kind == "weekly_all":
+			w.Kind = KindWeekly
+		case l.Scope != nil && l.Scope.Model != nil:
+			w.Kind = KindModel
+			w.Label = l.Scope.Model.DisplayName
+			if w.Label == "" && l.Scope.Model.ID != nil {
+				w.Label = *l.Scope.Model.ID
+			}
+			if w.Label == "" {
+				continue
+			}
+		default:
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+func (e *claudeExtraUsage) toWindow() (Window, bool) {
+	if e == nil || !e.IsEnabled || e.MonthlyLimit <= 0 {
+		return Window{}, false
+	}
+	used := 100 * e.UsedCredits / e.MonthlyLimit
+	if e.Utilization != nil {
+		used = *e.Utilization
+	}
+	places := 2
+	if e.DecimalPlaces != nil && *e.DecimalPlaces >= 0 && *e.DecimalPlaces <= 4 {
+		places = *e.DecimalPlaces
+	}
+	scale := math.Pow10(places)
+	detail := fmt.Sprintf("%.*f / %.*f", places, e.UsedCredits/scale, places, e.MonthlyLimit/scale)
+	if e.Currency != "" {
+		detail += " " + e.Currency
+	}
+	return Window{Kind: KindCredit, UsedPercent: clampPercent(used), Detail: detail}, true
+}
+
 func (s *ClaudeSource) Read(ctx context.Context) Provider {
 	tok := s.token(ctx)
 	if tok == "" {
 		return Provider{Agent: s.Agent(), Error: ErrNotConfigured}
 	}
 	var body struct {
-		FiveHour *claudeWindow `json:"five_hour"`
-		SevenDay *claudeWindow `json:"seven_day"`
+		FiveHour   *claudeWindow     `json:"five_hour"`
+		SevenDay   *claudeWindow     `json:"seven_day"`
+		Limits     []claudeLimit     `json:"limits"`
+		ExtraUsage *claudeExtraUsage `json:"extra_usage"`
 	}
 	status, err := httpJSON(ctx, s.HTTP, http.MethodGet, strings.TrimRight(s.BaseURL, "/")+"/api/oauth/usage", map[string]string{
 		"Authorization":  "Bearer " + tok,
@@ -174,10 +264,20 @@ func (s *ClaudeSource) Read(ctx context.Context) Provider {
 		return failure(s.Agent(), status)
 	}
 	p := Provider{Agent: s.Agent(), Available: true}
-	if w, ok := body.FiveHour.toWindow(KindSession); ok {
-		p.Windows = append(p.Windows, w)
+	// The limits list is newer and also carries per-model weekly windows;
+	// the five_hour/seven_day objects stay as the fallback for older
+	// responses.
+	if ws := limitsWindows(body.Limits); len(ws) > 0 {
+		p.Windows = ws
+	} else {
+		if w, ok := body.FiveHour.toWindow(KindSession); ok {
+			p.Windows = append(p.Windows, w)
+		}
+		if w, ok := body.SevenDay.toWindow(KindWeekly); ok {
+			p.Windows = append(p.Windows, w)
+		}
 	}
-	if w, ok := body.SevenDay.toWindow(KindWeekly); ok {
+	if w, ok := body.ExtraUsage.toWindow(); ok {
 		p.Windows = append(p.Windows, w)
 	}
 	return p
@@ -459,7 +559,13 @@ func (s FuncSource) Read(ctx context.Context) Provider { return s.Fn(ctx) }
 func CreditProvider(agent string, used float64, limit *float64) Provider {
 	p := Provider{Agent: agent, Available: true}
 	if limit != nil && *limit > 0 {
-		p.Windows = []Window{{Kind: KindCredit, UsedPercent: clampPercent(100 * used / *limit)}}
+		p.Windows = []Window{{
+			Kind:        KindCredit,
+			UsedPercent: clampPercent(100 * used / *limit),
+			Detail:      fmt.Sprintf("$%.2f / $%.2f", used, *limit),
+		}}
+	} else {
+		p.Detail = fmt.Sprintf("$%.2f spent · no limit", used)
 	}
 	return p
 }

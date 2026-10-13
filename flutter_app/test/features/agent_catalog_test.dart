@@ -212,6 +212,55 @@ void main() {
     expect(find.byKey(const ValueKey('quota-codex-5h')), findsNothing);
   });
 
+  testWidgets(
+    'catalog cards refresh quotas and show money, models and failures',
+    (tester) async {
+      final (api, _) = await _pump(tester);
+      expect(find.text('34%'), findsOneWidget);
+
+      // A minute later the cards show the new reading without leaving the page.
+      when(() => api.fetchQuotas()).thenAnswer(
+        (_) async => [
+          AgentQuota.fromJson({
+            'agent': 'claude',
+            'available': true,
+            'windows': [
+              {'kind': 'session', 'used_percent': 61},
+              {'kind': 'weekly', 'used_percent': 46},
+              {'kind': 'model', 'label': 'Fable', 'used_percent': 3},
+              {
+                'kind': 'credit',
+                'used_percent': 4.22,
+                'detail': '31.65 / 750.00 EUR',
+              },
+            ],
+          }),
+          AgentQuota.fromJson({
+            'agent': 'openrouter',
+            'available': true,
+            'detail': r'$3.00 spent · no limit',
+          }),
+          AgentQuota.fromJson({'agent': 'copilot', 'error': 'unavailable'}),
+        ],
+      );
+      await tester.pump(kQuotaRefreshInterval);
+      await tester.pumpAndSettle();
+
+      verify(() => api.fetchQuotas()).called(2);
+      expect(find.text('61%'), findsOneWidget);
+      expect(find.text('34%'), findsNothing);
+      expect(find.byKey(const ValueKey('quota-claude-Fable')), findsOneWidget);
+      expect(find.text('31.65 / 750.00 EUR'), findsOneWidget);
+      expect(find.text('4%'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('quota-openrouter-detail')),
+        findsOneWidget,
+      );
+      expect(find.text(r'$3.00 spent · no limit'), findsOneWidget);
+      expect(find.text('Usage unavailable (unavailable)'), findsOneWidget);
+    },
+  );
+
   testWidgets('catalog renders without quotas on older daemons', (
     tester,
   ) async {
