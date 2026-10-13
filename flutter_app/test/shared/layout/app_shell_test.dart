@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
+import 'package:heimdallm/shared/router.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
@@ -645,6 +646,16 @@ void main() {
       scaffold.openDrawer();
       await tester.pumpAndSettle();
       expect(find.text('Instances'), findsOneWidget);
+    });
+  });
+
+  test('every router branch has exactly one rail destination', () {
+    final shell =
+        createRouter().configuration.routes.first as StatefulShellRoute;
+    final indexes = appDestinations.map((d) => d.branchIndex).toList();
+    expect(indexes.toSet().length, indexes.length, reason: 'duplicate index');
+    expect(indexes.toSet(), {
+      for (var i = 0; i < shell.branches.length; i++) i,
     });
   });
 }

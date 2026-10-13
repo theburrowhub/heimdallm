@@ -17,8 +17,10 @@ import '../features/server/server_screen.dart';
 import '../features/stats/stats_screen.dart';
 import 'layout/app_shell.dart';
 
-/// Destination order here MUST match `appDestinations` in `app_shell.dart`
-/// (each branch's position is what the navigation rail/drawer highlights).
+/// Each branch's position here is the `branchIndex` of its entry in
+/// `appDestinations` (`app_shell.dart`). The rail may show destinations in a
+/// different order; `branchIndex` is the only link, and
+/// `test/shared/layout/app_shell_test.dart` checks it covers every branch.
 GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
   initialLocation: initialLocation,
   routes: [
@@ -75,10 +77,7 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
             // Renamed from "Agents" to "Prompts" during the navigation
             // redesign; kept so bookmarks/deep links to the old name keep
             // working.
-            GoRoute(
-              path: '/agents',
-              redirect: (context, state) => '/prompts',
-            ),
+            GoRoute(path: '/agents', redirect: (context, state) => '/prompts'),
           ],
         ),
         StatefulShellBranch(
@@ -89,9 +88,8 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
               routes: [
                 GoRoute(
                   path: ':id',
-                  builder: (context, state) => AgentConfigScreen(
-                    agentId: state.pathParameters['id']!,
-                  ),
+                  builder: (context, state) =>
+                      AgentConfigScreen(agentId: state.pathParameters['id']!),
                 ),
               ],
             ),
@@ -169,10 +167,7 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
         return ServerScreen(initialTab: tab);
       },
     ),
-    GoRoute(
-      path: '/logs',
-      redirect: (context, state) => '/server?tab=logs',
-    ),
+    GoRoute(path: '/logs', redirect: (context, state) => '/server?tab=logs'),
   ],
 );
 
