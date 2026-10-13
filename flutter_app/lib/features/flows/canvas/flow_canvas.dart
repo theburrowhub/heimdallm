@@ -1,6 +1,6 @@
 import 'dart:ui' show PointMode;
 
-import 'package:flutter/gestures.dart' show DragStartBehavior;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -46,13 +46,58 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
   Offset _grab = Offset.zero;
   bool _nodeMoved = false;
 
-  CanvasEdge? _hover;
+  /// The hovered edge by identity; its geometry is looked up every build so
+  /// the scissors follow the edge when its ends move.
+  (String, EdgePort)? _hover;
+
+  /// The last pointer position seen anywhere (global). A palette drag's
+  /// DragTarget offset is the feedback's corner, not the pointer, so drops
+  /// are placed from this instead.
+  Offset? _lastPointer;
+
+  @override
+  void initState() {
+    super.initState();
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_trackPointer);
+  }
 
   @override
   void dispose() {
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_trackPointer);
     _transform.dispose();
     _focus.dispose();
     super.dispose();
+  }
+
+  void _trackPointer(PointerEvent e) {
+    if (e is PointerMoveEvent || e is PointerUpEvent || e is PointerDownEvent) {
+      _lastPointer = e.position;
+    }
+  }
+
+  bool get _editable => ref.read(flowEditorProvider).draft == null;
+
+  /// Ends any gesture in progress when editing becomes disabled (a draft
+  /// arrived): the gesture's own callbacks will no longer act, so a node
+  /// move so far becomes its own undo step and a port drag is dropped.
+  void _abortGestures() {
+    final node = _dragNode;
+    if (node != null) _endNodeDrag(node);
+    if (_dragPort != null || _hover != null) {
+      setState(() {
+        _dragPort = null;
+        _dragTo = null;
+        _hover = null;
+      });
+    }
+  }
+
+  /// Places a palette item centred under the pointer.
+  void _dropFromPalette(DragTargetDetails<FlowNodeType> d) {
+    final global = _lastPointer ?? d.offset;
+    final at =
+        _toCanvas(global) - Offset(kNodeSize.width / 2, kNodeSize.height / 2);
+    widget.onDropFromPalette?.call(d.data, at);
   }
 
   /// Global pointer position → canvas coordinates (accounts for pan/zoom).
@@ -84,12 +129,26 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     }
   }
 
+  void _startPortDrag(String from, EdgePort p, Offset global) {
+    if (!_editable) return;
+    setState(() {
+      _dragPort = (from, p);
+      _dragTo = _toCanvas(global);
+    });
+  }
+
+  void _updatePortDrag(Offset global) {
+    if (_dragPort == null) return;
+    setState(() => _dragTo = _toCanvas(global));
+  }
+
   void _cancelPortDrag() => setState(() {
     _dragPort = null;
     _dragTo = null;
   });
 
   void _startNodeDrag(String id, Offset global) {
+    if (!_editable) return;
     final pos = ref.read(flowEditorProvider).flow.nodes[id]?.position;
     if (pos == null) return;
     _dragNode = id;
@@ -114,22 +173,33 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     if (pos != null) _ctl.moveNode(id, pos);
   }
 
+  static CanvasEdge? _edgeOf(List<CanvasEdge> edges, (String, EdgePort)? k) {
+    if (k == null) return null;
+    for (final e in edges) {
+      if (e.from == k.$1 && e.port == k.$2) return e;
+    }
+    return null;
+  }
+
   void _onHover(Offset p, List<CanvasEdge> edges, bool editable) {
-    var h = editable ? hitEdge(edges, p) : null;
+    final hit = editable ? hitEdge(edges, p) : null;
+    var h = hit == null ? null : (hit.from, hit.port);
     // Keep the scissors while the pointer is on them, even if that is a
     // little off the line.
-    if (h == null && _hover != null) {
-      final mid = (_hover!.a + _hover!.b) / 2;
+    final current = _edgeOf(edges, _hover);
+    if (h == null && current != null) {
+      final mid = (current.a + current.b) / 2;
       if ((p - mid).distance <= _cutSize / 2 + 2) h = _hover;
     }
-    if (h?.from != _hover?.from || h?.port != _hover?.port) {
-      setState(() => _hover = h);
-    }
+    if (h != _hover) setState(() => _hover = h);
   }
 
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(flowEditorProvider);
+    ref.listen(flowEditorProvider.select((s) => s.draft != null), (was, now) {
+      if (now && was != true) _abortGestures();
+    });
     final scheme = Theme.of(context).colorScheme;
     final yesColor = resolveAppColor(context, AppColors.success);
     final noColor = resolveAppColor(context, AppColors.danger);
@@ -155,13 +225,8 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
     final selectedNode = selection is NodeSelection ? selection.id : null;
     // Edges whose source port is in use, so the port dot shows as filled.
     final usedPorts = {for (final e in edges) (e.from, e.port)};
-    // A stale hover (the edge was cut or a draft appeared) must not linger.
-    final hover =
-        editable &&
-            _hover != null &&
-            usedPorts.contains((_hover!.from, _hover!.port))
-        ? _hover
-        : null;
+    // The hovered edge as it is now; gone if it was cut or a draft is shown.
+    final hover = editable ? _edgeOf(edges, _hover) : null;
 
     Offset? dragFrom;
     if (_dragPort case (final from, final port)) {
@@ -189,17 +254,13 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
           child: GestureDetector(
             key: ValueKey(key),
             behavior: HitTestBehavior.opaque,
-            onPanStart: editable
-                ? (d) => setState(() {
-                    _dragPort = (from, p);
-                    _dragTo = _toCanvas(d.globalPosition);
-                  })
-                : null,
-            onPanUpdate: editable
-                ? (d) => setState(() => _dragTo = _toCanvas(d.globalPosition))
-                : null,
-            onPanEnd: editable ? (_) => _endPortDrag() : null,
-            onPanCancel: editable ? _cancelPortDrag : null,
+            // Callbacks stay set while a draft is shown (they check
+            // editability themselves): removing them mid-gesture would
+            // dispose the recognizer without an end or cancel.
+            onPanStart: (d) => _startPortDrag(from, p, d.globalPosition),
+            onPanUpdate: (d) => _updatePortDrag(d.globalPosition),
+            onPanEnd: (_) => _endPortDrag(),
+            onPanCancel: _cancelPortDrag,
             child: SizedBox.square(
               dimension: _portHit,
               child: Center(child: dot),
@@ -247,8 +308,7 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
       },
       child: DragTarget<FlowNodeType>(
         onWillAcceptWithDetails: (_) => editable,
-        onAcceptWithDetails: (d) =>
-            widget.onDropFromPalette?.call(d.data, _toCanvas(d.offset)),
+        onAcceptWithDetails: _dropFromPalette,
         builder: (context, _, _) => ColoredBox(
           color: scheme.surfaceContainerLow,
           child: InteractiveViewer(
@@ -409,14 +469,11 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
           _focus.requestFocus();
           _ctl.select(NodeSelection(n.id));
         },
-        onPanStart: editable
-            ? (d) => _startNodeDrag(n.id, d.globalPosition)
-            : null,
-        onPanUpdate: editable
-            ? (d) => _updateNodeDrag(n.id, d.globalPosition)
-            : null,
-        onPanEnd: editable ? (_) => _endNodeDrag(n.id) : null,
-        onPanCancel: editable ? () => _endNodeDrag(n.id) : null,
+        // Always set, see the port callbacks.
+        onPanStart: (d) => _startNodeDrag(n.id, d.globalPosition),
+        onPanUpdate: (d) => _updateNodeDrag(n.id, d.globalPosition),
+        onPanEnd: (_) => _endNodeDrag(n.id),
+        onPanCancel: () => _endNodeDrag(n.id),
         child: FlowNodeCard(
           node: n,
           selected: selected,
