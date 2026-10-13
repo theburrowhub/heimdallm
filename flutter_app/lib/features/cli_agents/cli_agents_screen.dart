@@ -33,6 +33,9 @@ class CLIAgentsScreen extends ConsumerStatefulWidget {
   /// Whether [discoveredModels] is being (re)loaded.
   final bool modelsLoading;
 
+  /// Providers whose API key is not set, so their models cannot load.
+  final Set<String> providersWithoutKey;
+
   /// Reloads [discoveredModels] (the catalog rescan), for a provider whose
   /// model list could not be loaded.
   final Future<void> Function()? onReloadModels;
@@ -44,6 +47,7 @@ class CLIAgentsScreen extends ConsumerStatefulWidget {
     this.header,
     this.providerIds = const {},
     this.modelsLoading = false,
+    this.providersWithoutKey = const {},
     this.onReloadModels,
   });
 
@@ -161,6 +165,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                       models: _modelsFor(name),
                       isProvider: widget.providerIds.contains(name),
                       modelsLoading: widget.modelsLoading,
+                      keyConfigured: !widget.providersWithoutKey.contains(name),
                       onReloadModels: widget.onReloadModels,
                       prompts: prompts,
                       onChanged: (s) {
@@ -311,6 +316,7 @@ class _AgentSection extends StatefulWidget {
   final List<String> models;
   final bool isProvider;
   final bool modelsLoading;
+  final bool keyConfigured;
   final Future<void> Function()? onReloadModels;
   final List<dynamic> prompts;
   final ValueChanged<_AgentState> onChanged;
@@ -322,6 +328,7 @@ class _AgentSection extends StatefulWidget {
     required this.models,
     this.isProvider = false,
     this.modelsLoading = false,
+    this.keyConfigured = true,
     this.onReloadModels,
     required this.prompts,
     required this.onChanged,
@@ -452,6 +459,7 @@ class _AgentSectionState extends State<_AgentSection> {
                         model: s.model,
                         models: models,
                         loading: widget.modelsLoading,
+                        keyConfigured: widget.keyConfigured,
                         onRetry: widget.onReloadModels,
                         onChanged: (v) {
                           setState(() => s.model = v);

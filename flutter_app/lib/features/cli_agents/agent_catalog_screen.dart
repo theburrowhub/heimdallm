@@ -324,6 +324,10 @@ class AgentConfigScreen extends ConsumerWidget {
             },
             providerIds: {if (isProvider) agentId},
             modelsLoading: catalogAsync.isLoading,
+            // A provider's catalog entry is configured once its key is set.
+            providersWithoutKey: {
+              if (info != null && info.isProvider && !info.configured) agentId,
+            },
             onReloadModels: () async {
               await ref.read(apiClientProvider).rescanCliAgents();
               ref.invalidate(cliAgentCatalogProvider);
@@ -459,6 +463,13 @@ class _ProviderKeyCardState extends ConsumerState<ProviderKeyCard> {
     setState(() => _busy = true);
     try {
       final s = await action();
+      // The daemon refreshes the catalog in the background after a key
+      // change; rescan now so the model list reflects the new key.
+      try {
+        await ref.read(apiClientProvider).rescanCliAgents();
+      } catch (_) {
+        // The background refresh still catches up.
+      }
       if (!mounted) return;
       _keyCtrl.clear();
       setState(() => _status = s);

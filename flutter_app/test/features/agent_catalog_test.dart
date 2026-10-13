@@ -89,14 +89,23 @@ class _TestConfigNotifier extends ConfigNotifier {
   Future<AppConfig> build() async => config;
 }
 
-/// The catalog payload with OpenRouter offering [models].
-Map<String, dynamic> _catalogWithOpenRouterModels(List<String> models) => {
+/// The catalog payload with OpenRouter offering [models] (and its key set
+/// unless [configured] is false).
+Map<String, dynamic> _catalogWithOpenRouterModels(
+  List<String> models, {
+  bool configured = true,
+}) => {
   ..._catalogJson,
   'agents': [
     for (final a
         in (_catalogJson['agents']! as List).cast<Map<String, dynamic>>())
       if (a['id'] == 'openrouter')
-        <String, dynamic>{...a, 'models': models}
+        <String, dynamic>{
+          ...a,
+          'models': models,
+          'installed': configured,
+          'configured': configured,
+        }
       else
         a,
   ],
@@ -336,7 +345,10 @@ void main() {
     );
     await tester.tap(find.byKey(const ValueKey('provider-key-save')));
     await tester.pumpAndSettle();
-    verify(() => api.setAgentKey('openrouter', 'sk-or-new')).called(1);
+    verifyInOrder([
+      () => api.setAgentKey('openrouter', 'sk-or-new'),
+      () => api.rescanCliAgents(),
+    ]);
     expect(find.text('Key saved'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('provider-key-remove')));
@@ -543,6 +555,75 @@ void main() {
       find.text("Couldn't load the model list from OpenRouter"),
       findsNothing,
     );
+  });
+
+  testWidgets('without an API key the picker asks for one instead of Retry', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      catalog: _catalogWithOpenRouterModels(const [], configured: false),
+    );
+    expect(
+      find.text('Add an OpenRouter API key above to load the models'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('provider-models-retry')), findsNothing);
+    expect(
+      find.text("Couldn't load the model list from OpenRouter"),
+      findsNothing,
+    );
+  });
+
+  testWidgets('a key save still succeeds when the rescan after it fails', (
+    tester,
+  ) async {
+    final (api, _) = await _pump(tester, location: '/cli-agents/openrouter');
+    when(() => api.rescanCliAgents()).thenThrow(ApiException('busy'));
+    await tester.enterText(
+      find.byKey(const ValueKey('provider-key-field')),
+      'sk-or-new',
+    );
+    await tester.tap(find.byKey(const ValueKey('provider-key-save')));
+    await tester.pumpAndSettle();
+    expect(find.text('Key saved'), findsOneWidget);
+    expect(find.textContaining('busy'), findsNothing);
+  });
+
+  testWidgets('Enter in an empty model field keeps the saved model', (
+    tester,
+  ) async {
+    final (api, _) = await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      config: const AppConfig(
+        agentConfigs: {'openrouter': CLIAgentConfig(model: 'openai/gpt-5')},
+      ),
+    );
+    final field = find.byKey(const ValueKey('model-openrouter'));
+    await tester.enterText(field, '');
+    await tester.pumpAndSettle();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(field).controller!.text, 'openai/gpt-5');
+    verifyNever(() => api.patchConfig(any()));
+  });
+
+  testWidgets('Enter in an empty model field never picks the first model', (
+    tester,
+  ) async {
+    final (api, _) = await _pump(tester, location: '/cli-agents/openrouter');
+    final field = find.byKey(const ValueKey('model-openrouter'));
+    await tester.tap(field);
+    await tester.pumpAndSettle();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+    verifyNever(() => api.patchConfig(any()));
+    expect(find.text('Choose a model'), findsOneWidget);
   });
 
   testWidgets('a failed model list retry is reported', (tester) async {

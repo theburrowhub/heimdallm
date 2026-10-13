@@ -23,6 +23,10 @@ class ProviderModelField extends StatefulWidget {
   /// Whether [models] is being loaded.
   final bool loading;
 
+  /// Whether the provider's API key is set. Without one the list cannot load,
+  /// and retrying would not help.
+  final bool keyConfigured;
+
   /// Reloads [models]; the Retry button is hidden without it.
   final Future<void> Function()? onRetry;
 
@@ -38,6 +42,7 @@ class ProviderModelField extends StatefulWidget {
     required this.models,
     required this.onChanged,
     this.loading = false,
+    this.keyConfigured = true,
     this.onRetry,
     this.providerName = 'OpenRouter',
   });
@@ -125,6 +130,17 @@ class _ProviderModelFieldState extends State<ProviderModelField> {
           AppText.muted('Loading the model list from $name…'),
         ],
       );
+    } else if (models.isEmpty && !widget.keyConfigured) {
+      status = Row(
+        key: const ValueKey('provider-models-need-key'),
+        children: [
+          Icon(Icons.key_off, size: 16, color: warning),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text('Add an $name API key above to load the models'),
+          ),
+        ],
+      );
     } else if (models.isEmpty) {
       status = Column(
         key: const ValueKey('provider-models-unavailable'),
@@ -190,6 +206,12 @@ class _ProviderModelFieldState extends State<ProviderModelField> {
                     prefixIcon: const Icon(Icons.search, size: 18),
                   ),
                   onSubmitted: (v) {
+                    // Enter on an empty field is not a choice: keep the
+                    // saved model rather than picking the first match.
+                    if (v.trim().isEmpty) {
+                      _ctrl.text = widget.model;
+                      return;
+                    }
                     // Enter keeps an exact or unlisted id as typed, and
                     // otherwise picks the highlighted match.
                     if (models.contains(v.trim()) || _matches(v).isEmpty) {
