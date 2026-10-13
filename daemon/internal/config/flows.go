@@ -98,7 +98,7 @@ type QuotaCondition struct {
 }
 
 // ScheduleCondition holds on the given weekdays within [From, To) in TZ.
-// From > To spans midnight (e.g. 22:00-06:00).
+// From > To spans midnight (e.g. 22:00-06:00); From == To is the whole day.
 type ScheduleCondition struct {
 	Days []string `toml:"days,omitempty" json:"days,omitempty"` // mon..sun; empty = every day
 	From string   `toml:"from" json:"from"`                     // HH:MM
@@ -112,9 +112,9 @@ const DefaultFlowID = "default"
 
 // Flow limits.
 const (
-	maxFlows           = 50
-	maxNodesPerFlow    = 200
-	maxConditionsPerRu = 20
+	maxFlows             = 50
+	maxNodesPerFlow      = 200
+	maxConditionsPerNode = 20
 )
 
 var (
@@ -288,8 +288,8 @@ func CheckFlow(id string, f FlowConfig) (errs, warns []FlowIssue) {
 			if total == 0 {
 				add(nid, "", "a condition needs at least one schedule or quota condition")
 			}
-			if total > maxConditionsPerRu {
-				add(nid, "", "has too many conditions (max %d)", maxConditionsPerRu)
+			if total > maxConditionsPerNode {
+				add(nid, "", "has too many conditions (max %d)", maxConditionsPerNode)
 			}
 			for _, ck := range OrderKeys(mapKeys(n.Quota)) {
 				if err := validateQuotaCondition(n.Quota[ck]); err != nil {

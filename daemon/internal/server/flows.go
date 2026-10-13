@@ -55,8 +55,9 @@ func (srv *Server) handleListFlows(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, srv.flowsListFn(r.Context()))
 }
 
-// handleSimulateFlow evaluates a flow now (or at a given time) and explains
-// every rule, so the operator can check a flow before relying on it.
+// handleSimulateFlow walks a flow's graph now (or at a given time) and
+// explains every step on the path, so the operator can check a flow before
+// relying on it.
 func (srv *Server) handleSimulateFlow(w http.ResponseWriter, r *http.Request) {
 	if srv.flowSimulateFn == nil {
 		http.Error(w, `{"error":"flows not available"}`, http.StatusServiceUnavailable)

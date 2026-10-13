@@ -950,7 +950,7 @@ HEIMDALLM_HOST=https://heimdallm.example.com HEIMDALLM_TOKEN=... make dev-cli
 | `heimdallm-cli config` | Print the daemon's running configuration as JSON |
 | `heimdallm-cli stats` | Review statistics: totals, by severity, by CLI, top repos, timing |
 | `heimdallm-cli agents` | Supported agents and which are installed (`--rescan` to look again) |
-| `heimdallm-cli flows` | Review flows and their rules; `flows simulate [--flow ID] [--repo owner/name] [--at RFC3339]` explains which agent would review; `flows quotas` shows each agent's remaining quota |
+| `heimdallm-cli flows` | Review flows and their steps; `flows simulate [--flow ID] [--repo owner/name] [--at RFC3339]` explains which agent would review; `flows quotas` shows each agent's remaining quota |
 | `heimdallm-cli dashboard` | Live terminal dashboard |
 
 ### TUI dashboard keybindings

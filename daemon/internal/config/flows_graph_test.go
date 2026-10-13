@@ -113,10 +113,10 @@ func TestCheckFlowConditionLimit(t *testing.T) {
 			"a1": {Type: NodeAgent, Agent: "claude"},
 		}}
 	}
-	if errs, _ := CheckFlow("x", build(maxConditionsPerRu)); len(errs) != 0 {
+	if errs, _ := CheckFlow("x", build(maxConditionsPerNode)); len(errs) != 0 {
 		t.Fatalf("exactly the limit must be accepted: %v", errs)
 	}
-	errs, _ := CheckFlow("x", build(maxConditionsPerRu+1))
+	errs, _ := CheckFlow("x", build(maxConditionsPerNode+1))
 	if len(errs) != 1 || errs[0].Node != "c1" || !strings.Contains(errs[0].Message, "too many conditions") {
 		t.Fatalf("errs=%v", errs)
 	}
