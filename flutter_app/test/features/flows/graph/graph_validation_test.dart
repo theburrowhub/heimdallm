@@ -73,6 +73,40 @@ void main() {
     expect(checkGraph(g({'c1': badQuota}, start: 'c1')).errorNodes, {'c1'});
   });
 
+  test('quota window, op and match are checked like the daemon', () {
+    Set<String> errs(FlowNode n) =>
+        checkGraph(g({'c1': n}, start: 'c1')).errorNodes;
+    FlowNode q(QuotaCondition c, {String match = 'all'}) => FlowNode(
+      id: 'c1',
+      type: FlowNodeType.condition,
+      match: match,
+      quota: [c],
+    );
+    expect(errs(q(const QuotaCondition(agent: 'claude'))), isEmpty);
+    expect(
+      errs(q(const QuotaCondition(agent: 'claude', window: 'model:opus-4'))),
+      isEmpty,
+    );
+    expect(errs(q(const QuotaCondition(agent: 'claude', window: 'daily'))), {
+      'c1',
+    });
+    expect(errs(q(const QuotaCondition(agent: 'claude', window: 'model:'))), {
+      'c1',
+    });
+    expect(
+      errs(q(QuotaCondition(agent: 'claude', window: 'model:${'x' * 123}'))),
+      {'c1'},
+    );
+    expect(
+      errs(q(QuotaCondition(agent: 'claude', window: 'model:${'x' * 122}'))),
+      isEmpty,
+    );
+    expect(errs(q(const QuotaCondition(agent: 'claude', op: 'equal'))), {'c1'});
+    expect(errs(q(const QuotaCondition(agent: 'claude'), match: 'some')), {
+      'c1',
+    });
+  });
+
   test(
     'empty flow without a start is not an error; start without nodes is',
     () {

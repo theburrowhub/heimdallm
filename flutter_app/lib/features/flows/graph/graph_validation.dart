@@ -24,6 +24,15 @@ final _hhmmPattern = RegExp(r'^([01]\d|2[0-3]):[0-5]\d$');
 const _weekdays = {'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'};
 const _maxNodes = 200;
 const _maxConditions = 20;
+const _quotaWindows = {'session', 'weekly', 'monthly', 'credit', 'any'};
+const _modelWindowPrefix = 'model:';
+const _maxWindowLength = 128;
+
+bool _validWindow(String w) =>
+    _quotaWindows.contains(w) ||
+    (w.startsWith(_modelWindowPrefix) &&
+        w.length > _modelWindowPrefix.length &&
+        w.length <= _maxWindowLength);
 
 Set<String> reachableFrom(ReviewFlow f) {
   final seen = <String>{};
@@ -107,6 +116,9 @@ GraphCheck checkGraph(ReviewFlow f) {
       }
     }
     if (n.isCondition) {
+      if (!const {'', 'all', 'any'}.contains(n.match)) {
+        err(id, 'Match must be all or any.');
+      }
       final total = n.quota.length + n.schedule.length;
       if (total == 0) err(id, 'Add at least one schedule or quota condition.');
       if (total > _maxConditions) {
@@ -124,6 +136,15 @@ GraphCheck checkGraph(ReviewFlow f) {
       }
       for (final q in n.quota) {
         if (q.agent.isEmpty) err(id, 'Pick the agent whose quota is checked.');
+        if (!_validWindow(q.window)) {
+          err(
+            id,
+            'Quota window must be session, weekly, monthly, credit, any or model:<id>.',
+          );
+        }
+        if (q.op != 'below' && q.op != 'above') {
+          err(id, 'Quota op must be below or above.');
+        }
         if (q.percent < 0 || q.percent > 100) err(id, 'Percent must be 0-100.');
       }
     } else if (n.agent.isEmpty) {
