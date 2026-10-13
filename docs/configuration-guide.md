@@ -383,14 +383,22 @@ API endpoints:
 
 ### Review flows
 
-A **flow** decides which agent reviews a PR. It is an ordered list of rules;
-each rule names an agent and optional conditions. Rules are evaluated in
-order: the first rule whose conditions hold and whose agent is installed (or,
-for OpenRouter, has a key) reviews. The later matching rules are the
-fallbacks: if the chosen agent fails **because it ran out of quota** (a usage
-limit, rate limit, HTTP 402 or 429), the review moves on to the next one in
-the same run, and the activity log records `review fallback: claude → codex`.
-Any other failure fails the review as before.
+A **flow** decides which agent reviews a PR. It is a small decision graph
+made of two kinds of steps:
+
+- a **condition** step checks a schedule and/or agent quotas and has two
+  exits, `yes` (the conditions hold) and `no` (they do not);
+- an **agent** step names an agent and has a single `next` exit, which is the
+  fallback: another agent step, a condition step, or nothing (end).
+
+Heimdallm walks the graph from `start`. At a condition step it follows `yes` or
+`no`. At an agent step it adds the agent to the ordered candidate list if it
+is installed (or, for OpenRouter, has a key) and not already listed, then
+follows `next`. The first candidate reviews; the rest are the fallbacks: if the
+chosen agent fails **because it ran out of quota** (a usage limit, rate limit,
+HTTP 402 or 429), the review moves on to the next candidate in the same run,
+and the activity log records `review fallback: claude → codex`. Any other
+failure fails the review as before.
 
 Conditions:
 
@@ -399,51 +407,127 @@ Conditions:
 | `schedule` | today is one of `days` (`mon`…`sun`; empty = every day) and the time is within `[from, to)` in `tz` (IANA zone; empty = the daemon's). `from > to` spans midnight, e.g. `22:00`–`06:00`. |
 | `quota` | `agent`'s used `window` is `below` / `above` `percent`. Windows: `session` (5h), `weekly`, `monthly`, `credit`, `any` (the most used window) or `model:<id>` (a per-model bucket, Gemini). |
 
-A rule with several conditions needs all of them (`match = "all"`, the
-default) or any of them (`match = "any"`). A rule with no conditions always
-applies, which makes it the catch-all at the end of a flow. Quota conditions
-**fail closed**: when an agent's quota cannot be read, `below` and `above`
-both read as false and the flow moves on rather than guess.
+A condition step with several conditions needs all of them (`match = "all"`,
+the default) or any of them (`match = "any"`), and must have at least one.
+Quota conditions **fail closed**: when an agent's quota cannot be read,
+`below` and `above` both read as false, so the walk takes the `no` exit rather
+than guess.
 
-The example below reviews with Claude while both its 5h and weekly windows
-are under 50%, with Copilot on weekday mornings, and with Codex otherwise:
+Limits: a flow has at most 200 steps and a condition step at most 20
+conditions; ids match `^[a-z0-9][a-z0-9_-]{0,63}$`; every exit must point at
+an existing step; loops are not allowed (the graph must be acyclic). Steps not
+reachable from `start` are ignored and shown as warnings.
+
+The example below reviews with Codex at night (weekdays 22:00 to 06:00) and
+falls back to Claude; outside those hours, or when Claude is above 80% of its
+weekly quota, it goes straight to the last step. Steps are keyed by id;
+`x` / `y` are the optional canvas position:
 
 ```toml
 [ai]
-flow = "weekday"                       # the global flow
+flow = "night-codex"                   # the global flow
 
-[ai.flows.weekday]
-name = "Weekday"
+[ai.flows.night-codex]
+name  = "Codex at night, Claude while quota lasts"
+start = "n1"                           # entry step; empty = no steps
 
-[ai.flows.weekday.rules.10]
-agent = "claude"
-[ai.flows.weekday.rules.10.quota.session]
-agent = "claude"
-window = "session"
-op = "below"
-percent = 50
-[ai.flows.weekday.rules.10.quota.weekly]
-agent = "claude"
-window = "weekly"
-op = "below"
-percent = 50
-
-[ai.flows.weekday.rules.20]
-agent = "copilot"
-[ai.flows.weekday.rules.20.schedule.office]
+[ai.flows.night-codex.nodes.n1]
+type  = "condition"
+match = "any"                          # all (default) | any
+yes   = "n2"                           # when the conditions hold; "" = end
+no    = "n3"                           # when they do not;         "" = end
+x = 120.0
+y = 80.0
+[ai.flows.night-codex.nodes.n1.schedule.s1]
 days = ["mon", "tue", "wed", "thu", "fri"]
-from = "08:00"
-to = "15:00"
-tz = "Europe/Madrid"
+from = "22:00"
+to   = "06:00"
+tz   = "Europe/Madrid"
+[ai.flows.night-codex.nodes.n1.quota.q1]
+agent   = "claude"
+window  = "weekly"
+op      = "above"
+percent = 80
 
-[ai.flows.weekday.rules.99]
-agent = "codex"                        # no conditions: if everything else fails
+[ai.flows.night-codex.nodes.n2]
+type  = "agent"
+agent = "codex"
+next  = "n3"                           # fallback: an agent or a condition; "" = end
+x = 360.0
+y = 40.0
+
+[ai.flows.night-codex.nodes.n3]
+type  = "agent"
+agent = "claude"
+next  = ""
 ```
 
-Rule keys (`10`, `20`, `99`) only set the order; they are compared as
-numbers. The **Flows** screen in the app edits all of this (drag rules to
-reorder) and has a *What would review now?* panel; the same answer is
-available from `POST /flows/simulate` and `heimdallm-cli flows simulate`.
+Walk for that flow: on a weekday at 23:00 the schedule holds, so `n1` goes to
+`n2` (Codex) and then to `n3` (Claude): candidates `codex, claude`. On Saturday
+at 12:00, with Claude under 80%, neither condition holds, so `n1` goes to `n3`:
+candidates `claude`. A flow written in the old `rules` format is no longer
+read: its keys are ignored, so it loads with no steps and reviews fall back to
+the built-in `default` flow below. `PUT /flows/{id}` with a `rules` body is
+rejected with `400`.
+
+**The editor.** The **Flows** screen in the app edits flows on a canvas: drag
+steps from the palette onto the canvas, connect the dots (each step's exits)
+to wire them, and edit the selected step in the inspector. Invalid graphs show
+their errors on the offending step and cannot be saved. The *Test* panel asks
+*What would review now?* for the graph on screen, saved or not, and highlights
+the path the walk takes. *Adjust with AI* opens the assistant (below).
+
+API and CLI:
+
+| Endpoint | What it does |
+|---|---|
+| `GET /flows` | The flows, the resolved global flow and the installed agents |
+| `PUT /flows/{id}` | Saves a graph. Invalid graphs return `422` with `{errors: [{node, field, message}]}` |
+| `DELETE /flows/{id}` | Removes a flow |
+| `POST /flows/simulate` | Evaluates a flow. Body: `{"flow": "<saved id>", "graph": {...unsaved graph...}, "repo": "owner/repo", "at": "<RFC3339>"}`; every field is optional, `graph` takes precedence over `flow`. Returns the `candidates` and the `path` walked step by step |
+| `POST /flows/assist` | Drafts a graph from a description (below) |
+
+`heimdallm-cli flows simulate [--flow <id>] [--repo owner/repo]` prints the
+walk and the candidates for the saved flow.
+
+**The flow assistant.** Describe a flow in words ("at night use Codex; if
+Claude is above 80% weekly, Gemini") and one of your installed agents drafts
+it. In the editor, *Adjust with AI* lets you pick the agent and write the
+instruction; the draft is painted on the canvas as a diff with a short plan,
+and you **Accept**, discard or refine it. While the agent drafts, and while a
+draft is shown, the editor is locked against edits. Accept is a single undo
+step, and nothing is saved until you press Save.
+
+`POST /flows/assist` takes `{"agent": "claude", "instruction": "...", "flow":
+{...}}` (`flow` is optional: the current graph to change, saved or not) and
+returns `{flow, plan, warnings, agent, duration_ms}`. The draft is never
+stored. Notes:
+
+- The whole draft, including one automatic repair round if the first output is
+  invalid, has a 180 s timeout; the response can be held up to 210 s (the
+  write deadline is extended, also through the hub proxy).
+- One assist runs at a time: a second request gets `409`.
+- The agent runs **without** its review permission flags, in an empty
+  temporary workspace with no repository checkout (Codex uses the executor's
+  own trusted temporary workspace).
+- Its output is only ever data: it is strictly decoded and fully validated
+  before it is returned.
+- OpenRouter talks to an HTTP API only, so it cannot be an assistant.
+- Errors: `400` bad request (agent not installed, review-only or empty
+  instruction), `409` busy, `422` unusable output, `502` the agent failed,
+  `504` timeout.
+
+From a terminal:
+
+```bash
+heimdallm-cli flows assist "at night use Codex; if Claude is above 80% weekly, Gemini" \
+  --flow night-codex --agent claude --apply
+```
+
+`--flow` names the flow to change (and, with `--apply`, to save as), `--agent`
+picks the installed agent (default `claude`), and `--apply` saves the draft
+with `PUT /flows/<id>` instead of only printing it. The command waits up to
+220 s.
 
 **The default flow.** With no flow selected, Heimdallm uses the flow
 `default`, built from the classic `primary` / `fallback` settings, so configs

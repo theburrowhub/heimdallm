@@ -15,7 +15,8 @@ Success criteria:
    installed agent, and gets a validated draft painted on the canvas with a short
    plan, which they accept, discard or refine again. Nothing is saved until they
    press Save.
-3. Every existing flow keeps choosing exactly the same agents after the migration.
+3. A config with no flows keeps choosing the same agents: the built-in `default` flow is still
+   built from `primary` / `fallback`.
 
 What the user asked for, verbatim intent: a node editor like the reference screenshot
 (palette on the left, canvas in the middle, properties on the right, "Adjust with AI"
@@ -35,7 +36,7 @@ Decisions taken during brainstorming:
 
 | Existing | Reused for |
 |---|---|
-| `config.FlowConfig` / `FlowRule` (`daemon/internal/config/flows.go`) | Source format of the one-pass migration; then removed from the write path |
+| `config.FlowConfig` / `FlowRule` (`daemon/internal/config/flows.go`) | Replaced by the node-based `FlowConfig` / `FlowNode`; the rule-list format is deleted |
 | `config.ScheduleCondition`, `config.QuotaCondition` + their validation | Unchanged, now carried by condition nodes |
 | `config.Config.FlowForRepo` (repo > org > global, `legacyFlow`) | Same resolution; `legacyFlow` now builds a graph |
 | `flows.Evaluate`, `scheduleHolds`, `quotaHolds` (`daemon/internal/flows/flows.go`) | Condition evaluation reused verbatim; the walk over rules becomes a walk over the graph |
@@ -45,7 +46,6 @@ Decisions taken during brainstorming:
 | `agentcatalog.Store` (`GET /cli-agents`) | Installed agents for the assistant selector, the prompt, and the editor dropdowns |
 | `executor.Executor.ExecuteRaw` + `StripToJSON` | Running the assistant prompt and extracting its JSON |
 | `executor.ValidateWorkDir` | The assistant runs in an empty temp dir under `/tmp` |
-| Config backup-on-rewrite pattern | Backup before the migration write |
 | Flutter `ApiClient` flow methods, `PlatformServices`, design system (`mix`) | Editor plumbing and look |
 
 ## 3. Data model
@@ -98,9 +98,6 @@ type FlowConfig struct {
     Name  string              `toml:"name"  json:"name"`
     Start string              `toml:"start" json:"start"`
     Nodes map[string]FlowNode `toml:"nodes" json:"nodes"`
-    // Rules is read only by the migration (§5) and never written back.
-    // It is not part of the JSON API; the PUT handler rejects a "rules" key.
-    Rules map[string]FlowRule `toml:"rules,omitempty" json:"-"`
 }
 
 type FlowNode struct {
@@ -139,10 +136,9 @@ so the editor can pin it on the node:
 Allowed, flagged as warnings (not errors): nodes unreachable from `start`; agents that
 are supported but not installed. Unreachable nodes are ignored by evaluation.
 
-`PUT /flows/{id}` whose body has a `rules` key → `400` ("flows are node graphs now; the
-legacy rules format is only read once, at migration"). The handler checks for the key
-explicitly before the strict decode, so the operator gets this message rather than a
-generic "unknown field".
+`PUT /flows/{id}` whose body has a `rules` key → `400` ("flows are node graphs; the rules
+format is not supported"). The handler checks for the key explicitly before the strict
+decode, so the operator gets this message rather than a generic "unknown field".
 
 ## 4. Evaluation (`daemon/internal/flows`)
 
@@ -169,29 +165,16 @@ added?, reasons[]}]}` — the `rules[]` field is replaced by `path[]`.
 `flowWriteAgents` (merge tracking) walks agent nodes in a deterministic topological
 order (Kahn, ties by node id) and keeps write-capable agents without repeats.
 
-## 5. One-pass migration
+## 5. No migration
 
-At config load, before validation, every flow with `rules` and no `nodes` is
-converted. With rules ordered by `OrderKeys` as `r1..rn`, and `entry(i)` being the
-first node of rule `i` (`entry(n+1) = ""`):
-
-- conditional rule `i` → condition node `c_i` (its `match`, `quota`, `schedule`),
-  `yes = a_i`, `no = entry(i+1)`; agent node `a_i` with `next = entry(i+1)`;
-- unconditional rule `i` → agent node `a_i` with `next = entry(i+1)`;
-- `start = entry(1)`.
-
-This is exact: the walk visits `a_i` iff rule `i` matches, in rule order, so the
-candidate list is identical. Size is linear (≤ 2 nodes per rule). Node ids are
-`c<order key>` / `a<order key>` (sanitised). Positions are left empty; the editor
-auto-lays them out on first open.
-
-The synthetic `default` flow from `legacyFlow` (primary → fallback) is built directly
-as `a_primary.next = a_fallback`.
-
-Write-back: if any flow was converted, the daemon writes `config.toml` **once**, after
-copying the original to `config.toml.bak.<unix-seconds>` (existing pattern). If a
-converted flow fails validation, the daemon logs the flow id and reason and refuses to
-start without touching the file — the same posture as any other invalid config.
+There is no migration: review flows had no users, and the rule-list format is deleted.
+A TOML flow still written with `rules` does **not** fail `Load`: TOML decoding is lenient
+and the `rules` keys are ignored as unknown, so the flow loads with no nodes and no
+`start`. Validation reports no error for an empty flow, so it loads empty and
+`FlowForRepo` silently falls back to the built-in primary/fallback flow. `PUT /flows/{id}`
+with a `rules` body is rejected with `400` ("flows are node graphs; the rules format is
+not supported"). The synthetic `default` flow from `legacyFlow` (primary → fallback) is
+built directly as `a_primary.next = a_fallback`.
 
 ## 6. API
 
@@ -200,7 +183,7 @@ start without touching the file — the same posture as any other invalid config
 | `GET /flows` | Body shape follows §3; `agents` becomes `[{id, installed, review_only}]` from `agentcatalog.Store` + `executor.SupportedCLIs()` |
 | `PUT /flows/{id}` | Body is a node-based `FlowConfig`; strict decode; validation errors return `422 {errors:[{node, field, message}]}` |
 | `DELETE /flows/{id}` | Unchanged |
-| `POST /flows/simulate` | Accepts `{flow_id? , flow? (unsaved graph), repo?, at?}`; returns the `Decision` with `path[]` |
+| `POST /flows/simulate` | `flow` stays the saved flow id; the unsaved graph goes in `graph`: `{flow?, graph?, repo?, at?}`; returns the `Decision` with `path[]` |
 | `POST /flows/assist` | **New**, §7 |
 
 The same handlers serve the hub proxy allowlist unchanged (flows are not proxied today).
@@ -234,8 +217,11 @@ with a fake runner):
    clearly delimited block. Output contract: a single JSON object `{plan, flow}`.
 3. **Run**: `ExecuteRaw(agent, prompt, opts)` with `WorkDir` = a fresh empty
    `os.MkdirTemp("", "heimdallm-assist-*")` (removed afterwards), no repo checkout,
-   the CLI's read-only / no-tools flags where the executor supports them, a **180 s**
-   timeout, and the request context so a client disconnect kills the process group.
+   the agent run WITHOUT its review permission flags (codex uses the executor's own
+   trusted temp workspace instead), a **180 s** timeout for the whole draft including the
+   repair round (the response may be held up to 210 s: the write deadline is extended,
+   also through the hub proxy), and the request context so a client disconnect kills the
+   process group.
 4. **Parse & validate**: `StripToJSON` → strict decode → `Validate`. On failure, **one
    repair round**: re-run with the previous output and the validation errors appended.
    Still invalid → `422 {errors, raw_excerpt}` (excerpt capped at 2 KB).
@@ -319,9 +305,6 @@ No `dart:io`, no desktop plugins: the editor is shared code and builds for web.
 
 - **Daemon** (`make test-docker`): `Validate` (each rule in §3.3); evaluator (branches,
   fallback into a condition, unavailable and duplicate agents, end edges, trace);
-  migration property test — random rule lists (0–12 rules, random conditions, random
-  instants and availability) give identical candidates through `Evaluate(legacy)` and
-  `Evaluate(migrated)`; migration write-once + backup + refuse-to-start on invalid;
   handlers `GET/PUT/simulate` (unsaved graph) and `assist` with a fake runner (valid
   output, repair on second round, `422`, `409`, `504`, `502`, cancellation removes the
   temp dir); `flowWriteAgents`.
@@ -333,12 +316,11 @@ No `dart:io`, no desktop plugins: the editor is shared code and builds for web.
 - Coverage ratchet must not drop.
 - **Local E2E**: a daemon built from the branch with a **hard stop** (unauthenticated
   review agent) so it never reviews real PRs; load a copy of a real config with flows,
-  check the migrated file and that `simulate` gives the same candidates as v0.10.x for a
-  set of instants; generate a flow with the assistant using a real installed agent and
+  check that `simulate` returns the path the graph predicts for a set of instants; generate a flow with the assistant using a real installed agent and
   save it from the UI.
 
 ## 11. Delivery
 
-One PR (`feat:`), containing migration, daemon, CLI, editor and the
+One PR (`feat:`), containing daemon, CLI, editor and the
 `docs/configuration-guide.md` "Review flows" section rewritten for the node format.
-The old format is not written anymore; the migration makes the upgrade transparent.
+The old rule-list format is deleted, without migration.
