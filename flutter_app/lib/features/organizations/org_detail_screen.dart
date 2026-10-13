@@ -17,7 +17,7 @@ import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
-import '../flows/flows_screen.dart' show flowsProvider;
+import '../flows/flows_list_screen.dart' show flowsProvider;
 import '../repositories/widgets/feature_palette.dart';
 
 class OrgDetailScreen extends ConsumerStatefulWidget {

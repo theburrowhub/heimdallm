@@ -1,8 +1,9 @@
+import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../features/activity/activity_screen.dart';
 import '../features/agents/agents_screen.dart';
 import '../features/cli_agents/agent_catalog_screen.dart';
-import '../features/flows/flows_screen.dart';
+import '../features/flows/flows_list_screen.dart';
 import '../features/dashboard/dashboard_screen.dart';
 import '../features/instances/instances_screen.dart';
 import '../features/instances/routing_screen.dart';
@@ -128,8 +129,12 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
               routes: [
                 GoRoute(
                   path: ':id',
-                  builder: (context, state) =>
-                      FlowEditorScreen(flowId: state.pathParameters['id']!),
+                  // Temporary: the graph editor replaces this.
+                  builder: (context, state) => Scaffold(
+                    body: Center(
+                      child: Text('Flow ${state.pathParameters['id']}'),
+                    ),
+                  ),
                 ),
               ],
             ),

@@ -139,8 +139,9 @@ void main() {
                 'flows': {
                   'night': {
                     'name': 'Night',
-                    'rules': {
-                      '10': {'agent': 'codex'},
+                    'start': 'a1',
+                    'nodes': {
+                      'a1': {'type': 'agent', 'agent': 'codex'},
                     },
                   },
                 },
@@ -168,17 +169,20 @@ void main() {
       );
       final listing = await client.fetchFlows();
       expect(listing.selected, 'night');
-      expect(listing.flows['night']!.rules.single.agent, 'codex');
+      expect(listing.flows['night']!.nodes['a1']!.agent, 'codex');
 
       await client.putFlow(
         'night',
         const ReviewFlow(
           name: 'Night',
-          rules: [FlowRule(agent: 'codex')],
+          start: 'a1',
+          nodes: {
+            'a1': FlowNode(id: 'a1', type: FlowNodeType.agent, agent: 'codex'),
+          },
         ),
       );
-      expect(sentBody!['rules'], {
-        '10': {'agent': 'codex'},
+      expect(sentBody!['nodes'], {
+        'a1': {'type': 'agent', 'agent': 'codex'},
       });
       await client.deleteFlow('night');
       final at = DateTime.utc(2026, 10, 8, 9);
