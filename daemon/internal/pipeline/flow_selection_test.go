@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/pipeline"
@@ -47,6 +48,12 @@ func (f *scriptedExec) Execute(cli, _ string, opts executor.ExecOptions) (*execu
 
 func flowPipeline(t *testing.T, exec *scriptedExec) (*pipeline.Pipeline, *fakePublisher) {
 	t.Helper()
+	p, pub, _ := flowPipelineWithStore(t, exec)
+	return p, pub
+}
+
+func flowPipelineWithStore(t *testing.T, exec *scriptedExec) (*pipeline.Pipeline, *fakePublisher, *store.Store) {
+	t.Helper()
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +62,7 @@ func flowPipeline(t *testing.T, exec *scriptedExec) (*pipeline.Pipeline, *fakePu
 	pub := &fakePublisher{}
 	p := pipeline.New(s, &fakeGHCounter{diff: "+line"}, exec, &fakeNotify{})
 	p.SetPublisher(pub)
-	return p, pub
+	return p, pub, s
 }
 
 func TestRun_FlowFallsBackOnQuotaError(t *testing.T) {
@@ -125,6 +132,57 @@ func TestRun_FlowFailsAfterEveryAgentFailed(t *testing.T) {
 	}
 	if ev, ok := pub.firstOf("review_agent_fallback"); !ok || !strings.Contains(ev.Data, `"reason":"quota"`) {
 		t.Errorf("fallback event = %+v (%v), want reason quota", ev, ok)
+	}
+}
+
+func TestRun_FlowRetriesOfABrokenReviewUseOneAgent(t *testing.T) {
+	// Every agent failed on the first run, so the review itself is the likely
+	// problem: the automatic retry must not spend the whole flow again. A
+	// quota failure still moves on, and a manual retry chains as before.
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true},
+		failWith: map[string]error{
+			"claude": errors.New("exit status 1"),
+			"codex":  errors.New("exit status 1"),
+		},
+	}
+	p, _, st := flowPipelineWithStore(t, exec)
+	pr := budgetPR(57)
+	opts := pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }}
+	if _, err := p.Run(pr, opts); err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("first run: err=%v ran=%v", err, exec.ran)
+	}
+	// What the scheduler sees once the retry cooldown has passed: the failed
+	// attempt is on record, but long enough ago.
+	elapse := func() {
+		t.Helper()
+		row, err := st.GetPRByGithubID(pr.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.AdvanceReviewRetryBackoff(row.ID, pr.Head.SHA, time.Now().Add(-24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		exec.ran = nil
+	}
+
+	elapse()
+	if _, err := p.Run(pr, opts); err == nil || strings.Join(exec.ran, ",") != "claude" {
+		t.Fatalf("automatic retry: err=%v ran=%v, want only claude", err, exec.ran)
+	}
+
+	elapse()
+	exec.failWith["claude"] = errors.New("usage limit reached")
+	if _, err := p.Run(pr, opts); err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("quota failure on a retry still moves on: err=%v ran=%v", err, exec.ran)
+	}
+
+	exec.ran = nil
+	exec.failWith["claude"] = errors.New("exit status 1")
+	forced := opts
+	forced.Force = true
+	if _, err := p.Run(pr, forced); err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("manual retry chains: err=%v ran=%v", err, exec.ran)
 	}
 }
 

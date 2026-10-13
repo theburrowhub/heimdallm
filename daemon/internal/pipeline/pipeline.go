@@ -1326,10 +1326,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// operator intent and bypasses the check, but its execution is still armed
 	// below so a failed manual retry protects the next automatic tick.
 	now := time.Now().UTC()
+	// priorAttempts counts earlier failed runs of this head SHA. It limits
+	// how far a non-quota failure is handed down the flow (see the agent
+	// loop below).
+	priorAttempts := 0
 	if !opts.Force {
 		blocked, retryAt, attempts, err := p.store.CheckReviewRetryBackoff(
 			prID, pr.Head.SHA, now,
 		)
+		if err == nil {
+			priorAttempts = attempts
+		}
 		if err != nil {
 			slog.Warn("pipeline: review retry cooldown check failed, proceeding",
 				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
@@ -1444,15 +1451,22 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		if err == nil {
 			break
 		}
-		// Any failure of this agent — spent quota, unparseable output, a
-		// crash — hands the review to the next agent in the flow. Retrying
-		// the same agent first would fail the same way on every retry while
-		// the next one could review. Each agent runs at most once, and a
-		// cancelled review stops here.
-		if i+1 < len(agentsToTry) && !errors.Is(err, executor.ErrExecutionCancelled) {
+		// A failed agent hands the review to the next agent in the flow, each
+		// agent running at most once; a cancelled review stops here.
+		//   - Spent quota always moves on: the agent, not the review, is the
+		//     problem.
+		//   - Any other failure (unparseable output, a crash) moves on only on
+		//     the first run of this head SHA or a manual retry. If every agent
+		//     already failed once, the review itself is the likely problem
+		//     (e.g. a diff no agent can handle), so automatic retries go back
+		//     to one agent per attempt instead of spending the whole flow on
+		//     each one.
+		quota := executor.IsQuotaError(err)
+		handOff := quota || opts.Force || priorAttempts == 0
+		if i+1 < len(agentsToTry) && handOff && !errors.Is(err, executor.ErrExecutionCancelled) {
 			reason := "error"
 			msg := "pipeline: agent failed, handing the review to the next agent in the flow"
-			if executor.IsQuotaError(err) {
+			if quota {
 				reason = "quota"
 				msg = "pipeline: agent out of quota, handing the review to the next agent in the flow"
 			}

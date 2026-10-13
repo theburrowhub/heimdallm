@@ -392,7 +392,10 @@ limit, rate limit, HTTP 402 or 429) or for any other reason, such as output
 that is not valid JSON or a crash — the review moves on to the next one in the
 same run, and the activity log records `review fallback: claude → codex`. Each
 agent is tried at most once; the review fails only when every agent in the
-flow failed, and a cancelled review never moves on.
+flow failed, and a cancelled review never moves on. A failure that is not
+about quota moves on only on the first run of a commit (or a manual retry):
+if every agent already failed once, the review itself is the likely problem,
+so automatic retries use one agent per attempt instead of the whole flow.
 
 Conditions:
 
