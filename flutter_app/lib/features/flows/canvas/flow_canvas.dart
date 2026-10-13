@@ -14,8 +14,6 @@ import 'package:heimdallm/features/flows/graph/flow_diff.dart';
 import 'package:heimdallm/shared/design_system/color_resolver.dart';
 import 'package:heimdallm/shared/design_system/tokens.dart';
 
-const _canvasSize = Size(6000, 4000);
-
 /// Ports are drawn [kPortSize] wide but take pointers over this square.
 const _portHit = 24.0;
 const _cutSize = 28.0;
@@ -332,6 +330,7 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
               state.flow.nodes[e.key]?.position != null)
             state.flow.nodes[e.key]!,
     ];
+    final size = canvasSizeFor([...shown.nodes.values, ...ghosts]);
     // Stacked in id order so painting matches hitNode's topmost rule.
     final ids =
         shown.nodes.keys
@@ -384,8 +383,8 @@ class _FlowCanvasState extends ConsumerState<FlowCanvas> {
                 },
                 child: SizedBox(
                   key: _stackKey,
-                  width: _canvasSize.width,
-                  height: _canvasSize.height,
+                  width: size.width,
+                  height: size.height,
                   child: Stack(
                     clipBehavior: Clip.none,
                     children: [

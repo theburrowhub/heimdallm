@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/painting.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -155,7 +156,8 @@ class FlowEditorController extends Notifier<FlowEditorState> {
   void markSaved([ReviewFlow? saved]) =>
       state = _with(state.flow, saved: saved ?? state.flow);
 
-  void select(Selection s) => state = _with(state.flow, selection: s);
+  /// Changes only the selection: a test run's highlighted path stays.
+  void select(Selection s) => _keep(selection: s);
 
   void rename(String name) => _commit(state.flow.copyWith(name: name));
 
@@ -176,13 +178,17 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     return id;
   }
 
+  /// Moves [id] to [to], kept at non-negative coordinates: the canvas
+  /// cannot reach a step above or left of its origin.
   void moveNode(String id, Offset to, {bool commit = true}) {
     final n = state.flow.nodes[id];
     if (n == null) return;
     final next = state.flow.copyWith(
       nodes: {
         ...state.flow.nodes,
-        id: n.copyWith(position: to),
+        id: n.copyWith(
+          position: Offset(math.max(0, to.dx), math.max(0, to.dy)),
+        ),
       },
     );
     if (!commit) {
@@ -324,21 +330,25 @@ class FlowEditorController extends Notifier<FlowEditorState> {
 
   void setDrafting(bool on) => _keep(drafting: on);
 
-  /// The current state with only the simulation or the drafting flag changed.
-  void _keep({Object? simulation = _same, bool? drafting}) =>
-      state = FlowEditorState(
-        flow: state.flow,
-        saved: state.saved,
-        selection: state.selection,
-        draft: state.draft,
-        check: state.check,
-        simulation: identical(simulation, _same)
-            ? state.simulation
-            : simulation as FlowDecision?,
-        drafting: drafting ?? state.drafting,
-        undoDepth: _undo.length,
-        redoDepth: _redo.length,
-      );
+  /// The current state with only the simulation, the drafting flag or the
+  /// selection changed.
+  void _keep({
+    Object? simulation = _same,
+    bool? drafting,
+    Selection? selection,
+  }) => state = FlowEditorState(
+    flow: state.flow,
+    saved: state.saved,
+    selection: selection ?? state.selection,
+    draft: state.draft,
+    check: state.check,
+    simulation: identical(simulation, _same)
+        ? state.simulation
+        : simulation as FlowDecision?,
+    drafting: drafting ?? state.drafting,
+    undoDepth: _undo.length,
+    redoDepth: _redo.length,
+  );
 }
 
 final flowEditorProvider =

@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:heimdallm/core/models/flow.dart';
@@ -6,6 +7,25 @@ import 'package:heimdallm/features/flows/graph/auto_layout.dart';
 
 /// Size of the Start pill drawn at [kStartPosition].
 const kStartSize = Size(96, 40);
+
+/// The canvas is never smaller than this.
+const kMinCanvasSize = Size(6000, 4000);
+
+/// Room left past the furthest step, to drop and drag into.
+const kCanvasSlack = 1000.0;
+
+/// A canvas big enough for every placed node with [kCanvasSlack] to spare:
+/// pointers only reach what lies inside it.
+Size canvasSizeFor(Iterable<FlowNode> nodes) {
+  var w = kMinCanvasSize.width, h = kMinCanvasSize.height;
+  for (final n in nodes) {
+    final p = n.position;
+    if (p == null) continue;
+    w = math.max(w, p.dx + kNodeSize.width + kCanvasSlack);
+    h = math.max(h, p.dy + kNodeSize.height + kCanvasSlack);
+  }
+  return Size(w, h);
+}
 
 /// One drawn connection: [from] ('' for Start) leaves through [port] at [a]
 /// and enters [to] at [b]. Coordinates are canvas coordinates.

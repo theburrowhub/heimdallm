@@ -224,4 +224,25 @@ void main() {
     ctl().redo();
     expect(st().selection, NodeSelection(a));
   });
+
+  test('a node moved past the top-left corner stays on the canvas', () {
+    final a = ctl().addNode(FlowNodeType.agent, const Offset(300, 200));
+    ctl().moveNode(a, const Offset(-500, -40), commit: false);
+    expect(st().flow.nodes[a]!.position, Offset.zero);
+    ctl().moveNode(a, const Offset(80, -1));
+    expect(st().flow.nodes[a]!.position, const Offset(80, 0));
+  });
+
+  test('selecting a step keeps the test run highlighted', () {
+    final a = ctl().addNode(FlowNodeType.agent, const Offset(300, 200));
+    const run = FlowDecision(
+      flowId: 'x',
+      path: [FlowPathStep(node: 'a1')],
+    );
+    ctl().setSimulation(run);
+    ctl().select(NodeSelection(a));
+    expect(st().simulation, same(run));
+    ctl().select(const NoSelection());
+    expect(st().simulation, same(run));
+  });
 }

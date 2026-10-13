@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/flows/canvas/canvas_geometry.dart';
@@ -60,5 +62,21 @@ void main() {
         .position;
     expect(hitEdge(edges, mid)?.port, EdgePort.yes);
     expect(hitEdge(edges, const Offset(5, 5)), isNull);
+  });
+
+  test('the canvas covers every placed step, never below the minimum', () {
+    expect(canvasSizeFor(f.nodes.values), kMinCanvasSize);
+    const far = FlowNode(
+      id: 'a9',
+      type: FlowNodeType.agent,
+      position: Offset(8000, 5000),
+    );
+    expect(
+      canvasSizeFor([...f.nodes.values, far]),
+      Size(
+        8000 + kNodeSize.width + kCanvasSlack,
+        5000 + kNodeSize.height + kCanvasSlack,
+      ),
+    );
   });
 }

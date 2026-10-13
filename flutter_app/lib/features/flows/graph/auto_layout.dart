@@ -8,11 +8,17 @@ const kColumnGap = 120.0;
 const kRowGap = 40.0;
 const kStartPosition = Offset(40, 200);
 
+/// The least distance a laid-out step keeps from the canvas's top edge.
+const kLayoutMargin = 40.0;
+
 /// Layered layout: a node's column is the longest path from Start to it;
 /// within a column, nodes keep the order in which a yes-before-no-before-
 /// next depth-first walk meets them, so "yes" sits above "no". Unreachable
-/// nodes go in a row below everything else. With [onlyMissing], nodes that
-/// already have a position keep it.
+/// nodes go in a row below everything else. Tall columns are moved down so
+/// nothing lands above [kLayoutMargin]. With [onlyMissing], nodes that
+/// already have a position keep it; if one of those lies at a negative
+/// coordinate, the whole graph moves so it is back on the canvas (the canvas
+/// cannot reach a step there).
 ReviewFlow autoLayout(ReviewFlow f, {bool onlyMissing = false}) {
   final order = <String>[];
   final seen = <String>{};
@@ -72,12 +78,26 @@ ReviewFlow autoLayout(ReviewFlow f, {bool onlyMissing = false}) {
   for (var i = 0; i < rest.length; i++) {
     pos[rest[i]] = Offset(kStartPosition.dx + (i + 1) * colW, restY);
   }
+  final top = pos.values.fold(kLayoutMargin, (m, p) => math.min(m, p.dy));
+  final down = Offset(0, kLayoutMargin - top);
+  final nodes = {
+    for (final e in f.nodes.entries)
+      e.key: onlyMissing && e.value.position != null
+          ? e.value
+          : e.value.copyWith(position: pos[e.key]! + down),
+  };
+  var minX = 0.0, minY = 0.0;
+  for (final n in nodes.values) {
+    minX = math.min(minX, n.position!.dx);
+    minY = math.min(minY, n.position!.dy);
+  }
+  final shift = Offset(-minX, -minY);
   return f.copyWith(
-    nodes: {
-      for (final e in f.nodes.entries)
-        e.key: onlyMissing && e.value.position != null
-            ? e.value
-            : e.value.copyWith(position: pos[e.key]),
-    },
+    nodes: shift == Offset.zero
+        ? nodes
+        : {
+            for (final e in nodes.entries)
+              e.key: e.value.copyWith(position: e.value.position! + shift),
+          },
   );
 }

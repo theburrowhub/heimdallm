@@ -69,4 +69,39 @@ void main() {
     final out = autoLayout(flow.copyWith(start: ''));
     expect(out.nodes.values.every((n) => n.position != null), isTrue);
   });
+
+  test('a tall column is shifted so every step lies on the canvas', () {
+    // A binary tree three conditions deep: eight agents share column 3.
+    final nodes = <String, FlowNode>{};
+    for (var i = 1; i <= 7; i++) {
+      nodes['c$i'] = FlowNode(
+        id: 'c$i',
+        type: FlowNodeType.condition,
+        yes: i < 4 ? 'c${2 * i}' : 'a${2 * i - 7}',
+        no: i < 4 ? 'c${2 * i + 1}' : 'a${2 * i - 6}',
+      );
+    }
+    for (var i = 1; i <= 8; i++) {
+      nodes['a$i'] = FlowNode(id: 'a$i', type: FlowNodeType.agent);
+    }
+    final out = autoLayout(ReviewFlow(start: 'c1', nodes: nodes));
+    for (final n in out.nodes.values) {
+      expect(n.position!.dy, greaterThanOrEqualTo(kLayoutMargin), reason: n.id);
+      expect(n.position!.dx, greaterThanOrEqualTo(kLayoutMargin), reason: n.id);
+    }
+  });
+
+  test('positions kept by onlyMissing are moved off negative coordinates', () {
+    final placed = flow.copyWith(
+      nodes: {
+        ...flow.nodes,
+        'a1': flow.nodes['a1']!.copyWith(position: const Offset(-300, -50)),
+      },
+    );
+    final out = autoLayout(placed, onlyMissing: true);
+    for (final n in out.nodes.values) {
+      expect(n.position!.dx, greaterThanOrEqualTo(0), reason: n.id);
+      expect(n.position!.dy, greaterThanOrEqualTo(0), reason: n.id);
+    }
+  });
 }

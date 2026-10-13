@@ -368,4 +368,39 @@ void main() {
     };
     expect(cards, {'a1': false, 'a2': true});
   });
+
+  testWidgets('a step dragged past the top-left corner can still be tapped', (
+    tester,
+  ) async {
+    final c = await pumpCanvas(tester, twoAgents);
+    await tester.drag(
+      find.byKey(const ValueKey('node-a1')),
+      const Offset(-700, -500),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('node-a1')));
+    await tester.pump();
+    expect(c.read(flowEditorProvider).selection, const NodeSelection('a1'));
+  });
+
+  testWidgets('the canvas grows to hold a step placed far to the right', (
+    tester,
+  ) async {
+    final c = await pumpCanvas(
+      tester,
+      twoAgents.copyWith(
+        nodes: {
+          ...twoAgents.nodes,
+          'a2': twoAgents.nodes['a2']!.copyWith(
+            position: const Offset(6500, 4300),
+          ),
+        },
+      ),
+    );
+    tester.view.physicalSize = const Size(7200, 4800);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('node-a2')));
+    await tester.pump();
+    expect(c.read(flowEditorProvider).selection, const NodeSelection('a2'));
+  });
 }
