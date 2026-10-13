@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:heimdallm/core/models/flow.dart';
-import 'package:heimdallm/features/flows/canvas/canvas_geometry.dart';
 import 'package:heimdallm/features/flows/graph/auto_layout.dart';
 import 'package:heimdallm/features/flows/graph/flow_diff.dart';
 import 'package:heimdallm/shared/design_system/color_resolver.dart';
@@ -74,7 +73,7 @@ class FlowNodeCard extends StatelessWidget {
       _ => scheme.outlineVariant,
     };
     final strong = selected || diff != null || hasError || onPath;
-    return Opacity(
+    final card = Opacity(
       opacity: ghost ? .35 : (unreachable ? .55 : 1),
       child: Container(
         width: kNodeSize.width,
@@ -124,6 +123,9 @@ class FlowNodeCard extends StatelessWidget {
                             _title,
                             style: text.titleSmall?.copyWith(
                               fontWeight: FontWeight.w600,
+                              decoration: ghost
+                                  ? TextDecoration.lineThrough
+                                  : null,
                             ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
@@ -151,6 +153,7 @@ class FlowNodeCard extends StatelessWidget {
                       _subtitle,
                       style: text.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
+                        decoration: ghost ? TextDecoration.lineThrough : null,
                       ),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
@@ -162,6 +165,38 @@ class FlowNodeCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+    final d = diff;
+    if (d == null) return card;
+    // What the draft does to this step, in words as well as colour.
+    final colour = switch (d) {
+      DiffKind.added => resolveAppColor(context, AppColors.success),
+      DiffKind.changed => resolveAppColor(context, AppColors.warning),
+      DiffKind.removed => danger,
+    };
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        card,
+        Positioned(
+          top: -9,
+          right: 10,
+          child: Container(
+            key: ValueKey('diff-${node.id}'),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(
+              color: canvasCardColor(scheme),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: colour),
+            ),
+            child: Text(switch (d) {
+              DiffKind.added => 'new',
+              DiffKind.changed => 'changed',
+              DiffKind.removed => 'removed',
+            }, style: text.labelSmall?.copyWith(color: colour, height: 1.2)),
+          ),
+        ),
+      ],
     );
   }
 }

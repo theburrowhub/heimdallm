@@ -114,6 +114,10 @@ class FlowPalette extends StatelessWidget {
             'A condition continues through yes or no; an agent through its fallback.',
           ),
           (
+            Icons.add_circle_outline,
+            'Click + beside an exit, or pick "+ New" in the inspector, to add the next step.',
+          ),
+          (
             Icons.content_cut,
             'Hover a connection and click the scissors to cut it.',
           ),

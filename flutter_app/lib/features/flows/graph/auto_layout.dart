@@ -8,6 +8,12 @@ const kColumnGap = 120.0;
 const kRowGap = 40.0;
 const kStartPosition = Offset(40, 200);
 
+/// Size of the Start pill drawn at [kStartPosition].
+const kStartSize = Size(96, 40);
+
+/// The least room kept between a placed step and anything else on the canvas.
+const kPlaceGap = 24.0;
+
 /// The least distance a laid-out step keeps from the canvas's top edge.
 const kLayoutMargin = 40.0;
 
@@ -100,4 +106,56 @@ ReviewFlow autoLayout(ReviewFlow f, {bool onlyMissing = false}) {
               e.key: e.value.copyWith(position: e.value.position! + shift),
           },
   );
+}
+
+/// [at] (kept at non-negative coordinates), or the first spot below it, one
+/// row at a time, where a step clears [taken] and the Start pill by
+/// [kPlaceGap].
+Offset freeSpot(Iterable<Rect> taken, Offset at) {
+  final busy = [kStartPosition & kStartSize, ...taken];
+  var p = Offset(math.max(0, at.dx), math.max(0, at.dy));
+  for (var i = 0; i < 1000; i++) {
+    final r = (p & kNodeSize).inflate(kPlaceGap);
+    if (!busy.any(r.overlaps)) break;
+    p += Offset(0, kNodeSize.height + kRowGap);
+  }
+  return p;
+}
+
+/// The canvas rectangles of [f]'s placed steps, but [except].
+List<Rect> nodeRects(ReviewFlow f, {String? except}) => [
+  for (final n in f.nodes.values)
+    if (n.position != null && n.id != except) n.position! & kNodeSize,
+];
+
+/// [autoLayout] with `onlyMissing`, then every step that had no position is
+/// moved down until it clears the placed ones, [keepClearOf] and the steps
+/// placed before it, so a drafted step never lands on top of another.
+ReviewFlow layoutMissing(
+  ReviewFlow f, {
+  Iterable<Rect> keepClearOf = const [],
+}) {
+  final missing = {
+    for (final n in f.nodes.values)
+      if (n.position == null) n.id,
+  };
+  final laid = autoLayout(f, onlyMissing: true);
+  if (missing.isEmpty) return laid;
+  final taken = [
+    ...keepClearOf,
+    for (final n in laid.nodes.values)
+      if (!missing.contains(n.id)) n.position! & kNodeSize,
+  ];
+  final order = missing.toList()
+    ..sort((a, b) {
+      final pa = laid.nodes[a]!.position!, pb = laid.nodes[b]!.position!;
+      return pa.dx != pb.dx ? pa.dx.compareTo(pb.dx) : pa.dy.compareTo(pb.dy);
+    });
+  final nodes = {...laid.nodes};
+  for (final id in order) {
+    final p = freeSpot(taken, nodes[id]!.position!);
+    taken.add(p & kNodeSize);
+    nodes[id] = nodes[id]!.copyWith(position: p);
+  }
+  return laid.copyWith(nodes: nodes);
 }

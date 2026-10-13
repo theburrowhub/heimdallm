@@ -104,4 +104,45 @@ void main() {
       expect(n.position!.dy, greaterThanOrEqualTo(0), reason: n.id);
     }
   });
+
+  test('freeSpot steps down past taken spots and the Start pill', () {
+    const a = Offset(300, 200);
+    expect(freeSpot(const [], a), a);
+    final taken = [a & kNodeSize];
+    final p = freeSpot(taken, const Offset(320, 210));
+    expect(p.dx, 320);
+    expect((p & kNodeSize).overlaps(taken.single.inflate(kPlaceGap)), isFalse);
+    final s = freeSpot(const [], kStartPosition);
+    expect((s & kNodeSize).overlaps(kStartPosition & kStartSize), isFalse);
+    expect(freeSpot(const [], const Offset(-50, -50)), const Offset(0, 0));
+  });
+
+  test('layoutMissing keeps placed steps and keeps new ones clear', () {
+    final f = ReviewFlow(
+      start: 'a1',
+      nodes: {
+        'a1': const FlowNode(
+          id: 'a1',
+          type: FlowNodeType.agent,
+          next: 'a2',
+          position: Offset(380, 200),
+        ),
+        'a2': const FlowNode(id: 'a2', type: FlowNodeType.agent, next: 'a3'),
+        'a3': const FlowNode(id: 'a3', type: FlowNodeType.agent),
+      },
+    );
+    final blocker = const Offset(720, 200) & kNodeSize;
+    final laid = layoutMissing(f, keepClearOf: [blocker]);
+    expect(laid.nodes['a1']!.position, const Offset(380, 200));
+    final rects = [
+      blocker,
+      for (final n in laid.nodes.values) n.position! & kNodeSize,
+    ];
+    for (var i = 0; i < rects.length; i++) {
+      for (var j = i + 1; j < rects.length; j++) {
+        expect(rects[i].overlaps(rects[j]), isFalse, reason: '$i/$j');
+      }
+    }
+    expect(layoutMissing(laid).toJson(), laid.toJson());
+  });
 }

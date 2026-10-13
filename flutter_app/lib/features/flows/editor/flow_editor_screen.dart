@@ -297,22 +297,17 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
     }
   }
 
-  /// Adds a step centred in the visible part of the canvas, stepping
-  /// diagonally past steps already there.
+  /// Adds a step centred in the visible part of the canvas (below it when
+  /// another step is there).
   void _addAtCentre(FlowNodeType type) {
-    final state = ref.read(flowEditorProvider);
-    if (state.locked) return;
-    final nodes = state.flow.nodes.values;
+    if (ref.read(flowEditorProvider).locked) return;
     final centre = _canvas.viewportCentre ?? const Offset(510, 438);
-    var at = centre - Offset(kNodeSize.width / 2, kNodeSize.height / 2);
-    for (var i = 0; i < 50; i++) {
-      final taken = nodes.any(
-        (n) => n.position != null && (n.position! - at).distance < 16,
-      );
-      if (!taken) break;
-      at += const Offset(30, 30);
-    }
-    ref.read(flowEditorProvider.notifier).addNode(type, at);
+    ref
+        .read(flowEditorProvider.notifier)
+        .addNode(
+          type,
+          centre - Offset(kNodeSize.width / 2, kNodeSize.height / 2),
+        );
   }
 
   @override
@@ -401,6 +396,16 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
       excluding: state.locked,
       child: IgnorePointer(ignoring: state.locked, child: inspector),
     );
+    // The assistant takes the inspector's place while open: the canvas is
+    // never covered. Closing it brings the inspector back.
+    final assisting = !readOnly && _assistOpen;
+    final sidePane = assisting
+        ? AssistPanel(
+            agents: listing.agents,
+            defaultAgent: defaultAgent,
+            onClose: () => setState(() => _assistOpen = false),
+          )
+        : inspectorPane;
 
     void undo() {
       if (canEdit) ctl.undo();
@@ -460,38 +465,6 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
                         ),
                       ),
                     ),
-                  if (!readOnly && !_assistOpen)
-                    Positioned(
-                      right: 16,
-                      bottom: 16,
-                      child: FloatingActionButton.extended(
-                        key: const ValueKey('assist-open'),
-                        onPressed: () => setState(() => _assistOpen = true),
-                        icon: const Icon(Icons.auto_awesome),
-                        label: const Text('Adjust with AI'),
-                      ),
-                    ),
-                  if (!readOnly && _assistOpen)
-                    Positioned(
-                      right: 16,
-                      bottom: 16,
-                      width: (area.maxWidth - 32).clamp(280, 420).toDouble(),
-                      child: _FloatingPanel(
-                        maxHeight: area.maxHeight - 32,
-                        child: AssistPanel(
-                          agents: listing.agents,
-                          defaultAgent: defaultAgent,
-                          onClose: () => setState(() => _assistOpen = false),
-                        ),
-                      ),
-                    ),
-                  if (state.drafting)
-                    const Positioned(
-                      top: 12,
-                      left: 0,
-                      right: 0,
-                      child: Center(child: _DraftingBanner()),
-                    ),
                 ],
               ),
             );
@@ -501,14 +474,15 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
                 children: [
                   Expanded(child: canvas),
                   Container(
-                    height: 280,
+                    key: const ValueKey('flow-side-pane'),
+                    height: assisting ? 320 : 280,
                     decoration: BoxDecoration(
                       color: panel,
                       border: Border(top: BorderSide(color: border)),
                     ),
                     child: SingleChildScrollView(
                       padding: const EdgeInsets.all(16),
-                      child: inspectorPane,
+                      child: sidePane,
                     ),
                   ),
                 ],
@@ -528,14 +502,15 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
                     ),
                   Expanded(child: canvas),
                   Container(
-                    width: 340,
+                    key: const ValueKey('flow-side-pane'),
+                    width: 360,
                     decoration: BoxDecoration(
                       color: panel,
                       border: Border(left: BorderSide(color: border)),
                     ),
                     child: SingleChildScrollView(
                       padding: const EdgeInsets.all(20),
-                      child: inspectorPane,
+                      child: sidePane,
                     ),
                   ),
                 ],
@@ -561,6 +536,9 @@ class _FlowEditorScreenState extends ConsumerState<FlowEditorScreen> {
                   canSave: !_saving && state.draft == null,
                   saving: _saving,
                   testOpen: _testOpen,
+                  onAssist: assisting
+                      ? null
+                      : () => setState(() => _assistOpen = true),
                   onBack: () => context.go('/flows'),
                   onUseGlobally: _useGlobally,
                   onUndo: ctl.undo,
@@ -618,28 +596,6 @@ class _FloatingPanel extends StatelessWidget {
   );
 }
 
-/// Says why the canvas and inspector ignore edits while the agent drafts.
-class _DraftingBanner extends StatelessWidget {
-  const _DraftingBanner();
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = resolveAppColor(context, AppColors.accent);
-    return AppBadge(
-      key: const ValueKey('assist-drafting'),
-      icon: Icon(Icons.auto_awesome, size: 14, color: accent),
-      label: 'The agent is drafting · editing is paused',
-      foreground: accent,
-      background: AppColors.surfaceRaised.resolve(context),
-      border: accent.withValues(alpha: .45),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      radius: 999,
-      fontSize: 12,
-      letterSpacing: 0,
-    );
-  }
-}
-
 /// The editor's bar: back, the flow's name and state, and its actions.
 class _TopBar extends StatelessWidget {
   final bool compact;
@@ -656,6 +612,10 @@ class _TopBar extends StatelessWidget {
   final bool canSave;
   final bool saving;
   final bool testOpen;
+
+  /// Opens the assistant; null while it is open (it closes from its own
+  /// header, which also cancels a run and discards a draft).
+  final VoidCallback? onAssist;
   final VoidCallback onBack;
   final ValueChanged<bool> onUseGlobally;
   final VoidCallback onUndo;
@@ -681,6 +641,7 @@ class _TopBar extends StatelessWidget {
     required this.canSave,
     required this.saving,
     required this.testOpen,
+    required this.onAssist,
     required this.onBack,
     required this.onUseGlobally,
     required this.onUndo,
@@ -804,6 +765,22 @@ class _TopBar extends StatelessWidget {
               onPressed: canArrange ? onArrange : null,
             ),
             divider(),
+            if (onAssist != null) ...[
+              compact
+                  ? IconButton.filledTonal(
+                      key: const ValueKey('assist-open'),
+                      tooltip: 'Adjust with AI',
+                      onPressed: onAssist,
+                      icon: const Icon(Icons.auto_awesome, size: 18),
+                    )
+                  : FilledButton.tonalIcon(
+                      key: const ValueKey('assist-open'),
+                      onPressed: onAssist,
+                      icon: const Icon(Icons.auto_awesome, size: 18),
+                      label: const Text('Adjust with AI'),
+                    ),
+              const SizedBox(width: 8),
+            ],
           ],
           test,
           const SizedBox(width: 8),

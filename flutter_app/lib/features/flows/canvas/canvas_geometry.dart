@@ -5,9 +5,6 @@ import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
 import 'package:heimdallm/features/flows/graph/auto_layout.dart';
 
-/// Size of the Start pill drawn at [kStartPosition].
-const kStartSize = Size(96, 40);
-
 /// The canvas is never smaller than this.
 const kMinCanvasSize = Size(6000, 4000);
 

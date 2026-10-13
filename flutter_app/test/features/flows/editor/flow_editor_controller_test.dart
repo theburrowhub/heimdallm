@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
+import 'package:heimdallm/features/flows/graph/auto_layout.dart';
 import 'package:heimdallm/features/flows/graph/flow_diff.dart';
 
 void main() {
@@ -244,5 +245,164 @@ void main() {
     expect(st().simulation, same(run));
     ctl().select(const NoSelection());
     expect(st().simulation, same(run));
+  });
+
+  bool overlaps(Offset a, Offset b) => (a & kNodeSize).overlaps(b & kNodeSize);
+
+  test('a step added on top of another moves below it', () {
+    final a1 = ctl().addNode(FlowNodeType.agent, const Offset(300, 200));
+    final a2 = ctl().addNode(FlowNodeType.agent, const Offset(310, 210));
+    final p1 = st().flow.nodes[a1]!.position!;
+    final p2 = st().flow.nodes[a2]!.position!;
+    expect(overlaps(p1, p2), isFalse);
+    expect(p2.dx, 310);
+    expect(p2.dy, greaterThan(p1.dy + kNodeSize.height));
+    expect(st().view?.reveal, a2);
+  });
+
+  test('addConnected places, connects and selects the new step as one undo '
+      'step', () {
+    final c = ctl().addNode(FlowNodeType.condition, const Offset(300, 200));
+    final undo = st().undoDepth;
+    final yes = ctl().addConnected(c, EdgePort.yes, FlowNodeType.agent)!;
+    final no = ctl().addConnected(c, EdgePort.no, FlowNodeType.condition)!;
+    final f = st().flow;
+    expect(f.nodes[c]!.yes, yes);
+    expect(f.nodes[c]!.no, no);
+    expect(f.nodes[no]!.isCondition, isTrue);
+    expect(f.nodes[yes]!.position!.dx, greaterThan(300 + kNodeSize.width));
+    expect(overlaps(f.nodes[yes]!.position!, f.nodes[no]!.position!), isFalse);
+    expect(st().selection, NodeSelection(no));
+    expect(st().view?.reveal, no);
+    expect(st().undoDepth, undo + 2);
+    ctl().undo();
+    expect(st().flow.nodes.containsKey(no), isFalse);
+    expect(st().flow.nodes[c]!.no, '');
+    // Agents have no yes exit.
+    expect(ctl().addConnected(yes, EdgePort.yes, FlowNodeType.agent), isNull);
+  });
+
+  test('addConnected from Start sets the start step', () {
+    final a = ctl().addConnected('', EdgePort.start, FlowNodeType.agent)!;
+    expect(st().flow.start, a);
+    expect(st().flow.nodes[a]!.position!.dx, greaterThan(kStartPosition.dx));
+  });
+
+  test('setEdge connects, ends and keeps the selection', () {
+    final a1 = ctl().addNode(FlowNodeType.agent, const Offset(300, 200));
+    final a2 = ctl().addNode(FlowNodeType.agent, const Offset(700, 200));
+    ctl().select(NodeSelection(a1));
+    expect(ctl().setEdge(a1, EdgePort.next, a2), isTrue);
+    expect(st().flow.nodes[a1]!.next, a2);
+    final depth = st().undoDepth;
+    expect(ctl().setEdge(a1, EdgePort.next, a2), isTrue);
+    expect(st().undoDepth, depth, reason: 'no change, no undo step');
+    expect(ctl().setEdge(a2, EdgePort.next, a1), isFalse);
+    expect(ctl().setEdge(a1, EdgePort.next, ''), isTrue);
+    expect(st().flow.nodes[a1]!.next, '');
+    expect(st().selection, NodeSelection(a1));
+    expect(ctl().setEdge('', EdgePort.start, a2), isTrue);
+    expect(st().flow.start, a2);
+    expect(ctl().setEdge('', EdgePort.start, ''), isTrue);
+    expect(st().flow.start, '');
+  });
+
+  test('connectableTargets leaves out the step itself and loops', () {
+    final a1 = ctl().addNode(FlowNodeType.agent, const Offset(300, 200));
+    final a2 = ctl().addNode(FlowNodeType.agent, const Offset(700, 200));
+    final a3 = ctl().addNode(FlowNodeType.agent, const Offset(1100, 200));
+    ctl().connect(a1, EdgePort.next, a2);
+    ctl().connect(a2, EdgePort.next, a3);
+    final f = st().flow;
+    expect(connectableTargets(f, a3, EdgePort.next), isEmpty);
+    expect(connectableTargets(f, a1, EdgePort.next), [a2, a3]);
+    // a2's own edge does not count against it when it is replaced.
+    expect(connectableTargets(f, a2, EdgePort.next), [a3]);
+    expect(connectableTargets(f, '', EdgePort.start), [a1, a2, a3]);
+  });
+
+  test('a drafted step never lands on a kept or removed step', () {
+    ctl().load(
+      ReviewFlow(
+        start: 'a1',
+        nodes: {
+          'a1': const FlowNode(
+            id: 'a1',
+            type: FlowNodeType.agent,
+            agent: 'claude',
+            next: 'a2',
+            position: Offset(380, 200),
+          ),
+          // Sits where the layout puts a drafted step's column.
+          'a2': const FlowNode(
+            id: 'a2',
+            type: FlowNodeType.agent,
+            agent: 'codex',
+            position: Offset(720, 200),
+          ),
+          'a3': const FlowNode(
+            id: 'a3',
+            type: FlowNodeType.agent,
+            agent: 'gemini',
+            position: Offset(1060, 200),
+          ),
+        },
+      ),
+    );
+    final view = st().view;
+    ctl().showDraft(
+      FlowAssistResult(
+        flow: ReviewFlow(
+          start: 'a1',
+          nodes: {
+            'a1': const FlowNode(
+              id: 'a1',
+              type: FlowNodeType.agent,
+              agent: 'claude',
+              next: 'c1',
+            ),
+            'c1': const FlowNode(
+              id: 'c1',
+              type: FlowNodeType.condition,
+              yes: 'a2',
+              no: 'a4',
+            ),
+            'a2': const FlowNode(
+              id: 'a2',
+              type: FlowNodeType.agent,
+              agent: 'codex',
+            ),
+            'a4': const FlowNode(
+              id: 'a4',
+              type: FlowNodeType.agent,
+              agent: 'gemini',
+            ),
+          },
+        ),
+      ),
+    );
+    final d = st().draft!.flow.nodes;
+    expect(d['a1']!.position, const Offset(380, 200));
+    expect(d['a2']!.position, const Offset(720, 200));
+    final placed = [
+      ...d.values.map((n) => n.position!),
+      const Offset(1060, 200), // the removed a3, drawn as a ghost
+    ];
+    for (var i = 0; i < placed.length; i++) {
+      for (var j = i + 1; j < placed.length; j++) {
+        expect(overlaps(placed[i], placed[j]), isFalse, reason: '$i/$j');
+      }
+    }
+    expect(st().view, isNot(same(view)), reason: 'a draft asks for a fit');
+  });
+
+  test('load and arrange ask the canvas to fit', () {
+    final loaded = st().view;
+    expect(loaded, isNotNull);
+    expect(loaded!.reveal, isNull);
+    ctl().addNode(FlowNodeType.agent, const Offset(300, 200));
+    ctl().arrange();
+    expect(st().view!.reveal, isNull);
+    expect(st().view, isNot(same(loaded)));
   });
 }

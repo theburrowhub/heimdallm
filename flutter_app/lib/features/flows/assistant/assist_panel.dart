@@ -225,7 +225,9 @@ class _AssistPanelState extends ConsumerState<AssistPanel> {
             Expanded(child: AppText.sectionTitle('Adjust with AI')),
             IconButton(
               key: const ValueKey('assist-close'),
-              tooltip: draft == null ? 'Close' : 'Close and discard the draft',
+              tooltip: draft == null
+                  ? 'Back to the inspector'
+                  : 'Discard the draft and go back to the inspector',
               visualDensity: VisualDensity.compact,
               icon: const Icon(Icons.close, size: 18),
               onPressed: _close,
@@ -442,15 +444,17 @@ class _DraftReview extends StatelessWidget {
             ),
           ],
           const SizedBox(height: 10),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
+          // Wraps in a narrow column rather than overflowing it.
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 8,
+            runSpacing: 8,
             children: [
               OutlinedButton(
                 key: const ValueKey('assist-discard'),
                 onPressed: busy ? null : onDiscard,
                 child: const Text('Discard'),
               ),
-              const SizedBox(width: 8),
               FilledButton.icon(
                 key: const ValueKey('assist-accept'),
                 onPressed: busy ? null : onAccept,

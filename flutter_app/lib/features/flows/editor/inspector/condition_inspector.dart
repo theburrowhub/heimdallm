@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
+import 'package:heimdallm/features/flows/editor/inspector/edge_picker.dart';
 import 'package:heimdallm/features/flows/editor/inspector/inspector_parts.dart';
 import 'package:heimdallm/shared/design_system/components/components.dart';
 
@@ -47,6 +48,20 @@ class ConditionInspector extends ConsumerWidget {
               'otherwise. Unknown quota counts as not holding.',
         ),
         if (readOnly) const InspectorReadOnlyNote(),
+        const InspectorLabel('Then'),
+        EdgePicker(
+          from: node.id,
+          port: EdgePort.yes,
+          label: 'If yes',
+          readOnly: readOnly,
+        ),
+        const SizedBox(height: 12),
+        EdgePicker(
+          from: node.id,
+          port: EdgePort.no,
+          label: 'If no',
+          readOnly: readOnly,
+        ),
         const InspectorLabel('Holds when'),
         DropdownButtonFormField<String>(
           key: const ValueKey('inspector-match'),

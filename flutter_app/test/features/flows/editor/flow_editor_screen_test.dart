@@ -404,8 +404,11 @@ void main() {
       final c1 = tester.getRect(find.byKey(const ValueKey('node-c1')));
       expect((c1.center - view.center).distance, lessThan(1));
       await doubleTap();
+      // The centre is taken: the next step goes right below, clear of it.
       final c2 = tester.getRect(find.byKey(const ValueKey('node-c2')));
-      expect(c2.topLeft - c1.topLeft, const Offset(30, 30));
+      expect(c2.left, c1.left);
+      expect(c2.top, greaterThan(c1.bottom));
+      expect(c2.overlaps(c1), isFalse);
     },
   );
 
@@ -445,7 +448,7 @@ void main() {
     expect(find.byKey(const ValueKey('assist-input')), findsNothing);
   });
 
-  testWidgets('in a compact window the assistant stays inside the canvas', (
+  testWidgets('in a compact window the assistant takes the inspector slot', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues(const {});
@@ -492,6 +495,11 @@ void main() {
       find.byKey(const ValueKey('assist-run')).hitTestable(),
       findsOneWidget,
     );
+    // Below the canvas, not over it.
+    final canvas = tester.getRect(find.byKey(const ValueKey('flow-canvas')));
+    final pane = tester.getRect(find.byKey(const ValueKey('flow-side-pane')));
+    expect(pane.top, greaterThanOrEqualTo(canvas.bottom));
+    expect(find.byKey(const ValueKey('flow-name')), findsNothing);
   });
 
   testWidgets('the editor is locked while the assistant drafts', (
@@ -508,38 +516,33 @@ void main() {
         client: any(named: 'client'),
       ),
     ).thenAnswer((_) => pending.future);
+    // the name field has the keyboard when the assistant opens
+    await tester.showKeyboard(find.byKey(const ValueKey('flow-name')));
     await tester.tap(find.byKey(const ValueKey('assist-open')));
     await tester.pumpAndSettle();
+    // The assistant replaced the inspector: its fields cannot be edited
+    // under the coming draft.
+    expect(find.byKey(const ValueKey('flow-name')), findsNothing);
     await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
-    // the name field has the keyboard when the run starts
-    await tester.showKeyboard(find.byKey(const ValueKey('flow-name')));
-    bool nameFocused() => tester
-        .widget<EditableText>(
-          find.descendant(
-            of: find.byKey(const ValueKey('flow-name')),
-            matching: find.byType(EditableText),
-          ),
-        )
-        .focusNode
-        .hasFocus;
-    expect(nameFocused(), isTrue);
     await tester.tap(find.byKey(const ValueKey('assist-run')));
     await tester.pump();
     expect(find.byKey(const ValueKey('assist-drafting')), findsOneWidget);
-    expect(nameFocused(), isFalse);
     // a palette double-tap does not add a step under the coming draft
     await tester.tap(find.byKey(const ValueKey('palette-agent')));
     await tester.pump(const Duration(milliseconds: 50));
     await tester.tap(find.byKey(const ValueKey('palette-agent')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.byKey(const ValueKey('node-a2')), findsNothing);
-    // nor can the inspector be focused again
-    await tester.tap(
-      find.byKey(const ValueKey('flow-name')),
-      warnIfMissed: false,
+    // nor does a step move
+    await tester.drag(
+      find.byKey(const ValueKey('node-a1')),
+      const Offset(60, 40),
     );
     await tester.pump();
-    expect(nameFocused(), isFalse);
+    expect(
+      containerOf(tester).read(flowEditorProvider).flow.nodes['a1']!.position,
+      const Offset(300, 200),
+    );
     pending.completeError(ApiException('gone'));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('assist-drafting')), findsNothing);
@@ -748,5 +751,96 @@ void main() {
     verify(() => api.patchConfig(any())).called(1);
     expect(busy('default-flow-primary'), isFalse);
     expect(busy('default-flow-fallback'), isFalse);
+  });
+
+  testWidgets(
+    'the assistant docks in the right column, never over the canvas',
+    (tester) async {
+      SharedPreferences.setMockInitialValues(const {});
+      final (api, _) = await pumpEditor(tester);
+      tester.view.physicalSize = const Size(1440, 900);
+      await tester.pumpAndSettle();
+      final canvasBefore = tester.getRect(
+        find.byKey(const ValueKey('flow-canvas')),
+      );
+      final pane = find.byKey(const ValueKey('flow-side-pane'));
+      expect(tester.getRect(pane).left, canvasBefore.right);
+      expect(find.byKey(const ValueKey('flow-name')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('assist-open')));
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: pane,
+          matching: find.byKey(const ValueKey('assist-input')),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('flow-name')), findsNothing);
+      expect(find.byKey(const ValueKey('assist-open')), findsNothing);
+      // The canvas keeps its whole area.
+      expect(
+        tester.getRect(find.byKey(const ValueKey('flow-canvas'))),
+        canvasBefore,
+      );
+      when(
+        () => api.assistFlow(
+          agent: any(named: 'agent'),
+          instruction: any(named: 'instruction'),
+          current: any(named: 'current'),
+          client: any(named: 'client'),
+        ),
+      ).thenAnswer(
+        (_) async => FlowAssistResult(
+          plan: 'Add a fallback.',
+          flow: _night.copyWith(
+            nodes: {
+              'a1': _night.nodes['a1']!.copyWith(next: 'a2'),
+              'a2': const FlowNode(
+                id: 'a2',
+                type: FlowNodeType.agent,
+                agent: 'codex',
+              ),
+            },
+          ),
+        ),
+      );
+      await tester.enterText(find.byKey(const ValueKey('assist-input')), 'x');
+      await tester.tap(find.byKey(const ValueKey('assist-run')));
+      await tester.pumpAndSettle();
+      // The draft is on the canvas, in view, with the banner's buttons.
+      final canvas = tester.getRect(find.byKey(const ValueKey('flow-canvas')));
+      final a2 = tester.getRect(find.byKey(const ValueKey('node-a2')));
+      expect(
+        canvas.contains(a2.topLeft) && canvas.contains(a2.bottomRight),
+        isTrue,
+      );
+      await tester.tap(find.byKey(const ValueKey('canvas-draft-accept')));
+      await tester.pumpAndSettle();
+      final st = containerOf(tester).read(flowEditorProvider);
+      expect(st.flow.nodes['a1']!.next, 'a2');
+      expect(st.draft, isNull);
+      // Closing brings the inspector back.
+      await tester.tap(find.byKey(const ValueKey('assist-close')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('flow-name')), findsOneWidget);
+      expect(find.byKey(const ValueKey('assist-open')), findsOneWidget);
+    },
+  );
+
+  testWidgets('Arrange fits the arranged flow in view', (tester) async {
+    await pumpEditor(tester);
+    final ctl = containerOf(tester).read(flowEditorProvider.notifier);
+    ctl.moveNode('a1', const Offset(4000, 3000));
+    await tester.pumpAndSettle();
+    final canvas = tester.getRect(find.byKey(const ValueKey('flow-canvas')));
+    bool a1InView() {
+      final r = tester.getRect(find.byKey(const ValueKey('node-a1')));
+      return canvas.contains(r.topLeft) && canvas.contains(r.bottomRight);
+    }
+
+    expect(a1InView(), isFalse);
+    await tester.tap(find.byKey(const ValueKey('flow-arrange')));
+    await tester.pumpAndSettle();
+    expect(a1InView(), isTrue);
   });
 }

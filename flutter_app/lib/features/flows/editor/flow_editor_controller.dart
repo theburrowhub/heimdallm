@@ -38,6 +38,14 @@ class EdgeSelection extends Selection {
   int get hashCode => Object.hash(from, port);
 }
 
+/// Asks the canvas to move its view: to fit the graph when part of it is out
+/// of view, or to bring the step [reveal] into view. Each request is a new
+/// object, so the canvas acts on it once.
+class ViewRequest {
+  final String? reveal;
+  ViewRequest({this.reveal});
+}
+
 /// An assistant result shown over the canvas until accepted or discarded.
 class FlowDraft {
   final ReviewFlow flow;
@@ -65,6 +73,9 @@ class FlowEditorState {
   final int undoDepth;
   final int redoDepth;
 
+  /// The latest view change asked of the canvas.
+  final ViewRequest? view;
+
   const FlowEditorState({
     required this.flow,
     required this.saved,
@@ -75,6 +86,7 @@ class FlowEditorState {
     this.drafting = false,
     this.undoDepth = 0,
     this.redoDepth = 0,
+    this.view,
   });
 
   /// Editing is paused while a draft is shown or being drafted.
@@ -104,6 +116,7 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     FlowDraft? draft,
     bool clearDraft = false,
     ReviewFlow? saved,
+    ViewRequest? view,
   }) => FlowEditorState(
     flow: flow,
     saved: saved ?? state.saved,
@@ -114,6 +127,7 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     drafting: state.drafting,
     undoDepth: _undo.length,
     redoDepth: _redo.length,
+    view: view ?? state.view,
   );
 
   /// Pushes the flow to restore on undo (the pre-drag flow while a drag is in
@@ -138,17 +152,22 @@ class FlowEditorController extends Notifier<FlowEditorState> {
   }
 
   /// Records the current flow for undo, then applies [next].
-  void _commit(ReviewFlow next, {Selection? selection}) {
+  void _commit(ReviewFlow next, {Selection? selection, ViewRequest? view}) {
     _pushUndo();
-    state = _with(next, selection: selection);
+    state = _with(next, selection: selection, view: view);
   }
 
   void load(ReviewFlow flow) {
     _undo.clear();
     _redo.clear();
     _dragOrigin = null;
-    final laid = autoLayout(flow, onlyMissing: true);
-    state = FlowEditorState(flow: laid, saved: laid, check: checkGraph(laid));
+    final laid = layoutMissing(flow);
+    state = FlowEditorState(
+      flow: laid,
+      saved: laid,
+      check: checkGraph(laid),
+      view: ViewRequest(),
+    );
   }
 
   /// Records [saved] (the flow the daemon accepted; the current flow when
@@ -161,22 +180,86 @@ class FlowEditorController extends Notifier<FlowEditorState> {
 
   void rename(String name) => _commit(state.flow.copyWith(name: name));
 
+  /// A new step of [type] at [at], or below it if that spot is taken.
+  FlowNode _newNode(FlowNodeType type, Offset at) => FlowNode(
+    id: state.flow.nextNodeId(type == FlowNodeType.agent ? 'a' : 'c'),
+    type: type,
+    position: freeSpot(nodeRects(state.flow), at),
+    schedule: type == FlowNodeType.condition
+        ? const [ScheduleCondition()]
+        : const [],
+  );
+
+  /// Adds a step at [at] (moved down until it overlaps nothing) and selects
+  /// it.
   String addNode(FlowNodeType type, Offset at) {
-    final id = state.flow.nextNodeId(type == FlowNodeType.agent ? 'a' : 'c');
-    final node = FlowNode(
-      id: id,
-      type: type,
-      position: at,
-      schedule: type == FlowNodeType.condition
-          ? const [ScheduleCondition()]
-          : const [],
-    );
+    final node = _newNode(type, at);
     _commit(
-      state.flow.copyWith(nodes: {...state.flow.nodes, id: node}),
-      selection: NodeSelection(id),
+      state.flow.copyWith(nodes: {...state.flow.nodes, node.id: node}),
+      selection: NodeSelection(node.id),
+      view: ViewRequest(reveal: node.id),
     );
-    return id;
+    return node.id;
   }
+
+  /// Adds a step of [type] to the right of [from] ('' for Start), connects
+  /// it from [port] and selects it, as one undo step. Returns its id, or
+  /// null when [from] has no such exit.
+  String? addConnected(String from, EdgePort port, FlowNodeType type) {
+    final f = state.flow;
+    final Offset at;
+    if (port == EdgePort.start) {
+      at =
+          kStartPosition +
+          Offset(
+            kStartSize.width + kColumnGap,
+            (kStartSize.height - kNodeSize.height) / 2,
+          );
+    } else {
+      final n = f.nodes[from];
+      if (n == null || !_hasPort(n, port)) return null;
+      final row = (kNodeSize.height + kRowGap) / 2;
+      at =
+          (n.position ?? Offset.zero) +
+          Offset(kNodeSize.width + kColumnGap, switch (port) {
+            EdgePort.yes => -row,
+            EdgePort.no => row,
+            _ => 0,
+          });
+    }
+    final node = _newNode(type, at);
+    final nodes = {...f.nodes, node.id: node};
+    _commit(
+      port == EdgePort.start
+          ? f.copyWith(nodes: nodes, start: node.id)
+          : f.copyWith(
+              nodes: {...nodes, from: _setPort(f.nodes[from]!, port, node.id)},
+            ),
+      selection: NodeSelection(node.id),
+      view: ViewRequest(reveal: node.id),
+    );
+    return node.id;
+  }
+
+  /// Points [port] of [from] ('' for Start) at [to], or at nothing when [to]
+  /// is empty. The selection stays. False when the edge is not allowed.
+  bool setEdge(String from, EdgePort port, String to) {
+    final f = state.flow;
+    final n = f.nodes[from];
+    final current = port == EdgePort.start ? f.start : edgeTarget(n, port);
+    if (current == to) return true;
+    if (to.isNotEmpty) return connect(from, port, to);
+    if (port == EdgePort.start) {
+      _commit(f.copyWith(start: ''));
+    } else if (n != null) {
+      _commit(f.copyWith(nodes: {...f.nodes, from: _setPort(n, port, '')}));
+    }
+    return true;
+  }
+
+  static bool _hasPort(FlowNode n, EdgePort port) => n.isCondition
+      ? (port == EdgePort.yes || port == EdgePort.no)
+      : port == EdgePort.next;
 
   /// Moves [id] to [to], kept at non-negative coordinates: the canvas
   /// cannot reach a step above or left of its origin.
@@ -207,11 +290,7 @@ class FlowEditorController extends Notifier<FlowEditorState> {
       return true;
     }
     final n = f.nodes[from];
-    if (n == null) return false;
-    final validPort = n.isCondition
-        ? (port == EdgePort.yes || port == EdgePort.no)
-        : port == EdgePort.next;
-    if (!validPort) return false;
+    if (n == null || !_hasPort(n, port)) return false;
     final cleared = f.copyWith(
       nodes: {...f.nodes, from: _setPort(n, port, '')},
     );
@@ -271,7 +350,7 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     _commit(state.flow.copyWith(nodes: {...state.flow.nodes, node.id: node}));
   }
 
-  void arrange() => _commit(autoLayout(state.flow));
+  void arrange() => _commit(autoLayout(state.flow), view: ViewRequest());
 
   void undo() {
     if (_dragOrigin != null) {
@@ -305,9 +384,18 @@ class FlowEditorController extends Notifier<FlowEditorState> {
               : e.value,
       },
     );
-    final laid = autoLayout(keep, onlyMissing: true);
+    // Drafted steps also keep clear of the removed ones, drawn as ghosts.
+    final laid = layoutMissing(
+      keep,
+      keepClearOf: [
+        for (final n in state.flow.nodes.values)
+          if (n.position != null && !keep.nodes.containsKey(n.id))
+            n.position! & kNodeSize,
+      ],
+    );
     state = _with(
       state.flow,
+      view: ViewRequest(),
       draft: FlowDraft(
         flow: laid,
         plan: r.plan,
@@ -348,7 +436,31 @@ class FlowEditorController extends Notifier<FlowEditorState> {
     drafting: drafting ?? state.drafting,
     undoDepth: _undo.length,
     redoDepth: _redo.length,
+    view: state.view,
   );
+}
+
+/// Where [port] of [n] leads ('' when it leads nowhere).
+String edgeTarget(FlowNode? n, EdgePort port) => switch (port) {
+  EdgePort.yes => n?.yes ?? '',
+  EdgePort.no => n?.no ?? '',
+  EdgePort.next => n?.next ?? '',
+  EdgePort.start => '',
+};
+
+/// The steps [port] of [from] ('' for Start) may lead to, in id order: any
+/// step but [from] itself and those that would close a loop.
+List<String> connectableTargets(ReviewFlow f, String from, EdgePort port) {
+  final n = f.nodes[from];
+  final cleared = n == null
+      ? f
+      : f.copyWith(
+          nodes: {...f.nodes, from: FlowEditorController._setPort(n, port, '')},
+        );
+  return [
+    for (final id in f.nodes.keys.toList()..sort())
+      if (port == EdgePort.start || !wouldCreateCycle(cleared, from, id)) id,
+  ];
 }
 
 final flowEditorProvider =

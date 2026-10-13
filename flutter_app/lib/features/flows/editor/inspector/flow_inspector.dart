@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
+import 'package:heimdallm/features/flows/editor/inspector/edge_picker.dart';
 import 'package:heimdallm/features/flows/editor/inspector/inspector_parts.dart';
 import 'package:heimdallm/shared/design_system/color_resolver.dart';
 import 'package:heimdallm/shared/design_system/components/components.dart';
@@ -65,6 +66,13 @@ class FlowInspector extends ConsumerWidget {
           maxLength: 120,
           label: 'Name',
           onChanged: (v) => ref.read(flowEditorProvider.notifier).rename(v),
+        ),
+        const SizedBox(height: 4),
+        EdgePicker(
+          from: '',
+          port: EdgePort.start,
+          label: 'Starts with',
+          readOnly: readOnly,
         ),
         if (onSetDefaultAgent case final set?)
           ..._defaultAgents(context, state.flow, set, defaultAgentsBusy),

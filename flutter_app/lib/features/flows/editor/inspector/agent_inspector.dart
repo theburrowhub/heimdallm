@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/features/flows/editor/flow_editor_controller.dart';
+import 'package:heimdallm/features/flows/editor/inspector/edge_picker.dart';
 import 'package:heimdallm/features/flows/editor/inspector/inspector_parts.dart';
 
 /// Properties of the selected agent step.
@@ -44,8 +45,8 @@ class AgentInspector extends ConsumerWidget {
           title: 'Agent step',
           id: node.id,
           description:
-              'Adds this agent to the reviewers, then continues through its '
-              'fallback when the agent is unavailable.',
+              'Adds this agent to the reviewers. When it fails or runs out '
+              'of quota, the flow tries the next step instead.',
         ),
         if (readOnly) const InspectorReadOnlyNote(),
         const InspectorLabel('Reviewer'),
@@ -74,6 +75,13 @@ class AgentInspector extends ConsumerWidget {
           onChanged: readOnly
               ? null
               : (v) => ctl.updateNode(node.copyWith(agent: v ?? '')),
+        ),
+        const InspectorLabel('Then'),
+        EdgePicker(
+          from: node.id,
+          port: EdgePort.next,
+          label: 'If it fails or runs out of quota',
+          readOnly: readOnly,
         ),
         InspectorIssues(issues: issues),
       ],
