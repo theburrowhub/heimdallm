@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn review flows into decision graphs edited on a visual canvas, migrate existing rule-list flows exactly, and add an assistant that drafts a flow from plain language using an installed CLI agent.
+**Goal:** Turn review flows into decision graphs edited on a visual canvas, replacing the rule-list format outright (no users yet, so no migration), and add an assistant that drafts a flow from plain language using an installed CLI agent.
 
-**Architecture:** The daemon's `config.FlowConfig` becomes `{name, start, nodes}` with `condition` (yes/no) and `agent` (fallback `next`) nodes; `flows.Evaluate` walks the graph and still returns an ordered candidate list, so the review pipeline is untouched. Legacy `rules` are converted in memory on every load and written back once at startup with a backup. `POST /flows/assist` runs the chosen agent via `ExecuteRaw` in an empty temp dir, validates its JSON with the same checker as `PUT`, and returns an unsaved draft. The Flutter editor is an own canvas (`InteractiveViewer` + positioned node widgets + `CustomPainter` edges) driven by a Riverpod notifier with undo/redo and a draft overlay.
+**Architecture:** The daemon's `config.FlowConfig` becomes `{name, start, nodes}` with `condition` (yes/no) and `agent` (fallback `next`) nodes; `flows.Evaluate` walks the graph and still returns an ordered candidate list, so the review pipeline is untouched. The rule-list format is deleted; there is no migration (amended 2026-10-13). `POST /flows/assist` runs the chosen agent via `ExecuteRaw` in an empty temp dir, validates its JSON with the same checker as `PUT`, and returns an unsaved draft. The Flutter editor is an own canvas (`InteractiveViewer` + positioned node widgets + `CustomPainter` edges) driven by a Riverpod notifier with undo/redo and a draft overlay.
 
 **Tech Stack:** Go 1.25 (daemon, chi, BurntSushi/toml), Go CLI module (cobra), Flutter (Riverpod 3, go_router 17, mix 2, http).
 
@@ -25,7 +25,7 @@
 
 ## Review Focus
 
-1. A hand-edited TOML flow that has **both** `rules` and `nodes` → nodes win, rules are dropped, a warning is logged (test in Task 2).
+1. A selected flow saved without a `start` (or with no nodes) → `FlowForRepo` falls back to the built-in primary/fallback flow instead of reviewing with nobody (test in Task 3).
 2. Assistant output wrapped in prose or a ```json fence, or with ids the model invented inconsistently (missing `start`, edge to a missing node) → fence stripped; inconsistency goes through the repair round, then `422` with node-pinned issues (tests in Task 5).
 3. `POST /flows/simulate` with an **unsaved graph containing a cycle** → `422`, never an endless walk; `Evaluate` itself also stops on a revisited node (tests in Tasks 3 and 4).
 4. Instruction of exactly 4000 multi-byte runes accepted, 4001 rejected (counted in runes, not bytes) (test in Task 5).
@@ -36,8 +36,8 @@
 ## File Map
 
 Daemon:
-- Modify `daemon/internal/config/flows.go` — graph types, `CheckFlow`, `ValidateFlow`, `MigrateLegacyFlow`, `legacyFlow`, `FlowForRepo`.
-- Create `daemon/internal/config/flows_migrate.go` — `migrateLegacyFlows`, `MigrateFlowsFile`, `FlowToMap`.
+- Modify `daemon/internal/config/flows.go` — graph types, `CheckFlow`, `ValidateFlow`, `legacyFlow`, `FlowForRepo`; rule-list types deleted (Task 3).
+- Create `daemon/internal/config/flows_map.go` — `FlowToMap`.
 - Modify `daemon/internal/config/config.go` (`Load`), `daemon/internal/config/writer.go` (`ValidateMap`).
 - Modify `daemon/internal/flows/flows.go` — graph walk, `PathStep`.
 - Create `daemon/internal/flows/assist.go`, `daemon/internal/flows/assist_prompt.go`.
@@ -542,68 +542,42 @@ git commit -m "feat(flows): decision-graph flow model and validation
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-### Task 2: Exact migration of rule-list flows
+### Task 2: (removed)
+
+Amended 2026-10-13 at the user's request: review flows have no users yet, so there is **no migration**. The rule-list format is deleted outright in Task 3 (together with the evaluator rewrite, so every commit compiles). No `MigrateLegacyFlow`, no `MigrateFlowsFile`, no `.bak` backup, no property test against the old evaluator.
+
+---
+
+### Task 3: Graph evaluator, trace and agent listings; rule-list format deleted
 
 **Files:**
-- Modify: `daemon/internal/config/flows.go` (`FlowForRepo`, `legacyFlow`, `validateFlows`)
-- Create: `daemon/internal/config/flows_migrate.go`
-- Modify: `daemon/internal/config/config.go` (`Load`), `daemon/internal/config/writer.go` (`ValidateMap`)
-- Modify: `daemon/internal/server/flows.go` (use `config.FlowToMap`, delete local `flowToMap`)
-- Modify: `daemon/cmd/heimdallm/main.go` (call `MigrateFlowsFile` after the HTTP listener is claimed)
-- Test: `daemon/internal/config/flows_migrate_test.go`
+- Modify: `daemon/internal/config/flows.go` (delete `FlowRule`, `FlowConfig.Rules`, `OrderedRuleKeys`, `maxRulesPerFlow`, `validateLegacyRules` and the `len(f.Rules) > 0` bridge in `validateFlows`; rewrite `FlowForRepo` and `legacyFlow`)
+- Create: `daemon/internal/config/flows_map.go` (`FlowToMap`, moved from server's `flowToMap`)
+- Modify: `daemon/internal/server/flows.go` (use `config.FlowToMap`; PUT's "needs at least one rule" check becomes "needs a start node": `if flow.Start == "" || len(flow.Nodes) == 0`)
+- Modify: `daemon/internal/flows/flows.go`
+- Modify: `daemon/cmd/heimdallm/flows.go` (`flowAgents`, `flowCandidates` logging)
+- Modify: `daemon/cmd/heimdallm/merge_tracking_runner.go` (`flowWriteAgents`)
+- Create: `daemon/internal/config/flows_order.go` (`TopoAgentOrder`)
+- Test: `daemon/internal/flows/flows_graph_test.go`, `daemon/internal/config/flows_order_test.go`, `daemon/internal/config/flows_default_test.go`
 
 **Interfaces:**
-- Consumes: Task 1 types, `validateLegacyRules`.
+- Consumes: Task 1 types.
 - Produces:
-  - `func MigrateLegacyFlow(f FlowConfig) FlowConfig` — exact conversion; node ids `c<10·k>`/`a<10·k>` by position (k = 1..n).
-  - `func (c *Config) migrateLegacyFlows() ([]string, error)` — in-memory, called by `Load` and `ValidateMap`.
-  - `func MigrateFlowsFile(path string, now time.Time) (migrated []string, backup string, err error)`
-  - `func FlowToMap(f FlowConfig) (map[string]any, error)` (moved from server's `flowToMap`).
+  - `type PathStep struct { Node, Type, Agent string; Holds, Available *bool; Added bool; Reasons []string }`
+  - `Decision{FlowID, FlowName, At, Candidates, Path []PathStep}` (`Rules` field removed)
+  - `func Evaluate(ctx, id string, f config.FlowConfig, now time.Time, q QuotaReader, available func(string) bool) Decision` (same signature)
+  - `func config.TopoAgentOrder(f FlowConfig) []string` — distinct agents in topological order (Kahn, ties by node id), reachable nodes only.
+  - `func config.FlowToMap(f FlowConfig) (map[string]any, error)` (moved from server's `flowToMap`).
+  - `config.FlowConfig` has no `Rules` field any more; `legacyFlow` (the built-in default) is a graph `a10` → `a20`.
 
 - [ ] **Step 1: Write the failing tests**
+
+`daemon/internal/config/flows_default_test.go`:
 
 ```go
 package config
 
-import (
-	"os"
-	"path/filepath"
-	"reflect"
-	"strings"
-	"testing"
-	"time"
-)
-
-func TestMigrateLegacyFlowShape(t *testing.T) {
-	f := FlowConfig{Name: "n", Rules: map[string]FlowRule{
-		"10": {Agent: "codex", Match: "any", Schedule: map[string]ScheduleCondition{"s1": {From: "22:00", To: "06:00"}}},
-		"20": {Agent: "claude"},
-		"30": {Agent: "gemini", Quota: map[string]QuotaCondition{"q1": {Agent: "claude", Window: "weekly", Op: "above", Percent: 80}}},
-	}}
-	g := MigrateLegacyFlow(f)
-	want := FlowConfig{Name: "n", Start: "c10", Nodes: map[string]FlowNode{
-		"c10": {Type: NodeCondition, Match: "any", Schedule: f.Rules["10"].Schedule, Yes: "a10", No: "a20"},
-		"a10": {Type: NodeAgent, Agent: "codex", Next: "a20"},
-		"a20": {Type: NodeAgent, Agent: "claude", Next: "c30"},
-		"c30": {Type: NodeCondition, Quota: f.Rules["30"].Quota, Yes: "a30", No: ""},
-		"a30": {Type: NodeAgent, Agent: "gemini"},
-	}}
-	if !reflect.DeepEqual(g, want) {
-		t.Fatalf("got %#v\nwant %#v", g, want)
-	}
-	if errs, _ := CheckFlow("n", g); len(errs) != 0 {
-		t.Fatalf("migrated flow invalid: %v", errs)
-	}
-}
-
-func TestMigrateLegacyFlowNodesWinOverRules(t *testing.T) {
-	f := validGraph()
-	f.Rules = map[string]FlowRule{"10": {Agent: "gemini"}}
-	g := MigrateLegacyFlow(f)
-	if g.Rules != nil || g.Start != "c1" {
-		t.Fatalf("nodes must win and rules be dropped: %#v", g)
-	}
-}
+import "testing"
 
 func TestLegacyFlowIsAGraph(t *testing.T) {
 	c := &Config{}
@@ -612,337 +586,33 @@ func TestLegacyFlowIsAGraph(t *testing.T) {
 	if f.Start != "a10" || f.Nodes["a10"].Next != "a20" || f.Nodes["a20"].Agent != "codex" {
 		t.Fatalf("legacy flow %#v", f)
 	}
-}
-
-const legacyTOML = `
-[ai]
-primary = "claude"
-flow = "night"
-[ai.flows.night]
-name = "Night"
-[ai.flows.night.rules.10]
-agent = "codex"
-[ai.flows.night.rules.10.schedule.s1]
-from = "22:00"
-to = "06:00"
-[ai.flows.night.rules.20]
-agent = "claude"
-`
-
-func TestLoadMigratesInMemory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte(minimalValidTOML+legacyTOML), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := cfg.AI.Flows["night"]
-	if f.Start != "c10" || len(f.Rules) != 0 {
-		t.Fatalf("not migrated: %#v", f)
+	if errs, _ := CheckFlow(DefaultFlowID, f); len(errs) != 0 {
+		t.Fatalf("default flow invalid: %v", errs)
 	}
 }
 
-func TestMigrateFlowsFileWritesOnceWithBackup(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	orig := []byte(minimalValidTOML + legacyTOML)
-	if err := os.WriteFile(path, orig, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Unix(1790000000, 0)
-	ids, backup, err := MigrateFlowsFile(path, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(ids, []string{"night"}) || backup != path+".bak.1790000000" {
-		t.Fatalf("ids=%v backup=%q", ids, backup)
-	}
-	if got, _ := os.ReadFile(backup); string(got) != string(orig) {
-		t.Fatal("backup is not the original file")
-	}
-	data, _ := os.ReadFile(path)
-	if strings.Contains(string(data), "rules") || !strings.Contains(string(data), `start = "c10"`) {
-		t.Fatalf("file not rewritten:\n%s", data)
-	}
-	ids, backup, err = MigrateFlowsFile(path, now.Add(time.Hour))
-	if err != nil || ids != nil || backup != "" {
-		t.Fatalf("second run must be a no-op: %v %q %v", ids, backup, err)
+func TestLegacyFlowSameAgentOnce(t *testing.T) {
+	c := &Config{}
+	c.AI.Primary, c.AI.Fallback = "claude", "claude"
+	f := c.legacyFlow("")
+	if f.Start != "a10" || len(f.Nodes) != 1 {
+		t.Fatalf("legacy flow %#v", f)
 	}
 }
 
-func TestMigrateFlowsFileMissingFileIsNoop(t *testing.T) {
-	ids, backup, err := MigrateFlowsFile(filepath.Join(t.TempDir(), "absent.toml"), time.Now())
-	if err != nil || ids != nil || backup != "" {
-		t.Fatalf("%v %q %v", ids, backup, err)
+func TestFlowForRepoIgnoresFlowWithoutStart(t *testing.T) {
+	c := &Config{}
+	c.AI.Primary = "claude"
+	c.AI.Flow = "empty"
+	c.AI.Flows = map[string]FlowConfig{"empty": {Name: "Empty"}}
+	id, f := c.FlowForRepo("o/r")
+	if id != DefaultFlowID || f.Start != "a10" {
+		t.Fatalf("id=%q flow=%#v", id, f)
 	}
 }
 ```
 
-`minimalValidTOML` must be the smallest config string that `Load` accepts **without** an `[ai]` table (the test supplies `[ai]`). Look in `daemon/internal/config/config_test.go` for an existing minimal fixture and reuse it; if the existing fixture includes `[ai]`, create a new `const minimalValidTOML` in the test file with its `[ai]` lines removed.
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `make test-docker GO_TEST_ARGS="-run 'TestMigrate|TestLoadMigrates|TestLegacyFlowIsAGraph' ./internal/config/..."`
-Expected: FAIL — `undefined: MigrateLegacyFlow`, `undefined: MigrateFlowsFile`.
-
-- [ ] **Step 3: Implement**
-
-Create `daemon/internal/config/flows_migrate.go`:
-
-```go
-package config
-
-import (
-	"bytes"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"os"
-	"slices"
-	"time"
-
-	"github.com/BurntSushi/toml"
-)
-
-// MigrateLegacyFlow converts a rule-list flow into the equivalent graph.
-// Rule i becomes, when it has conditions, a condition node c<10i> whose yes
-// edge leads to agent node a<10i> and whose no edge skips to the next rule;
-// the agent node's fallback edge also leads to the next rule. The walk then
-// visits a<10i> exactly when rule i matches, in rule order, so the candidate
-// list is identical to the old evaluation. A flow that already has nodes is
-// returned with its rules dropped: nodes win.
-func MigrateLegacyFlow(f FlowConfig) FlowConfig {
-	if len(f.Nodes) > 0 || len(f.Rules) == 0 {
-		f.Rules = nil
-		return f
-	}
-	keys := f.OrderedRuleKeys()
-	out := FlowConfig{Name: f.Name, Nodes: make(map[string]FlowNode, 2*len(keys))}
-	next := ""
-	for i := len(keys) - 1; i >= 0; i-- {
-		r := f.Rules[keys[i]]
-		suffix := fmt.Sprint((i + 1) * 10)
-		agentID := "a" + suffix
-		out.Nodes[agentID] = FlowNode{Type: NodeAgent, Agent: r.Agent, Next: next}
-		if len(r.Quota)+len(r.Schedule) == 0 {
-			next = agentID
-			continue
-		}
-		condID := "c" + suffix
-		match := r.Match
-		if match == "all" {
-			match = ""
-		}
-		out.Nodes[condID] = FlowNode{Type: NodeCondition, Match: match, Quota: r.Quota, Schedule: r.Schedule, Yes: agentID, No: next}
-		next = condID
-	}
-	out.Start = next
-	return out
-}
-
-// migrateLegacyFlows converts every rule-list flow in memory. Every load
-// path calls it, so a file that could not be rewritten still works.
-func (c *Config) migrateLegacyFlows() ([]string, error) {
-	var migrated []string
-	for _, id := range OrderKeys(mapKeys(c.AI.Flows)) {
-		f := c.AI.Flows[id]
-		if len(f.Rules) == 0 {
-			continue
-		}
-		if len(f.Nodes) > 0 {
-			slog.Warn("config: flow has both rules and nodes; using the nodes and dropping the rules", "flow", id)
-		} else if err := validateLegacyRules(id, f); err != nil {
-			return nil, err
-		}
-		c.AI.Flows[id] = MigrateLegacyFlow(f)
-		migrated = append(migrated, id)
-	}
-	return migrated, nil
-}
-
-// FlowToMap converts a flow to the generic TOML map shape used by the
-// config writer. Rules are never included.
-func FlowToMap(f FlowConfig) (map[string]any, error) {
-	f.Rules = nil
-	buf, err := json.Marshal(f)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(buf, &m); err != nil {
-		return nil, err
-	}
-	NormalizeNumbers(m)
-	return m, nil
-}
-
-// MigrateFlowsFile rewrites, once, every rule-list flow in the TOML file at
-// path as a graph, after copying the file to <path>.bak.<unix seconds>. It
-// returns the migrated flow ids and the backup path; nothing is written when
-// no flow needs migrating or the file does not exist.
-func MigrateFlowsFile(path string, now time.Time) ([]string, string, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, "", nil
-	}
-	if err != nil {
-		return nil, "", fmt.Errorf("config: read %s: %w", path, err)
-	}
-	var m map[string]any
-	if err := toml.Unmarshal(data, &m); err != nil {
-		return nil, "", fmt.Errorf("config: parse %s: %w", path, err)
-	}
-	ai, _ := m["ai"].(map[string]any)
-	flows, _ := ai["flows"].(map[string]any)
-	ids := mapKeys(flows)
-	slices.Sort(ids)
-	var migrated []string
-	for _, id := range ids {
-		raw, ok := flows[id].(map[string]any)
-		if !ok {
-			continue
-		}
-		if _, hasRules := raw["rules"]; !hasRules {
-			continue
-		}
-		var buf bytes.Buffer
-		if err := toml.NewEncoder(&buf).Encode(raw); err != nil {
-			return nil, "", fmt.Errorf("config: ai.flows.%s: %w", id, err)
-		}
-		var f FlowConfig
-		if err := toml.Unmarshal(buf.Bytes(), &f); err != nil {
-			return nil, "", fmt.Errorf("config: ai.flows.%s: %w", id, err)
-		}
-		g := MigrateLegacyFlow(f)
-		if err := ValidateFlow(id, g); err != nil {
-			return nil, "", err
-		}
-		gm, err := FlowToMap(g)
-		if err != nil {
-			return nil, "", err
-		}
-		flows[id] = gm
-		migrated = append(migrated, id)
-	}
-	if len(migrated) == 0 {
-		return nil, "", nil
-	}
-	if err := ValidateMap(m); err != nil {
-		return nil, "", err
-	}
-	backup := fmt.Sprintf("%s.bak.%d", path, now.Unix())
-	if err := os.WriteFile(backup, data, 0o600); err != nil {
-		return nil, "", fmt.Errorf("config: back up %s: %w", path, err)
-	}
-	if err := AtomicWriteTOML(path, m); err != nil {
-		return nil, "", err
-	}
-	return migrated, backup, nil
-}
-```
-
-In `daemon/internal/config/config.go` `Load`, right after `cfg.sanitizeLegacyAgentExecutionPolicy("toml/env")` add:
-
-```go
-	if _, err := cfg.migrateLegacyFlows(); err != nil {
-		return nil, err
-	}
-```
-
-In `daemon/internal/config/writer.go` `ValidateMap`, after `cfg.applyDefaults()` add:
-
-```go
-	if _, err := cfg.migrateLegacyFlows(); err != nil {
-		return &ValidationError{Err: err}
-	}
-```
-
-In `daemon/internal/config/flows.go`:
-
-```go
-func (c *Config) FlowForRepo(repo string) (string, FlowConfig) {
-	if name := c.FlowNameForRepo(repo); name != "" {
-		if f, ok := c.AI.Flows[name]; ok && f.Start != "" {
-			return name, f
-		}
-	}
-	return DefaultFlowID, c.legacyFlow(repo)
-}
-
-func (c *Config) legacyFlow(repo string) FlowConfig {
-	ai := c.AIForRepo(repo)
-	f := FlowConfig{Name: "Primary and fallback", Nodes: map[string]FlowNode{}}
-	if ai.Primary != "" {
-		f.Nodes["a10"] = FlowNode{Type: NodeAgent, Agent: ai.Primary}
-		f.Start = "a10"
-	}
-	if ai.Fallback != "" && ai.Fallback != ai.Primary {
-		f.Nodes["a20"] = FlowNode{Type: NodeAgent, Agent: ai.Fallback}
-		if f.Start == "" {
-			f.Start = "a20"
-		} else {
-			n := f.Nodes["a10"]
-			n.Next = "a20"
-			f.Nodes["a10"] = n
-		}
-	}
-	return f
-}
-```
-
-Delete `OrderedRuleKeys` callers outside the migration (Task 3 replaces `flowAgents` and `flowWriteAgents`); keep `OrderedRuleKeys` itself — the migration uses it.
-
-In `daemon/internal/server/flows.go`, delete the local `flowToMap` and call `config.FlowToMap(flow)` in `handlePutFlow`.
-
-In `daemon/cmd/heimdallm/main.go`, immediately after `defer httpListener.Close()`:
-
-```go
-	// One-time rewrite of rule-list review flows as graphs. Load already
-	// migrated them in memory, so a failure here (read-only config) only
-	// means the conversion repeats on the next start.
-	if migrated, backup, err := config.MigrateFlowsFile(cfgPath, time.Now()); err != nil {
-		slog.Warn("config: could not rewrite review flows as graphs; they keep working from memory", "path", cfgPath, "err", err)
-	} else if len(migrated) > 0 {
-		slog.Info("config: review flows migrated to graphs", "flows", migrated, "backup", backup)
-	}
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `make test-docker GO_TEST_ARGS="./internal/config/..."`
-Expected: PASS (the whole package, so existing config tests confirm `Load`/`ValidateMap` still accept every fixture).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add daemon/internal/config daemon/internal/server/flows.go daemon/cmd/heimdallm/main.go
-git commit -m "feat(flows): migrate rule-list flows to graphs exactly, once
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
-
-### Task 3: Graph evaluator, trace and agent listings
-
-**Files:**
-- Modify: `daemon/internal/flows/flows.go`
-- Modify: `daemon/cmd/heimdallm/flows.go` (`flowAgents`, `flowCandidates` logging)
-- Modify: `daemon/cmd/heimdallm/merge_tracking_runner.go` (`flowWriteAgents`)
-- Create: `daemon/internal/config/flows_order.go` (`TopoAgentOrder`)
-- Test: `daemon/internal/flows/flows_graph_test.go`, `daemon/internal/flows/migration_equivalence_test.go`, `daemon/internal/config/flows_order_test.go`
-
-**Interfaces:**
-- Consumes: Task 1/2 types, `config.MigrateLegacyFlow`.
-- Produces:
-  - `type PathStep struct { Node, Type, Agent string; Holds, Available *bool; Added bool; Reasons []string }`
-  - `Decision{FlowID, FlowName, At, Candidates, Path []PathStep}` (`Rules` field removed)
-  - `func Evaluate(ctx, id string, f config.FlowConfig, now time.Time, q QuotaReader, available func(string) bool) Decision` (same signature)
-  - `func config.TopoAgentOrder(f FlowConfig) []string` — distinct agents in topological order (Kahn, ties by node id), reachable nodes only.
-
-- [ ] **Step 1: Write the failing tests**
+Check the real field name that selects the global flow (`c.AI.Flow` above) in `daemon/internal/config` before running and adjust the test to it.
 
 `daemon/internal/flows/flows_graph_test.go`:
 
@@ -1048,108 +718,6 @@ func TestEvaluateEmptyFlow(t *testing.T) {
 }
 ```
 
-`daemon/internal/flows/migration_equivalence_test.go` — property test against a copy of the pre-graph evaluator:
-
-```go
-package flows
-
-import (
-	"context"
-	"fmt"
-	"math/rand"
-	"reflect"
-	"testing"
-	"time"
-
-	"github.com/heimdallm/daemon/internal/config"
-	"github.com/heimdallm/daemon/internal/quota"
-)
-
-// legacyCandidates is the pre-graph Evaluate, kept verbatim as the oracle
-// for the migration.
-func legacyCandidates(ctx context.Context, f config.FlowConfig, now time.Time, q QuotaReader, available func(string) bool) []string {
-	out := []string{}
-	seen := map[string]bool{}
-	for _, key := range f.OrderedRuleKeys() {
-		r := f.Rules[key]
-		node := config.FlowNode{Type: config.NodeCondition, Match: r.Match, Quota: r.Quota, Schedule: r.Schedule}
-		ok, _ := matches(ctx, node, now, q)
-		if ok && (available == nil || available(r.Agent)) && !seen[r.Agent] {
-			seen[r.Agent] = true
-			out = append(out, r.Agent)
-		}
-	}
-	return out
-}
-
-type fixedQuotas map[string]float64
-
-func (f fixedQuotas) Get(_ context.Context, agent string) quota.Provider {
-	used, ok := f[agent]
-	if !ok {
-		return quota.Provider{Agent: agent, Error: "unknown"}
-	}
-	return quota.Provider{Agent: agent, Available: true,
-		Windows: []quota.Window{{Kind: "weekly", UsedPercent: used}, {Kind: "session", UsedPercent: used / 2}}}
-}
-
-func TestMigrationIsExact(t *testing.T) {
-	agents := []string{"claude", "codex", "gemini", "copilot"}
-	days := []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
-	rng := rand.New(rand.NewSource(42))
-	for iter := 0; iter < 3000; iter++ {
-		f := config.FlowConfig{Name: "p", Rules: map[string]config.FlowRule{}}
-		for i := 0; i < rng.Intn(13); i++ {
-			r := config.FlowRule{Agent: agents[rng.Intn(len(agents))]}
-			if rng.Intn(2) == 0 {
-				r.Match = "any"
-			}
-			for j := 0; j < rng.Intn(3); j++ {
-				from, to := rng.Intn(24), rng.Intn(24)
-				if from == to {
-					to = (to + 1) % 24
-				}
-				sc := config.ScheduleCondition{From: fmt.Sprintf("%02d:00", from), To: fmt.Sprintf("%02d:30", to), TZ: "UTC"}
-				if rng.Intn(2) == 0 {
-					sc.Days = []string{days[rng.Intn(7)], days[rng.Intn(7)]}
-				}
-				if r.Schedule == nil {
-					r.Schedule = map[string]config.ScheduleCondition{}
-				}
-				r.Schedule[fmt.Sprintf("s%d", j)] = sc
-			}
-			for j := 0; j < rng.Intn(3); j++ {
-				op := "below"
-				if rng.Intn(2) == 0 {
-					op = "above"
-				}
-				win := []string{"weekly", "session", "any", "monthly"}[rng.Intn(4)]
-				if r.Quota == nil {
-					r.Quota = map[string]config.QuotaCondition{}
-				}
-				r.Quota[fmt.Sprintf("q%d", j)] = config.QuotaCondition{Agent: agents[rng.Intn(len(agents))], Window: win, Op: op, Percent: float64(rng.Intn(101))}
-			}
-			f.Rules[fmt.Sprint((i+1)*10)] = r
-		}
-		q := fixedQuotas{}
-		for _, a := range agents[:rng.Intn(len(agents)+1)] {
-			q[a] = float64(rng.Intn(101))
-		}
-		down := agents[rng.Intn(len(agents))]
-		avail := func(a string) bool { return a != down }
-		now := time.Date(2026, 10, 5+rng.Intn(7), rng.Intn(24), rng.Intn(60), 0, 0, time.UTC)
-
-		want := legacyCandidates(context.Background(), f, now, q, avail)
-		got := Evaluate(context.Background(), "p", config.MigrateLegacyFlow(f), now, q, avail).Candidates
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("iter %d at %s: graph %v, rules %v\nflow %#v", iter, now, got, want, f)
-		}
-	}
-}
-```
-
-Check the real field names of `quota.Provider` / `quota.Window` in `daemon/internal/quota` before running (`Agent`, `Available`, `Error`, `Windows`, `Kind`, `UsedPercent`); adjust `fixedQuotas.Get` to them — it must report `weekly` and `session` windows.
-
 `daemon/internal/config/flows_order_test.go`:
 
 ```go
@@ -1176,8 +744,8 @@ func TestTopoAgentOrder(t *testing.T) {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `make test-docker GO_TEST_ARGS="-run 'TestEvaluate|TestMigrationIsExact|TestTopoAgentOrder' ./internal/flows/... ./internal/config/..."`
-Expected: FAIL — `d.Path undefined`, `matches` signature mismatch, `undefined: TopoAgentOrder`.
+Run: `make test-docker GO_TEST_ARGS="-run 'TestEvaluate|TestTopoAgentOrder|TestLegacyFlow|TestFlowForRepoIgnores' ./internal/flows/... ./internal/config/..."`
+Expected: FAIL — `d.Path undefined`, `matches` signature mismatch, `undefined: TopoAgentOrder`, `legacyFlow` still rule-based.
 
 - [ ] **Step 3: Implement**
 
@@ -1352,17 +920,52 @@ func flowWriteAgents(c *config.Config, repo string) []string {
 }
 ```
 
-Update any existing test in `daemon/cmd/heimdallm` and `daemon/internal/flows` that built `FlowConfig{Rules: …}` for `Evaluate`, `flowAgents` or `flowWriteAgents`: wrap the literal in `config.MigrateLegacyFlow(...)` so the asserted candidates stay identical. Find them with `grep -rn "Rules:" daemon --include=*_test.go | grep -i flow`.
+Delete the rule-list format from `daemon/internal/config/flows.go`: `FlowRule`, the `Rules` field of `FlowConfig`, `OrderedRuleKeys`, `maxRulesPerFlow`, `validateLegacyRules`, and the `if len(f.Rules) > 0 { … validateLegacyRules … }` bridge in `validateFlows` (keep `validateQuotaCondition`/`validateScheduleCondition`, which `CheckFlow` uses). Replace `FlowForRepo` and `legacyFlow`:
+
+```go
+func (c *Config) FlowForRepo(repo string) (string, FlowConfig) {
+	if name := c.FlowNameForRepo(repo); name != "" {
+		if f, ok := c.AI.Flows[name]; ok && f.Start != "" {
+			return name, f
+		}
+	}
+	return DefaultFlowID, c.legacyFlow(repo)
+}
+
+func (c *Config) legacyFlow(repo string) FlowConfig {
+	ai := c.AIForRepo(repo)
+	f := FlowConfig{Name: "Primary and fallback", Nodes: map[string]FlowNode{}}
+	if ai.Primary != "" {
+		f.Nodes["a10"] = FlowNode{Type: NodeAgent, Agent: ai.Primary}
+		f.Start = "a10"
+	}
+	if ai.Fallback != "" && ai.Fallback != ai.Primary {
+		f.Nodes["a20"] = FlowNode{Type: NodeAgent, Agent: ai.Fallback}
+		if f.Start == "" {
+			f.Start = "a20"
+		} else {
+			n := f.Nodes["a10"]
+			n.Next = "a20"
+			f.Nodes["a10"] = n
+		}
+	}
+	return f
+}
+```
+
+Create `daemon/internal/config/flows_map.go` with `FlowToMap` (the body of server's `flowToMap`, unchanged: JSON round-trip, then `NormalizeNumbers`), delete `flowToMap` from `daemon/internal/server/flows.go` and call `config.FlowToMap(flow)` there. In `handlePutFlow` replace the "at least one rule" check with `if flow.Start == "" || len(flow.Nodes) == 0` (same 400 status, message "a flow needs a start step"); Task 4 then tightens PUT further.
+
+Rewrite every existing test that built `FlowConfig{Rules: …}` or `FlowRule{…}` (`daemon/internal/config/flows_test.go`, `daemon/internal/flows/flows_test.go`, `daemon/cmd/heimdallm/flows_test.go`; find them with `grep -rln -E 'Rules:|FlowRule\{' daemon --include='*_test.go'`) as the equivalent graph — rule i with conditions becomes a condition node whose `yes` goes to an agent node and whose `no` skips to the next rule; the agent node's `next` goes to the next rule — keeping the asserted candidates identical. Tests that only exercised `validateLegacyRules` and duplicate a `TestCheckFlow*` case are deleted; any that cover a check `CheckFlow` does not have yet are converted to a graph and kept. The two `internal/server` PUT tests that send `"rules"` JSON (`TestPutAndDeleteFlow`, `TestPutFlowWriteFailure`) are rewritten to send a node graph. Nothing under `daemon/` may mention `Rules`, `FlowRule` or `OrderedRuleKeys` afterwards (other than unrelated identifiers such as `PartitionRules`).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `make test-docker GO_TEST_ARGS="./internal/flows/... ./internal/config/... ./cmd/heimdallm/..."`
-Expected: PASS.
+Run: `make test-docker` (the whole daemon: removing `Rules` touches several packages).
+Expected: PASS, including `internal/server`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add daemon/internal/flows daemon/internal/config daemon/cmd/heimdallm
+git add daemon/internal/flows daemon/internal/config daemon/internal/server daemon/cmd/heimdallm
 git commit -m "feat(flows): evaluate flows by walking the graph, with a path trace
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -1573,7 +1176,6 @@ In `handleSimulateFlow`, raise the body cap to `256<<10` and, after the existing
 
 ```go
 	if req.Graph != nil {
-		req.Graph.Rules = nil
 		if errs, _ := config.CheckFlow("draft", *req.Graph); len(errs) > 0 {
 			writeFlowIssues(w, errs)
 			return
@@ -1597,7 +1199,7 @@ Replace the decode/validate part of `handlePutFlow` (from `r.Body = http.MaxByte
 	}
 	if _, legacy := probe["rules"]; legacy {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "flows are node graphs now; the legacy rules format is only read once, at migration",
+			"error": "flows are node graphs; the rules format is not supported",
 		})
 		return
 	}
@@ -2306,7 +1908,6 @@ func parseAssistAnswer(out []byte) (assistAnswer, []config.FlowIssue) {
 	if len(ans.Flow.Nodes) == 0 {
 		return ans, []config.FlowIssue{{Field: "nodes", Message: "the flow has no steps"}}
 	}
-	ans.Flow.Rules = nil
 	if errs, _ := config.CheckFlow("draft", ans.Flow); len(errs) > 0 {
 		return ans, errs
 	}
@@ -6261,14 +5862,15 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Rewrite the "Review flows" section of `docs/configuration-guide.md`**
 
-Replace the rule-based example and prose with the node format of spec §3.1 (the `night-codex` example), a short explanation of `condition` (yes/no) and `agent` (fallback `next`) steps, the evaluation walk, the limits (200 steps, 20 conditions per step, no loops), the one-time automatic migration with its `config.toml.bak.<seconds>` backup, the editor ("drag steps from the palette, connect dots, Test, Adjust with AI"), `POST /flows/simulate` with `graph`, `POST /flows/assist`, and `heimdallm-cli flows simulate|assist`. Keep the section's existing heading so links keep working.
+Replace the rule-based example and prose with the node format of spec §3.1 (the `night-codex` example), a short explanation of `condition` (yes/no) and `agent` (fallback `next`) steps, the evaluation walk, the limits (200 steps, 20 conditions per step, no loops), the editor ("drag steps from the palette, connect dots, Test, Adjust with AI"), `POST /flows/simulate` with `graph`, `POST /flows/assist`, and `heimdallm-cli flows simulate|assist`. Keep the section's existing heading so links keep working.
 
 - [ ] **Step 2: Align the spec with the plan**
 
 In the spec:
-- §5: node ids are positional (`c10`, `a10`, `c20`…), not derived from rule keys; the backup is a new step of the migration (there was no existing backup helper); `Load`/`ValidateMap` migrate in memory and the file is rewritten at startup after the HTTP port is claimed, a write failure being a warning (not a refusal to start); an invalid legacy flow still fails `Load` as before.
+- §5: replace the migration section with: there is no migration — review flows had no users, the rule-list format is deleted, and a TOML flow still written with `rules` has no `start`, so `Load` rejects it with the per-node validation error (the `rules` keys are ignored as unknown), and `PUT` rejects a `rules` body with `400`.
 - §6: `POST /flows/simulate` keeps `flow` as the saved flow id and takes the unsaved graph as `graph`.
 - §2: drop "Config backup-on-rewrite pattern" from the reused table.
+- §10/§12: drop the migration property test and the migration risks.
 
 - [ ] **Step 3: Run every gate**
 
@@ -6301,8 +5903,8 @@ HOME=$SCRATCH/home $SCRATCH/heimdalld &   # note the PID
 ```
 
 Verify, citing output:
-1. The log has `review flows migrated to graphs` with the flow ids and a backup path; `$SCRATCH/home/.config/heimdallm/config.toml` now has `[ai.flows.<id>.nodes.*]` and no `rules`; the `.bak.<seconds>` file equals the original.
-2. For every migrated flow and the instants `Mon 09:00`, `Mon 23:00`, `Sat 12:00` (daemon zone): `curl -s -X POST localhost:7942/flows/simulate -H "X-Heimdallm-Token: $(cat $SCRATCH/home/.local/share/heimdallm/api_token)" -d '{"flow":"<id>","at":"<RFC3339>"}'` returns the same `candidates` as the installed v0.10.x daemon gives for the same request (run the same curl against the running production daemon on 7842, read-only).
+1. `heimdallm-cli --host localhost:7942 flows list` shows the built-in default flow as `a10 → a20` steps.
+2. PUT the spec's `night-codex` example graph with curl, then for `Mon 09:00`, `Mon 23:00`, `Sat 12:00` (daemon zone) `curl -s -X POST localhost:7942/flows/simulate -H "X-Heimdallm-Token: $(cat $SCRATCH/home/.local/share/heimdallm/api_token)" -d '{"flow":"night-codex","at":"<RFC3339>"}'` returns the candidates and `path` the spec's walk predicts (write the expectation down before running).
 3. `heimdallm-cli --host localhost:7942 flows assist "de noche usa Codex; si Claude pasa del 80% semanal, Gemini" --agent claude` prints a plan and a valid draft (this uses the operator's real Claude CLI login — the agent CLI is authenticated even though the daemon's GitHub access is not). Then `make dev-cli`-style or the desktop app pointed at port 7942: open the flow editor, run the assistant, Accept, Save, reload, and confirm the saved graph renders identically.
 4. Stop the daemon (`kill <PID>`), delete `$SCRATCH`.
 
@@ -6312,7 +5914,7 @@ If step 3's agent is not logged in on this machine, record that fact and run it 
 
 ```bash
 git add docs
-git commit -m "docs: review flows as decision graphs, assistant and migration
+git commit -m "docs: review flows as decision graphs and the flow assistant
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -6321,5 +5923,5 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ## Self-Review Notes (planner)
 
-- Spec coverage: §3 → Task 1; §4 → Task 3; §5 → Task 2 (+ property test in Task 3); §6 → Task 4; §7 → Task 5; §8 → Task 6; §9.1 → Tasks 10–12; §9.2 → Tasks 7–12; §10 → each task + Task 13; §11 → Task 13 docs; the PR itself is opened after Task 13 with the mandatory security review of the diff.
-- Deviations from the spec, folded back in Task 13 Step 2: positional migration ids; backup is new code; simulate takes `graph`; migration write failure is a warning.
+- Spec coverage: §3 → Task 1; §4 → Task 3; §5 (no migration, amended) → Task 3; §6 → Task 4; §7 → Task 5; §8 → Task 6; §9.1 → Tasks 10–12; §9.2 → Tasks 7–12; §10 → each task + Task 13; §11 → Task 13 docs; the PR itself is opened after Task 13 with the mandatory security review of the diff.
+- Deviations from the spec, folded back in Task 13 Step 2: no migration (user decision 2026-10-13); simulate takes `graph`.
