@@ -22,7 +22,7 @@ import 'config_providers.dart';
 import '../../shared/widgets/review_limits_editor.dart';
 import '../../shared/widgets/token_saving_editor.dart';
 import '../review_limits/review_limits_usage.dart';
-import '../flows/flows_screen.dart' show flowsProvider;
+import '../flows/flows_list_screen.dart' show flowsProvider;
 
 // Poll-interval bounds, mirrored from the daemon's config.ValidatePollInterval
 // (daemon/internal/config/config.go: minPollInterval=1m, maxPollInterval=24h).
@@ -1815,8 +1815,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     circuitBreaker: _circuitBreaker,
     reviewLimits: _reviewLimits,
     tokenSaving: _tokenSaving,
-    // Primary/fallback are edited in the default flow (Flows), not here, so
-    // the server's current values are kept rather than a stale copy.
+    // Primary/fallback are edited from the default flow's inspector (Flows),
+    // not here, so the server's current values are kept rather than a stale
+    // copy.
     aiFlow: _aiFlow,
     reviewMode: _reviewMode,
     clusterRole: _clusterRole,

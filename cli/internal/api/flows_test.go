@@ -25,8 +25,8 @@ func TestFlowsClient(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/flows":
-			_, _ = w.Write([]byte(`{"selected":"weekday","default_id":"default","write_capable":["claude"],
-				"flows":{"weekday":{"name":"Weekday","rules":{"20":{"agent":"codex"},"10":{"agent":"claude"}}}}}`))
+			_, _ = w.Write([]byte(`{"selected":"weekday","default_id":"default","agents":[{"id":"claude","installed":true,"write_capable":true}],
+				"flows":{"weekday":{"name":"Weekday","start":"a1","nodes":{"a1":{"type":"agent","agent":"claude","next":"a2"},"a2":{"type":"agent","agent":"codex"}}}}}`))
 		case "/flows/simulate":
 			if r.Header.Get("Content-Type") != "application/json" {
 				t.Errorf("content type = %q", r.Header.Get("Content-Type"))
@@ -34,7 +34,7 @@ func TestFlowsClient(t *testing.T) {
 			b, _ := io.ReadAll(r.Body)
 			simBody = nil
 			_ = json.Unmarshal(b, &simBody)
-			_, _ = w.Write([]byte(`{"flow_id":"weekday","candidates":["codex"],"rules":[{"key":"10","agent":"claude","reasons":["x"]}]}`))
+			_, _ = w.Write([]byte(`{"flow_id":"weekday","candidates":["codex"],"path":[{"node":"a1","type":"agent","agent":"claude","reasons":["x"]}]}`))
 		case "/quotas":
 			_, _ = w.Write([]byte(`[{"agent":"claude","available":true,"windows":[{"kind":"session","used_percent":34}]}]`))
 		}
@@ -46,12 +46,15 @@ func TestFlowsClient(t *testing.T) {
 	if err != nil || l.Selected != "weekday" {
 		t.Fatalf("ListFlows = %+v, %v", l, err)
 	}
-	if got := l.Flows["weekday"].OrderedRuleKeys(); strings.Join(got, ",") != "10,20" {
-		t.Errorf("rule order = %v", got)
+	if got := strings.Join(l.Flows["weekday"].Describe(), "|"); got != "a1: claude → fallback: a2|a2: codex → end" {
+		t.Errorf("describe = %q", got)
+	}
+	if len(l.Agents) != 1 || l.Agents[0].ID != "claude" || !l.Agents[0].WriteCapable {
+		t.Errorf("agents = %+v", l.Agents)
 	}
 	at := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
 	d, err := c.SimulateFlow("", "org/a", at)
-	if err != nil || d.Candidates[0] != "codex" {
+	if err != nil || d.Candidates[0] != "codex" || len(d.Path) != 1 || d.Path[0].Node != "a1" {
 		t.Fatalf("SimulateFlow = %+v, %v", d, err)
 	}
 	if simBody["repo"] != "org/a" || simBody["at"] != "2026-10-08T09:00:00Z" || simBody["flow"] != nil {
@@ -100,27 +103,30 @@ func TestFlowsClient(t *testing.T) {
 }
 
 func TestFlowDescriptions(t *testing.T) {
-	r := api.FlowRule{
-		Agent: "copilot",
+	n := api.FlowNode{
+		Type:  "condition",
 		Match: "any",
+		Yes:   "a1",
 		Schedule: map[string]api.ScheduleCondition{
 			"s1": {Days: []string{"mon", "fri"}, From: "08:00", To: "15:00", TZ: "Europe/Madrid"},
 			"s2": {From: "22:00", To: "06:00"},
+			"s3": {Days: []string{"sat", "sun"}, From: "00:00", To: "00:00"},
+			"s4": {From: "07:00", To: "07:00"},
 		},
 		Quota: map[string]api.QuotaCondition{
 			"q1": {Agent: "claude", Window: "weekly", Op: "above", Percent: 90.5},
 			"q2": {Agent: "claude", Window: "session", Op: "below", Percent: 50},
 		},
 	}
-	want := "copilot when mon,fri 08:00-15:00 Europe/Madrid or every day 22:00-06:00 daemon time or claude weekly quota > 90.5% or claude session quota < 50%"
-	if got := r.Describe(); got != want {
+	want := "if mon,fri 08:00-15:00 Europe/Madrid or every day 22:00-06:00 daemon time or sat,sun all day daemon time or always or claude weekly quota > 90.5% or claude session quota < 50% → yes: a1 / no: end"
+	if got := n.Describe(); got != want {
 		t.Errorf("Describe =\n%q\nwant\n%q", got, want)
 	}
-	r.Match = ""
-	if got := r.Describe(); !strings.Contains(got, " and ") {
-		t.Errorf("all-match rule = %q", got)
+	n.Match = ""
+	if got := n.Describe(); !strings.Contains(got, " and ") {
+		t.Errorf("all-match node = %q", got)
 	}
-	unknown := api.FlowRule{Agent: "codex", Quota: map[string]api.QuotaCondition{
+	unknown := api.FlowNode{Type: "condition", Quota: map[string]api.QuotaCondition{
 		"q": {Agent: "claude", Window: "weekly", Op: "near", Percent: 50},
 	}}
 	if got := unknown.Describe(); !strings.Contains(got, "quota near 50%") {
@@ -130,12 +136,8 @@ func TestFlowDescriptions(t *testing.T) {
 	if got := unknown.Describe(); !strings.Contains(got, "quota < 50%") {
 		t.Errorf("an empty op is below, as the daemon evaluates it: %q", got)
 	}
-	if got := (api.FlowRule{Agent: "codex\x1b[31m"}).Describe(); strings.Contains(got, "\x1b") || !strings.HasSuffix(got, " always") {
+	if got := (api.FlowNode{Type: "agent", Agent: "codex\x1b[31m"}).Describe(); strings.Contains(got, "\x1b") || !strings.HasSuffix(got, " → end") {
 		t.Errorf("control bytes kept: %q", got)
-	}
-	keys := api.Flow{Rules: map[string]api.FlowRule{"b": {}, "a": {}, "100": {}, "9": {}, "010": {}, "10": {}}}.OrderedRuleKeys()
-	if strings.Join(keys, ",") != "9,010,10,100,a,b" {
-		t.Errorf("keys = %v", keys)
 	}
 
 	for _, tc := range []struct {
@@ -153,5 +155,107 @@ func TestFlowDescriptions(t *testing.T) {
 		if got := tc.q.Summary(); got != tc.want {
 			t.Errorf("Summary = %q, want %q", got, tc.want)
 		}
+	}
+}
+
+func TestFlowDescribeWalksGraph(t *testing.T) {
+	f := api.Flow{Name: "n", Start: "c1", Nodes: map[string]api.FlowNode{
+		"c1": {Type: "condition", Match: "any", Yes: "a1", No: "a2",
+			Schedule: map[string]api.ScheduleCondition{"s1": {From: "22:00", To: "06:00"}}},
+		"a1": {Type: "agent", Agent: "codex", Next: "a2"},
+		"a2": {Type: "agent", Agent: "claude"},
+		"x9": {Type: "agent", Agent: "gemini"},
+	}}
+	got := strings.Join(f.Describe(), "\n")
+	want := "c1: if every day 22:00-06:00 daemon time → yes: a1 / no: a2\n" +
+		"a1: codex → fallback: a2\n" +
+		"a2: claude → end\n" +
+		"⚠ unreachable x9: gemini → end"
+	if got != want {
+		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+	// A cycle or a dangling edge must not loop or panic; steps no path
+	// reaches are listed after the walk.
+	loop := api.Flow{Start: "a", Nodes: map[string]api.FlowNode{"a": {Type: "agent", Agent: "x", Next: "a"}, "b": {Type: "agent", Next: "zz"}}}
+	if got := strings.Join(loop.Describe(), "\n"); got != "a: x → fallback: a\n⚠ unreachable b:  → fallback: zz" {
+		t.Errorf("cycle = %q", got)
+	}
+	for _, tc := range []struct {
+		f    api.Flow
+		want string
+	}{
+		{api.Flow{Start: "gone", Nodes: map[string]api.FlowNode{"a": {Type: "agent", Agent: "x"}}}, "⚠ start gone is not a step\n⚠ unreachable a: x → end"},
+		{api.Flow{Nodes: map[string]api.FlowNode{"a": {Type: "agent", Agent: "x"}}}, "⚠ no start step\n⚠ unreachable a: x → end"},
+		{api.Flow{Start: "gone"}, "⚠ start gone is not a step"},
+		{api.Flow{}, ""},
+	} {
+		if got := strings.Join(tc.f.Describe(), "\n"); got != tc.want {
+			t.Errorf("Describe(%+v) = %q, want %q", tc.f, got, tc.want)
+		}
+	}
+	if got := (api.FlowNode{Type: "condition", Yes: "a"}).Describe(); got != "if (no conditions) → yes: a / no: end" {
+		t.Errorf("empty condition = %q", got)
+	}
+	if got := (api.FlowNode{Type: "loop\x1b"}).Describe(); got != "unknown step type loop" {
+		t.Errorf("unknown type = %q", got)
+	}
+}
+
+func TestAssistFlowPostsAndDecodes(t *testing.T) {
+	var body map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/flows/assist" || r.Method != http.MethodPost {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"plan":"p","agent":"claude","duration_ms":1500,"warnings":["w"],"flow":{"name":"x","start":"a1","nodes":{"a1":{"type":"agent","agent":"claude"}}}}`))
+	}))
+	defer ts.Close()
+	c := api.New(ts.URL, "tok")
+	res, err := c.AssistFlow("claude", "use claude", &api.Flow{Name: "cur"})
+	if err != nil || res.Plan != "p" || res.Flow.Start != "a1" || res.DurationMS != 1500 || len(res.Warnings) != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if body["agent"] != "claude" || body["instruction"] != "use claude" || body["flow"] == nil {
+		t.Fatalf("body %v", body)
+	}
+	if c.HTTPClient.Timeout != 30*time.Second {
+		t.Errorf("AssistFlow must not change the shared client timeout, got %v", c.HTTPClient.Timeout)
+	}
+	body = nil
+	if _, err := c.AssistFlow("claude", "x", nil); err != nil || body["flow"] != nil {
+		t.Errorf("no current flow: %v body %v", err, body)
+	}
+
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"agent timed out"}`, http.StatusGatewayTimeout)
+	}))
+	defer fail.Close()
+	if _, err := api.New(fail.URL, "").AssistFlow("claude", "x", nil); err == nil || !strings.Contains(err.Error(), "504") {
+		t.Errorf("assist error = %v", err)
+	}
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{oops`)) }))
+	defer bad.Close()
+	if _, err := api.New(bad.URL, "").AssistFlow("claude", "x", nil); err == nil {
+		t.Error("malformed assist result must error")
+	}
+	bare := &api.Client{Host: ts.URL}
+	if _, err := bare.AssistFlow("claude", "x", nil); err != nil {
+		t.Errorf("a Client without an HTTPClient must still assist: %v", err)
+	}
+}
+
+func TestPutFlow(t *testing.T) {
+	var path, method string
+	var body api.Flow
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, method = r.URL.EscapedPath(), r.Method
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+	err := api.New(ts.URL, "").PutFlow("a b", api.Flow{Name: "N", Start: "a1", Nodes: map[string]api.FlowNode{"a1": {Type: "agent", Agent: "claude"}}})
+	if err != nil || method != http.MethodPut || path != "/flows/a%20b" || body.Start != "a1" {
+		t.Fatalf("err=%v %s %s %+v", err, method, path, body)
 	}
 }

@@ -81,16 +81,13 @@ func mergeTrackAgentSpec(cfg **config.Config, cfgMu *sync.Mutex) func(repo strin
 	}
 }
 
-// flowWriteAgents lists, in rule order and without repeats, the agents of
+// flowWriteAgents lists, in flow order and without repeats, the agents of
 // repo's review flow that can edit files.
 func flowWriteAgents(c *config.Config, repo string) []string {
 	_, flow := c.FlowForRepo(repo)
 	var out []string
-	seen := map[string]bool{}
-	for _, key := range flow.OrderedRuleKeys() {
-		agent := flow.Rules[key].Agent
-		if !seen[agent] && executor.WriteCapable(agent) {
-			seen[agent] = true
+	for _, agent := range config.TopoAgentOrder(flow) {
+		if executor.WriteCapable(agent) {
 			out = append(out, agent)
 		}
 	}

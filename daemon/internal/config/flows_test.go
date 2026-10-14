@@ -12,10 +12,15 @@ flow = "global"
 
 [ai.flows.global]
 name = "Global"
-[ai.flows.global.rules.10]
+start = "a1"
+[ai.flows.global.nodes.a1]
+type = "agent"
 agent = "gemini"
 
-[ai.flows.night.rules.1]
+[ai.flows.night]
+start = "a1"
+[ai.flows.night.nodes.a1]
+type = "agent"
 agent = "opencode"
 
 [ai.orgs.acme]
@@ -37,34 +42,27 @@ primary = "copilot"
 	}
 	cfg.AI.Flow = ""
 	id, f := cfg.FlowForRepo("other/x")
-	if id != DefaultFlowID || f.Rules["10"].Agent != "claude" || f.Rules["20"].Agent != "codex" {
+	if id != DefaultFlowID || f.Start != "a10" || f.Nodes["a10"].Agent != "claude" || f.Nodes["a20"].Agent != "codex" {
 		t.Errorf("legacy flow = %s %+v", id, f)
 	}
 	if cfg.FlowNameForRepo("acme/legacy") != "night" {
 		t.Error("org flow applies to repos without their own")
 	}
 	all := cfg.AllFlows()
-	if len(all) != 3 || all[DefaultFlowID].Rules["10"].Agent != "claude" {
+	if len(all) != 3 || all[DefaultFlowID].Nodes["a10"].Agent != "claude" {
 		t.Errorf("AllFlows = %+v", all)
 	}
 }
 
 func TestLegacyFlowSkipsDuplicateFallback(t *testing.T) {
 	c := &Config{AI: AIConfig{Primary: "claude", Fallback: "claude"}}
-	if f := c.legacyFlow(""); len(f.Rules) != 1 {
+	if f := c.legacyFlow(""); len(f.Nodes) != 1 {
 		t.Errorf("legacy flow = %+v", f)
 	}
 	c.AI.Primary = ""
 	c.AI.Fallback = ""
-	if f := c.legacyFlow(""); len(f.Rules) != 0 {
+	if f := c.legacyFlow(""); len(f.Nodes) != 0 || f.Start != "" {
 		t.Errorf("empty legacy flow = %+v", f)
-	}
-}
-
-func TestOrderedRuleKeys(t *testing.T) {
-	f := FlowConfig{Rules: map[string]FlowRule{"100": {}, "9": {}, "b": {}, "20": {}, "a": {}}}
-	if got := strings.Join(f.OrderedRuleKeys(), ","); got != "9,20,100,a,b" {
-		t.Errorf("order = %s", got)
 	}
 }
 
@@ -93,37 +91,26 @@ func TestOrderKeysIsDeterministic(t *testing.T) {
 }
 
 func TestValidateFlows(t *testing.T) {
+	node := func(extra string) string {
+		return "[ai.flows.x]\nstart = \"c\"\n[ai.flows.x.nodes.c]\ntype = \"condition\"\nyes = \"a\"\n" + extra +
+			"[ai.flows.x.nodes.a]\ntype = \"agent\"\nagent = \"claude\"\n"
+	}
 	bad := map[string]string{
-		"bad id":       "[ai.flows.\"Bad Id\".rules.1]\nagent = \"claude\"\n",
+		"bad id":       "[ai.flows.\"Bad Id\"]\nstart = \"a\"\n[ai.flows.\"Bad Id\".nodes.a]\ntype = \"agent\"\nagent = \"claude\"\n",
 		"missing ref":  "flow = \"ghost\"\n",
 		"org ref":      "[ai.orgs.acme]\nflow = \"ghost\"\n",
 		"repo ref":     "[ai.repos.\"acme/api\"]\nflow = \"ghost\"\n",
-		"long key":     "[ai.flows.x.rules.\"12345678901234567\"]\nagent = \"claude\"\n",
-		"quota agent":  "[ai.flows.x.rules.1]\nagent = \"claude\"\n[ai.flows.x.rules.1.quota.a]\nagent = \"nope\"\nwindow = \"session\"\nop = \"below\"\npercent = 1\n",
-		"model window": "[ai.flows.x.rules.1]\nagent = \"claude\"\n[ai.flows.x.rules.1.quota.a]\nagent = \"gemini\"\nwindow = \"model:\"\nop = \"below\"\npercent = 1\n",
-		"long name":    "[ai.flows.x]\nname = \"" + strings.Repeat("n", 121) + "\"\n[ai.flows.x.rules.1]\nagent = \"claude\"\n",
+		"quota agent":  node("[ai.flows.x.nodes.c.quota.q]\nagent = \"nope\"\nwindow = \"session\"\nop = \"below\"\npercent = 1\n"),
+		"model window": node("[ai.flows.x.nodes.c.quota.q]\nagent = \"gemini\"\nwindow = \"model:\"\nop = \"below\"\npercent = 1\n"),
+		"long name":    "[ai.flows.x]\nname = \"" + strings.Repeat("n", 121) + "\"\nstart = \"a\"\n[ai.flows.x.nodes.a]\ntype = \"agent\"\nagent = \"claude\"\n",
 	}
 	for name, body := range bad {
 		if _, err := loadReviewLimitsTOML(t, body); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := loadReviewLimitsTOML(t, "flow = \"default\"\n[ai.flows.x.rules.1]\nagent = \"gemini\"\n[ai.flows.x.rules.1.quota.a]\nagent = \"gemini\"\nwindow = \"model:gemini-2.5-pro\"\nop = \"above\"\npercent = 10\n"); err != nil {
+	if _, err := loadReviewLimitsTOML(t, "flow = \"default\"\n"+node("[ai.flows.x.nodes.c.quota.q]\nagent = \"gemini\"\nwindow = \"model:gemini-2.5-pro\"\nop = \"above\"\npercent = 10\n")); err != nil {
 		t.Errorf("valid flow rejected: %v", err)
-	}
-	many := FlowConfig{Rules: map[string]FlowRule{}}
-	for i := 0; i <= maxRulesPerFlow; i++ {
-		many.Rules[strings.Repeat("1", 1)+string(rune('a'+i%26))+string(rune('a'+i/26))] = FlowRule{Agent: "claude"}
-	}
-	if ValidateFlow("x", many) == nil {
-		t.Error("too many rules accepted")
-	}
-	conds := FlowRule{Agent: "claude", Schedule: map[string]ScheduleCondition{}}
-	for i := 0; i <= maxConditionsPerRu; i++ {
-		conds.Schedule[string(rune('a'+i))] = ScheduleCondition{From: "01:00", To: "02:00"}
-	}
-	if ValidateFlow("x", FlowConfig{Rules: map[string]FlowRule{"1": conds}}) == nil {
-		t.Error("too many conditions accepted")
 	}
 	c := &Config{AI: AIConfig{Flows: map[string]FlowConfig{}}}
 	for i := 0; i <= maxFlows; i++ {

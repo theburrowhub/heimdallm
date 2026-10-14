@@ -26,15 +26,17 @@ func provider(windows ...quota.Window) quota.Provider {
 // The example from the feature request: Claude while it has quota, Copilot
 // on weekday mornings, Codex otherwise.
 func exampleFlow() config.FlowConfig {
-	return config.FlowConfig{Name: "Example", Rules: map[string]config.FlowRule{
-		"10": {Agent: "claude", Quota: map[string]config.QuotaCondition{
+	return config.FlowConfig{Name: "Example", Start: "c10", Nodes: map[string]config.FlowNode{
+		"c10": {Type: config.NodeCondition, Yes: "a10", No: "c20", Quota: map[string]config.QuotaCondition{
 			"a": {Agent: "claude", Window: "session", Op: "below", Percent: 50},
 			"b": {Agent: "claude", Window: "weekly", Op: "below", Percent: 50},
 		}},
-		"20": {Agent: "copilot", Schedule: map[string]config.ScheduleCondition{
+		"a10": {Type: config.NodeAgent, Agent: "claude", Next: "c20"},
+		"c20": {Type: config.NodeCondition, Yes: "a20", No: "a99", Schedule: map[string]config.ScheduleCondition{
 			"a": {Days: []string{"mon", "tue", "wed", "thu", "fri"}, From: "08:00", To: "15:00", TZ: "Europe/Madrid"},
 		}},
-		"99": {Agent: "codex"},
+		"a20": {Type: config.NodeAgent, Agent: "copilot", Next: "a99"},
+		"a99": {Type: config.NodeAgent, Agent: "codex"},
 	}}
 }
 
@@ -73,9 +75,9 @@ func TestEvaluate_RequestExample(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := Evaluate(context.Background(), "example", exampleFlow(), tc.at, tc.q, all)
 			if got := strings.Join(d.Candidates, ","); got != tc.want {
-				t.Errorf("candidates = %s, want %s\n%+v", got, tc.want, d.Rules)
+				t.Errorf("candidates = %s, want %s\n%+v", got, tc.want, d.Path)
 			}
-			if d.FlowID != "example" || d.FlowName != "Example" || len(d.Rules) != 3 || d.Rules[2].Key != "99" {
+			if d.FlowID != "example" || d.FlowName != "Example" || len(d.Path) == 0 {
 				t.Errorf("decision = %+v", d)
 			}
 		})
@@ -83,19 +85,26 @@ func TestEvaluate_RequestExample(t *testing.T) {
 }
 
 func TestEvaluate_AvailabilityAnyAndDedup(t *testing.T) {
-	f := config.FlowConfig{Rules: map[string]config.FlowRule{
-		"1":  {Agent: "claude", Match: "any", Quota: map[string]config.QuotaCondition{"a": {Agent: "claude", Window: "session", Op: "above", Percent: 90}}, Schedule: map[string]config.ScheduleCondition{"a": {From: "00:00", To: "23:59"}}},
-		"2":  {Agent: "copilot"},
-		"10": {Agent: "claude"},
+	f := config.FlowConfig{Start: "c1", Nodes: map[string]config.FlowNode{
+		"c1": {Type: config.NodeCondition, Match: "any", Yes: "a1", No: "a2",
+			Quota:    map[string]config.QuotaCondition{"a": {Agent: "claude", Window: "session", Op: "above", Percent: 90}},
+			Schedule: map[string]config.ScheduleCondition{"a": {From: "00:00", To: "23:59"}}},
+		"a1":  {Type: config.NodeAgent, Agent: "claude", Next: "a2"},
+		"a2":  {Type: config.NodeAgent, Agent: "copilot", Next: "a10"},
+		"a10": {Type: config.NodeAgent, Agent: "claude"},
 	}}
 	d := Evaluate(context.Background(), "x", f, time.Date(2026, 1, 1, 12, 0, 0, 0, time.Local), fakeQuotas{}, func(a string) bool { return a != "copilot" })
 	if strings.Join(d.Candidates, ",") != "claude" {
 		t.Errorf("candidates = %v", d.Candidates)
 	}
-	if !d.Rules[1].Matched || d.Rules[1].Available || !strings.Contains(strings.Join(d.Rules[1].Reasons, ";"), "not installed") {
-		t.Errorf("unavailable rule = %+v", d.Rules[1])
+	if d.Path[2].Node != "a2" || d.Path[2].Available == nil || *d.Path[2].Available || !strings.Contains(strings.Join(d.Path[2].Reasons, ";"), "not installed") {
+		t.Errorf("unavailable step = %+v", d.Path[2])
 	}
-	if d := Evaluate(context.Background(), "x", config.FlowConfig{Rules: map[string]config.FlowRule{"1": {Agent: "claude", Match: "any", Schedule: map[string]config.ScheduleCondition{"a": {From: "01:00", To: "02:00"}}}}}, time.Date(2026, 1, 1, 12, 0, 0, 0, time.Local), nil, nil); len(d.Candidates) != 0 {
+	none := config.FlowConfig{Start: "c1", Nodes: map[string]config.FlowNode{
+		"c1": {Type: config.NodeCondition, Match: "any", Yes: "a1", Schedule: map[string]config.ScheduleCondition{"a": {From: "01:00", To: "02:00"}}},
+		"a1": {Type: config.NodeAgent, Agent: "claude"},
+	}}
+	if d := Evaluate(context.Background(), "x", none, time.Date(2026, 1, 1, 12, 0, 0, 0, time.Local), nil, nil); len(d.Candidates) != 0 {
 		t.Errorf("any with no holding condition = %v", d.Candidates)
 	}
 }
@@ -152,5 +161,39 @@ func TestQuotaConditions(t *testing.T) {
 	unavailable := fakeQuotas{"x": {Agent: "x"}}
 	if ok, why := quotaHolds(context.Background(), config.QuotaCondition{Agent: "x", Window: "session"}, unavailable); ok || !strings.Contains(why, "unavailable") {
 		t.Errorf("unavailable without error = %v %s", ok, why)
+	}
+}
+
+func TestScheduleAllDay(t *testing.T) {
+	weekend := config.ScheduleCondition{Days: []string{"sat", "sun"}, From: "00:00", To: "00:00", TZ: "UTC"}
+	cases := map[string]bool{
+		"2026-10-10T00:00:00Z": true,  // Saturday, first minute
+		"2026-10-10T12:00:00Z": true,  // Saturday noon
+		"2026-10-10T23:59:00Z": true,  // Saturday, last minute
+		"2026-10-11T00:00:00Z": true,  // Sunday: no "started yesterday" shift
+		"2026-10-12T00:00:00Z": false, // Monday, first minute
+		"2026-10-09T23:59:00Z": false, // Friday
+	}
+	for at, want := range cases {
+		ts, _ := time.Parse(time.RFC3339, at)
+		if got, why := scheduleHolds(weekend, ts); got != want {
+			t.Errorf("%s: holds=%v want %v (%s)", at, got, want, why)
+		}
+	}
+	ts, _ := time.Parse(time.RFC3339, "2026-10-10T12:00:00Z")
+	_, why := scheduleHolds(config.ScheduleCondition{Days: []string{"sat", "sun"}, From: "00:00", To: "00:00"}, ts.In(time.Local))
+	if !strings.Contains(why, "schedule sat,sun all day holds") {
+		t.Errorf("reason = %q", why)
+	}
+	_, why = scheduleHolds(config.ScheduleCondition{Days: []string{"sat"}, From: "00:00", To: "00:00", TZ: "UTC"}, ts)
+	if !strings.Contains(why, "schedule sat all day UTC holds") {
+		t.Errorf("reason with a zone = %q", why)
+	}
+	every := config.ScheduleCondition{From: "09:00", To: "09:00", TZ: "UTC"}
+	for _, at := range []string{"2026-10-10T08:00:00Z", "2026-10-12T23:59:00Z"} {
+		ts, _ := time.Parse(time.RFC3339, at)
+		if ok, why := scheduleHolds(every, ts); !ok || !strings.Contains(why, "schedule always holds") {
+			t.Errorf("empty days must always hold: %v %s", ok, why)
+		}
 	}
 }

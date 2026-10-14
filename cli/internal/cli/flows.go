@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -27,7 +28,7 @@ func newFlowsCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.AddCommand(newFlowsSimulateCmd(), newFlowsQuotasCmd())
+	cmd.AddCommand(newFlowsSimulateCmd(), newFlowsQuotasCmd(), newFlowsAssistCmd())
 	return cmd
 }
 
@@ -60,6 +61,85 @@ func newFlowsSimulateCmd() *cobra.Command {
 	return cmd
 }
 
+func newFlowsAssistCmd() *cobra.Command {
+	var flowID, agent string
+	var apply, create, yes, force bool
+	cmd := &cobra.Command{
+		Use:   "assist <instruction>",
+		Short: "Draft a flow (or a change to --flow) from plain language with an installed agent",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if apply && flowID == "" {
+				return fmt.Errorf("--apply needs --flow: the id the draft is saved as")
+			}
+			client := clientFromContext(cmd.Context())
+			var current *api.Flow
+			if flowID != "" {
+				listing, err := client.ListFlows()
+				if err != nil {
+					return fmt.Errorf("fetching flows: %w", err)
+				}
+				f, ok := listing.Flows[flowID]
+				switch {
+				case ok && create:
+					return fmt.Errorf("flow %s already exists; drop --new to change it", api.DisplayText(flowID, 64))
+				case ok:
+					current = &f
+				case !create:
+					// A mistyped id would otherwise draft and save a new flow.
+					return fmt.Errorf("there is no flow %s; pass --new to draft a new flow under that id", api.DisplayText(flowID, 64))
+				}
+			}
+			res, err := client.AssistFlow(agent, args[0], current)
+			if err != nil {
+				return fmt.Errorf("drafting flow: %w", err)
+			}
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "Plan (%s, %.1fs):\n", api.DisplayText(res.Agent, 24), float64(res.DurationMS)/1000)
+			for _, line := range strings.Split(res.Plan, "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					fmt.Fprintf(w, "  %s\n", api.DisplayText(line, 500))
+				}
+			}
+			fmt.Fprintln(w)
+			for _, line := range res.Flow.Describe() {
+				fmt.Fprintf(w, "  %s\n", line)
+			}
+			for _, warn := range res.Warnings {
+				fmt.Fprintf(w, "  ⚠ %s\n", api.DisplayText(warn, 200))
+			}
+			if !apply {
+				// A re-run drafts again, and agents are not deterministic.
+				fmt.Fprintln(w, "\nNot saved. --apply drafts again and asks before saving that draft.")
+				return nil
+			}
+			if !force && (len(res.Warnings) > 0 || len(res.Flow.Nodes) == 0) {
+				return fmt.Errorf("not saved: the draft has warnings or no steps; check it, then re-run with --force to save it anyway")
+			}
+			if !yes {
+				fmt.Fprintf(w, "\nSave this draft as %s? [y/N] ", api.DisplayText(flowID, 64))
+				answer, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+					fmt.Fprintln(w, "Not saved.")
+					return nil
+				}
+			}
+			if err := client.PutFlow(flowID, res.Flow); err != nil {
+				return fmt.Errorf("saving flow %s: %w", flowID, err)
+			}
+			fmt.Fprintf(w, "\nSaved as %s.\n", api.DisplayText(flowID, 64))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&flowID, "flow", "", "flow id to change (and, with --apply, to save as)")
+	cmd.Flags().StringVar(&agent, "agent", "claude", "installed CLI agent that drafts the flow (HTTP agents and opencode cannot draft)")
+	cmd.Flags().BoolVar(&apply, "apply", false, "save the draft with PUT /flows/<id> after asking")
+	cmd.Flags().BoolVar(&create, "new", false, "--flow names a flow that does not exist yet")
+	cmd.Flags().BoolVar(&yes, "yes", false, "with --apply, save without asking")
+	cmd.Flags().BoolVar(&force, "force", false, "with --apply, save a draft that has warnings or no steps")
+	return cmd
+}
+
 func newFlowsQuotasCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "quotas",
@@ -76,7 +156,7 @@ func newFlowsQuotasCmd() *cobra.Command {
 	}
 }
 
-// printFlows renders every flow with its rules in evaluation order. Every
+// printFlows renders every flow as its steps in walk order. Every
 // daemon-supplied string goes through DisplayText.
 func printFlows(w io.Writer, l *api.FlowListing) {
 	fmt.Fprintln(w, "Review Flows")
@@ -96,20 +176,26 @@ func printFlows(w io.Writer, l *api.FlowListing) {
 			title += "  (global)"
 		}
 		fmt.Fprintf(w, "\n  %s\n", title)
-		keys := f.OrderedRuleKeys()
-		if len(keys) == 0 {
-			fmt.Fprintln(w, "    (no rules)")
+		lines := f.Describe()
+		if len(lines) == 0 {
+			fmt.Fprintln(w, "    (no steps)")
 		}
-		for i, k := range keys {
-			fmt.Fprintf(w, "    %d. %s\n", i+1, f.Rules[k].Describe())
+		for _, line := range lines {
+			fmt.Fprintf(w, "    %s\n", line)
 		}
 	}
-	if len(l.WriteCapable) > 0 {
-		fmt.Fprintf(w, "\n  Conflict resolution uses only: %s\n", api.DisplayText(strings.Join(l.WriteCapable, ", "), 200))
+	var writers []string
+	for _, a := range l.Agents {
+		if a.Installed && a.WriteCapable {
+			writers = append(writers, a.ID)
+		}
+	}
+	if len(writers) > 0 {
+		fmt.Fprintf(w, "\n  Conflict resolution uses only: %s\n", api.DisplayText(strings.Join(writers, ", "), 200))
 	}
 }
 
-// printFlowDecision explains a simulated flow rule by rule. now is false when
+// printFlowDecision explains the path a simulated flow walked. now is false when
 // the flow was evaluated at another time (--at), so the outcome is not
 // described as the present.
 func printFlowDecision(w io.Writer, d *api.FlowDecision, now bool) {
@@ -129,7 +215,7 @@ func printFlowDecision(w io.Writer, d *api.FlowDecision, now bool) {
 		if !now {
 			when = "at that time"
 		}
-		fmt.Fprintf(w, "  No agent would review %s (no rule matches with an available agent): the review would wait.\n", when)
+		fmt.Fprintf(w, "  No agent would review %s (no path reaches an available agent): the review would wait.\n", when)
 	default:
 		names := make([]string, len(d.Candidates))
 		for i, c := range d.Candidates {
@@ -141,16 +227,31 @@ func printFlowDecision(w io.Writer, d *api.FlowDecision, now bool) {
 		}
 		fmt.Fprintln(w)
 	}
-	for _, r := range d.Rules {
-		mark := "✗" // conditions do not hold
-		switch {
-		case r.Matched && r.Available:
-			mark = "✓"
-		case r.Matched:
-			mark = "⚠" // conditions hold, but the agent is not available
+	for _, s := range d.Path {
+		switch s.Type {
+		case "condition":
+			// Not reported is not the same as false.
+			branch := "?"
+			if s.Holds != nil {
+				branch = "no"
+				if *s.Holds {
+					branch = "yes"
+				}
+			}
+			fmt.Fprintf(w, "  %s condition → %s\n", api.DisplayText(s.Node, 64), branch)
+		case "agent":
+			mark := "✓ added"
+			switch {
+			case s.Available != nil && !*s.Available:
+				mark = "⚠"
+			case !s.Added:
+				mark = "· already listed"
+			}
+			fmt.Fprintf(w, "  %s %s %s\n", api.DisplayText(s.Node, 64), api.DisplayText(s.Agent, 24), mark)
+		default:
+			fmt.Fprintf(w, "  %s\n", api.DisplayText(s.Node, 64))
 		}
-		fmt.Fprintf(w, "  %s %s\n", mark, api.DisplayText(r.Agent, 24))
-		for _, why := range r.Reasons {
+		for _, why := range s.Reasons {
 			fmt.Fprintf(w, "      %s\n", api.DisplayText(why, 200))
 		}
 	}

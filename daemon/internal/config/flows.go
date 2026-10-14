@@ -11,25 +11,79 @@ import (
 	"github.com/heimdallm/daemon/internal/executor"
 )
 
-// FlowConfig is a review flow: an ordered list of rules that decides which
-// agent reviews a PR. Rules are keyed by an order string ("10", "20", …,
-// compared numerically) because TOML cannot hold slices of tables in this
-// schema; the first rule whose conditions hold and whose agent is available
-// wins, and later matching rules are the fallbacks if that agent runs out of
-// quota mid-review.
+// FlowConfig is a review flow: a decision graph that picks which agents
+// review a PR, in order. Evaluation starts at Start; condition nodes branch
+// on schedule and quota, agent nodes add their agent to the candidates and
+// continue through their fallback edge. Nodes are a map keyed by node id
+// because TOML cannot hold slices of tables in this schema.
 type FlowConfig struct {
 	Name  string              `toml:"name" json:"name"`
-	Rules map[string]FlowRule `toml:"rules" json:"rules"`
+	Start string              `toml:"start,omitempty" json:"start"`
+	Nodes map[string]FlowNode `toml:"nodes,omitempty" json:"nodes"`
 }
 
-// FlowRule picks Agent when its conditions hold. No conditions means "always"
-// (the catch-all at the end of a flow).
-type FlowRule struct {
-	Agent string `toml:"agent" json:"agent"`
-	// Match is "all" (default: every condition holds) or "any".
+// Node types.
+const (
+	NodeCondition = "condition"
+	NodeAgent     = "agent"
+)
+
+// FlowNode is one step of a flow graph. A condition node uses Match, Quota,
+// Schedule, Yes and No; an agent node uses Agent and Next (its fallback).
+// An empty edge ends the walk. X and Y are the editor's canvas position.
+type FlowNode struct {
+	Type     string                       `toml:"type" json:"type"`
 	Match    string                       `toml:"match,omitempty" json:"match,omitempty"`
 	Quota    map[string]QuotaCondition    `toml:"quota,omitempty" json:"quota,omitempty"`
 	Schedule map[string]ScheduleCondition `toml:"schedule,omitempty" json:"schedule,omitempty"`
+	Yes      string                       `toml:"yes,omitempty" json:"yes,omitempty"`
+	No       string                       `toml:"no,omitempty" json:"no,omitempty"`
+	Agent    string                       `toml:"agent,omitempty" json:"agent,omitempty"`
+	Next     string                       `toml:"next,omitempty" json:"next,omitempty"`
+	X        *float64                     `toml:"x,omitempty" json:"x,omitempty"`
+	Y        *float64                     `toml:"y,omitempty" json:"y,omitempty"`
+}
+
+// Edges lists the node's outgoing edges (yes, no, next) that are set.
+func (n FlowNode) Edges() []string {
+	var out []string
+	for _, e := range []string{n.Yes, n.No, n.Next} {
+		if e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// SortedNodeIDs returns the node ids in string order, so validation and
+// error messages never depend on map iteration.
+func (f FlowConfig) SortedNodeIDs() []string {
+	ids := make([]string, 0, len(f.Nodes))
+	for id := range f.Nodes {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// FlowIssue is one validation finding, pinned to a node when it has one so
+// the editor can show it on the canvas.
+type FlowIssue struct {
+	Node    string `json:"node,omitempty"`
+	Field   string `json:"field,omitempty"`
+	Message string `json:"message"`
+}
+
+func (i FlowIssue) Error() string {
+	switch {
+	case i.Node != "" && i.Field != "":
+		return fmt.Sprintf("nodes.%s.%s: %s", i.Node, i.Field, i.Message)
+	case i.Node != "":
+		return fmt.Sprintf("nodes.%s: %s", i.Node, i.Message)
+	case i.Field != "":
+		return fmt.Sprintf("%s: %s", i.Field, i.Message)
+	}
+	return i.Message
 }
 
 // QuotaCondition compares an agent's used quota with a threshold.
@@ -44,7 +98,7 @@ type QuotaCondition struct {
 }
 
 // ScheduleCondition holds on the given weekdays within [From, To) in TZ.
-// From > To spans midnight (e.g. 22:00-06:00).
+// From > To spans midnight (e.g. 22:00-06:00); From == To is the whole day.
 type ScheduleCondition struct {
 	Days []string `toml:"days,omitempty" json:"days,omitempty"` // mon..sun; empty = every day
 	From string   `toml:"from" json:"from"`                     // HH:MM
@@ -58,9 +112,9 @@ const DefaultFlowID = "default"
 
 // Flow limits.
 const (
-	maxFlows           = 50
-	maxRulesPerFlow    = 50
-	maxConditionsPerRu = 20
+	maxFlows             = 50
+	maxNodesPerFlow      = 200
+	maxConditionsPerNode = 20
 )
 
 var (
@@ -77,16 +131,6 @@ var (
 func Weekday(name string) (time.Weekday, bool) {
 	d, ok := validWeekdays[strings.ToLower(strings.TrimSpace(name))]
 	return d, ok
-}
-
-// OrderedRuleKeys returns a flow's rule keys in evaluation order (see
-// OrderKeys).
-func (f FlowConfig) OrderedRuleKeys() []string {
-	keys := make([]string, 0, len(f.Rules))
-	for k := range f.Rules {
-		keys = append(keys, k)
-	}
-	return OrderKeys(keys)
 }
 
 // OrderKeys sorts flow map keys in evaluation order: numeric keys ascending,
@@ -130,12 +174,12 @@ func (c *Config) FlowNameForRepo(repo string) string {
 }
 
 // FlowForRepo resolves the flow that decides which agent reviews repo. A
-// selected flow that exists wins; otherwise the flow is synthesised from the
-// legacy primary/fallback settings (repo > org > global), so configs written
-// before flows keep their behaviour unchanged.
+// selected flow that exists and has a start node wins; otherwise the flow is
+// synthesised from the legacy primary/fallback settings (repo > org >
+// global), so configs written before flows keep their behaviour unchanged.
 func (c *Config) FlowForRepo(repo string) (string, FlowConfig) {
 	if name := c.FlowNameForRepo(repo); name != "" {
-		if f, ok := c.AI.Flows[name]; ok && len(f.Rules) > 0 {
+		if f, ok := c.AI.Flows[name]; ok && f.Start != "" {
 			return name, f
 		}
 	}
@@ -144,12 +188,20 @@ func (c *Config) FlowForRepo(repo string) (string, FlowConfig) {
 
 func (c *Config) legacyFlow(repo string) FlowConfig {
 	ai := c.AIForRepo(repo)
-	f := FlowConfig{Name: "Primary and fallback", Rules: map[string]FlowRule{}}
+	f := FlowConfig{Name: "Primary and fallback", Nodes: map[string]FlowNode{}}
 	if ai.Primary != "" {
-		f.Rules["10"] = FlowRule{Agent: ai.Primary}
+		f.Nodes["a10"] = FlowNode{Type: NodeAgent, Agent: ai.Primary}
+		f.Start = "a10"
 	}
 	if ai.Fallback != "" && ai.Fallback != ai.Primary {
-		f.Rules["20"] = FlowRule{Agent: ai.Fallback}
+		f.Nodes["a20"] = FlowNode{Type: NodeAgent, Agent: ai.Fallback}
+		if f.Start == "" {
+			f.Start = "a20"
+		} else {
+			n := f.Nodes["a10"]
+			n.Next = "a20"
+			f.Nodes["a10"] = n
+		}
 	}
 	return f
 }
@@ -175,62 +227,204 @@ func ValidateFlowID(id string) error {
 	return nil
 }
 
-// ValidateFlow checks one flow's rules and conditions.
+// ValidateFlow checks one flow and returns its first error.
 func ValidateFlow(id string, f FlowConfig) error {
-	path := "ai.flows." + id
+	if errs, _ := CheckFlow(id, f); len(errs) > 0 {
+		return fmt.Errorf("config: ai.flows.%s: %s", id, errs[0].Error())
+	}
+	return nil
+}
+
+// CheckFlow validates a flow graph. Errors make the flow unusable; warnings
+// (unreachable nodes) are shown by the editor and ignored by evaluation.
+func CheckFlow(id string, f FlowConfig) (errs, warns []FlowIssue) {
+	add := func(node, field, format string, a ...any) {
+		errs = append(errs, FlowIssue{Node: node, Field: field, Message: fmt.Sprintf(format, a...)})
+	}
 	if len(f.Name) > 120 {
-		return fmt.Errorf("config: %s.name is longer than 120 characters", path)
+		add("", "name", "is longer than 120 characters")
 	}
-	if len(f.Rules) > maxRulesPerFlow {
-		return fmt.Errorf("config: %s has %d rules, at most %d allowed", path, len(f.Rules), maxRulesPerFlow)
+	if len(f.Nodes) > maxNodesPerFlow {
+		add("", "nodes", "has %d nodes, at most %d allowed", len(f.Nodes), maxNodesPerFlow)
+		return errs, warns
 	}
-	for key, r := range f.Rules {
-		rp := path + ".rules." + key
-		if len(key) == 0 || len(key) > 16 {
-			return fmt.Errorf("config: %s: rule key must be 1-16 characters", rp)
+	if len(f.Nodes) == 0 {
+		if f.Start != "" {
+			add("", "start", "names %q but the flow has no nodes", f.Start)
 		}
-		if err := executor.ValidateCLIName(r.Agent); err != nil {
-			return fmt.Errorf("config: %s.agent: %w", rp, err)
+		return errs, warns
+	}
+	if f.Start == "" {
+		add("", "start", "must name the first node")
+	} else if _, ok := f.Nodes[f.Start]; !ok {
+		add("", "start", "names %q, which is not a node", f.Start)
+	}
+	ids := f.SortedNodeIDs()
+	for _, nid := range ids {
+		n := f.Nodes[nid]
+		if !flowIDPattern.MatchString(nid) {
+			add(nid, "", "node id must be 1-64 characters of a-z, 0-9, '-' or '_'")
 		}
-		if !validMatchModes[r.Match] {
-			return fmt.Errorf("config: %s.match must be all or any", rp)
-		}
-		if len(r.Quota)+len(r.Schedule) > maxConditionsPerRu {
-			return fmt.Errorf("config: %s has too many conditions (max %d)", rp, maxConditionsPerRu)
-		}
-		for ck, q := range r.Quota {
-			qp := rp + ".quota." + ck
-			if err := executor.ValidateCLIName(q.Agent); err != nil {
-				return fmt.Errorf("config: %s.agent: %w", qp, err)
+		edge := func(field, target string) {
+			if target == "" {
+				return
 			}
-			if !validQuotaWin[q.Window] && !(strings.HasPrefix(q.Window, modelWindowPfx) && len(q.Window) > len(modelWindowPfx) && len(q.Window) <= 128) {
-				return fmt.Errorf("config: %s.window must be session, weekly, monthly, credit, any or model:<id>", qp)
-			}
-			if !validQuotaOps[q.Op] {
-				return fmt.Errorf("config: %s.op must be below or above", qp)
-			}
-			if q.Percent < 0 || q.Percent > 100 {
-				return fmt.Errorf("config: %s.percent must be between 0 and 100", qp)
+			if _, ok := f.Nodes[target]; !ok {
+				add(nid, field, "points at %q, which is not a node", target)
 			}
 		}
-		for ck, sc := range r.Schedule {
-			sp := rp + ".schedule." + ck
-			if !hhmmPattern.MatchString(sc.From) || !hhmmPattern.MatchString(sc.To) {
-				return fmt.Errorf("config: %s: from/to must be HH:MM", sp)
+		switch n.Type {
+		case NodeCondition:
+			if n.Agent != "" {
+				add(nid, "agent", "a condition has no agent")
 			}
-			if sc.From == sc.To {
-				return fmt.Errorf("config: %s: from and to must differ", sp)
+			if n.Next != "" {
+				add(nid, "next", "a condition branches with yes/no, not next")
 			}
-			for _, d := range sc.Days {
-				if _, ok := Weekday(d); !ok {
-					return fmt.Errorf("config: %s.days: %q is not mon..sun", sp, d)
+			if !validMatchModes[n.Match] {
+				add(nid, "match", "must be all or any")
+			}
+			total := len(n.Quota) + len(n.Schedule)
+			if total == 0 {
+				add(nid, "", "a condition needs at least one schedule or quota condition")
+			}
+			if total > maxConditionsPerNode {
+				add(nid, "", "has too many conditions (max %d)", maxConditionsPerNode)
+			}
+			for _, ck := range OrderKeys(mapKeys(n.Quota)) {
+				if err := validateQuotaCondition(n.Quota[ck]); err != nil {
+					add(nid, "quota."+ck, "%s", err)
 				}
 			}
-			if sc.TZ != "" {
-				if _, err := time.LoadLocation(sc.TZ); err != nil {
-					return fmt.Errorf("config: %s.tz: unknown time zone %q", sp, sc.TZ)
+			for _, ck := range OrderKeys(mapKeys(n.Schedule)) {
+				if err := validateScheduleCondition(n.Schedule[ck]); err != nil {
+					add(nid, "schedule."+ck, "%s", err)
 				}
 			}
+			edge("yes", n.Yes)
+			edge("no", n.No)
+		case NodeAgent:
+			if n.Match != "" || len(n.Quota) > 0 || len(n.Schedule) > 0 {
+				add(nid, "", "an agent step has no conditions; put them in a condition step")
+			}
+			if n.Yes != "" {
+				add(nid, "yes", "an agent step continues through next, not yes")
+			}
+			if n.No != "" {
+				add(nid, "no", "an agent step continues through next, not no")
+			}
+			if err := executor.ValidateCLIName(n.Agent); err != nil {
+				add(nid, "agent", "%s", err)
+			}
+			edge("next", n.Next)
+		default:
+			add(nid, "type", "must be condition or agent, not %q", n.Type)
+		}
+	}
+	if cyc := findCycleNode(f, ids); cyc != "" {
+		add(cyc, "", "this step is part of a cycle; a flow must never loop back")
+	}
+	reach := reachable(f)
+	for _, nid := range ids {
+		if !reach[nid] {
+			warns = append(warns, FlowIssue{Node: nid, Message: "not reachable from the start; it is ignored"})
+		}
+	}
+	return errs, warns
+}
+
+func mapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// findCycleNode returns a node on a cycle ("" when the graph is acyclic).
+// Edges to missing nodes are ignored here; CheckFlow reports them.
+func findCycleNode(f FlowConfig, ids []string) string {
+	const (
+		white = iota
+		grey
+		black
+	)
+	colour := map[string]int{}
+	var visit func(id string) string
+	visit = func(id string) string {
+		colour[id] = grey
+		for _, next := range f.Nodes[id].Edges() {
+			if _, ok := f.Nodes[next]; !ok {
+				continue
+			}
+			switch colour[next] {
+			case grey:
+				return next
+			case white:
+				if c := visit(next); c != "" {
+					return c
+				}
+			}
+		}
+		colour[id] = black
+		return ""
+	}
+	for _, id := range ids {
+		if colour[id] == white {
+			if c := visit(id); c != "" {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
+// reachable marks the nodes reachable from Start.
+func reachable(f FlowConfig) map[string]bool {
+	seen := map[string]bool{}
+	stack := []string{f.Start}
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		n, ok := f.Nodes[id]
+		if !ok || seen[id] {
+			continue
+		}
+		seen[id] = true
+		stack = append(stack, n.Edges()...)
+	}
+	return seen
+}
+
+func validateQuotaCondition(q QuotaCondition) error {
+	if err := executor.ValidateCLIName(q.Agent); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	if !validQuotaWin[q.Window] && !(strings.HasPrefix(q.Window, modelWindowPfx) && len(q.Window) > len(modelWindowPfx) && len(q.Window) <= 128) {
+		return fmt.Errorf("window must be session, weekly, monthly, credit, any or model:<id>")
+	}
+	if !validQuotaOps[q.Op] {
+		return fmt.Errorf("op must be below or above")
+	}
+	if q.Percent < 0 || q.Percent > 100 {
+		return fmt.Errorf("percent must be between 0 and 100")
+	}
+	return nil
+}
+
+// validateScheduleCondition accepts from == to: that is the whole day.
+func validateScheduleCondition(sc ScheduleCondition) error {
+	if !hhmmPattern.MatchString(sc.From) || !hhmmPattern.MatchString(sc.To) {
+		return fmt.Errorf("from/to must be HH:MM")
+	}
+	for _, d := range sc.Days {
+		if _, ok := Weekday(d); !ok {
+			return fmt.Errorf("days: %q is not mon..sun", d)
+		}
+	}
+	if sc.TZ != "" {
+		if _, err := time.LoadLocation(sc.TZ); err != nil {
+			return fmt.Errorf("tz: unknown time zone %q", sc.TZ)
 		}
 	}
 	return nil

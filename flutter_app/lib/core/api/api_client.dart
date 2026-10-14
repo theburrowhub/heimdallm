@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/activity.dart';
@@ -772,6 +773,27 @@ class ApiClient {
     return fallback;
   }
 
+  /// Throws [FlowValidationException] for a 422 carrying `errors`, else
+  /// [ApiException] with the daemon's message.
+  Never _throwFlowError(http.Response resp, String fallback) {
+    if (resp.statusCode == 422) {
+      try {
+        final body = jsonDecode(resp.body) as Map<String, dynamic>;
+        final issues = ((body['errors'] as List<dynamic>?) ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(FlowIssue.fromJson)
+            .toList();
+        throw FlowValidationException(
+          (body['error'] as String?) ?? fallback,
+          issues,
+        );
+      } on FormatException {
+        // fall through to the generic message
+      }
+    }
+    throw ApiException(_errorMessage(resp.body, fallback));
+  }
+
   /// Every review flow, the default one included, and the global choice.
   Future<FlowListing> fetchFlows() async {
     final resp = await _client.get(_uri('/flows'), headers: await _authHeaders());
@@ -789,7 +811,7 @@ class ApiClient {
       body: jsonEncode(flow.toJson()),
     );
     if (resp.statusCode != 200) {
-      throw ApiException(_errorMessage(resp.body, 'Could not save the flow'));
+      _throwFlowError(resp, 'Could not save the flow');
     }
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }
@@ -811,6 +833,7 @@ class ApiClient {
     String? flow,
     String? repo,
     DateTime? at,
+    ReviewFlow? graph,
   }) async {
     final resp = await _client.post(
       _uri('/flows/simulate'),
@@ -819,12 +842,46 @@ class ApiClient {
         'flow': ?flow,
         'repo': ?repo,
         if (at != null) 'at': at.toUtc().toIso8601String(),
+        if (graph != null) 'graph': graph.toJson(),
       }),
     );
     if (resp.statusCode != 200) {
-      throw ApiException(_errorMessage(resp.body, 'Could not simulate the flow'));
+      _throwFlowError(resp, 'Could not simulate the flow');
     }
     return FlowDecision.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  /// Asks an installed agent to draft a flow (or a change to [current]).
+  /// Nothing is saved. Pass [client] to cancel by closing it. The daemon may
+  /// hold the answer for up to 210 s, so the wait is 220 s.
+  Future<FlowAssistResult> assistFlow({
+    required String agent,
+    required String instruction,
+    ReviewFlow? current,
+    http.Client? client,
+  }) async {
+    final http.Response resp;
+    try {
+      resp = await (client ?? _client)
+          .post(
+            _uri('/flows/assist'),
+            headers: await _authHeaders(),
+            body: jsonEncode({
+              'agent': agent,
+              'instruction': instruction,
+              if (current != null) 'flow': current.toJson(),
+            }),
+          )
+          .timeout(const Duration(seconds: 220));
+    } on TimeoutException {
+      throw ApiException('The agent took too long to draft the flow');
+    }
+    if (resp.statusCode != 200) {
+      _throwFlowError(resp, 'Could not draft the flow');
+    }
+    return FlowAssistResult.fromJson(
+      jsonDecode(resp.body) as Map<String, dynamic>,
+    );
   }
 
   /// Every agent's remaining quota.
@@ -989,6 +1046,12 @@ class ApiClient {
     result['issues'] ??= <dynamic>[];
     return result;
   }
+}
+
+/// A flow the daemon rejected, with each problem pinned to its step.
+class FlowValidationException extends ApiException {
+  final List<FlowIssue> issues;
+  FlowValidationException(super.message, this.issues);
 }
 
 class ApiException implements Exception {

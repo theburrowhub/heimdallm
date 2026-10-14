@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/agentcatalog"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/flows"
@@ -67,17 +69,7 @@ func agentExecOptions(cli string, agentCfg config.CLIAgentConfig, globalTimeout,
 }
 
 // flowAgents lists the distinct agents a flow can pick.
-func flowAgents(f config.FlowConfig) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, key := range f.OrderedRuleKeys() {
-		if a := f.Rules[key].Agent; !seen[a] {
-			seen[a] = true
-			out = append(out, a)
-		}
-	}
-	return out
-}
+func flowAgents(f config.FlowConfig) []string { return config.TopoAgentOrder(f) }
 
 // modelRequiredAgents have no default model: without one configured they
 // cannot review (OpenRouter's catalog changes too often for a built-in id).
@@ -166,26 +158,61 @@ func flowCandidates(flowID string, flow config.FlowConfig, repo string, quotas f
 		defer cancel()
 		d := flows.Evaluate(ctx, flowID, flow, time.Now(), quotas, available)
 		slog.Info("review flow evaluated", "repo", repo, "flow", flowID, "candidates", d.Candidates)
-		for _, r := range d.Rules {
-			slog.Debug("review flow rule", "repo", repo, "flow", flowID, "rule", r.Key, "agent", r.Agent,
-				"matched", r.Matched, "available", r.Available, "reasons", r.Reasons)
+		for _, s := range d.Path {
+			slog.Debug("review flow step", "repo", repo, "flow", flowID, "node", s.Node, "type", s.Type,
+				"agent", s.Agent, "added", s.Added, "reasons", s.Reasons)
 		}
 		return d.Candidates
 	}
 }
 
-// flowListing is the GET /flows body: every flow (the default one included)
-// and the global selection.
-func flowListing(c *config.Config) map[string]any {
+// FlowAgent is one agent offered by the flow editor.
+type FlowAgent struct {
+	ID           string `json:"id"`
+	Installed    bool   `json:"installed"`
+	ReviewOnly   bool   `json:"review_only"`
+	WriteCapable bool   `json:"write_capable"`
+	// CanDraft: the assistant can run this agent (flows.CanDraft).
+	CanDraft bool `json:"can_draft"`
+}
+
+// installedAgents maps every review agent the catalog found installed (or,
+// for API providers, configured) by its config agent id.
+func installedAgents(agents []agentcatalog.Agent) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range agents {
+		if a.Kind == agentcatalog.KindIDE {
+			continue
+		}
+		if a.Installed || a.Configured {
+			out[a.ConfigAgent] = true
+		}
+	}
+	return out
+}
+
+// flowListing is the GET /flows body: every flow (the default one
+// included), the global selection and the agents the editor can offer.
+func flowListing(c *config.Config, installed map[string]bool) map[string]any {
 	selected := c.AI.Flow
 	if selected == "" {
 		selected = config.DefaultFlowID
+	}
+	var agents []FlowAgent
+	for _, id := range executor.SupportedCLIs() {
+		agents = append(agents, FlowAgent{
+			ID:           id,
+			Installed:    installed[id],
+			ReviewOnly:   executor.IsHTTPOnly(id),
+			WriteCapable: executor.WriteCapable(id),
+			CanDraft:     flows.CanDraft(id),
+		})
 	}
 	return map[string]any{
 		"flows":         c.AllFlows(),
 		"selected":      selected,
 		"default_id":    config.DefaultFlowID,
-		"agents":        executor.SupportedCLIs(),
+		"agents":        agents,
 		"write_capable": writeCapableAgents(),
 	}
 }
@@ -207,6 +234,13 @@ func simulateFlow(ctx context.Context, c *config.Config, req server.FlowSimulati
 	if at.IsZero() {
 		at = time.Now()
 	}
+	if req.Graph != nil {
+		name := req.Flow
+		if name == "" {
+			name = "draft"
+		}
+		return flows.Evaluate(ctx, name, *req.Graph, at, quotas, available), nil
+	}
 	if req.Flow != "" {
 		f, ok := c.AllFlows()[req.Flow]
 		if !ok {
@@ -216,4 +250,86 @@ func simulateFlow(ctx context.Context, c *config.Config, req server.FlowSimulati
 	}
 	id, f := c.FlowForRepo(req.Repo)
 	return flows.Evaluate(ctx, id, f, at, quotas, available), nil
+}
+
+// rawExecutor is the part of the executor the assistant runner needs.
+type rawExecutor interface {
+	ExecuteRaw(cli, prompt string, opts executor.ExecOptions) ([]byte, error)
+	TerminateExecution(executionID string) (bool, error)
+}
+
+// assistCancelPoll is how often a cancelled run retries TerminateExecution
+// until the executor has registered the execution.
+const assistCancelPoll = 25 * time.Millisecond
+
+// execRunner runs the assistant prompt through the executor with the
+// agent's own model and limits, but none of its review permission settings,
+// in an empty temp workspace, and kills the process group when ctx ends.
+// That is all the daemon enforces: whether the agent may still use tools
+// depends on its CLI's own settings (agents whose defaults allow everything
+// are refused, see flows.CanDraft).
+type execRunner struct {
+	exec rawExecutor
+	opts func(agent, workDir string) executor.ExecOptions
+}
+
+func (r execRunner) Run(ctx context.Context, agent, prompt, workDir string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	opts := r.opts(agent, workDir)
+	// Drafting needs no tools: clear every permission flag that would widen
+	// what the agent may do, the same fields OptionsForSelectedCLI scrubs.
+	opts.DangerouslySkipPerms = false
+	opts.PermissionMode = ""
+	opts.ApprovalMode = ""
+	opts.ExtraFlags = ""
+	if agent == "codex" {
+		// With no WorkDir the executor gives codex its own empty workspace and
+		// waives the git-repo check; a plain temp dir would make codex abort
+		// with "Not inside a trusted directory".
+		opts.WorkDir = ""
+	}
+	opts.ExecutionID = "flow-assist-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	opts.Timeout = flows.DefaultAssistTimeout
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-stop:
+			return
+		}
+		// The executor registers an execution only after resolving the CLI, so
+		// a cancel that lands earlier finds nothing: retry until it takes.
+		t := time.NewTicker(assistCancelPoll)
+		defer t.Stop()
+		for {
+			if ok, _ := r.exec.TerminateExecution(opts.ExecutionID); ok {
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return r.exec.ExecuteRaw(agent, prompt, opts)
+}
+
+// assistContext lists the installed agents and their quotas for the prompt.
+func assistContext(ctx context.Context, agents []agentcatalog.Agent, quotas []quota.Provider) flows.AssistContext {
+	out := flows.AssistContext{Quotas: quotas, Now: time.Now()}
+	for _, a := range agents {
+		if a.Kind == agentcatalog.KindIDE || !(a.Installed || a.Configured) {
+			continue
+		}
+		out.Agents = append(out.Agents, flows.AssistAgent{
+			ID:       a.ConfigAgent,
+			Models:   a.Models,
+			Runnable: flows.CanDraft(a.ConfigAgent),
+		})
+	}
+	return out
 }

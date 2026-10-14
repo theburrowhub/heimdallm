@@ -1402,6 +1402,10 @@ func (srv *Server) handleInstanceProxy(w http.ResponseWriter, r *http.Request) {
 			r = r.WithContext(ctx)
 		}
 	}
+	if rest == "/flows/assist" {
+		// A proxied draft takes as long as a local one; same budget.
+		extendAssistDeadline(w)
+	}
 	proxy.ServeHTTP(w, r)
 }
 

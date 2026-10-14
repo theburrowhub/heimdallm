@@ -454,6 +454,10 @@ var allowedCLIs = map[string]struct{}{
 // when registered with RegisterHTTPAgent and configured.
 var httpOnlyCLIs = map[string]bool{"openrouter": true}
 
+// IsHTTPOnly reports whether an agent runs in-process over HTTP (review
+// only) instead of as a CLI.
+func IsHTTPOnly(cli string) bool { return httpOnlyCLIs[cli] }
+
 // HTTPAgent is a review agent the daemon runs in-process (an API client plus
 // its own harness) instead of spawning a CLI.
 type HTTPAgent interface {
