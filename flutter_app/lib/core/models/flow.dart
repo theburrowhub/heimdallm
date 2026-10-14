@@ -482,11 +482,15 @@ class QuotaWindow {
   final double usedPercent;
   final DateTime? resetsAt;
 
+  /// The window in money, e.g. "31.65 / 750.00 EUR", when reported.
+  final String detail;
+
   const QuotaWindow({
     required this.kind,
     this.label = '',
     required this.usedPercent,
     this.resetsAt,
+    this.detail = '',
   });
 
   String get shortLabel => switch (kind) {
@@ -505,6 +509,7 @@ class QuotaWindow {
       label: (j['label'] as String?) ?? '',
       usedPercent: (j['used_percent'] as num?)?.toDouble() ?? 0,
       resetsAt: reset == null || reset.year <= 1 ? null : reset,
+      detail: (j['detail'] as String?) ?? '',
     );
   }
 }
@@ -516,15 +521,19 @@ class AgentQuota {
   final List<QuotaWindow> windows;
   final String error;
 
+  /// An allowance with no window, e.g. "3.00 USD spent · no limit".
+  final String detail;
+
   const AgentQuota({
     required this.agent,
     this.available = false,
     this.windows = const [],
     this.error = '',
+    this.detail = '',
   });
 
   String get summary => windows.isEmpty
-      ? (available ? 'no limits' : '')
+      ? (available ? (detail.isEmpty ? 'no limits' : detail) : '')
       : windows
             .map((w) => '${w.shortLabel} ${w.usedPercent.round()}%')
             .join(' · ');
@@ -537,5 +546,6 @@ class AgentQuota {
         .map(QuotaWindow.fromJson)
         .toList(),
     error: (j['error'] as String?) ?? '',
+    detail: (j['detail'] as String?) ?? '',
   );
 }

@@ -154,6 +154,22 @@ void main() {
     expect(q.windows[1].resetsAt, isNull);
     expect(const AgentQuota(agent: 'x', available: true).summary, 'no limits');
     expect(const AgentQuota(agent: 'x').summary, '');
+    expect(
+      const AgentQuota(
+        agent: 'x',
+        available: true,
+        detail: '3.00 USD spent · no limit',
+      ).summary,
+      '3.00 USD spent · no limit',
+    );
+    expect(
+      QuotaWindow.fromJson({
+        'kind': 'credit',
+        'used_percent': 4,
+        'detail': '31.65 / 750.00 EUR',
+      }).detail,
+      '31.65 / 750.00 EUR',
+    );
     for (final kind in ['weekly', 'monthly', 'credit', 'other']) {
       expect(QuotaWindow(kind: kind, usedPercent: 1).shortLabel, isNotEmpty);
     }

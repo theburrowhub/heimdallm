@@ -256,6 +256,88 @@ void main() {
     expect(find.byKey(const ValueKey('quota-codex-5h')), findsNothing);
   });
 
+  testWidgets(
+    'catalog cards refresh quotas and show money, models and failures',
+    (tester) async {
+      final (api, _) = await _pump(tester);
+      expect(find.text('34%'), findsOneWidget);
+
+      // A minute later the cards show the new reading without leaving the page.
+      when(() => api.fetchQuotas()).thenAnswer(
+        (_) async => [
+          AgentQuota.fromJson({
+            'agent': 'claude',
+            'available': true,
+            'detail': '1.00 EUR extra usage spent · no limit',
+            'windows': [
+              {'kind': 'session', 'used_percent': 61},
+              {'kind': 'weekly', 'used_percent': 46},
+              {'kind': 'model', 'label': 'Fable', 'used_percent': 3},
+              {'kind': 'model', 'label': 'Opus', 'used_percent': 12},
+              // A model whose label equals the credit row's short label.
+              {'kind': 'model', 'label': 'credit', 'used_percent': 7},
+              {
+                'kind': 'credit',
+                'used_percent': 4.22,
+                'detail': '31.65 / 750.00 EUR',
+              },
+            ],
+          }),
+          AgentQuota.fromJson({
+            'agent': 'openrouter',
+            'available': true,
+            'detail': '3.00 USD spent · no limit',
+          }),
+          AgentQuota.fromJson({'agent': 'copilot', 'error': 'unavailable'}),
+        ],
+      );
+      await tester.pump(kQuotaRefreshInterval);
+      await tester.pumpAndSettle();
+
+      verify(() => api.fetchQuotas()).called(2);
+      expect(find.text('61%'), findsOneWidget);
+      expect(find.text('34%'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('quota-claude-model:Fable')),
+        findsOneWidget,
+      );
+      // Six windows: none is cut, the credit row included, and a model
+      // labelled like another kind keeps a key of its own.
+      expect(
+        find.byKey(const ValueKey('quota-claude-model:Opus')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('quota-claude-model:credit')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('quota-claude-credit')), findsOneWidget);
+      expect(find.text('31.65 / 750.00 EUR'), findsOneWidget);
+      expect(find.text('4%'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('quota-openrouter-detail')),
+        findsOneWidget,
+      );
+      expect(find.text('3.00 USD spent · no limit'), findsOneWidget);
+      // A provider detail shows next to windows too (uncapped Claude credits).
+      expect(
+        find.text('1.00 EUR extra usage spent · no limit'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Usage unavailable: provider not reachable'),
+        findsOneWidget,
+      );
+
+      // A failed refresh keeps the last good reading instead of blanking it.
+      when(() => api.fetchQuotas()).thenThrow(ApiException('boom'));
+      await tester.pump(kQuotaRefreshInterval);
+      await tester.pumpAndSettle();
+      expect(find.text('61%'), findsOneWidget);
+      expect(find.text('31.65 / 750.00 EUR'), findsOneWidget);
+    },
+  );
+
   testWidgets('catalog renders without quotas on older daemons', (
     tester,
   ) async {
