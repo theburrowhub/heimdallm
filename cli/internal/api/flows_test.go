@@ -118,7 +118,7 @@ func TestFlowDescriptions(t *testing.T) {
 			"q2": {Agent: "claude", Window: "session", Op: "below", Percent: 50},
 		},
 	}
-	want := "if mon,fri 08:00-15:00 Europe/Madrid or every day 22:00-06:00 daemon time or sat,sun all day or always or claude weekly quota > 90.5% or claude session quota < 50% → yes: a1 / no: end"
+	want := "if mon,fri 08:00-15:00 Europe/Madrid or every day 22:00-06:00 daemon time or sat,sun all day daemon time or always or claude weekly quota > 90.5% or claude session quota < 50% → yes: a1 / no: end"
 	if got := n.Describe(); got != want {
 		t.Errorf("Describe =\n%q\nwant\n%q", got, want)
 	}
@@ -169,14 +169,35 @@ func TestFlowDescribeWalksGraph(t *testing.T) {
 	got := strings.Join(f.Describe(), "\n")
 	want := "c1: if every day 22:00-06:00 daemon time → yes: a1 / no: a2\n" +
 		"a1: codex → fallback: a2\n" +
-		"a2: claude → end"
+		"a2: claude → end\n" +
+		"⚠ unreachable x9: gemini → end"
 	if got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}
-	// A cycle or a dangling edge must not loop or panic.
+	// A cycle or a dangling edge must not loop or panic; steps no path
+	// reaches are listed after the walk.
 	loop := api.Flow{Start: "a", Nodes: map[string]api.FlowNode{"a": {Type: "agent", Agent: "x", Next: "a"}, "b": {Type: "agent", Next: "zz"}}}
-	if got := loop.Describe(); len(got) != 1 {
-		t.Errorf("cycle = %v", got)
+	if got := strings.Join(loop.Describe(), "\n"); got != "a: x → fallback: a\n⚠ unreachable b:  → fallback: zz" {
+		t.Errorf("cycle = %q", got)
+	}
+	for _, tc := range []struct {
+		f    api.Flow
+		want string
+	}{
+		{api.Flow{Start: "gone", Nodes: map[string]api.FlowNode{"a": {Type: "agent", Agent: "x"}}}, "⚠ start gone is not a step\n⚠ unreachable a: x → end"},
+		{api.Flow{Nodes: map[string]api.FlowNode{"a": {Type: "agent", Agent: "x"}}}, "⚠ no start step\n⚠ unreachable a: x → end"},
+		{api.Flow{Start: "gone"}, "⚠ start gone is not a step"},
+		{api.Flow{}, ""},
+	} {
+		if got := strings.Join(tc.f.Describe(), "\n"); got != tc.want {
+			t.Errorf("Describe(%+v) = %q, want %q", tc.f, got, tc.want)
+		}
+	}
+	if got := (api.FlowNode{Type: "condition", Yes: "a"}).Describe(); got != "if (no conditions) → yes: a / no: end" {
+		t.Errorf("empty condition = %q", got)
+	}
+	if got := (api.FlowNode{Type: "loop\x1b"}).Describe(); got != "unknown step type loop" {
+		t.Errorf("unknown type = %q", got)
 	}
 }
 
@@ -217,6 +238,10 @@ func TestAssistFlowPostsAndDecodes(t *testing.T) {
 	defer bad.Close()
 	if _, err := api.New(bad.URL, "").AssistFlow("claude", "x", nil); err == nil {
 		t.Error("malformed assist result must error")
+	}
+	bare := &api.Client{Host: ts.URL}
+	if _, err := bare.AssistFlow("claude", "x", nil); err != nil {
+		t.Errorf("a Client without an HTTPClient must still assist: %v", err)
 	}
 }
 

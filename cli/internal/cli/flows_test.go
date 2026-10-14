@@ -18,7 +18,8 @@ func TestPrintFlows(t *testing.T) {
 	var buf bytes.Buffer
 	printFlows(&buf, &api.FlowListing{
 		Selected: "weekday",
-		Agents:   []api.FlowAgent{{ID: "claude", WriteCapable: true}, {ID: "codex", WriteCapable: true}, {ID: "gemini"}},
+		Agents: []api.FlowAgent{{ID: "claude", Installed: true, WriteCapable: true}, {ID: "codex", Installed: true, WriteCapable: true},
+			{ID: "aider", WriteCapable: true}, {ID: "gemini", Installed: true}},
 		Flows: map[string]api.Flow{
 			"weekday": {Name: "Weekday\x1b[2J", Start: "c1", Nodes: map[string]api.FlowNode{
 				"c1": {Type: "condition", Yes: "a1", No: "a2", Quota: map[string]api.QuotaCondition{
@@ -51,7 +52,7 @@ func TestPrintFlowDecision(t *testing.T) {
 		FlowID: "weekday", FlowName: "Weekday", At: time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC),
 		Candidates: []string{"copilot", "codex"},
 		Path: []api.PathStep{
-			{Node: "c1", Type: "condition", Reasons: []string{"claude session quota below 50% does not hold (used 70%)"}},
+			{Node: "c1", Type: "condition", Holds: &no, Reasons: []string{"claude session quota below 50% does not hold (used 70%)"}},
 			{Node: "a1", Type: "agent", Agent: "copilot", Available: &yes, Added: true, Reasons: []string{"schedule holds"}},
 			{Node: "a2", Type: "agent", Agent: "gemini", Available: &no, Reasons: []string{"gemini is not installed"}},
 			{Node: "a3", Type: "agent", Agent: "codex", Available: &yes},
@@ -202,11 +203,12 @@ func TestPrintFlowDecisionShowsPath(t *testing.T) {
 		{Node: "c1", Type: "condition", Holds: &yes, Reasons: []string{"schedule 22:00-06:00 holds"}},
 		{Node: "a1", Type: "agent", Agent: "codex", Available: &yes, Added: true},
 		{Node: "a2", Type: "agent", Agent: "gemini", Available: &no, Reasons: []string{"gemini is not installed or not configured"}},
+		{Node: "c2", Type: "condition"},
 	}}
 	var buf bytes.Buffer
 	printFlowDecision(&buf, d, true)
 	out := buf.String()
-	for _, want := range []string{"Reviews with codex", "c1 condition → yes", "a1 codex ✓ added", "a2 gemini ⚠", "not installed"} {
+	for _, want := range []string{"Reviews with codex", "c1 condition → yes", "a1 codex ✓ added", "a2 gemini ⚠", "not installed", "c2 condition → ?"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in\n%s", want, out)
 		}
@@ -216,7 +218,14 @@ func TestPrintFlowDecisionShowsPath(t *testing.T) {
 // runFlows runs `flows <args>` against a fake daemon and captures its output.
 func runFlows(t *testing.T, daemonURL string, args ...string) (string, error) {
 	t.Helper()
+	return runFlowsWithInput(t, daemonURL, "", args...)
+}
+
+// runFlowsWithInput is runFlows with stdin set to input.
+func runFlowsWithInput(t *testing.T, daemonURL, input string, args ...string) (string, error) {
+	t.Helper()
 	cmd := newFlowsCmd()
+	cmd.SetIn(strings.NewReader(input))
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
@@ -245,18 +254,75 @@ func TestFlowsAssistPrintsPlanAndApplies(t *testing.T) {
 	}))
 	defer ts.Close()
 	out, err := runFlows(t, ts.URL, "assist", "codex first", "--flow", "night", "--agent", "claude", "--apply")
+	if err == nil || put || !strings.Contains(err.Error(), "--force") || !strings.Contains(out, "⚠ careful") {
+		t.Fatalf("a draft with warnings must not be saved without --force: err=%v put=%v out=\n%s", err, put, out)
+	}
+	out, err = runFlowsWithInput(t, ts.URL, "y\n", "assist", "codex first", "--flow", "night", "--apply", "--force")
 	if err != nil || !put || !strings.Contains(out, "Codex first.") || !strings.Contains(out, "a1: codex") ||
-		!strings.Contains(out, "⚠ careful") || !strings.Contains(out, "Saved as night.") {
+		!strings.Contains(out, "Save this draft as night? [y/N]") || !strings.Contains(out, "Saved as night.") {
 		t.Fatalf("err=%v put=%v out=\n%s", err, put, out)
 	}
-	if !strings.Contains(assistBody, `"flow":{"name":"Night"`) {
-		t.Errorf("the current flow must be sent as context: %s", assistBody)
+	if !strings.Contains(assistBody, `"flow":{"name":"Night"`) || !strings.Contains(assistBody, `"agent":"claude"`) {
+		t.Errorf("the current flow and the default agent must be sent: %s", assistBody)
+	}
+
+	put = false
+	out, err = runFlowsWithInput(t, ts.URL, "n\n", "assist", "codex first", "--flow", "night", "--apply", "--force")
+	if err != nil || put || !strings.HasSuffix(out, "Not saved.\n") {
+		t.Fatalf("declining must not save: err=%v put=%v out=\n%s", err, put, out)
+	}
+	out, err = runFlows(t, ts.URL, "assist", "codex first", "--flow", "night", "--apply", "--force", "--yes")
+	if err != nil || !put || strings.Contains(out, "[y/N]") {
+		t.Fatalf("--yes saves without asking: err=%v put=%v out=\n%s", err, put, out)
 	}
 
 	put = false
 	out, err = runFlows(t, ts.URL, "assist", "codex first", "--flow", "night")
 	if err != nil || put || !strings.Contains(out, "Not saved.") {
 		t.Fatalf("without --apply nothing is saved: err=%v put=%v out=\n%s", err, put, out)
+	}
+}
+
+func TestFlowsAssistGuardsTheFlowID(t *testing.T) {
+	var put, assist int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/flows":
+			_, _ = w.Write([]byte(`{"flows":{"night":{"name":"Night","start":"a1","nodes":{"a1":{"type":"agent","agent":"claude"}}}},"agents":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/flows/assist":
+			assist++
+			b, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(b), `"flow"`) {
+				t.Errorf("a new flow has no current flow: %s", b)
+			}
+			_, _ = w.Write([]byte(`{"plan":"First line.\n\nSecond\u001b[2J line.","agent":"codex","flow":{"name":"Day","start":"a1","nodes":{"a1":{"type":"agent","agent":"codex"}}}}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/flows/day":
+			put++
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	if _, err := runFlows(t, ts.URL, "assist", "x", "--flow", "nigth", "--apply"); err == nil || !strings.Contains(err.Error(), "there is no flow nigth") || assist != 0 {
+		t.Fatalf("a mistyped id must fail before drafting: %v (assist %d)", err, assist)
+	}
+	if _, err := runFlows(t, ts.URL, "assist", "x", "--flow", "night", "--new"); err == nil || !strings.Contains(err.Error(), "already exists") || assist != 0 {
+		t.Fatalf("--new on an existing id must fail: %v (assist %d)", err, assist)
+	}
+	out, err := runFlows(t, ts.URL, "assist", "x", "--flow", "day", "--new", "--agent", "codex", "--apply", "--yes")
+	if err != nil || put != 1 || !strings.Contains(out, "  First line.\n  Second[2J line.\n") {
+		t.Fatalf("err=%v put=%d out=\n%s", err, put, out)
+	}
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			t.Errorf("an empty draft must not be saved")
+		}
+		_, _ = w.Write([]byte(`{"plan":"p","flow":{"name":"x"}}`))
+	}))
+	defer empty.Close()
+	if _, err := runFlows(t, empty.URL, "assist", "x", "--flow", "x", "--new", "--apply", "--yes"); err == nil || !strings.Contains(err.Error(), "no steps") {
+		t.Fatalf("empty draft: %v", err)
 	}
 }
 

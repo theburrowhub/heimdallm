@@ -521,13 +521,16 @@ From a terminal:
 
 ```bash
 heimdallm-cli flows assist "at night use Codex; if Claude is above 80% weekly, Gemini" \
-  --flow night-codex --agent claude --apply
+  --flow night-codex --new --agent claude --apply
 ```
 
-`--flow` names the flow to change (and, with `--apply`, to save as), `--agent`
-picks the installed agent (default `claude`), and `--apply` saves the draft
-with `PUT /flows/<id>` instead of only printing it. The command waits up to
-220 s.
+`--flow` names the flow to change (and, with `--apply`, to save as); an id
+that does not exist is refused unless `--new` says to create it. `--agent`
+picks the installed agent (default `claude`). `--apply` prints the draft and
+asks before saving that same draft with `PUT /flows/<id>` (`--yes` skips the
+question); a draft with warnings or no steps is only saved with `--force`.
+Without `--apply` nothing is saved, and running again drafts again. The command
+waits up to 220 s.
 
 **The default flow.** With no flow selected, Heimdallm uses the flow
 `default`, built from the classic `primary` / `fallback` settings, so configs

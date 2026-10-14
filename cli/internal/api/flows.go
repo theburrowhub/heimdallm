@@ -117,7 +117,7 @@ func (c *Client) ListFlows() (*FlowListing, error) {
 	}
 	var out FlowListing
 	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("decoding flows: %w", err)
+		return nil, fmt.Errorf("decoding flows (is the daemon the same version as this CLI?): %w", err)
 	}
 	return &out, nil
 }
@@ -164,7 +164,10 @@ func (c *Client) AssistFlow(agent, instruction string, current *Flow) (*AssistRe
 		body["flow"] = current
 	}
 	slow := *c
-	hc := *c.HTTPClient
+	var hc http.Client
+	if c.HTTPClient != nil {
+		hc = *c.HTTPClient
+	}
 	hc.Timeout = assistTimeout
 	slow.HTTPClient = &hc
 	data, err := slow.doJSON(http.MethodPost, "/flows/assist", body)
@@ -215,7 +218,8 @@ func keyLess(a, b string) bool {
 }
 
 // Describe renders the reachable steps in walk order (depth-first from Start,
-// yes before no before next), one line each.
+// yes before no before next), one line each, then what makes the graph
+// broken: a start that names no node, and steps no path reaches.
 func (f Flow) Describe() []string {
 	var out []string
 	seen := map[string]bool{}
@@ -232,6 +236,23 @@ func (f Flow) Describe() []string {
 		walk(n.Next)
 	}
 	walk(f.Start)
+	if _, ok := f.Nodes[f.Start]; !ok {
+		switch {
+		case f.Start != "":
+			out = append(out, "⚠ start "+DisplayText(f.Start, 64)+" is not a step")
+		case len(f.Nodes) > 0:
+			out = append(out, "⚠ no start step")
+		}
+	}
+	ids := make([]string, 0, len(f.Nodes))
+	for id := range f.Nodes {
+		if !seen[id] {
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range orderKeys(ids) {
+		out = append(out, "⚠ unreachable "+DisplayText(id, 64)+": "+f.Nodes[id].Describe())
+	}
 	return out
 }
 
@@ -244,12 +265,16 @@ func edgeName(id string) string {
 
 // Describe summarises one step. Daemon-supplied text goes through DisplayText.
 func (n FlowNode) Describe() string {
-	if n.Type == "agent" {
+	switch n.Type {
+	case "agent":
 		next := "end"
 		if n.Next != "" {
 			next = "fallback: " + edgeName(n.Next)
 		}
 		return DisplayText(n.Agent, 24) + " → " + next
+	case "condition":
+	default:
+		return "unknown step type " + DisplayText(n.Type, 24)
 	}
 	var conds []string
 	for _, k := range sortedKeys(n.Schedule) {
@@ -261,6 +286,10 @@ func (n FlowNode) Describe() string {
 	join := " and "
 	if n.Match == "any" {
 		join = " or "
+	}
+	if len(conds) == 0 {
+		// The daemon refuses to save this; say so rather than print "if  →".
+		conds = []string{"(no conditions)"}
 	}
 	return "if " + strings.Join(conds, join) + " → yes: " + edgeName(n.Yes) + " / no: " + edgeName(n.No)
 }
@@ -278,10 +307,11 @@ func describeSchedule(s ScheduleCondition) string {
 	if s.From == s.To {
 		text = days + " all day"
 	}
-	switch {
-	case s.TZ != "":
+	// Which day it is depends on the zone too, so an all-day window on some
+	// days names it as much as a time range does.
+	if s.TZ != "" {
 		text += " " + s.TZ
-	case s.From != s.To:
+	} else {
 		text += " daemon time"
 	}
 	return DisplayText(text, 80)

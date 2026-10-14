@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -62,7 +63,7 @@ func newFlowsSimulateCmd() *cobra.Command {
 
 func newFlowsAssistCmd() *cobra.Command {
 	var flowID, agent string
-	var apply bool
+	var apply, create, yes, force bool
 	cmd := &cobra.Command{
 		Use:   "assist <instruction>",
 		Short: "Draft a flow (or a change to --flow) from plain language with an installed agent",
@@ -78,19 +79,29 @@ func newFlowsAssistCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("fetching flows: %w", err)
 				}
-				if f, ok := listing.Flows[flowID]; ok {
+				f, ok := listing.Flows[flowID]
+				switch {
+				case ok && create:
+					return fmt.Errorf("flow %s already exists; drop --new to change it", api.DisplayText(flowID, 64))
+				case ok:
 					current = &f
+				case !create:
+					// A mistyped id would otherwise draft and save a new flow.
+					return fmt.Errorf("there is no flow %s; pass --new to draft a new flow under that id", api.DisplayText(flowID, 64))
 				}
-			}
-			if agent == "" {
-				agent = "claude"
 			}
 			res, err := client.AssistFlow(agent, args[0], current)
 			if err != nil {
 				return fmt.Errorf("drafting flow: %w", err)
 			}
 			w := cmd.OutOrStdout()
-			fmt.Fprintf(w, "Plan (%s, %.1fs):\n  %s\n\n", api.DisplayText(res.Agent, 24), float64(res.DurationMS)/1000, api.DisplayText(res.Plan, 2000))
+			fmt.Fprintf(w, "Plan (%s, %.1fs):\n", api.DisplayText(res.Agent, 24), float64(res.DurationMS)/1000)
+			for _, line := range strings.Split(res.Plan, "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					fmt.Fprintf(w, "  %s\n", api.DisplayText(line, 500))
+				}
+			}
+			fmt.Fprintln(w)
 			for _, line := range res.Flow.Describe() {
 				fmt.Fprintf(w, "  %s\n", line)
 			}
@@ -98,8 +109,20 @@ func newFlowsAssistCmd() *cobra.Command {
 				fmt.Fprintf(w, "  ⚠ %s\n", api.DisplayText(warn, 200))
 			}
 			if !apply {
-				fmt.Fprintln(w, "\nNot saved. Re-run with --flow <id> --apply to save it.")
+				// A re-run drafts again, and agents are not deterministic.
+				fmt.Fprintln(w, "\nNot saved. --apply drafts again and asks before saving that draft.")
 				return nil
+			}
+			if !force && (len(res.Warnings) > 0 || len(res.Flow.Nodes) == 0) {
+				return fmt.Errorf("not saved: the draft has warnings or no steps; check it, then re-run with --force to save it anyway")
+			}
+			if !yes {
+				fmt.Fprintf(w, "\nSave this draft as %s? [y/N] ", api.DisplayText(flowID, 64))
+				answer, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+					fmt.Fprintln(w, "Not saved.")
+					return nil
+				}
 			}
 			if err := client.PutFlow(flowID, res.Flow); err != nil {
 				return fmt.Errorf("saving flow %s: %w", flowID, err)
@@ -109,8 +132,11 @@ func newFlowsAssistCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&flowID, "flow", "", "flow id to change (and, with --apply, to save as)")
-	cmd.Flags().StringVar(&agent, "agent", "", "installed CLI agent that drafts the flow (default claude; HTTP agents and opencode cannot draft)")
-	cmd.Flags().BoolVar(&apply, "apply", false, "save the draft with PUT /flows/<id>")
+	cmd.Flags().StringVar(&agent, "agent", "claude", "installed CLI agent that drafts the flow (HTTP agents and opencode cannot draft)")
+	cmd.Flags().BoolVar(&apply, "apply", false, "save the draft with PUT /flows/<id> after asking")
+	cmd.Flags().BoolVar(&create, "new", false, "--flow names a flow that does not exist yet")
+	cmd.Flags().BoolVar(&yes, "yes", false, "with --apply, save without asking")
+	cmd.Flags().BoolVar(&force, "force", false, "with --apply, save a draft that has warnings or no steps")
 	return cmd
 }
 
@@ -160,7 +186,7 @@ func printFlows(w io.Writer, l *api.FlowListing) {
 	}
 	var writers []string
 	for _, a := range l.Agents {
-		if a.WriteCapable {
+		if a.Installed && a.WriteCapable {
 			writers = append(writers, a.ID)
 		}
 	}
@@ -204,9 +230,13 @@ func printFlowDecision(w io.Writer, d *api.FlowDecision, now bool) {
 	for _, s := range d.Path {
 		switch s.Type {
 		case "condition":
-			branch := "no"
-			if s.Holds != nil && *s.Holds {
-				branch = "yes"
+			// Not reported is not the same as false.
+			branch := "?"
+			if s.Holds != nil {
+				branch = "no"
+				if *s.Holds {
+					branch = "yes"
+				}
 			}
 			fmt.Fprintf(w, "  %s condition → %s\n", api.DisplayText(s.Node, 64), branch)
 		case "agent":
