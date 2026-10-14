@@ -212,6 +212,57 @@ func TestRun_FlowRetriesOfABrokenReviewUseOneAgent(t *testing.T) {
 	}
 }
 
+func TestRun_FlowRetriesRotateThroughTheFlow(t *testing.T) {
+	// The primary fails this review every time; codex failed the first run
+	// only by chance. Automatic retries run one agent each but start further
+	// down the flow, so codex gets the review back on a later retry.
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true, "gemini": true},
+		failWith: map[string]error{
+			"claude": errors.New("exit status 1"),
+			"codex":  executor.ErrExecutionTimedOut,
+			"gemini": errors.New("exit status 1"),
+		},
+	}
+	p, _, st := flowPipelineWithStore(t, exec)
+	pr := budgetPR(61)
+	opts := pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex", "gemini"} }}
+	_, err := p.Run(pr, opts)
+	if err == nil || strings.Join(exec.ran, ",") != "claude,codex,gemini" {
+		t.Fatalf("first run: err=%v ran=%v", err, exec.ran)
+	}
+	var flowErr *pipeline.FlowFailedError
+	if !errors.As(err, &flowErr) || strings.Join(flowErr.Agents, ",") != "claude,codex,gemini" {
+		t.Fatalf("err = %v, want a FlowFailedError naming every agent", err)
+	}
+	if got := pipeline.UserFacingReviewError(err); got != "3 agents of the flow failed: claude: exit status 1; codex: Review timed out before completion; gemini: exit status 1." {
+		t.Errorf("status = %q; one timeout must not label the whole chain", got)
+	}
+	// Each run and each aging step count one attempt: the second run sees
+	// two, the third four.
+	elapse := func() {
+		t.Helper()
+		row, err := st.GetPRByGithubID(pr.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.AdvanceReviewRetryBackoff(row.ID, pr.Head.SHA, time.Now().Add(-24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		exec.ran = nil
+	}
+	elapse()
+	if _, err := p.Run(pr, opts); err == nil || strings.Join(exec.ran, ",") != "gemini" {
+		t.Fatalf("second run: err=%v ran=%v, want gemini alone", err, exec.ran)
+	}
+	elapse()
+	delete(exec.failWith, "codex")
+	rev, err := p.Run(pr, opts)
+	if err != nil || rev == nil || rev.CLIUsed != "codex" || strings.Join(exec.ran, ",") != "codex" {
+		t.Fatalf("third run: rev=%v err=%v ran=%v, want codex to review", rev, err, exec.ran)
+	}
+}
+
 func TestRun_FlowDoesNotFallBackWhenCancelled(t *testing.T) {
 	exec := &scriptedExec{
 		installed: map[string]bool{"claude": true, "codex": true},

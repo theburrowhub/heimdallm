@@ -395,9 +395,11 @@ same run, and the activity log records `review fallback: claude → codex`; the
 `error`). Each
 agent is tried at most once; the review fails only when every agent in the
 flow failed, and a cancelled review never moves on. A failure that is not
-about quota moves on only on the first run of a commit (or a manual retry):
-if every agent already failed once, the review itself is the likely problem,
-so automatic retries use one agent per attempt instead of the whole flow.
+about quota moves on only on the first run of a commit (or a manual retry).
+Automatic retries of a commit that already had a failed or interrupted run
+use one agent per attempt instead of the whole flow, starting one agent
+further down the flow each time, so every agent gets retried without each
+retry costing the whole flow.
 
 Conditions:
 
