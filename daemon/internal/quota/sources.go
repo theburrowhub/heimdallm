@@ -212,12 +212,15 @@ func limitsWindows(limits []claudeLimit) []Window {
 			w.Kind = KindWeekly
 		case l.Kind == "weekly_scoped" && l.Scope != nil && l.Scope.Model != nil:
 			w.Kind = KindModel
-			// The stable id when the API gives one, so a flow condition on
-			// model:<label> keeps matching; the display name otherwise.
-			if l.Scope.Model.ID != nil && *l.Scope.Model.ID != "" {
-				w.Label = *l.Scope.Model.ID
-			} else {
-				w.Label = l.Scope.Model.DisplayName
+			// The display name is what people read and write conditions
+			// against; the id, when the API gives one, matches too, so a
+			// condition keeps working whichever the API starts sending.
+			if l.Scope.Model.ID != nil {
+				w.ID = *l.Scope.Model.ID
+			}
+			w.Label = l.Scope.Model.DisplayName
+			if w.Label == "" {
+				w.Label = w.ID
 			}
 			if w.Label == "" {
 				continue

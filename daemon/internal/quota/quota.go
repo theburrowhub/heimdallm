@@ -28,6 +28,9 @@ const (
 type Window struct {
 	Kind  string `json:"kind"`
 	Label string `json:"label,omitempty"`
+	// ID is a model window's model id when the provider gives one; Label is
+	// then its display name. A model condition matches either.
+	ID string `json:"id,omitempty"`
 	// UsedPercent is how much of the window is spent, 0-100.
 	UsedPercent float64   `json:"used_percent"`
 	ResetsAt    time.Time `json:"resets_at,omitempty"`
@@ -61,7 +64,7 @@ type Provider struct {
 // false.
 func (p Provider) Window(kind, label string) (Window, bool) {
 	for _, w := range p.Windows {
-		if w.Kind == kind && (label == "" || w.Label == label) {
+		if w.Kind == kind && (label == "" || w.Label == label || (w.ID != "" && w.ID == label)) {
 			return w, true
 		}
 	}

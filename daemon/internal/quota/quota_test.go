@@ -144,11 +144,12 @@ func TestClaudeSourceLimitsEdgeCases(t *testing.T) {
 	}
 }
 
-func TestClaudeSourceMergesLegacyDedupesAndPrefersIDs(t *testing.T) {
+func TestClaudeSourceMergesLegacyDedupesAndMatchesIDs(t *testing.T) {
 	// limits gives only per-model windows: session and weekly come from the
-	// legacy objects. A scoped model with an id is labelled by the id, a
-	// repeated (kind, label) is kept once, and other scoped kinds are
-	// skipped. Uncapped extra usage shows its spend as a detail.
+	// legacy objects. A scoped model is labelled by its display name and
+	// matched by its id too, a repeated (kind, label) is kept once, and other
+	// scoped kinds are skipped. Uncapped extra usage shows its spend as a
+	// detail.
 	srv := server(t, nil, 200, `{
 	 "five_hour":{"utilization":20},
 	 "seven_day":{"utilization":30},
@@ -174,8 +175,11 @@ func TestClaudeSourceMergesLegacyDedupesAndPrefersIDs(t *testing.T) {
 	if w, _ := p.Window(KindWeekly, ""); w.UsedPercent != 30 {
 		t.Errorf("weekly from legacy = %+v", w)
 	}
-	if w, ok := p.Window(KindModel, "claude-opus"); !ok || w.UsedPercent != 5 {
-		t.Errorf("model by id = %+v (%v)", w, ok)
+	if w, ok := p.Window(KindModel, "claude-opus"); !ok || w.UsedPercent != 5 || w.Label != "Opus" {
+		t.Errorf("model by id = %+v (%v), want it labelled by its display name", w, ok)
+	}
+	if w, ok := p.Window(KindModel, "Opus"); !ok || w.UsedPercent != 5 {
+		t.Errorf("model by display name = %+v (%v)", w, ok)
 	}
 	if p.Detail != "12.34 EUR extra usage spent · no limit" {
 		t.Errorf("detail = %q", p.Detail)

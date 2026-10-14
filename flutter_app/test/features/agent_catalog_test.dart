@@ -230,6 +230,8 @@ void main() {
               {'kind': 'weekly', 'used_percent': 46},
               {'kind': 'model', 'label': 'Fable', 'used_percent': 3},
               {'kind': 'model', 'label': 'Opus', 'used_percent': 12},
+              // A model whose label equals the credit row's short label.
+              {'kind': 'model', 'label': 'credit', 'used_percent': 7},
               {
                 'kind': 'credit',
                 'used_percent': 4.22,
@@ -251,9 +253,20 @@ void main() {
       verify(() => api.fetchQuotas()).called(2);
       expect(find.text('61%'), findsOneWidget);
       expect(find.text('34%'), findsNothing);
-      expect(find.byKey(const ValueKey('quota-claude-Fable')), findsOneWidget);
-      // Five windows: none is cut, the credit row included.
-      expect(find.byKey(const ValueKey('quota-claude-Opus')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('quota-claude-model:Fable')),
+        findsOneWidget,
+      );
+      // Six windows: none is cut, the credit row included, and a model
+      // labelled like another kind keeps a key of its own.
+      expect(
+        find.byKey(const ValueKey('quota-claude-model:Opus')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('quota-claude-model:credit')),
+        findsOneWidget,
+      );
       expect(find.byKey(const ValueKey('quota-claude-credit')), findsOneWidget);
       expect(find.text('31.65 / 750.00 EUR'), findsOneWidget);
       expect(find.text('4%'), findsOneWidget);

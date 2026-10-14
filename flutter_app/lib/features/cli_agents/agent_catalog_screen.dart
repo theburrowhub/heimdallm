@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/models/cli_agent.dart';
-import '../../core/models/flow.dart' show AgentQuota;
+import '../../core/models/flow.dart' show AgentQuota, QuotaWindow;
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
@@ -276,7 +276,9 @@ class AgentCatalogCard extends StatelessWidget {
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(4),
                           child: LinearProgressIndicator(
-                            key: ValueKey('quota-${agent.id}-${w.shortLabel}'),
+                            key: ValueKey(
+                              'quota-${agent.id}-${_quotaRowKey(w)}',
+                            ),
                             value: w.usedPercent / 100,
                             minHeight: 5,
                             color: w.usedPercent >= 90
@@ -301,7 +303,9 @@ class AgentCatalogCard extends StatelessWidget {
                     ),
                     child: Text(
                       w.detail,
-                      key: ValueKey('quota-${agent.id}-${w.shortLabel}-detail'),
+                      key: ValueKey(
+                        'quota-${agent.id}-${_quotaRowKey(w)}-detail',
+                      ),
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 10, color: muted),
                     ),
@@ -314,6 +318,11 @@ class AgentCatalogCard extends StatelessWidget {
     );
   }
 }
+
+/// A window's row key on a catalog card. A model's label can equal another
+/// kind's short label (a model named "credit"), so model rows say their kind.
+String _quotaRowKey(QuotaWindow w) =>
+    w.kind == 'model' ? 'model:${w.label}' : w.shortLabel;
 
 /// Settings page of one agent: detection details plus the execution editor.
 class AgentConfigScreen extends ConsumerWidget {
