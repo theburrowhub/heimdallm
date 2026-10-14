@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -156,14 +158,132 @@ func (w *claudeWindow) toWindow(kind string) (Window, bool) {
 	return out, true
 }
 
+// claudeLimit is one entry of the usage endpoint's limits list: the session
+// window, the all-models weekly window and per-model weekly windows.
+type claudeLimit struct {
+	Kind     string   `json:"kind"`
+	Percent  *float64 `json:"percent"`
+	ResetsAt *string  `json:"resets_at"`
+	Scope    *struct {
+		Model *struct {
+			ID          *string `json:"id"`
+			DisplayName string  `json:"display_name"`
+		} `json:"model"`
+	} `json:"scope"`
+}
+
+// claudeExtraUsage is the account's usage credits, in minor currency units.
+type claudeExtraUsage struct {
+	IsEnabled     bool     `json:"is_enabled"`
+	MonthlyLimit  float64  `json:"monthly_limit"`
+	UsedCredits   float64  `json:"used_credits"`
+	Utilization   *float64 `json:"utilization"`
+	Currency      string   `json:"currency"`
+	DecimalPlaces *int     `json:"decimal_places"`
+}
+
+func parseResetsAt(v *string) time.Time {
+	if v == nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, *v)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// limitsWindows maps the limits list to windows: the session window, the
+// all-models weekly window and the per-model weekly windows. Other kinds are
+// skipped, and a (kind, label) pair is kept once, so Provider.Window and the
+// UI never see duplicates.
+func limitsWindows(limits []claudeLimit) []Window {
+	var out []Window
+	seen := map[string]bool{}
+	for _, l := range limits {
+		if l.Percent == nil {
+			continue
+		}
+		w := Window{UsedPercent: clampPercent(*l.Percent), ResetsAt: parseResetsAt(l.ResetsAt)}
+		switch {
+		case l.Kind == "session":
+			w.Kind = KindSession
+		case l.Kind == "weekly_all":
+			w.Kind = KindWeekly
+		case l.Kind == "weekly_scoped" && l.Scope != nil && l.Scope.Model != nil:
+			w.Kind = KindModel
+			// The display name is what people read and write conditions
+			// against; the id, when the API gives one, matches too, so a
+			// condition keeps working whichever the API starts sending.
+			if l.Scope.Model.ID != nil {
+				w.ID = *l.Scope.Model.ID
+			}
+			w.Label = l.Scope.Model.DisplayName
+			if w.Label == "" {
+				w.Label = w.ID
+			}
+			if w.Label == "" {
+				continue
+			}
+		default:
+			continue
+		}
+		key := w.Kind + "\x00" + w.Label
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, w)
+	}
+	return out
+}
+
+// money formats an amount with an optional currency code after it, the one
+// format every credit detail uses: "31.65 EUR", "12.50 USD".
+func money(amount float64, places int, currency string) string {
+	s := fmt.Sprintf("%.*f", places, amount)
+	if currency != "" {
+		s += " " + currency
+	}
+	return s
+}
+
+// apply adds the account's usage credits to p: a credit window when they
+// have a monthly cap, or a provider detail with the spend when they do not.
+func (e *claudeExtraUsage) apply(p *Provider) {
+	if e == nil || !e.IsEnabled {
+		return
+	}
+	places := 2
+	if e.DecimalPlaces != nil && *e.DecimalPlaces >= 0 && *e.DecimalPlaces <= 4 {
+		places = *e.DecimalPlaces
+	}
+	scale := math.Pow10(places)
+	if e.MonthlyLimit <= 0 {
+		p.Detail = money(e.UsedCredits/scale, places, e.Currency) + " extra usage spent · no limit"
+		return
+	}
+	used := 100 * e.UsedCredits / e.MonthlyLimit
+	if e.Utilization != nil {
+		used = *e.Utilization
+	}
+	p.Windows = append(p.Windows, Window{
+		Kind:        KindCredit,
+		UsedPercent: clampPercent(used),
+		Detail:      fmt.Sprintf("%.*f / %s", places, e.UsedCredits/scale, money(e.MonthlyLimit/scale, places, e.Currency)),
+	})
+}
+
 func (s *ClaudeSource) Read(ctx context.Context) Provider {
 	tok := s.token(ctx)
 	if tok == "" {
 		return Provider{Agent: s.Agent(), Error: ErrNotConfigured}
 	}
 	var body struct {
-		FiveHour *claudeWindow `json:"five_hour"`
-		SevenDay *claudeWindow `json:"seven_day"`
+		FiveHour   *claudeWindow     `json:"five_hour"`
+		SevenDay   *claudeWindow     `json:"seven_day"`
+		Limits     []claudeLimit     `json:"limits"`
+		ExtraUsage *claudeExtraUsage `json:"extra_usage"`
 	}
 	status, err := httpJSON(ctx, s.HTTP, http.MethodGet, strings.TrimRight(s.BaseURL, "/")+"/api/oauth/usage", map[string]string{
 		"Authorization":  "Bearer " + tok,
@@ -174,12 +294,22 @@ func (s *ClaudeSource) Read(ctx context.Context) Provider {
 		return failure(s.Agent(), status)
 	}
 	p := Provider{Agent: s.Agent(), Available: true}
-	if w, ok := body.FiveHour.toWindow(KindSession); ok {
-		p.Windows = append(p.Windows, w)
+	// The limits list is newer and also carries per-model weekly windows.
+	// The five_hour/seven_day objects fill in whichever of the session and
+	// weekly windows the list did not give (older responses, null percents).
+	p.Windows = limitsWindows(body.Limits)
+	for _, legacy := range []struct {
+		w    *claudeWindow
+		kind string
+	}{{body.FiveHour, KindSession}, {body.SevenDay, KindWeekly}} {
+		if _, ok := p.Window(legacy.kind, ""); ok {
+			continue
+		}
+		if w, ok := legacy.w.toWindow(legacy.kind); ok {
+			p.Windows = append(p.Windows, w)
+		}
 	}
-	if w, ok := body.SevenDay.toWindow(KindWeekly); ok {
-		p.Windows = append(p.Windows, w)
-	}
+	body.ExtraUsage.apply(&p)
 	return p
 }
 
@@ -458,8 +588,19 @@ func (s FuncSource) Read(ctx context.Context) Provider { return s.Fn(ctx) }
 // (OpenRouter keys). An unlimited key has no window.
 func CreditProvider(agent string, used float64, limit *float64) Provider {
 	p := Provider{Agent: agent, Available: true}
-	if limit != nil && *limit > 0 {
-		p.Windows = []Window{{Kind: KindCredit, UsedPercent: clampPercent(100 * used / *limit)}}
+	switch {
+	case limit == nil:
+		p.Detail = money(used, 2, "USD") + " spent · no limit"
+	case *limit <= 0:
+		// An explicit zero limit is a key with nothing left, not an
+		// unlimited one.
+		p.Windows = []Window{{Kind: KindCredit, UsedPercent: 100, Detail: fmt.Sprintf("%.2f / %s", used, money(0, 2, "USD"))}}
+	default:
+		p.Windows = []Window{{
+			Kind:        KindCredit,
+			UsedPercent: clampPercent(100 * used / *limit),
+			Detail:      fmt.Sprintf("%.2f / %s", used, money(*limit, 2, "USD")),
+		}}
 	}
 	return p
 }

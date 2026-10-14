@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/models/cli_agent.dart';
-import '../../core/models/flow.dart' show AgentQuota;
+import '../../core/models/flow.dart' show AgentQuota, QuotaWindow;
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
@@ -21,17 +21,38 @@ final cliAgentCatalogProvider = FutureProvider.autoDispose<CliAgentCatalog>((
   return ref.watch(apiClientProvider).fetchCliAgents();
 });
 
-/// Every agent's remaining quota (GET /quotas); empty on older daemons.
+/// How often the catalog re-reads quotas. The agents branch stays mounted in
+/// the shell, so this runs for as long as the app does; the daemon caches
+/// each provider's reading for two minutes, so it never adds provider calls.
+const kQuotaRefreshInterval = Duration(minutes: 1);
+
+/// Every agent's remaining quota (GET /quotas), re-read every
+/// [kQuotaRefreshInterval]. A failed read throws so the AsyncValue keeps the
+/// last good reading instead of blanking the cards; with no reading yet
+/// (older daemons) the cards show no usage.
 final agentQuotasProvider = FutureProvider.autoDispose<Map<String, AgentQuota>>(
+  // No automatic retry: the timer re-reads every minute anyway, and a
+  // failure keeps the last reading on screen.
+  retry: (_, _) => null,
   (ref) async {
-    try {
-      final list = await ref.watch(apiClientProvider).fetchQuotas();
-      return {for (final q in list) q.agent: q};
-    } catch (_) {
-      return const {};
-    }
+    final timer = Timer(kQuotaRefreshInterval, ref.invalidateSelf);
+    ref.onDispose(timer.cancel);
+    final list = await ref.watch(apiClientProvider).fetchQuotas();
+    return {for (final q in list) q.agent: q};
   },
 );
+
+/// Width of the window label column on a catalog card; the money detail
+/// under a bar is indented by the same amount.
+const _quotaLabelWidth = 56.0;
+
+/// Readable copy for the daemon's closed set of quota errors.
+String quotaErrorText(String error) => switch (error) {
+  'expired' => 'Usage unavailable: sign-in expired',
+  'unavailable' => 'Usage unavailable: provider not reachable',
+  'unsupported' => 'This agent reports no usage',
+  _ => 'Usage unavailable',
+};
 
 String agentEmoji(String id) => switch (id) {
   'claude' => '🔷',
@@ -242,16 +263,37 @@ class AgentCatalogCard extends StatelessWidget {
               ],
             ),
             if (quota != null &&
+                !quota!.available &&
+                quota!.error.isNotEmpty &&
+                quota!.error != 'not_configured') ...[
+              const SizedBox(height: 8),
+              Text(
+                quotaErrorText(quota!.error),
+                key: ValueKey('quota-${agent.id}-unavailable'),
+                style: TextStyle(fontSize: 11, color: muted),
+              ),
+            ],
+            if (quota != null &&
+                quota!.available &&
+                quota!.detail.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                quota!.detail,
+                key: ValueKey('quota-${agent.id}-detail'),
+                style: const TextStyle(fontSize: 11),
+              ),
+            ],
+            if (quota != null &&
                 quota!.available &&
                 quota!.windows.isNotEmpty) ...[
               const SizedBox(height: 8),
-              for (final w in quota!.windows.take(3))
+              for (final w in quota!.windows) ...[
                 Padding(
                   padding: const EdgeInsets.only(top: 3),
                   child: Row(
                     children: [
                       SizedBox(
-                        width: 56,
+                        width: _quotaLabelWidth,
                         child: Text(
                           w.shortLabel,
                           overflow: TextOverflow.ellipsis,
@@ -262,7 +304,9 @@ class AgentCatalogCard extends StatelessWidget {
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(4),
                           child: LinearProgressIndicator(
-                            key: ValueKey('quota-${agent.id}-${w.shortLabel}'),
+                            key: ValueKey(
+                              'quota-${agent.id}-${_quotaRowKey(w)}',
+                            ),
                             value: w.usedPercent / 100,
                             minHeight: 5,
                             color: w.usedPercent >= 90
@@ -279,6 +323,22 @@ class AgentCatalogCard extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (w.detail.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      left: _quotaLabelWidth,
+                      top: 1,
+                    ),
+                    child: Text(
+                      w.detail,
+                      key: ValueKey(
+                        'quota-${agent.id}-${_quotaRowKey(w)}-detail',
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 10, color: muted),
+                    ),
+                  ),
+              ],
             ],
           ],
         ),
@@ -286,6 +346,11 @@ class AgentCatalogCard extends StatelessWidget {
     );
   }
 }
+
+/// A window's row key on a catalog card. A model's label can equal another
+/// kind's short label (a model named "credit"), so model rows say their kind.
+String _quotaRowKey(QuotaWindow w) =>
+    w.kind == 'model' ? 'model:${w.label}' : w.shortLabel;
 
 /// Settings page of one agent: detection details plus the execution editor.
 class AgentConfigScreen extends ConsumerWidget {
