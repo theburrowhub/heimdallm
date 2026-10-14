@@ -657,5 +657,24 @@ void main() {
     expect(indexes.toSet(), {
       for (var i = 0; i < shell.branches.length; i++) i,
     });
+    // Each entry opens its own screen: swapping two branches in the router
+    // keeps the index set intact but must still fail here.
+    const expectedPath = {
+      'Activity': '/',
+      'Activity log': '/activity',
+      'My PRs': '/merge',
+      'Repositories': '/repos',
+      'Organizations': '/orgs',
+      'Prompts': '/prompts',
+      'Agents': '/cli-agents',
+      'Flows': '/flows',
+      'Stats': '/stats',
+      'Instances': '/instances',
+    };
+    expect(appDestinations.map((d) => d.label).toSet(), expectedPath.keys);
+    for (final d in appDestinations) {
+      final route = shell.branches[d.branchIndex].routes.first as GoRoute;
+      expect(route.path, expectedPath[d.label], reason: d.label);
+    }
   });
 }
