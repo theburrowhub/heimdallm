@@ -359,10 +359,12 @@ OpenRouter has no CLI. Heimdallm calls the API itself, using a harness built for
 
 ```toml
 [ai.agents.openrouter]
-model     = "anthropic/claude-sonnet-4.5"  # any tool-capable OpenRouter model
+model     = "vendor/model"                 # required: any tool-capable OpenRouter model
 max_turns = 12                              # max tool rounds
 effort    = "medium"                        # reasoning effort, for models that support it
 ```
+
+**`model` is required.** OpenRouter has no default model: its catalog changes too often for a built-in id to stay valid. Until you pick a model, OpenRouter counts as unavailable, just like when it has no API key: a flow skips it and reviews with its next agent, and the flow simulator shows it as unavailable. A review that still reaches OpenRouter without a model (for example, set as the legacy primary agent) fails straight away with `openrouter: no model selected — set [ai.agents.openrouter] model, or pick one in Agents → OpenRouter`, and that error shows on the PR like any other failed review. The OpenRouter card on the **Agents** screen says **Choose a model**, and the daemon logs a warning at startup and on every config reload.
 
 Set the key on the **Agents → OpenRouter** page. The key is write-only:
 
@@ -370,7 +372,13 @@ Set the key on the **Agents → OpenRouter** page. The key is write-only:
 - It only ever reports whether a key is set and where it comes from.
 - A stored key takes precedence over `OPENROUTER_API_KEY`.
 
-That page also shows the key's spend and limit, and the model list only offers models that accept tool calls. OpenRouter is review-only: it is never used to resolve merge conflicts.
+That page also shows the key's spend and limit. The **Model** field searches OpenRouter's live list, which the daemon reads from `/models` and caches for an hour. It only offers models that accept tool calls, and it shows the whole list, not a truncated one. Other details:
+
+- With no API key, the page asks you to add one first. Saving a key rescans the agents, so the list loads straight away.
+- If the list cannot be loaded (OpenRouter is unreachable, for example), the page says so and offers **Retry**. Retry rescans the agents (`POST /cli-agents/rescan`). You can still type a model id and press Enter.
+- A saved model that OpenRouter no longer offers is flagged, so you can pick another one.
+
+OpenRouter is review-only: it is never used to resolve merge conflicts.
 
 API endpoints:
 

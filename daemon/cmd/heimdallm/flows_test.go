@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -142,5 +145,99 @@ func TestOverrideMapsCarryTheFlow(t *testing.T) {
 	}
 	if _, ok := repoAIOverrideMap(config.RepoAI{})["flow"]; ok {
 		t.Error("no flow selected must not project one")
+	}
+}
+
+// OpenRouter has no default model: like a missing key, a missing model makes
+// it unavailable, so flows skip it instead of failing every review on it.
+func TestFlowAgentAvailable_OpenRouterNeedsAModel(t *testing.T) {
+	model := ""
+	installed := map[string]bool{"openrouter": true, "claude": true}
+	available := flowAgentAvailable(
+		func(agent string) bool { return installed[agent] },
+		func(agent string) string {
+			if agent == "openrouter" {
+				return model
+			}
+			return ""
+		},
+	)
+	if available("openrouter") {
+		t.Error("openrouter without a model must be unavailable")
+	}
+	model = "   "
+	if available("openrouter") {
+		t.Error("a blank model is no model")
+	}
+	if !available("claude") {
+		t.Error("CLI agents keep their CLI default model")
+	}
+	model = "vendor/model"
+	if !available("openrouter") {
+		t.Error("openrouter with a model and a key is available")
+	}
+	installed["openrouter"] = false
+	if available("openrouter") {
+		t.Error("openrouter without a key stays unavailable")
+	}
+
+	f := config.FlowConfig{Name: "F", Rules: map[string]config.FlowRule{
+		"10": {Agent: "openrouter"},
+		"20": {Agent: "claude"},
+	}}
+	installed["openrouter"] = true
+	model = ""
+	got := flowCandidates("f", f, "o/r", staticQuotas{}, available)()
+	if strings.Join(got, ",") != "claude" {
+		t.Errorf("candidates = %v, want claude only", got)
+	}
+}
+
+func TestDetectedByAndAgentModelsSnapshot(t *testing.T) {
+	detected := detectedBy(func(primary, fallback string) (string, error) {
+		if primary == "claude" && fallback == "" {
+			return "claude", nil
+		}
+		return "", errors.New("not installed")
+	})
+	if !detected("claude") || detected("gemini") {
+		t.Error("detectedBy must follow Detect's error")
+	}
+
+	var models agentModels
+	if models.model("openrouter") != "" {
+		t.Error("an empty snapshot has no models")
+	}
+	models.store(&config.Config{AI: config.AIConfig{Agents: map[string]config.CLIAgentConfig{
+		"openrouter": {Model: "vendor/model"},
+	}}})
+	if models.model("openrouter") != "vendor/model" || models.model("claude") != "" {
+		t.Error("the snapshot must hold the configured models")
+	}
+	// A config reload stores a new snapshot: readers follow it.
+	models.refresh(&config.Config{}, func(string) bool { return false })
+	if models.model("openrouter") != "" {
+		t.Error("the snapshot must follow a reload")
+	}
+}
+
+func TestWarnModelRequiredWithoutModel(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	configured := func(a string) bool { return a == "openrouter" }
+	warnModelRequiredWithoutModel(&config.Config{}, configured)
+	if !strings.Contains(buf.String(), "agent=openrouter") {
+		t.Errorf("want a warning for openrouter without a model, got %q", buf.String())
+	}
+	buf.Reset()
+	warnModelRequiredWithoutModel(&config.Config{AI: config.AIConfig{Agents: map[string]config.CLIAgentConfig{
+		"openrouter": {Model: "vendor/model"},
+	}}}, configured)
+	warnModelRequiredWithoutModel(&config.Config{}, func(string) bool { return false })
+	if buf.Len() != 0 {
+		t.Errorf("no warning with a model or without a key, got %q", buf.String())
 	}
 }

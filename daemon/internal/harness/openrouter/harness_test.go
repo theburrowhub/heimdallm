@@ -65,6 +65,9 @@ func (f *fakeOpenRouter) handler(t *testing.T) http.HandlerFunc {
 	}
 }
 
+// testModel is the model the tests configure: OpenRouter has no default.
+const testModel = "anthropic/claude-sonnet-5.5"
+
 func completion(content string, toolCalls string) string {
 	c := "null"
 	if content != "" {
@@ -150,15 +153,15 @@ func TestReview_ToolBudgetForcesAnAnswer(t *testing.T) {
 	call := `[{"id":"c","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}}]`
 	f := &fakeOpenRouter{replies: []string{completion("", call), completion("", call), completion(reviewJSON, "")}}
 	r := newTestRunner(t, f)
-	answer, _, err := r.Review(context.Background(), "p", executor.ExecOptions{WorkDir: ws.root, MaxTurns: 2})
+	answer, _, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: testModel, WorkDir: ws.root, MaxTurns: 2})
 	if err != nil || answer != reviewJSON {
 		t.Fatalf("Review = %q, %v", answer, err)
 	}
 	if f.requests[2]["tool_choice"] != "none" {
 		t.Errorf("after the budget the model must be told not to call tools: %v", f.requests[2]["tool_choice"])
 	}
-	if f.requests[0]["model"] != DefaultModel {
-		t.Errorf("default model = %v", f.requests[0]["model"])
+	if f.requests[0]["model"] != testModel {
+		t.Errorf("model = %v", f.requests[0]["model"])
 	}
 	last := f.requests[2]["messages"].([]any)
 	if note := last[len(last)-1].(map[string]any)["content"].(string); !strings.Contains(note, "used all 2 tool rounds") {
@@ -169,7 +172,7 @@ func TestReview_ToolBudgetForcesAnAnswer(t *testing.T) {
 func TestReview_DiffOnlyWithoutCheckout(t *testing.T) {
 	f := &fakeOpenRouter{replies: []string{completion(reviewJSON, "")}}
 	r := newTestRunner(t, f)
-	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{WorkDir: filepath.Join(t.TempDir(), "gone")}); err != nil {
+	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: testModel, WorkDir: filepath.Join(t.TempDir(), "gone")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := f.requests[0]["tools"]; ok {
@@ -180,7 +183,7 @@ func TestReview_DiffOnlyWithoutCheckout(t *testing.T) {
 func TestReview_CorrectsANonJSONAnswerOnce(t *testing.T) {
 	f := &fakeOpenRouter{replies: []string{completion("Here is my review: it looks fine.", ""), completion(reviewJSON, "")}}
 	r := newTestRunner(t, f)
-	answer, usage, err := r.Review(context.Background(), "p", executor.ExecOptions{})
+	answer, usage, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: testModel})
 	if err != nil || answer != reviewJSON || usage.InputTokens != 200 {
 		t.Fatalf("Review = %q, %+v, %v", answer, usage, err)
 	}
@@ -190,15 +193,34 @@ func TestReview_CorrectsANonJSONAnswerOnce(t *testing.T) {
 	}
 
 	f.replies = []string{completion("still prose", ""), completion("", "")}
-	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{}); err == nil || !strings.Contains(err.Error(), "no review") {
+	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: testModel}); err == nil || !strings.Contains(err.Error(), "no review") {
 		t.Errorf("an empty corrective answer must fail: %v", err)
+	}
+}
+
+// OpenRouter has no default model: a run without one fails before any request
+// with an error that tells the operator where to pick one.
+func TestReview_RequiresAModel(t *testing.T) {
+	f := &fakeOpenRouter{}
+	r := newTestRunner(t, f)
+	for _, model := range []string{"", "   "} {
+		_, usage, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: model})
+		if !errors.Is(err, ErrNoModel) || usage != nil {
+			t.Fatalf("Review(model=%q) = %v, %+v", model, err, usage)
+		}
+		if !strings.Contains(err.Error(), "Agents → OpenRouter") {
+			t.Errorf("the error must say where to pick a model: %v", err)
+		}
+	}
+	if len(f.requests) != 0 {
+		t.Errorf("no request may reach OpenRouter without a model: %v", f.requests)
 	}
 }
 
 func TestReview_ErrorsAndRateLimits(t *testing.T) {
 	f := &fakeOpenRouter{status: http.StatusTooManyRequests}
 	r := newTestRunner(t, f)
-	_, _, err := r.Review(context.Background(), "p", executor.ExecOptions{})
+	_, _, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: testModel})
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || !apiErr.RateLimited() || !strings.Contains(apiErr.Error(), "Rate limit exceeded") {
 		t.Fatalf("429 = %v", err)
@@ -208,15 +230,15 @@ func TestReview_ErrorsAndRateLimits(t *testing.T) {
 	}
 	f.status = 0
 	f.replies = []string{`{"choices":[]}`}
-	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{}); err == nil {
+	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: testModel}); err == nil {
 		t.Error("no choices must fail")
 	}
 	f.replies = []string{`{"error":{"message":"upstream down"}}`}
-	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{}); err == nil || !strings.Contains(err.Error(), "upstream down") {
+	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: testModel}); err == nil || !strings.Contains(err.Error(), "upstream down") {
 		t.Errorf("in-body error = %v", err)
 	}
 	f.replies = []string{`not json`}
-	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{}); err == nil {
+	if _, _, err := r.Review(context.Background(), "p", executor.ExecOptions{Model: testModel}); err == nil {
 		t.Error("malformed response must fail")
 	}
 
@@ -224,7 +246,7 @@ func TestReview_ErrorsAndRateLimits(t *testing.T) {
 	if none.Configured() {
 		t.Error("no key means not configured")
 	}
-	if _, _, err := none.Review(context.Background(), "p", executor.ExecOptions{}); !errors.Is(err, ErrNoKey) {
+	if _, _, err := none.Review(context.Background(), "p", executor.ExecOptions{Model: testModel}); !errors.Is(err, ErrNoKey) {
 		t.Errorf("no key = %v", err)
 	}
 	var nilRunner *Runner

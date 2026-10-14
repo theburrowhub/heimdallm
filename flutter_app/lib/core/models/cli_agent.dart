@@ -1,10 +1,15 @@
+/// Agents known to be in-process providers. The catalog's `kind` is the
+/// source of truth; this only covers a catalog that has not loaded (yet).
+/// Keep in sync with modelRequiredAgents in daemon/cmd/heimdallm/flows.go.
+const knownProviderAgentIds = {'openrouter'};
+
 /// One agent from the daemon's installed-agent catalog (GET /cli-agents).
 class CliAgentInfo {
   final String id;
   final String name;
 
-  /// 'agent' (runs reviews) or 'ide' (detected only; reviews go through
-  /// [configAgent]).
+  /// 'agent' (runs reviews), 'ide' (detected only; reviews go through
+  /// [configAgent]) or 'provider' (an API called in-process).
   final String kind;
   final bool executable;
   final bool installed;

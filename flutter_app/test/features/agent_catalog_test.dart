@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -74,17 +76,48 @@ const _catalogJson = {
   ],
 };
 
+const _defaultConfig = AppConfig(
+  agentConfigs: {'claude': CLIAgentConfig(model: 'claude-opus-5')},
+);
+
 class _TestConfigNotifier extends ConfigNotifier {
+  final AppConfig config;
+
+  _TestConfigNotifier([this.config = _defaultConfig]);
+
   @override
-  Future<AppConfig> build() async => const AppConfig(
-    agentConfigs: {'claude': CLIAgentConfig(model: 'claude-opus-5')},
-  );
+  Future<AppConfig> build() async => config;
 }
+
+/// The catalog payload with OpenRouter offering [models] (and its key set
+/// unless [configured] is false).
+Map<String, dynamic> _catalogWithOpenRouterModels(
+  List<String> models, {
+  bool configured = true,
+}) => {
+  ..._catalogJson,
+  'agents': [
+    for (final a
+        in (_catalogJson['agents']! as List).cast<Map<String, dynamic>>())
+      if (a['id'] == 'openrouter')
+        <String, dynamic>{
+          ...a,
+          'models': models,
+          'installed': configured,
+          'configured': configured,
+        }
+      else
+        a,
+  ],
+};
 
 Future<(_MockApiClient, GoRouter)> _pump(
   WidgetTester tester, {
   String location = '/cli-agents',
   bool quotasFail = false,
+  AppConfig config = _defaultConfig,
+  Map<String, dynamic> catalog = _catalogJson,
+  bool catalogPending = false,
 }) async {
   tester.view.physicalSize = const Size(1400, 1200);
   tester.view.devicePixelRatio = 1;
@@ -92,12 +125,15 @@ Future<(_MockApiClient, GoRouter)> _pump(
   addTearDown(tester.view.resetDevicePixelRatio);
 
   final api = _MockApiClient();
-  when(
-    () => api.fetchCliAgents(),
-  ).thenAnswer((_) async => CliAgentCatalog.fromJson(_catalogJson));
+  final pending = Completer<CliAgentCatalog>();
+  when(() => api.fetchCliAgents()).thenAnswer(
+    (_) => catalogPending
+        ? pending.future
+        : Future.value(CliAgentCatalog.fromJson(catalog)),
+  );
   when(
     () => api.rescanCliAgents(),
-  ).thenAnswer((_) async => CliAgentCatalog.fromJson(_catalogJson));
+  ).thenAnswer((_) async => CliAgentCatalog.fromJson(catalog));
   when(() => api.patchConfig(any())).thenAnswer((_) async => {});
   if (quotasFail) {
     when(() => api.fetchQuotas()).thenThrow(ApiException('404'));
@@ -154,7 +190,7 @@ Future<(_MockApiClient, GoRouter)> _pump(
     ProviderScope(
       overrides: [
         apiClientProvider.overrideWithValue(api),
-        configNotifierProvider.overrideWith(_TestConfigNotifier.new),
+        configNotifierProvider.overrideWith(() => _TestConfigNotifier(config)),
         agentsProvider.overrideWith((ref) async => <ReviewPrompt>[]),
       ],
       child: MaterialApp.router(
@@ -164,7 +200,13 @@ Future<(_MockApiClient, GoRouter)> _pump(
       ),
     ),
   );
-  await tester.pumpAndSettle();
+  if (catalogPending) {
+    // A spinner never settles: pump the config load and stop there.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+  } else {
+    await tester.pumpAndSettle();
+  }
   return (api, router);
 }
 
@@ -197,6 +239,8 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('agents-rescan')));
     await tester.pumpAndSettle();
     verify(() => api.rescanCliAgents()).called(1);
+    verify(() => api.fetchCliAgents()).called(greaterThan(0));
+    debugDumpApp();
     expect(find.text('Agents rescanned'), findsOneWidget);
   });
 
@@ -301,7 +345,10 @@ void main() {
     );
     await tester.tap(find.byKey(const ValueKey('provider-key-save')));
     await tester.pumpAndSettle();
-    verify(() => api.setAgentKey('openrouter', 'sk-or-new')).called(1);
+    verifyInOrder([
+      () => api.setAgentKey('openrouter', 'sk-or-new'),
+      () => api.rescanCliAgents(),
+    ]);
     expect(find.text('Key saved'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('provider-key-remove')));
@@ -359,6 +406,262 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('provider-key-save')));
     await tester.pumpAndSettle();
     expect(find.textContaining('bad key'), findsOneWidget);
+  });
+
+  testWidgets('OpenRouter has no CLI default: the model is a required, '
+      'searchable choice', (tester) async {
+    final (api, _) = await _pump(tester, location: '/cli-agents/openrouter');
+    expect(find.text('CLI default'), findsNothing);
+    expect(find.text('Required — OpenRouter has no default'), findsOneWidget);
+    expect(find.text('Choose a model'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('model-openrouter')),
+      'GPT',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('openai/gpt-5'), findsOneWidget);
+    expect(find.text('anthropic/claude-sonnet-4.5'), findsNothing);
+
+    await tester.tap(find.text('openai/gpt-5'));
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    final patch =
+        verify(() => api.patchConfig(captureAny())).captured.last
+            as Map<String, dynamic>;
+    expect(patch['ai']['agents']['openrouter']['model'], 'openai/gpt-5');
+    expect(find.text('Choose a model'), findsNothing);
+  });
+
+  testWidgets('OpenRouter never offers a CLI default while the catalog loads', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      catalogPending: true,
+    );
+    expect(find.text('CLI default'), findsNothing);
+    expect(
+      find.text('Loading the model list from OpenRouter…'),
+      findsOneWidget,
+    );
+    expect(find.text('Required — OpenRouter has no default'), findsOneWidget);
+  });
+
+  testWidgets('Enter picks the highlighted match, or keeps an exact id', (
+    tester,
+  ) async {
+    final (api, _) = await _pump(tester, location: '/cli-agents/openrouter');
+    final field = find.byKey(const ValueKey('model-openrouter'));
+
+    await tester.enterText(field, 'claude');
+    await tester.pumpAndSettle();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    var patch =
+        verify(() => api.patchConfig(captureAny())).captured.last
+            as Map<String, dynamic>;
+    expect(
+      patch['ai']['agents']['openrouter']['model'],
+      'anthropic/claude-sonnet-4.5',
+    );
+
+    await tester.enterText(field, 'openai/gpt-5');
+    await tester.pumpAndSettle();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    patch =
+        verify(() => api.patchConfig(captureAny())).captured.last
+            as Map<String, dynamic>;
+    expect(patch['ai']['agents']['openrouter']['model'], 'openai/gpt-5');
+  });
+
+  testWidgets('leaving the field drops an unsubmitted search', (tester) async {
+    final (api, _) = await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      config: const AppConfig(
+        agentConfigs: {'openrouter': CLIAgentConfig(model: 'openai/gpt-5')},
+      ),
+    );
+    final field = find.byKey(const ValueKey('model-openrouter'));
+    await tester.enterText(field, 'half-typed');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('openrouter-tool-rounds')));
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(field).controller!.text, 'openai/gpt-5');
+    verifyNever(() => api.patchConfig(any()));
+  });
+
+  testWidgets('a saved OpenRouter model that is no longer offered is flagged', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      config: const AppConfig(
+        agentConfigs: {'openrouter': CLIAgentConfig(model: 'x/retired')},
+      ),
+    );
+    expect(
+      find.byKey(const ValueKey('provider-model-missing')),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('not offered by OpenRouter any more'),
+      findsOneWidget,
+    );
+    expect(find.text('Choose a model'), findsNothing);
+  });
+
+  testWidgets('an unavailable OpenRouter model list offers Retry and still '
+      'accepts a typed model id', (tester) async {
+    final (api, _) = await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      catalog: _catalogWithOpenRouterModels(const []),
+    );
+    expect(
+      find.text("Couldn't load the model list from OpenRouter"),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('provider-model-missing')), findsNothing);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('model-openrouter')),
+      '  vendor/custom-model ',
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    final patch =
+        verify(() => api.patchConfig(captureAny())).captured.last
+            as Map<String, dynamic>;
+    expect(patch['ai']['agents']['openrouter']['model'], 'vendor/custom-model');
+
+    when(() => api.fetchCliAgents()).thenAnswer(
+      (_) async => CliAgentCatalog.fromJson(
+        _catalogWithOpenRouterModels(const ['vendor/custom-model']),
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('provider-models-retry')));
+    await tester.pumpAndSettle();
+    verify(() => api.rescanCliAgents()).called(1);
+    expect(
+      find.text("Couldn't load the model list from OpenRouter"),
+      findsNothing,
+    );
+  });
+
+  testWidgets('without an API key the picker asks for one instead of Retry', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      catalog: _catalogWithOpenRouterModels(const [], configured: false),
+    );
+    expect(
+      find.text('Add an OpenRouter API key above to load the models'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('provider-models-retry')), findsNothing);
+    expect(
+      find.text("Couldn't load the model list from OpenRouter"),
+      findsNothing,
+    );
+  });
+
+  testWidgets('a key save still succeeds when the rescan after it fails', (
+    tester,
+  ) async {
+    final (api, _) = await _pump(tester, location: '/cli-agents/openrouter');
+    when(() => api.rescanCliAgents()).thenThrow(ApiException('busy'));
+    await tester.enterText(
+      find.byKey(const ValueKey('provider-key-field')),
+      'sk-or-new',
+    );
+    await tester.tap(find.byKey(const ValueKey('provider-key-save')));
+    await tester.pumpAndSettle();
+    expect(find.text('Key saved'), findsOneWidget);
+    expect(find.textContaining('busy'), findsNothing);
+  });
+
+  testWidgets('Enter in an empty model field keeps the saved model', (
+    tester,
+  ) async {
+    final (api, _) = await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      config: const AppConfig(
+        agentConfigs: {'openrouter': CLIAgentConfig(model: 'openai/gpt-5')},
+      ),
+    );
+    final field = find.byKey(const ValueKey('model-openrouter'));
+    await tester.enterText(field, '');
+    await tester.pumpAndSettle();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(field).controller!.text, 'openai/gpt-5');
+    verifyNever(() => api.patchConfig(any()));
+  });
+
+  testWidgets('Enter in an empty model field never picks the first model', (
+    tester,
+  ) async {
+    final (api, _) = await _pump(tester, location: '/cli-agents/openrouter');
+    final field = find.byKey(const ValueKey('model-openrouter'));
+    await tester.tap(field);
+    await tester.pumpAndSettle();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+    verifyNever(() => api.patchConfig(any()));
+    expect(find.text('Choose a model'), findsOneWidget);
+  });
+
+  testWidgets('a failed model list retry is reported', (tester) async {
+    final (api, _) = await _pump(
+      tester,
+      location: '/cli-agents/openrouter',
+      catalog: _catalogWithOpenRouterModels(const []),
+    );
+    when(() => api.rescanCliAgents()).thenThrow(ApiException('offline'));
+    await tester.tap(find.byKey(const ValueKey('provider-models-retry')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('offline'), findsOneWidget);
+  });
+
+  testWidgets('the catalog asks for a model when OpenRouter has none', (
+    tester,
+  ) async {
+    await _pump(tester);
+    expect(
+      find.byKey(const ValueKey('agent-needs-model-openrouter')),
+      findsOneWidget,
+    );
+    expect(find.text('Choose a model'), findsOneWidget);
+  });
+
+  testWidgets('the catalog does not ask for a model once OpenRouter has one', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      config: const AppConfig(
+        agentConfigs: {'openrouter': CLIAgentConfig(model: 'openai/gpt-5')},
+      ),
+    );
+    expect(
+      find.byKey(const ValueKey('agent-needs-model-openrouter')),
+      findsNothing,
+    );
   });
 
   test('AgentKeyStatus parses', () {
