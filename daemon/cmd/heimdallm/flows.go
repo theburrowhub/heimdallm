@@ -123,6 +123,16 @@ func (m *agentModels) store(c *config.Config) {
 	m.p.Store(&snap)
 }
 
+// refresh stores c's models and warns about every agent that needs a model
+// and has none, using detected (the probe flow availability uses) to tell
+// which agents are set up. Run it on every config load and reload, after
+// the config itself is swapped in, so flows never see a model buildRunOpts
+// lacks.
+func (m *agentModels) refresh(c *config.Config, detected func(string) bool) {
+	m.store(c)
+	warnModelRequiredWithoutModel(c, detected)
+}
+
 func (m *agentModels) model(agent string) string {
 	if snap := m.p.Load(); snap != nil {
 		return (*snap)[agent]

@@ -193,7 +193,7 @@ func TestFlowAgentAvailable_OpenRouterNeedsAModel(t *testing.T) {
 	}
 }
 
-func TestDetectedByAndLiveAgentModel(t *testing.T) {
+func TestDetectedByAndAgentModelsSnapshot(t *testing.T) {
 	detected := detectedBy(func(primary, fallback string) (string, error) {
 		if primary == "claude" && fallback == "" {
 			return "claude", nil
@@ -215,7 +215,7 @@ func TestDetectedByAndLiveAgentModel(t *testing.T) {
 		t.Error("the snapshot must hold the configured models")
 	}
 	// A config reload stores a new snapshot: readers follow it.
-	models.store(&config.Config{})
+	models.refresh(&config.Config{}, func(string) bool { return false })
 	if models.model("openrouter") != "" {
 		t.Error("the snapshot must follow a reload")
 	}

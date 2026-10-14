@@ -808,14 +808,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Flow availability reads the agents' models from a lock-free snapshot
 	// (never cfgMu), refreshed on every config load and reload.
 	var models agentModels
-	refreshAgentModels := func(c *config.Config) {
-		models.store(c)
-		warnModelRequiredWithoutModel(c, func(agent string) bool {
-			return agent == "openrouter" && openRouterAdmin.KeySource() != ""
-		})
-	}
-	refreshAgentModels(cfg)
-	agentAvailable := flowAgentAvailable(detectedBy(exec.Detect), models.model)
+	agentDetected := detectedBy(exec.Detect)
+	models.refresh(cfg, agentDetected)
+	agentAvailable := flowAgentAvailable(agentDetected, models.model)
 
 	buildRunOpts := func(pr *gh.PullRequest, aiCfg config.RepoAI) pipeline.RunOptions {
 		cli := aiCfg.Primary
@@ -2233,27 +2228,22 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			go propagatePartition(runtimeCtx, clusterSt)
 		}
 
-		// newCfg is already validated and is applied below on every path.
-		refreshAgentModels(newCfg)
+		// Apply the new config immediately so config reads (GET /config, the
+		// next tier1ConfigFn tick, etc.) reflect it right away, whether or not
+		// the pollers restart. The agent-model snapshot follows the swap, so
+		// flows never see a model buildRunOpts lacks.
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
+		cfg = newCfg
+		cfgMu.Unlock()
+		models.refresh(newCfg, agentDetected)
+		// The kill-switches live on the client and limiter, not the pollers,
+		// so they need applying even when nothing restarts.
+		applyClientRuntimeConfig(ghClient, limiter, newCfg)
 		if !restartPollers {
-			cfg = newCfg
-			cfgMu.Unlock()
-			// The kill-switches live on the client and limiter, not the
-			// pollers, so they need applying even when nothing restarts.
-			applyClientRuntimeConfig(ghClient, limiter, newCfg)
 			slog.Info("config reload: applied without poller restart")
 			return nil
 		}
-		cfgMu.Unlock()
-
-		// Apply the new config immediately so config reads (GET /config, the
-		// next tier1ConfigFn tick, etc.) reflect it right away.
-		cfgMu.Lock()
-		cfg = newCfg
-		cfgMu.Unlock()
-		applyClientRuntimeConfig(ghClient, limiter, newCfg)
 
 		// Restart the pollers in the BACKGROUND. oldWg.Wait() can block for
 		// tens of seconds (an in-flight poll cycle or agent review must finish

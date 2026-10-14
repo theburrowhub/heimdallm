@@ -335,7 +335,10 @@ class AgentConfigScreen extends ConsumerWidget {
             onReloadModels: () async {
               // The page can be left while the rescan runs: invalidate
               // through the container, not this widget's ref.
-              final container = ProviderScope.containerOf(context);
+              final container = ProviderScope.containerOf(
+                context,
+                listen: false,
+              );
               await container.read(apiClientProvider).rescanCliAgents();
               container.invalidate(cliAgentCatalogProvider);
             },
