@@ -1,10 +1,12 @@
 package pipeline_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/pipeline"
@@ -47,6 +49,12 @@ func (f *scriptedExec) Execute(cli, _ string, opts executor.ExecOptions) (*execu
 
 func flowPipeline(t *testing.T, exec *scriptedExec) (*pipeline.Pipeline, *fakePublisher) {
 	t.Helper()
+	p, pub, _ := flowPipelineWithStore(t, exec)
+	return p, pub
+}
+
+func flowPipelineWithStore(t *testing.T, exec *scriptedExec) (*pipeline.Pipeline, *fakePublisher, *store.Store) {
+	t.Helper()
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +63,7 @@ func flowPipeline(t *testing.T, exec *scriptedExec) (*pipeline.Pipeline, *fakePu
 	pub := &fakePublisher{}
 	p := pipeline.New(s, &fakeGHCounter{diff: "+line"}, exec, &fakeNotify{})
 	p.SetPublisher(pub)
-	return p, pub
+	return p, pub, s
 }
 
 func TestRun_FlowFallsBackOnQuotaError(t *testing.T) {
@@ -89,21 +97,181 @@ func TestRun_FlowFallsBackOnQuotaError(t *testing.T) {
 	}
 }
 
-func TestRun_FlowStopsOnNonQuotaError(t *testing.T) {
+func TestRun_FlowFallsBackOnAgentFailure(t *testing.T) {
+	// An agent that fails for its own reasons (unparseable output, a crash)
+	// must not pin the review to itself: retrying the same agent first would
+	// fail the same way on every retry while the next agent could review.
+	exec := &scriptedExec{
+		installed: map[string]bool{"copilot": true, "claude": true},
+		failWith:  map[string]error{"copilot": errors.New(`executor: parse JSON result: invalid character '\n' in string literal`)},
+	}
+	p, pub := flowPipeline(t, exec)
+	rev, err := p.Run(budgetPR(51), pipeline.RunOptions{Primary: "copilot", Candidates: func() []string { return []string{"copilot", "claude"} }})
+	if err != nil || rev == nil || rev.CLIUsed != "claude" || strings.Join(exec.ran, ",") != "copilot,claude" {
+		t.Fatalf("rev=%v err=%v ran=%v, want claude to review after copilot failed", rev, err, exec.ran)
+	}
+	if ev, ok := pub.firstOf("review_agent_fallback"); !ok || !strings.Contains(ev.Data, `"reason":"error"`) {
+		t.Errorf("fallback event = %+v (%v), want reason error", ev, ok)
+	}
+}
+
+func TestRun_FlowFailsAfterEveryAgentFailed(t *testing.T) {
 	exec := &scriptedExec{
 		installed: map[string]bool{"claude": true, "codex": true},
-		failWith:  map[string]error{"claude": errors.New("parse JSON result: invalid character")},
+		failWith: map[string]error{
+			"claude": errors.New("rate limit"),
+			"codex":  errors.New("exit status 1"),
+		},
+	}
+	p, pub := flowPipeline(t, exec)
+	_, err := p.Run(budgetPR(52), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }})
+	if err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("every agent failing must fail after trying each once: err=%v ran=%v", err, exec.ran)
+	}
+	if !strings.Contains(err.Error(), "claude: rate limit") || !strings.Contains(err.Error(), "codex: exit status 1") {
+		t.Errorf("err = %v, want every agent's failure", err)
+	}
+	if ev, ok := pub.firstOf("review_agent_fallback"); !ok || !strings.Contains(ev.Data, `"reason":"quota"`) {
+		t.Errorf("fallback event = %+v (%v), want reason quota", ev, ok)
+	}
+}
+
+func TestRun_FlowStopsOnContextCancellationAndLabelsTimeouts(t *testing.T) {
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true},
+		failWith:  map[string]error{"claude": fmt.Errorf("run: %w", context.Canceled)},
+	}
+	p, pub := flowPipeline(t, exec)
+	opts := pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }}
+	if _, err := p.Run(budgetPR(58), opts); err == nil || strings.Join(exec.ran, ",") != "claude" {
+		t.Fatalf("a cancelled context must stop: err=%v ran=%v", err, exec.ran)
+	}
+	exec.ran = nil
+	exec.failWith["claude"] = fmt.Errorf("run: %w", context.DeadlineExceeded)
+	if _, err := p.Run(budgetPR(60), opts); err == nil || strings.Join(exec.ran, ",") != "claude" {
+		t.Fatalf("an expired parent deadline must stop: err=%v ran=%v", err, exec.ran)
+	}
+	exec.ran = nil
+	exec.failWith["claude"] = fmt.Errorf("run: %w", executor.ErrExecutionTimedOut)
+	if _, err := p.Run(budgetPR(59), opts); err != nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("a timeout moves on: err=%v ran=%v", err, exec.ran)
+	}
+	if ev, ok := pub.firstOf("review_agent_fallback"); !ok || !strings.Contains(ev.Data, `"reason":"timeout"`) {
+		t.Errorf("fallback event = %+v (%v), want reason timeout", ev, ok)
+	}
+}
+
+func TestRun_FlowRetriesOfABrokenReviewUseOneAgent(t *testing.T) {
+	// Every agent failed on the first run, so the review itself is the likely
+	// problem: the automatic retry must not spend the whole flow again. A
+	// quota failure still moves on, and a manual retry chains as before.
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true},
+		failWith: map[string]error{
+			"claude": errors.New("exit status 1"),
+			"codex":  errors.New("exit status 1"),
+		},
+	}
+	p, _, st := flowPipelineWithStore(t, exec)
+	pr := budgetPR(57)
+	opts := pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }}
+	if _, err := p.Run(pr, opts); err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("first run: err=%v ran=%v", err, exec.ran)
+	}
+	// What the scheduler sees once the retry cooldown has passed: the failed
+	// attempt is on record, but long enough ago.
+	elapse := func() {
+		t.Helper()
+		row, err := st.GetPRByGithubID(pr.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.AdvanceReviewRetryBackoff(row.ID, pr.Head.SHA, time.Now().Add(-24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		exec.ran = nil
+	}
+
+	elapse()
+	if _, err := p.Run(pr, opts); err == nil || strings.Join(exec.ran, ",") != "claude" {
+		t.Fatalf("automatic retry: err=%v ran=%v, want only claude", err, exec.ran)
+	}
+
+	elapse()
+	exec.failWith["claude"] = errors.New("usage limit reached")
+	if _, err := p.Run(pr, opts); err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("quota failure on a retry still moves on: err=%v ran=%v", err, exec.ran)
+	}
+
+	exec.ran = nil
+	exec.failWith["claude"] = errors.New("exit status 1")
+	forced := opts
+	forced.Force = true
+	if _, err := p.Run(pr, forced); err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
+		t.Fatalf("manual retry chains: err=%v ran=%v", err, exec.ran)
+	}
+}
+
+func TestRun_FlowRetriesRotateThroughTheFlow(t *testing.T) {
+	// The primary fails this review every time; codex failed the first run
+	// only by chance. Automatic retries run one agent each but start further
+	// down the flow, so codex gets the review back on a later retry.
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true, "gemini": true},
+		failWith: map[string]error{
+			"claude": errors.New("exit status 1"),
+			"codex":  executor.ErrExecutionTimedOut,
+			"gemini": errors.New("exit status 1"),
+		},
+	}
+	p, _, st := flowPipelineWithStore(t, exec)
+	pr := budgetPR(61)
+	opts := pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex", "gemini"} }}
+	_, err := p.Run(pr, opts)
+	if err == nil || strings.Join(exec.ran, ",") != "claude,codex,gemini" {
+		t.Fatalf("first run: err=%v ran=%v", err, exec.ran)
+	}
+	var flowErr *pipeline.FlowFailedError
+	if !errors.As(err, &flowErr) || strings.Join(flowErr.Agents, ",") != "claude,codex,gemini" {
+		t.Fatalf("err = %v, want a FlowFailedError naming every agent", err)
+	}
+	if got := pipeline.UserFacingReviewError(err); got != "3 agents of the flow failed: claude: exit status 1; codex: Review timed out before completion; gemini: exit status 1." {
+		t.Errorf("status = %q; one timeout must not label the whole chain", got)
+	}
+	// Each run and each aging step count one attempt: the second run sees
+	// two, the third four.
+	elapse := func() {
+		t.Helper()
+		row, err := st.GetPRByGithubID(pr.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.AdvanceReviewRetryBackoff(row.ID, pr.Head.SHA, time.Now().Add(-24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		exec.ran = nil
+	}
+	elapse()
+	if _, err := p.Run(pr, opts); err == nil || strings.Join(exec.ran, ",") != "gemini" {
+		t.Fatalf("second run: err=%v ran=%v, want gemini alone", err, exec.ran)
+	}
+	elapse()
+	delete(exec.failWith, "codex")
+	rev, err := p.Run(pr, opts)
+	if err != nil || rev == nil || rev.CLIUsed != "codex" || strings.Join(exec.ran, ",") != "codex" {
+		t.Fatalf("third run: rev=%v err=%v ran=%v, want codex to review", rev, err, exec.ran)
+	}
+}
+
+func TestRun_FlowDoesNotFallBackWhenCancelled(t *testing.T) {
+	exec := &scriptedExec{
+		installed: map[string]bool{"claude": true, "codex": true},
+		failWith:  map[string]error{"claude": fmt.Errorf("run: %w", executor.ErrExecutionCancelled)},
 	}
 	p, _ := flowPipeline(t, exec)
-	_, err := p.Run(budgetPR(51), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }})
+	_, err := p.Run(budgetPR(56), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }})
 	if err == nil || strings.Join(exec.ran, ",") != "claude" {
-		t.Fatalf("a broken review must not spend another agent: err=%v ran=%v", err, exec.ran)
-	}
-	exec.failWith["codex"] = errors.New("429 too many requests")
-	exec.failWith["claude"] = errors.New("rate limit")
-	exec.ran = nil
-	if _, err := p.Run(budgetPR(52), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude", "codex"} }}); err == nil || strings.Join(exec.ran, ",") != "claude,codex" {
-		t.Fatalf("every agent out of quota must fail after trying all: err=%v ran=%v", err, exec.ran)
+		t.Fatalf("a cancelled review must stop: err=%v ran=%v", err, exec.ran)
 	}
 }
 

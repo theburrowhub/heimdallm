@@ -113,6 +113,8 @@ class CLIAgentConfig {
   );
 
   // Temporary fallback until safe provider capability discovery lands (#734).
+  // Providers (OpenRouter) have no entry: their models only come from the
+  // daemon's live list, and they have no default model to fall back to.
   static const modelOptions = <String, List<String>>{
     'claude': [
       'claude-fable-5',
@@ -129,13 +131,6 @@ class CLIAgentConfig {
       'gemini-2.5-pro',
       'gemini-2.5-flash',
       'gemini-2.5-flash-lite',
-    ],
-    // Used until the daemon reports the account's tool-capable models.
-    'openrouter': [
-      'anthropic/claude-sonnet-4.5',
-      'anthropic/claude-opus-4.1',
-      'openai/gpt-5',
-      'google/gemini-2.5-pro',
     ],
     'codex': [
       'gpt-5.6-sol',
@@ -1354,14 +1349,10 @@ class AppConfig {
   /// entries for individually-disabled repos. Any writer that mutates one
   /// half (an org toggle, a per-repo toggle) must source the other half from
   /// here so it doesn't silently drop the entries it isn't changing.
-  List<String> get nonMonitoredList =>
-      [
-          ...nonMonitoredOrgs,
-          ...repoConfigs.entries
-              .where((e) => !e.value.isMonitored)
-              .map((e) => e.key),
-        ]
-        ..sort();
+  List<String> get nonMonitoredList => [
+    ...nonMonitoredOrgs,
+    ...repoConfigs.entries.where((e) => !e.value.isMonitored).map((e) => e.key),
+  ]..sort();
 
   AppConfig copyWith({
     Object? bindAddr = _sentinel,

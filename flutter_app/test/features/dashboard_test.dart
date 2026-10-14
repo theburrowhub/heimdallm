@@ -614,9 +614,11 @@ void main() {
       // callback rather than simulating a raw tap on the label text.
       final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
       // The callback takes a rail position, not a branch index.
-      rail.onDestinationSelected!(
-        appDestinations.indexWhere((d) => d.label == 'Instances'),
+      final instances = appDestinations.indexWhere(
+        (d) => d.label == 'Instances',
       );
+      expect(instances, isNot(-1), reason: 'no Instances destination');
+      rail.onDestinationSelected!(instances);
       await tester.pumpAndSettle();
 
       expect(find.text('No instances registered'), findsOneWidget);

@@ -359,10 +359,12 @@ OpenRouter has no CLI. Heimdallm calls the API itself, using a harness built for
 
 ```toml
 [ai.agents.openrouter]
-model     = "anthropic/claude-sonnet-4.5"  # any tool-capable OpenRouter model
+model     = "vendor/model"                 # required: any tool-capable OpenRouter model
 max_turns = 12                              # max tool rounds
 effort    = "medium"                        # reasoning effort, for models that support it
 ```
+
+**`model` is required.** OpenRouter has no default model: its catalog changes too often for a built-in id to stay valid. Until you pick a model, OpenRouter counts as unavailable, just like when it has no API key: a flow skips it and reviews with its next agent, and the flow simulator shows it as unavailable. A review that still reaches OpenRouter without a model (for example, set as the legacy primary agent) fails straight away with `openrouter: no model selected — set [ai.agents.openrouter] model, or pick one in Agents → OpenRouter`, and that error shows on the PR like any other failed review. The OpenRouter card on the **Agents** screen says **Choose a model**, and the daemon logs a warning at startup and on every config reload.
 
 Set the key on the **Agents → OpenRouter** page. The key is write-only:
 
@@ -370,7 +372,13 @@ Set the key on the **Agents → OpenRouter** page. The key is write-only:
 - It only ever reports whether a key is set and where it comes from.
 - A stored key takes precedence over `OPENROUTER_API_KEY`.
 
-That page also shows the key's spend and limit, and the model list only offers models that accept tool calls. OpenRouter is review-only: it is never used to resolve merge conflicts.
+That page also shows the key's spend and limit. The **Model** field searches OpenRouter's live list, which the daemon reads from `/models` and caches for an hour. It only offers models that accept tool calls, and it shows the whole list, not a truncated one. Other details:
+
+- With no API key, the page asks you to add one first. Saving a key rescans the agents, so the list loads straight away.
+- If the list cannot be loaded (OpenRouter is unreachable, for example), the page says so and offers **Retry**. Retry rescans the agents (`POST /cli-agents/rescan`). You can still type a model id and press Enter.
+- A saved model that OpenRouter no longer offers is flagged, so you can pick another one.
+
+OpenRouter is review-only: it is never used to resolve merge conflicts.
 
 API endpoints:
 
@@ -395,10 +403,18 @@ Heimdallm walks the graph from `start`. At a condition step it follows `yes` or
 `no`. At an agent step it adds the agent to the ordered candidate list if it
 is installed (or, for OpenRouter, has a key) and not already listed, then
 follows `next`. The first candidate reviews; the rest are the fallbacks: if the
-chosen agent fails **because it ran out of quota** (a usage limit, rate limit,
-HTTP 402 or 429), the review moves on to the next candidate in the same run,
-and the activity log records `review fallback: claude → codex`. Any other
-failure fails the review as before.
+chosen agent fails — because it ran out of quota (a usage limit, rate limit,
+HTTP 402 or 429) or for any other reason, such as output that is not valid
+JSON or a crash — the review moves on to the next candidate in the same run,
+and the activity log records `review fallback: claude → codex`; the
+`review_agent_fallback` event carries the reason (`quota`, `timeout` or
+`error`). Each agent is tried at most once; the review fails only when every
+candidate failed, and a cancelled review never moves on. A failure that is not
+about quota moves on only on the first run of a commit (or a manual retry).
+Automatic retries of a commit that already had a failed or interrupted run
+use one agent per attempt instead of the whole flow, starting one agent
+further down the flow each time, so every agent gets retried without each
+retry costing the whole flow.
 
 Conditions:
 
@@ -534,7 +550,7 @@ waits up to 220 s.
 
 **The default flow.** With no flow selected, Heimdallm uses the flow
 `default`, built from the classic `primary` / `fallback` settings, so configs
-written before flows behave as they did (plus the quota fallback):
+written before flows behave as they did (plus the fallback on failure):
 
 ```bash
 HEIMDALLM_AI_PRIMARY=claude     # claude | codex | gemini | copilot | cursor_cli | opencode | openrouter
