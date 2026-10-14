@@ -13,8 +13,10 @@ const (
 	EventCircuitBreakerTripped = "circuit_breaker_tripped"
 
 	// EventReviewAgentFallback fires when a review flow hands a review to its
-	// next agent because the current one ran out of quota mid-review.
-	// Payload: {"repo", "pr_number", "from", "to"}.
+	// next agent because the current one failed: its quota ran out
+	// (reason "quota"), it timed out ("timeout") or the run failed for any
+	// other reason ("error").
+	// Payload: {"repo", "pr_number", "from", "to", "reason"}.
 	EventReviewAgentFallback = "review_agent_fallback"
 
 	// EventRepoDiscovered fires when the poll cycle sees a PR whose repo

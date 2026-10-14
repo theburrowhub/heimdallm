@@ -3,6 +3,7 @@ package agentcatalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -200,10 +201,10 @@ func TestCapModels(t *testing.T) {
 	for i := 0; i < maxModels+10; i++ {
 		many = append(many, "m"+strings.Repeat("x", i%5)+string(rune('a'+i%26))+strings.Repeat("y", i/26))
 	}
-	if got := capModels(many); len(got) != maxModels {
+	if got := capModels(many, maxModels); len(got) != maxModels {
 		t.Errorf("cap = %d", len(got))
 	}
-	got := capModels([]string{"ok", "", " ok ", "has space", strings.Repeat("a", maxModelLen+1), "$(rm)", "x[effort=high]"})
+	got := capModels([]string{"ok", "", " ok ", "has space", strings.Repeat("a", maxModelLen+1), "$(rm)", "x[effort=high]"}, maxModels)
 	if strings.Join(got, ",") != "ok,x[effort=high]" {
 		t.Errorf("capModels = %v", got)
 	}
@@ -261,6 +262,25 @@ func TestScan_ProviderUsesItsOwnProbe(t *testing.T) {
 	or = byID(d.Scan(context.Background()))["openrouter"]
 	if !or.Installed || !or.Configured || strings.Join(or.Models, ",") != "anthropic/claude-sonnet-4.5" {
 		t.Errorf("configured provider = %+v", or)
+	}
+}
+
+// A provider's list comes from an API, not a CLI probe: OpenRouter offers
+// hundreds of tool-capable models and the picker must see all of them. Only
+// the much larger safety cap applies.
+func TestScan_ProviderModelsAreNotTruncatedAtTheCLICap(t *testing.T) {
+	many := make([]string, 0, maxProviderModels+50)
+	for i := 0; i < maxProviderModels+50; i++ {
+		many = append(many, fmt.Sprintf("vendor/model-%04d", i))
+	}
+	d := testDetector("/h", map[string]string{}, fakeFS{}, map[string]string{})
+	d.Provider = func(_ context.Context, id string) (bool, []string) { return true, many[:maxModels+100] }
+	if got := byID(d.Scan(context.Background()))["openrouter"].Models; len(got) != maxModels+100 {
+		t.Errorf("provider models = %d, want %d", len(got), maxModels+100)
+	}
+	d.Provider = func(_ context.Context, id string) (bool, []string) { return true, many }
+	if got := byID(d.Scan(context.Background()))["openrouter"].Models; len(got) != maxProviderModels {
+		t.Errorf("provider safety cap = %d, want %d", len(got), maxProviderModels)
 	}
 }
 

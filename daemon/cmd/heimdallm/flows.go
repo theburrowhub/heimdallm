@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -75,6 +77,80 @@ func flowAgents(f config.FlowConfig) []string {
 		}
 	}
 	return out
+}
+
+// modelRequiredAgents have no default model: without one configured they
+// cannot review (OpenRouter's catalog changes too often for a built-in id).
+// Keep in sync with knownProviderAgentIds in
+// flutter_app/lib/core/models/cli_agent.dart.
+var modelRequiredAgents = map[string]bool{"openrouter": true}
+
+// flowAgentAvailable reports whether a flow may pick an agent: it is
+// installed or configured (detected), and an agent that needs a model has
+// one. modelFor returns the agent's live configured model.
+func flowAgentAvailable(detected func(string) bool, modelFor func(string) string) func(string) bool {
+	return func(agent string) bool {
+		if !detected(agent) {
+			return false
+		}
+		return !modelRequiredAgents[agent] || strings.TrimSpace(modelFor(agent)) != ""
+	}
+}
+
+// detectedBy adapts an executor's Detect to flowAgentAvailable's probe.
+func detectedBy(detect func(primary, fallback string) (string, error)) func(string) bool {
+	return func(agent string) bool {
+		_, err := detect(agent, "")
+		return err == nil
+	}
+}
+
+// agentModels is a lock-free snapshot of every agent's configured model.
+// Flow evaluation reads it from callbacks that run deep inside agent
+// selection, so it must never take the config mutex: a caller that already
+// held it would deadlock the daemon. Every config load and reload stores a
+// fresh snapshot.
+type agentModels struct {
+	p atomic.Pointer[map[string]string]
+}
+
+func (m *agentModels) store(c *config.Config) {
+	snap := map[string]string{}
+	for id := range c.AI.Agents {
+		// The same lookup buildRunOpts uses for an agent's options.
+		snap[id] = c.AgentConfigFor(id).Model
+	}
+	m.p.Store(&snap)
+}
+
+// refresh stores c's models and warns about every agent that needs a model
+// and has none, using detected (the probe flow availability uses) to tell
+// which agents are set up. Run it on every config load and reload, after
+// the config itself is swapped in, so flows never see a model buildRunOpts
+// lacks.
+func (m *agentModels) refresh(c *config.Config, detected func(string) bool) {
+	m.store(c)
+	warnModelRequiredWithoutModel(c, detected)
+}
+
+func (m *agentModels) model(agent string) string {
+	if snap := m.p.Load(); snap != nil {
+		return (*snap)[agent]
+	}
+	return ""
+}
+
+// warnModelRequiredWithoutModel logs, at startup and on every reload, each
+// configured agent that needs a model and has none: flows skip it, and as
+// the legacy primary it fails every review until a model is set.
+func warnModelRequiredWithoutModel(c *config.Config, configured func(agent string) bool) {
+	for agent := range modelRequiredAgents {
+		if !configured(agent) || strings.TrimSpace(c.AgentConfigFor(agent).Model) != "" {
+			continue
+		}
+		slog.Warn("config: agent has no model; review flows skip it and it cannot review until one is set",
+			"agent", agent, "set", "[ai.agents."+agent+"] model")
+	}
 }
 
 // flowCandidates evaluates repo's flow now and logs the decision, for the

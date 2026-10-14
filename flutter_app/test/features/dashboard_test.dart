@@ -20,6 +20,7 @@ import 'package:heimdallm/features/server/server_actions.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
+import 'package:heimdallm/shared/layout/app_shell.dart';
 import 'package:heimdallm/shared/router.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import '../core/platform/fake_platform_services.dart';
@@ -612,7 +613,12 @@ void main() {
       // the real one, so drive the destination directly through the rail's
       // callback rather than simulating a raw tap on the label text.
       final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
-      rail.onDestinationSelected!(8);
+      // The callback takes a rail position, not a branch index.
+      final instances = appDestinations.indexWhere(
+        (d) => d.label == 'Instances',
+      );
+      expect(instances, isNot(-1), reason: 'no Instances destination');
+      rail.onDestinationSelected!(instances);
       await tester.pumpAndSettle();
 
       expect(find.text('No instances registered'), findsOneWidget);

@@ -10,6 +10,7 @@ import '../../core/models/flow.dart' show AgentQuota, QuotaWindow;
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
+import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
 import 'cli_agents_screen.dart';
 
@@ -93,6 +94,7 @@ class _AgentCatalogScreenState extends ConsumerState<AgentCatalogScreen> {
   Widget build(BuildContext context) {
     final async = ref.watch(cliAgentCatalogProvider);
     final quotas = ref.watch(agentQuotasProvider).value ?? const {};
+    final agentConfigs = ref.watch(configNotifierProvider).value?.agentConfigs;
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -141,6 +143,16 @@ class _AgentCatalogScreenState extends ConsumerState<AgentCatalogScreen> {
                       child: AgentCatalogCard(
                         agent: a,
                         quota: quotas[a.id],
+                        // A provider has no default model: until one is
+                        // chosen it cannot review. Without a key the card
+                        // already says "No API key", the first thing to fix.
+                        needsModel:
+                            a.isProvider &&
+                            a.configured &&
+                            agentConfigs != null &&
+                            (agentConfigs[a.configAgent]?.model ?? '')
+                                .trim()
+                                .isEmpty,
                         onTap: () => context.go('/cli-agents/${a.configAgent}'),
                       ),
                     ),
@@ -160,11 +172,15 @@ class AgentCatalogCard extends StatelessWidget {
   final AgentQuota? quota;
   final VoidCallback onTap;
 
+  /// The agent has no model and no default to fall back to (a provider).
+  final bool needsModel;
+
   const AgentCatalogCard({
     super.key,
     required this.agent,
     required this.onTap,
     this.quota,
+    this.needsModel = false,
   });
 
   @override
@@ -224,6 +240,18 @@ class AgentCatalogCard extends StatelessWidget {
                     foreground: muted,
                     background: AppColors.surfaceRaised.resolve(context),
                     border: border,
+                  ),
+                if (needsModel)
+                  AppBadge(
+                    key: ValueKey('agent-needs-model-${agent.id}'),
+                    label: 'Choose a model',
+                    foreground: AppColors.warning.resolve(context),
+                    background: AppColors.warning
+                        .resolve(context)
+                        .withValues(alpha: 0.14),
+                    border: AppColors.warning
+                        .resolve(context)
+                        .withValues(alpha: 0.35),
                   ),
                 if (agent.isIde)
                   AppBadge(
@@ -332,8 +360,12 @@ class AgentConfigScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final catalog = ref.watch(cliAgentCatalogProvider).value;
-    final info = catalog?.byId(agentId);
+    final catalogAsync = ref.watch(cliAgentCatalogProvider);
+    final info = catalogAsync.value?.byId(agentId);
+    // The catalog's kind decides; the known ids only cover a catalog that
+    // has not loaded, so OpenRouter never flashes a "CLI default".
+    final isProvider =
+        info?.isProvider ?? knownProviderAgentIds.contains(agentId);
     return Column(
       children: [
         Padding(
@@ -358,6 +390,22 @@ class AgentConfigScreen extends ConsumerWidget {
             agentIds: [agentId],
             discoveredModels: {
               if (info != null && info.models.isNotEmpty) agentId: info.models,
+            },
+            providerIds: {if (isProvider) agentId},
+            modelsLoading: catalogAsync.isLoading,
+            // A provider's catalog entry is configured once its key is set.
+            providersWithoutKey: {
+              if (info != null && info.isProvider && !info.configured) agentId,
+            },
+            onReloadModels: () async {
+              // The page can be left while the rescan runs: invalidate
+              // through the container, not this widget's ref.
+              final container = ProviderScope.containerOf(
+                context,
+                listen: false,
+              );
+              await container.read(apiClientProvider).rescanCliAgents();
+              container.invalidate(cliAgentCatalogProvider);
             },
             header: info == null
                 ? null
@@ -493,9 +541,24 @@ class _ProviderKeyCardState extends ConsumerState<ProviderKeyCard> {
       if (!mounted) return;
       _keyCtrl.clear();
       setState(() => _status = s);
-      ref.invalidate(cliAgentCatalogProvider);
       ref.invalidate(agentUsageProvider(widget.agent.id));
       showToast(context, done);
+      // Rescan so the model list reflects the new key, without holding the
+      // button: a rescan probes every agent and can take seconds. The
+      // daemon's own background refresh covers a failed rescan.
+      final api = ref.read(apiClientProvider);
+      unawaited(
+        Future<CliAgentCatalog>(api.rescanCliAgents)
+            .then<void>(
+              (_) {},
+              onError: (Object e) {
+                debugPrint('agents rescan after a key change failed: $e');
+              },
+            )
+            .whenComplete(() {
+              if (mounted) ref.invalidate(cliAgentCatalogProvider);
+            }),
+      );
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);
     } finally {

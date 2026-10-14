@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,17 @@ func UserFacingReviewError(err error) string {
 	if errors.Is(err, executor.ErrExecutionCancelled) {
 		return "Review cancelled manually."
 	}
+	// Classify each agent's failure on its own: one agent timing out must not
+	// label the whole chain a timeout, and each one's captured output is cut
+	// separately.
+	var flowErr *FlowFailedError
+	if errors.As(err, &flowErr) && len(flowErr.Failures) > 0 {
+		parts := make([]string, len(flowErr.Failures))
+		for i, f := range flowErr.Failures {
+			parts[i] = flowErr.Agents[i] + ": " + strings.TrimSuffix(UserFacingReviewError(f), ".")
+		}
+		return truncateUserFacing(fmt.Sprintf("%d agents of the flow failed: %s.", len(parts), strings.Join(parts, "; ")))
+	}
 	if errors.Is(err, executor.ErrExecutionTimedOut) {
 		return "Review timed out before completion."
 	}
@@ -70,12 +82,34 @@ func UserFacingReviewError(err error) string {
 	if raw == "" {
 		return "Review failed before producing a result."
 	}
-	runes := []rune(raw)
-	if len(runes) > maxUserFacingReviewErrorRunes {
-		raw = string(runes[:maxUserFacingReviewErrorRunes-1]) + "…"
-	}
-	return raw
+	return truncateUserFacing(raw)
 }
+
+func truncateUserFacing(s string) string {
+	runes := []rune(s)
+	if len(runes) > maxUserFacingReviewErrorRunes {
+		s = string(runes[:maxUserFacingReviewErrorRunes-1]) + "…"
+	}
+	return s
+}
+
+// FlowFailedError is a review that every agent it tried failed. Each failure
+// keeps its agent, so the status can name them all, and errors.Is still sees
+// every failure.
+type FlowFailedError struct {
+	Agents   []string
+	Failures []error
+}
+
+func (e *FlowFailedError) Error() string {
+	parts := make([]string, len(e.Failures))
+	for i, err := range e.Failures {
+		parts[i] = e.Agents[i] + ": " + err.Error()
+	}
+	return fmt.Sprintf("pipeline: %d agents of the flow failed: %s", len(e.Failures), strings.Join(parts, "; "))
+}
+
+func (e *FlowFailedError) Unwrap() []error { return e.Failures }
 
 // Failed and in-flight review executions are bounded separately from completed
 // reviews. Twenty failures per repository in a rolling hour preserves the
@@ -1326,10 +1360,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// operator intent and bypasses the check, but its execution is still armed
 	// below so a failed manual retry protects the next automatic tick.
 	now := time.Now().UTC()
+	// priorAttempts counts earlier failed runs of this head SHA. It limits
+	// how far a non-quota failure is handed down the flow (see the agent
+	// loop below).
+	priorAttempts := 0
 	if !opts.Force {
 		blocked, retryAt, attempts, err := p.store.CheckReviewRetryBackoff(
 			prID, pr.Head.SHA, now,
 		)
+		if err == nil {
+			priorAttempts = attempts
+		}
 		if err != nil {
 			slog.Warn("pipeline: review retry cooldown check failed, proceeding",
 				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
@@ -1417,7 +1458,22 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// permission or workspace guards.
 	slog.Info("pipeline: prompt built", "repo", pr.Repo, "pr", pr.Number,
 		"prompt_bytes", len(prompt), "incremental", incrementalFrom != "", "compact", compact)
+	// On an automatic retry a non-quota failure runs a single agent (see the
+	// loop below), so each retry starts one agent further down the flow: an
+	// agent that always fails this review cannot pin it while another agent
+	// could review it. An agent over its own review limit keeps the order.
+	if k := priorAttempts % len(agentsToTry); k > 0 {
+		rotated := append(append([]string{}, agentsToTry[k:]...), agentsToTry[:k]...)
+		if p.budget.assignAgent(p.store, ticket, rotated[0], opts.Budgets.Agents[rotated[0]], now) == nil {
+			slog.Info("pipeline: automatic retry starts further down the flow",
+				"repo", pr.Repo, "pr", pr.Number, "attempt", priorAttempts+1, "cli", rotated[0])
+			agentsToTry = rotated
+		}
+	}
+	assigned := agentsToTry[0]
 	var result *executor.ReviewResult
+	var failedAgents []string
+	var failures []error
 	for i, agent := range agentsToTry {
 		execOpts := execOptionsFor(agent, primary, opts)
 		if cliFlags != "" && execOpts.ExtraFlags == "" {
@@ -1431,29 +1487,58 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 		}
 		execOpts.ExecutionID = ReviewExecutionID(prID)
 		execOpts.ReportUsage = true
-		if i > 0 {
+		if agent != assigned {
 			// Charge the agent that actually runs, and stop if its own
 			// budget filled up while the previous agent was running.
 			if blocked := p.budget.assignAgent(p.store, ticket, agent, opts.Budgets.Agents[agent], time.Now().UTC()); blocked != nil && !opts.Force {
 				// cli and err still describe the agent that ran out of quota.
 				return nil, fmt.Errorf("pipeline: execute %s: %w; %s, next in the flow, is over its review limit: %w", cli, err, agent, blocked)
 			}
+			assigned = agent
 		}
 		cli = agent
 		result, err = p.executor.Execute(cli, prompt, execOpts)
 		if err == nil {
 			break
 		}
-		if i+1 < len(agentsToTry) && executor.IsQuotaError(err) {
-			slog.Warn("pipeline: agent out of quota, handing the review to the next agent in the flow",
-				"repo", pr.Repo, "pr", pr.Number, "agent", cli, "next", agentsToTry[i+1], "err", err)
+		// A failed agent hands the review to the next agent in the flow, each
+		// agent running at most once; a cancelled review stops here.
+		//   - Spent quota always moves on: the agent, not the review, is the
+		//     problem.
+		//   - Any other failure (unparseable output, a crash) moves on only on
+		//     the first run of this head SHA or a manual retry. Once a run of
+		//     this SHA failed or was interrupted, the review itself may be the
+		//     problem (e.g. a diff no agent can handle), so automatic retries
+		//     run one agent per attempt, rotated above, instead of spending
+		//     the whole flow on each one.
+		failedAgents = append(failedAgents, cli)
+		failures = append(failures, err)
+		quota := executor.IsQuotaError(err)
+		cancelled := errors.Is(err, executor.ErrExecutionCancelled) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		handOff := quota || opts.Force || priorAttempts == 0
+		if i+1 < len(agentsToTry) && handOff && !cancelled {
+			reason := "error"
+			msg := "pipeline: agent failed, handing the review to the next agent in the flow"
+			switch {
+			case quota:
+				reason = "quota"
+				msg = "pipeline: agent out of quota, handing the review to the next agent in the flow"
+			case errors.Is(err, executor.ErrExecutionTimedOut):
+				reason = "timeout"
+			}
+			slog.Warn(msg, "repo", pr.Repo, "pr", pr.Number, "agent", cli, "next", agentsToTry[i+1], "err", err)
 			p.publish(sse.EventReviewAgentFallback, map[string]any{
 				"repo":      pr.Repo,
 				"pr_number": pr.Number,
 				"from":      cli,
 				"to":        agentsToTry[i+1],
+				"reason":    reason,
 			})
 			continue
+		}
+		if len(failures) > 1 {
+			// Keep every agent's failure: the first one is usually the cause.
+			return nil, &FlowFailedError{Agents: failedAgents, Failures: failures}
 		}
 		runErr := fmt.Errorf("pipeline: execute %s: %w", cli, err)
 		return nil, runErr

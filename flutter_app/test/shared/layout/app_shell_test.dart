@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
+import 'package:heimdallm/shared/router.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
@@ -115,6 +116,14 @@ GoRouter minimalRouter({String initialLocation = '/'}) => GoRouter(
               path: '/instances',
               builder: (_, _) =>
                   const Scaffold(body: Text('Instances content')),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/flows',
+              builder: (_, _) => const Scaffold(body: Text('Flows content')),
             ),
           ],
         ),
@@ -320,6 +329,61 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Merge content'), findsOneWidget);
+  });
+
+  // The rail lists destinations in display order, which is not branch order
+  // (Flows is shown before Stats but is the last branch), so a rail position
+  // must never be used as a branch index.
+  testWidgets('every rail destination opens and highlights its own branch', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices();
+    final api = _MockApiClient();
+
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(platform: platform, api: api),
+    );
+
+    const contentByLabel = {
+      'Activity': 'Dashboard content',
+      'Activity log': 'Activity log content',
+      'My PRs': 'Merge content',
+      'Repositories': 'Repositories content',
+      'Organizations': 'Organizations content',
+      'Prompts': 'Prompts content',
+      'Agents': 'Agents content',
+      'Flows': 'Flows content',
+      'Stats': 'Stats content',
+      'Instances': 'Instances content',
+    };
+    expect(
+      appDestinations.map((d) => d.label),
+      unorderedEquals(contentByLabel.keys),
+    );
+
+    for (final (position, destination) in appDestinations.indexed) {
+      await tester.tap(
+        find.descendant(
+          of: find.byType(NavigationRail),
+          matching: find.text(destination.label),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(contentByLabel[destination.label]!),
+        findsOneWidget,
+        reason: '${destination.label} must open its own screen',
+      );
+      expect(
+        tester
+            .widget<NavigationRail>(find.byType(NavigationRail))
+            .selectedIndex,
+        position,
+        reason: '${destination.label} must be the highlighted rail entry',
+      );
+    }
   });
 
   testWidgets('when stopped, the toolbar start action is wired', (
@@ -583,5 +647,34 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Instances'), findsOneWidget);
     });
+  });
+
+  test('every router branch has exactly one rail destination', () {
+    final shell =
+        createRouter().configuration.routes.first as StatefulShellRoute;
+    final indexes = appDestinations.map((d) => d.branchIndex).toList();
+    expect(indexes.toSet().length, indexes.length, reason: 'duplicate index');
+    expect(indexes.toSet(), {
+      for (var i = 0; i < shell.branches.length; i++) i,
+    });
+    // Each entry opens its own screen: swapping two branches in the router
+    // keeps the index set intact but must still fail here.
+    const expectedPath = {
+      'Activity': '/',
+      'Activity log': '/activity',
+      'My PRs': '/merge',
+      'Repositories': '/repos',
+      'Organizations': '/orgs',
+      'Prompts': '/prompts',
+      'Agents': '/cli-agents',
+      'Flows': '/flows',
+      'Stats': '/stats',
+      'Instances': '/instances',
+    };
+    expect(appDestinations.map((d) => d.label).toSet(), expectedPath.keys);
+    for (final d in appDestinations) {
+      final route = shell.branches[d.branchIndex].routes.first as GoRoute;
+      expect(route.path, expectedPath[d.label], reason: d.label);
+    }
   });
 }

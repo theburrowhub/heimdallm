@@ -106,6 +106,14 @@ class AppShell extends ConsumerWidget {
 
   const AppShell({super.key, required this.navigationShell});
 
+  /// The rail position of [branchIndex], or null when no destination shows it.
+  static int? _railIndexOf(int branchIndex) {
+    final position = appDestinations.indexWhere(
+      (d) => d.branchIndex == branchIndex,
+    );
+    return position < 0 ? null : position;
+  }
+
   void _onDestinationSelected(int branchIndex) {
     navigationShell.goBranch(
       branchIndex,
@@ -214,8 +222,12 @@ class AppShell extends ConsumerWidget {
               children: [
                 NavigationRail(
                   extended: isRailExtended,
-                  selectedIndex: navigationShell.currentIndex,
-                  onDestinationSelected: _onDestinationSelected,
+                  // The rail speaks in display positions, the shell in branch
+                  // indices; the two orders differ, so always translate.
+                  selectedIndex: _railIndexOf(navigationShell.currentIndex),
+                  onDestinationSelected: (position) => _onDestinationSelected(
+                    appDestinations[position].branchIndex,
+                  ),
                   destinations: [
                     for (final d in appDestinations)
                       NavigationRailDestination(
