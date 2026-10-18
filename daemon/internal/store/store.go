@@ -443,6 +443,7 @@ func Open(dsn string) (*Store, error) {
 		backoff_ns INTEGER NOT NULL,
 		last_seen  TEXT NOT NULL
 	)`)
+	ensureGitHubCacheSchema(db)
 	dropIssuePipelineData(db)
 	return &Store{db: db}, nil
 }

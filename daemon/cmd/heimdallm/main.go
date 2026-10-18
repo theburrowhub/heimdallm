@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -606,6 +607,14 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 
 	notifier := notify.New()
 	ghClient := deps.newGitHubClient(token)
+	// Persist the ETag and diff caches so a restart keeps answering warm polls
+	// with 304s instead of a burst of full responses. Namespaced by the token
+	// so another account's cached bodies are never served.
+	cacheNS := githubCacheNamespace(token)
+	if err := ghClient.AttachCacheBackend(s.ETagCache(cacheNS)); err != nil {
+		slog.Warn("github: persisted etag cache unavailable, starting cold", "err", err)
+	}
+	ghClient.AttachDiffCache(s.DiffCache(cacheNS))
 	exec := executor.New()
 	// OpenRouter is reviewed in-process by Heimdallm's own harness; its key
 	// lives in the data dir (set from the app) or OPENROUTER_API_KEY.
@@ -2861,6 +2870,14 @@ func (c *cachingArchivedChecker) IsRepoArchived(repo string) (bool, error) {
 	return archived, nil
 }
 
+// githubCacheNamespace fingerprints the token for the persistent GitHub
+// caches. Only a prefix of the SHA-256 is kept: it separates accounts, it is
+// not a credential.
+func githubCacheNamespace(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:8])
+}
+
 func sendDiscoveryRepos(
 	ctx context.Context,
 	disc scheduler.Tier1Discovery,
@@ -2872,12 +2889,8 @@ func sendDiscoveryRepos(
 	cfg := configFn()
 	var discovered []string
 	if cfg.DiscoveryTopic != "" {
-		if limiter != nil {
-			if err := limiter.Acquire(ctx, scheduler.TierDiscovery); err != nil {
-				slog.Warn("tier1: acquire discovery rate-limit token failed", "err", err)
-				return
-			}
-		}
+		// Topic discovery is Search traffic: the client's search gate meters
+		// every page against the Search budget, so no core permit is taken.
 		if err := disc.Refresh(cfg.DiscoveryTopic, cfg.DiscoveryOrgs); err != nil {
 			slog.Warn("tier1: discovery refresh failed, using cached discovered repos", "err", err)
 		}

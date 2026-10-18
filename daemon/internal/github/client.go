@@ -88,6 +88,11 @@ type Client struct {
 	searchGate    atomic.Pointer[func() error]
 	graphqlGate   atomic.Pointer[func() error]
 	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
+	// batchSize overrides defaultGraphQLBatchSize when positive.
+	batchSize atomic.Int64
+	// diffs, when set, persists diffs keyed by the commits they span. A diff
+	// between two fixed commits never changes, so it is never re-downloaded.
+	diffs atomic.Pointer[DiffCacheBackend]
 
 	// The authenticated login is immutable for the lifetime of a client (the
 	// token is immutable too). Cache it after the first successful lookup so
@@ -801,6 +806,9 @@ func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
 		params.Set("per_page", "100")
 		params.Set("page", strconv.Itoa(page))
 
+		if err := c.acquireSearch(); err != nil {
+			return nil, fmt.Errorf("search repositories: acquire: %w", err)
+		}
 		resp, err := c.do("GET", "/search/repositories?"+params.Encode(), "application/vnd.github+json")
 		if err != nil {
 			return nil, fmt.Errorf("search repositories: %w", err)

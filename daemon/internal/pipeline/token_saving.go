@@ -26,6 +26,13 @@ type CompareDiffFetcher interface {
 	FetchCompareDiff(repo, base, head string) (diff string, ok bool, err error)
 }
 
+// HeadDiffFetcher is the optional capability to serve a PR diff from a cache
+// keyed by the commits it spans, so a re-run on unchanged commits does not
+// download the same diff again.
+type HeadDiffFetcher interface {
+	FetchDiffAt(repo string, number int, baseSHA, headSHA string) (string, error)
+}
+
 // Compact-prompt caps. The default path keeps maxCommentsBytes (16KB) and an
 // uncapped re-review context.
 const (
@@ -57,7 +64,12 @@ func (p *Pipeline) reviewDiff(pr *github.PullRequest, prevReview *store.Review, 
 		}
 	}
 	if incrementalFrom == "" {
-		if diff, err = p.gh.FetchDiff(pr.Repo, pr.Number); err != nil {
+		if fetcher, ok := p.gh.(HeadDiffFetcher); ok {
+			diff, err = fetcher.FetchDiffAt(pr.Repo, pr.Number, pr.Base.SHA, pr.Head.SHA)
+		} else {
+			diff, err = p.gh.FetchDiff(pr.Repo, pr.Number)
+		}
+		if err != nil {
 			return "", "", err
 		}
 	}

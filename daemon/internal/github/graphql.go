@@ -38,6 +38,10 @@ type graphQLOptions struct {
 	// ordinary tokens. Only errors that name a path and are of a known
 	// field-scoped type are tolerated; anything else stays fatal.
 	TolerateFieldErrors bool
+
+	// MaxBodyBytes overrides the response body ceiling. Zero keeps
+	// maxBodyBytes (1 MiB); batched queries carrying many PRs need more.
+	MaxBodyBytes int64
 }
 
 // PartialGraphQLError reports that GitHub answered with usable data but could
@@ -90,83 +94,18 @@ func (c *Client) graphQL(query string, variables map[string]any, out any) error 
 // error messages joined with "; " — unless opts.TolerateFieldErrors applies.
 // The body is limited to maxBodyBytes.
 func (c *Client) graphQLWith(opts graphQLOptions, query string, variables map[string]any, out any) error {
-	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
-	// touching GitHub. GraphQL needs this as much as do()/doWithBody — GitHub
-	// penalises requests sent during a secondary/abuse block, so traffic on
-	// this path would keep a block alive that going quiet lets clear.
-	if until, paused := c.rateLimitPaused(); paused {
-		return &RateLimitError{RetryAt: until}
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"query":     query,
-		"variables": variables,
-	})
+	data, gqlErrs, err := c.graphQLRaw(opts, query, variables)
 	if err != nil {
-		return fmt.Errorf("github: graphql: marshal request: %w", err)
+		return err
 	}
-
-	gqlURL := c.graphqlURL()
-	req, err := http.NewRequest("POST", gqlURL, bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("github: graphql: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	accept := opts.Accept
-	if accept == "" {
-		accept = "application/vnd.github+json"
-	}
-	req.Header.Set("Accept", accept)
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("github: graphql: request: %w", err)
-	}
-	// Notify the rate-limit observer — mirrors doWithBody so GraphQL
-	// responses also update the live budget.
-	c.notifyRateObserver(resp)
-
-	// Open the breaker when GitHub rejects this call for rate limiting, so the
-	// rest of the cycle stops hammering. Mirrors do()/doWithBody; the response
-	// is still handled below exactly as before.
-	if wait, limited := rateLimitDelay(resp); limited {
-		c.pauseRateLimit(wait)
-	}
-	defer resp.Body.Close()
-
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if readErr != nil {
-		return fmt.Errorf("github: graphql: read body: %w", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return fmt.Errorf("github: graphql: status %d: %s", resp.StatusCode, errBody)
-	}
-
-	// Parse the GraphQL envelope: {"data":..., "errors":[...]}.
-	// `path` entries are a mix of field names and list indices, so the raw
-	// element type is any; only the string segments are meaningful here.
-	var envelope struct {
-		Data   json.RawMessage `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Path    []any  `json:"path"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return fmt.Errorf("github: graphql: decode envelope: %w", err)
-	}
-	if len(envelope.Errors) > 0 {
-		msgs := make([]string, len(envelope.Errors))
-		for i, e := range envelope.Errors {
+	if len(gqlErrs) > 0 {
+		msgs := make([]string, len(gqlErrs))
+		for i, e := range gqlErrs {
 			msgs[i] = e.Message
 		}
-		partial := opts.TolerateFieldErrors && envelope.Data != nil
+		partial := opts.TolerateFieldErrors && data != nil
 		var paths, types []string
-		for _, e := range envelope.Errors {
+		for _, e := range gqlErrs {
 			p := graphQLErrorPath(e.Path)
 			if p == "" {
 				// No path means the whole query failed, not one field.
@@ -184,18 +123,102 @@ func (c *Client) graphQLWith(opts graphQLOptions, query string, variables map[st
 			return fmt.Errorf("github: graphql: errors: %s", strings.Join(msgs, "; "))
 		}
 		if out != nil {
-			if err := json.Unmarshal(envelope.Data, out); err != nil {
+			if err := json.Unmarshal(data, out); err != nil {
 				return fmt.Errorf("github: graphql: decode data: %w", err)
 			}
 		}
 		return &PartialGraphQLError{Paths: paths, Types: types, Messages: msgs}
 	}
-	if out != nil && envelope.Data != nil {
-		if err := json.Unmarshal(envelope.Data, out); err != nil {
+	if out != nil && data != nil {
+		if err := json.Unmarshal(data, out); err != nil {
 			return fmt.Errorf("github: graphql: decode data: %w", err)
 		}
 	}
 	return nil
+}
+
+// graphQLError is one entry of a GraphQL response's "errors" array. `path`
+// entries are a mix of field names and list indices, so the raw element type
+// is any; only the string segments are meaningful to callers.
+type graphQLError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Path    []any  `json:"path"`
+}
+
+// graphQLRaw sends one GraphQL request and returns the raw "data" payload and
+// the "errors" array without interpreting either, so batched callers can
+// attribute each error to the aliased field it names. Transport failures,
+// non-200 statuses and an undecodable envelope are returned as err.
+func (c *Client) graphQLRaw(opts graphQLOptions, query string, variables map[string]any) (json.RawMessage, []graphQLError, error) {
+	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
+	// touching GitHub. GraphQL needs this as much as do()/doWithBody — GitHub
+	// penalises requests sent during a secondary/abuse block, so traffic on
+	// this path would keep a block alive that going quiet lets clear.
+	if until, paused := c.rateLimitPaused(); paused {
+		return nil, nil, &RateLimitError{RetryAt: until}
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": variables,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("github: graphql: marshal request: %w", err)
+	}
+
+	gqlURL := c.graphqlURL()
+	req, err := http.NewRequest("POST", gqlURL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, nil, fmt.Errorf("github: graphql: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	accept := opts.Accept
+	if accept == "" {
+		accept = "application/vnd.github+json"
+	}
+	req.Header.Set("Accept", accept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("github: graphql: request: %w", err)
+	}
+	// Notify the rate-limit observer — mirrors doWithBody so GraphQL
+	// responses also update the live budget.
+	c.notifyRateObserver(resp)
+
+	// Open the breaker when GitHub rejects this call for rate limiting, so the
+	// rest of the cycle stops hammering. Mirrors do()/doWithBody; the response
+	// is still handled below exactly as before.
+	if wait, limited := rateLimitDelay(resp); limited {
+		c.pauseRateLimit(wait)
+	}
+	defer resp.Body.Close()
+
+	limit := opts.MaxBodyBytes
+	if limit <= 0 {
+		limit = maxBodyBytes
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if readErr != nil {
+		return nil, nil, fmt.Errorf("github: graphql: read body: %w", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		errBody := safeTruncate(string(body), maxErrBodyLen)
+		return nil, nil, fmt.Errorf("github: graphql: status %d: %s", resp.StatusCode, errBody)
+	}
+
+	// Parse the GraphQL envelope: {"data":..., "errors":[...]}.
+	var envelope struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []graphQLError  `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, nil, fmt.Errorf("github: graphql: decode envelope: %w", err)
+	}
+	return envelope.Data, envelope.Errors, nil
 }
 
 // graphQLErrorPath renders a GraphQL error path as a dotted string. List
