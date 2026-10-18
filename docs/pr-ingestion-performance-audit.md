@@ -83,3 +83,29 @@ should be delivered separately with their own measurements:
 9. Introduce PR Search pagination only as a stream into the candidate queue,
    preserving current time-to-first-candidate while lifting the existing
    first-100-result limit.
+
+## GitHub API reduction (issue #864)
+
+A second pass targeted the number of GitHub requests rather than latency.
+It shipped as four stacked PRs.
+
+| Area | Before | After |
+|---|---|---|
+| PR discovery | 1 REST search per qualifier (review-requested, author, assignee), single page of 100 | one GraphQL request with three aliased searches, paginated up to 1,000 per qualifier; REST search remains the fallback per qualifier |
+| Review worker hydration | `GET /pulls/N` per candidate per cycle, before dedup | the inventory node is read live and reused for 2 minutes; the stale-request, dismissed and same-SHA guards run before publishing |
+| Tier 3 | `GET /pulls/N` per watched PR; unchanged PRs evicted after 1h and re-enrolled at 1 min (~7 checks per PR per hour, forever) | due PRs read in batched GraphQL queries of 50; open PRs settle at the 15-minute backoff; skips no longer reset it; dispatched items are deferred |
+| Merge tracking | 1–2 searches plus a full merge-status query per due PR (pending checks every 45s); pages resend the whole query | discovery reuses the inventory; a batched fingerprint gates the full query, and a resting decision is reused while the fingerprint and config are unchanged; pages send only their connection |
+| Archive check and rename probe | `GET /repos/{r}` per repository in each loop | one batched query per pass; GraphQL misses fall back to REST, which follows renames |
+| Re-review timeline | every REST timeline page on each `updated_at` bump | GraphQL `timelineItems` filtered to the two event types and paged back only to the newest relevant event; REST is the fallback |
+| Caches | memory only | ETag cache persisted in SQLite (LRU, namespaced by token); diffs cached by the commits they span |
+| Team review requests | ignored after being paid for | a request to one of the user's teams counts (memberships cached for 24h) |
+
+This closes follow-ups 5 (GraphQL PR snapshot behind a fallback), 8 (cold
+archive checks) and 9 (search pagination) above.
+
+Not batched, deliberately:
+
+- `GetPRReviews` inside a run. Single-page ETag hits do not count against
+  the rate limit, and the peer-publication guard must read fresh data.
+- The directive comment fetch before the gate (#383). A remember/forget
+  directive must apply even on cycles that produce no review.

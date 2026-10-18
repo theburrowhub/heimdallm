@@ -250,3 +250,49 @@ func TestEnrollAfterReview(t *testing.T) {
 	f.err = errors.New("db down")
 	enrollAfterReview(context.Background(), f, pr, false, "test") // logged, not fatal
 }
+
+type prefetchingArchiveChecker struct {
+	archived   map[string]bool
+	prefetched [][]string
+	calls      int
+}
+
+func (f *prefetchingArchiveChecker) IsRepoArchived(repo string) (bool, error) {
+	f.calls++
+	return f.archived[repo], nil
+}
+
+func (f *prefetchingArchiveChecker) PrefetchRepoMeta(repos []string) {
+	f.prefetched = append(f.prefetched, append([]string(nil), repos...))
+}
+
+// The archive cache batches only the repos it cannot answer itself.
+func TestCachingArchivedChecker_PrefetchesOnlyStaleRepos(t *testing.T) {
+	inner := &prefetchingArchiveChecker{archived: map[string]bool{"o/old": true}}
+	c := newCachingArchivedChecker(inner, time.Hour)
+	if _, err := c.IsRepoArchived("o/cached"); err != nil {
+		t.Fatal(err)
+	}
+	c.PrefetchRepoMeta([]string{"o/cached", "o/new", "o/old"})
+	if len(inner.prefetched) != 1 || fmt.Sprint(inner.prefetched[0]) != "[o/new o/old]" {
+		t.Fatalf("prefetched = %v", inner.prefetched)
+	}
+	c.mu.Lock()
+	for k := range c.cache {
+		c.cache[k] = archivedCacheEntry{at: time.Now()}
+	}
+	c.cache["o/new"] = archivedCacheEntry{at: time.Now()}
+	c.cache["o/old"] = archivedCacheEntry{at: time.Now()}
+	c.mu.Unlock()
+	c.PrefetchRepoMeta([]string{"o/cached", "o/new", "o/old"})
+	if len(inner.prefetched) != 1 {
+		t.Fatal("a fully cached pass must not prefetch")
+	}
+	// A checker that cannot batch is left alone.
+	plain := newCachingArchivedChecker(archiveOnly{}, time.Hour)
+	plain.PrefetchRepoMeta([]string{"o/x"})
+}
+
+type archiveOnly struct{}
+
+func (archiveOnly) IsRepoArchived(string) (bool, error) { return false, nil }

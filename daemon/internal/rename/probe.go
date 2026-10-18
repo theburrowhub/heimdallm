@@ -26,6 +26,13 @@ type CanonicalProbe interface {
 	GetCanonicalFullName(repo string) (string, error)
 }
 
+// BatchPrefetcher is the optional CanonicalProbe capability to resolve every
+// repository of a pass in batched requests up front; the per-repo lookups
+// that follow are then answered without a request each.
+type BatchPrefetcher interface {
+	PrefetchRepoMeta(repos []string)
+}
+
 // Dispatcher hides the heavy Reconciler behind a one-method interface
 // so the probe can be tested without constructing every reconciler
 // dep. *Reconciler satisfies it.
@@ -92,6 +99,13 @@ func NewProbe(deps ProbeDeps) *Probe {
 // reconciler dispatch — operator-disabled entries are not
 // auto-rewritten).
 func (p *Probe) Tick(ctx context.Context) {
+	if pf, ok := p.deps.Probe.(BatchPrefetcher); ok {
+		repos := append([]string(nil), p.deps.Repos()...)
+		if p.deps.NonMonitored != nil {
+			repos = append(repos, p.deps.NonMonitored()...)
+		}
+		pf.PrefetchRepoMeta(repos)
+	}
 	p.tickMonitored(ctx)
 	p.tickNonMonitored(ctx)
 }
