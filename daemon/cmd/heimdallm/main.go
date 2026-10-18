@@ -1386,9 +1386,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				// younger than one merge-tracking cycle, instead of searching.
 				ghClient.SetInventoryReuse(interval)
 				stats := mergeTrackReconciler.Tick(ctx, monitoredReposFn())
-				if stats.Evaluated > 0 || stats.Actions > 0 || stats.Errors > 0 {
+				if stats.Evaluated > 0 || stats.Unchanged > 0 || stats.Actions > 0 || stats.Errors > 0 {
 					slog.Info("merge tracking: cycle complete",
-						"discovered", stats.Discovered, "evaluated", stats.Evaluated,
+						"discovered", stats.Discovered, "evaluated", stats.Evaluated, "unchanged", stats.Unchanged,
 						"actions", stats.Actions, "errors", stats.Errors)
 				}
 			}

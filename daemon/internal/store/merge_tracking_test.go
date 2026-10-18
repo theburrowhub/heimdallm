@@ -731,3 +731,53 @@ func TestOpen_ReconcilesInFlightRowsFromAPreviousProcess(t *testing.T) {
 		t.Errorf("armed anchor = %q, want it preserved across the restart", row.AutoMergeHeadSHA)
 	}
 }
+
+func TestMergeTrackingFingerprint_RoundTripAndErrors(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prID, err := s.UpsertPR(&store.PR{GithubID: 9, Repo: "o/r", Number: 9, Title: "t", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureMergeTracking(prID, "o/r", 9); err != nil {
+		t.Fatal(err)
+	}
+	if fp, err := s.MergeTrackingFingerprint(prID); err != nil || fp != "" {
+		t.Fatalf("fp=%q err=%v", fp, err)
+	}
+	if err := s.SetMergeTrackingFingerprint(prID, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if fp, _ := s.MergeTrackingFingerprint(prID); fp != "abc" {
+		t.Fatalf("fp = %q", fp)
+	}
+	until := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	if err := s.DeferMergeTracking(prID, until); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := s.GetMergeTracking(prID)
+	if !row.CooldownUntil.Equal(until) {
+		t.Fatalf("cooldown = %v, want %v", row.CooldownUntil, until)
+	}
+	if err := s.ClearMergeTrackingCooldown(prID); err != nil {
+		t.Fatal(err)
+	}
+	if fp, _ := s.MergeTrackingFingerprint(prID); fp != "" {
+		t.Fatal("a re-check must forget the fingerprint")
+	}
+	if fp, err := s.MergeTrackingFingerprint(12345); err != nil || fp != "" {
+		t.Fatalf("missing row: fp=%q err=%v", fp, err)
+	}
+	s.Close()
+	if _, err := s.MergeTrackingFingerprint(prID); err == nil {
+		t.Error("closed db must fail")
+	}
+	if err := s.SetMergeTrackingFingerprint(prID, "x"); err == nil {
+		t.Error("closed db must fail")
+	}
+	if err := s.DeferMergeTracking(prID, until); err == nil {
+		t.Error("closed db must fail")
+	}
+}
