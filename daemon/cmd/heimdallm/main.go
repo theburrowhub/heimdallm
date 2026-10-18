@@ -1382,6 +1382,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			// for a full poll interval reads as broken. The cycle is a no-op
 			// when the feature is off, so this costs nothing by default.
 			runMergeTrackCycle := func() {
+				// Discovery reuses the review poll's PR inventory when it is
+				// younger than one merge-tracking cycle, instead of searching.
+				ghClient.SetInventoryReuse(interval)
 				stats := mergeTrackReconciler.Tick(ctx, monitoredReposFn())
 				if stats.Evaluated > 0 || stats.Actions > 0 || stats.Errors > 0 {
 					slog.Info("merge tracking: cycle complete",
@@ -1472,7 +1475,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			return
 		}
 
-		pr, err := ghClient.GetPR(msg.Repo, msg.Number)
+		// The poll's GraphQL inventory already read this PR live; within the
+		// freshness window that snapshot is the hydration and no GET is sent.
+		pr, err := ghClient.GetPRFresh(msg.Repo, msg.Number, reviewHydrationMaxAge)
 		if err != nil {
 			slog.Error("review-worker: fetch PR from GitHub",
 				"repo", msg.Repo, "pr", msg.Number, "err", err)
@@ -1489,7 +1494,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		loginMu.Lock()
 		botLogin := cachedLogin
 		loginMu.Unlock()
-		if botLogin != "" && !pr.ReviewRequestedFor(botLogin) {
+		if botLogin != "" && !pr.RequestedFor(ghClient.ReviewerIdentityFor(botLogin, pr.Repo)) {
 			// Search is eventually consistent; the fresh Pulls response is the
 			// source of truth. Keeping this guard in the worker removes the old
 			// duplicate serial hydration without admitting ghost results.
@@ -1536,11 +1541,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			}
 		}
 
-		// Enroll for state watching via SQLite watch store.
-		if err := watchStore.Enroll(ctx, "pr", pr.Repo, pr.Number, pr.ID); err != nil {
-			slog.Warn("review-worker: failed to enroll watch",
-				"repo", pr.Repo, "pr", pr.Number, "err", err)
-		}
+		enrollAfterReview(ctx, watchStore, pr, rev != nil, "review-worker")
 	}
 
 	reviewHandler := guardUpdateVoidHandler(
@@ -1813,10 +1814,26 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 					slog.Warn("state-poller: scan failed", "err", err)
 					continue
 				}
+				// Read every due PR in batched GraphQL queries up front; each
+				// state check below is then answered from that snapshot instead
+				// of its own GET /pulls/N.
+				refs := make([]gh.PRRef, 0, len(ready))
+				for _, entry := range ready {
+					if entry.Type == "pr" && entry.Repo != "" && adapter.repoIsMonitored(entry.Repo) {
+						refs = append(refs, gh.PRRef{Repo: entry.Repo, Number: entry.Number})
+					}
+				}
+				ghClient.PrefetchPRs(refs)
 				for _, entry := range ready {
 					if err := stateCheckPub.PublishStateCheck(statePollerCtx, entry.Type, entry.Repo, entry.Number, entry.GithubID); err != nil {
 						slog.Warn("state-poller: publish failed",
 							"type", entry.Type, "repo", entry.Repo, "number", entry.Number, "err", err)
+						continue
+					}
+					// Not due again until its check has run and rescheduled it;
+					// otherwise a slow worker gets the same item every scan.
+					if err := watchStore.Defer(statePollerCtx, entry.Key(), entry.Backoff()); err != nil {
+						slog.Debug("state-poller: defer failed", "key", entry.Key(), "err", err)
 					}
 				}
 			}
@@ -1850,8 +1867,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 
 		// Rate limit before any GitHub API call. TierWatch (50ms) matches
 		// the old Tier 3 priority — state checks are lightweight and high-priority.
-		if err := limiter.Acquire(ctx, scheduler.TierWatch); err != nil {
-			return false, fmt.Errorf("rate limit cancelled: %w", err)
+		// A check the batched prefetch already answered sends no request.
+		if _, cached, _ := ghClient.RecentPRSnapshot(msg.Repo, msg.Number, tier3SnapshotMaxAge); !cached {
+			if err := limiter.Acquire(ctx, scheduler.TierWatch); err != nil {
+				return false, fmt.Errorf("rate limit cancelled: %w", err)
+			}
 		}
 
 		item := &scheduler.WatchItem{
@@ -3802,9 +3822,30 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 		prAllowedOrgs[strings.ToLower(o)] = struct{}{}
 	}
 
+	// Team memberships for every org in this result, in one batched query
+	// (cached for a day): a request to one of the user's teams counts.
+	if botLogin != "" {
+		orgs := make([]string, 0, len(prs))
+		for _, pr := range prs {
+			if owner, _, ok := strings.Cut(pr.Repo, "/"); ok {
+				orgs = append(orgs, owner)
+			}
+		}
+		a.ghClient.PrefetchUserTeams(botLogin, orgs)
+	}
+
 	for _, pr := range prs {
 		if pr.Repo == "" {
 			slog.Warn("adapter: skipping PR with empty repo", "pr_number", pr.Number)
+			continue
+		}
+		// A hydrated inventory node is read live, so it settles what a stale
+		// search index got wrong right here — before a NATS message, a worker
+		// slot or a GET is spent on it.
+		if !pr.HydratedAt.IsZero() && botLogin != "" &&
+			!pr.RequestedFor(a.ghClient.ReviewerIdentityFor(botLogin, pr.Repo)) {
+			slog.Debug("tier2: bot no longer requested, skipping stale search result",
+				"repo", pr.Repo, "pr", pr.Number)
 			continue
 		}
 		// Skip PRs from orgs outside discovery_orgs when configured.
@@ -3947,11 +3988,41 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 		}
 	}
 	if a.watchStore != nil {
-		if err := a.watchStore.Enroll(ctx, "pr", pr.Repo, pr.Number, pr.ID); err != nil {
-			slog.Warn("ProcessPR: failed to enroll watch", "repo", pr.Repo, "pr", pr.Number, "err", err)
-		}
+		enrollAfterReview(ctx, a.watchStore, ghPR, rev != nil, "ProcessPR")
 	}
 	return nil
+}
+
+// tier3SnapshotMaxAge is how old the state poller's batched snapshot of a PR
+// may be when its state check runs. The poller reads it right before
+// dispatching, so this only has to cover queueing.
+const tier3SnapshotMaxAge = 90 * time.Second
+
+// reviewHydrationMaxAge is how old the poll's inventory snapshot of a PR may
+// be for the review worker to use it instead of GET /pulls/N. A message
+// waiting longer than this for a worker slot is hydrated again.
+const reviewHydrationMaxAge = 2 * time.Minute
+
+// watchEnroller is the subset of the watch store review paths enroll through.
+type watchEnroller interface {
+	Enroll(ctx context.Context, typ, repo string, number int, githubID int64) error
+	EnrollIfAbsent(ctx context.Context, typ, repo string, number int, githubID int64) (bool, error)
+}
+
+// enrollAfterReview starts watching pr. A review that actually ran restarts
+// the watch at the initial backoff (new activity is likely); a skipped run
+// only adds a missing watch, leaving an existing one's backoff alone — a
+// skip resetting it is what kept unchanged PRs polled every minute.
+func enrollAfterReview(ctx context.Context, ws watchEnroller, pr *gh.PullRequest, reviewed bool, who string) {
+	var err error
+	if reviewed {
+		err = ws.Enroll(ctx, "pr", pr.Repo, pr.Number, pr.ID)
+	} else {
+		_, err = ws.EnrollIfAbsent(ctx, "pr", pr.Repo, pr.Number, pr.ID)
+	}
+	if err != nil {
+		slog.Warn(who+": failed to enroll watch", "repo", pr.Repo, "pr", pr.Number, "err", err)
+	}
 }
 
 // PublishPending implements scheduler.Tier2PRProcessor.
@@ -4136,7 +4207,7 @@ func (a *tier2Adapter) pruneBreakerTripDedup(now time.Time) {
 // not run. Closed items never need a review run at Tier 3.
 func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem) (bool, *scheduler.ItemSnapshot, error) {
 	if item.Type == "pr" {
-		snap, err := a.ghClient.GetPRSnapshot(item.Repo, item.Number)
+		snap, err := a.ghClient.GetPRSnapshotFresh(item.Repo, item.Number, tier3SnapshotMaxAge)
 		if err != nil {
 			return false, nil, err
 		}
@@ -4201,7 +4272,7 @@ func (a *tier2Adapter) awaitingReReviewRequest(item *scheduler.WatchItem, snap *
 	a.loginMu.Lock()
 	botLogin := *a.login
 	a.loginMu.Unlock()
-	if botLogin == "" || snap.ReviewRequestedFor(botLogin) {
+	if botLogin == "" || snap.RequestedFor(a.ghClient.ReviewerIdentityFor(botLogin, item.Repo)) {
 		return false
 	}
 	stored, err := a.store.GetPRByGithubID(item.GithubID)

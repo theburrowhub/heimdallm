@@ -93,6 +93,13 @@ type Client struct {
 	// diffs, when set, persists diffs keyed by the commits they span. A diff
 	// between two fixed commits never changes, so it is never re-downloaded.
 	diffs atomic.Pointer[DiffCacheBackend]
+	// inventory holds the last PR inventory; snapshots the hydrated PRs it and
+	// the batched Tier 3 lookups produced, for consumers inside their
+	// freshness window.
+	inventory inventoryState
+	snapshots snapshotCache
+	// teams caches the user's team memberships per organization.
+	teams teamCache
 
 	// The authenticated login is immutable for the lifetime of a client (the
 	// token is immutable too). Cache it after the first successful lookup so
@@ -481,7 +488,9 @@ func (c *Client) FetchPRsToReview() ([]*PullRequest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: resolve user: %w", err)
 	}
-	prs, err := c.fetchByQualifier(username, "review-requested", nil) // no repo filter
+	// Always fresh: this poll is what notices a new review request.
+	inv, invErr := c.FetchPRInventory(0)
+	prs, err := c.prsForQualifier(inv, invErr, username, qualifierReviewRequested)
 	if err != nil {
 		return nil, err
 	}
@@ -518,34 +527,6 @@ func githubLoginsEqual(a, b string) bool {
 
 func normalizeGitHubLoginForCompare(login string) string {
 	return strings.TrimSpace(strings.TrimLeft(login, "@"))
-}
-
-// FetchPRs fetches all open PRs where the user is reviewer, assignee, or author.
-// Used for the dashboard display only — NOT for triggering AI reviews.
-func (c *Client) FetchPRs(repos []string) ([]*PullRequest, error) {
-	username, err := c.AuthenticatedUser()
-	if err != nil {
-		return nil, fmt.Errorf("github: resolve user: %w", err)
-	}
-
-	qualifiers := []string{"review-requested", "assignee", "author"}
-	seen := make(map[int64]struct{})
-	var all []*PullRequest
-
-	for _, q := range qualifiers {
-		prs, err := c.fetchByQualifier(username, q, repos)
-		if err != nil {
-			slog.Warn("github: fetch PRs partial error", "qualifier", q, "err", err)
-			continue
-		}
-		for _, pr := range prs {
-			if _, dup := seen[pr.ID]; !dup {
-				seen[pr.ID] = struct{}{}
-				all = append(all, pr)
-			}
-		}
-	}
-	return all, nil
 }
 
 func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([]*PullRequest, error) {
@@ -934,6 +915,7 @@ func (c *Client) RateLimit() (*RateLimit, error) {
 type PRHeadInfo struct {
 	HeadSHA            string
 	RequestedReviewers []string // lowercased logins
+	RequestedTeams     []Team
 }
 
 // ReviewRequestedFor reports whether login (case-insensitive) is still in the
@@ -996,7 +978,7 @@ func (c *Client) GetPRHeadInfo(repo string, number int) (PRHeadInfo, error) {
 	for i, u := range pr.RequestedReviewers {
 		logins[i] = strings.ToLower(u.Login)
 	}
-	return PRHeadInfo{HeadSHA: pr.Head.SHA, RequestedReviewers: logins}, nil
+	return PRHeadInfo{HeadSHA: pr.Head.SHA, RequestedReviewers: logins, RequestedTeams: pr.RequestedTeams}, nil
 }
 
 // PRSnapshot is the subset of PR fields Tier 3's guard evaluator needs.
@@ -1015,6 +997,8 @@ type PRSnapshot struct {
 	// uses it to tell an updated_at bump (CI, comments, peer reviews) apart
 	// from an actual re-review request without walking the timeline.
 	RequestedReviewers []string
+	// RequestedTeams are the pending team requests (see PullRequest.RequestedTeams).
+	RequestedTeams []Team
 }
 
 // ReviewRequestedFor reports whether login (case-insensitive, leading "@"
@@ -1062,6 +1046,7 @@ func (c *Client) GetPRSnapshot(repo string, number int) (*PRSnapshot, error) {
 		UpdatedAt:          pr.UpdatedAt,
 		HeadSHA:            pr.Head.SHA,
 		RequestedReviewers: reviewers,
+		RequestedTeams:     pr.RequestedTeams,
 	}, nil
 }
 
@@ -1083,12 +1068,9 @@ func (c *Client) GetPR(repo string, number int) (*PullRequest, error) {
 	if err := json.Unmarshal(body, &pr); err != nil {
 		return nil, fmt.Errorf("github: get PR: unmarshal: %w", err)
 	}
-	// Populate the Repo field the same way FetchPRs does.
-	if pr.Head.Repo.FullName != "" {
-		pr.Repo = pr.Head.Repo.FullName
-	} else {
-		pr.Repo = repo
-	}
+	// The PR lives in the repository it was fetched from. head.repo is the
+	// fork for a cross-repository PR, and reviews posted there would miss it.
+	pr.Repo = repo
 	return &pr, nil
 }
 

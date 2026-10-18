@@ -2949,3 +2949,62 @@ func TestPipeline_Run_PeerPublishedSkipBeforeGenerationNamesThePeer(t *testing.T
 		}
 	}
 }
+
+// teamReviewerFetcher is a fakeReviewerFetcher that also resolves the bot's
+// teams, like the production GitHub client.
+type teamReviewerFetcher struct {
+	fakeReviewerFetcher
+	teams []string
+}
+
+func (f *teamReviewerFetcher) ReviewerIdentityFor(login, repo string) github.ReviewerIdentity {
+	id := github.ReviewerIdentity{Login: login, Org: "org", Teams: map[string]struct{}{}}
+	for _, s := range f.teams {
+		id.Teams[s] = struct{}{}
+	}
+	return id
+}
+
+// A pending request to one of the bot's teams is a request for the bot: new
+// commits on such a PR are re-reviewed exactly like a direct request.
+func TestPipeline_Run_ReReviewsNewCommitsWhenTeamRequested(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		teams []string
+		want  int
+	}{
+		{"member of the requested team", []string{"core"}, 2},
+		{"not a member", []string{"web"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := store.Open(":memory:")
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer s.Close()
+			exec := &fakeExecCounter{}
+			p := pipeline.New(s, &fakeGHCounter{diff: "+line"}, exec, &fakeNotify{})
+			p.SetBotLogin("heimdallm-bot")
+			p.SetReviewerFetcher(&teamReviewerFetcher{
+				fakeReviewerFetcher: fakeReviewerFetcher{info: github.PRHeadInfo{RequestedTeams: []github.Team{{Slug: "core"}}}},
+				teams:               tc.teams,
+			})
+			pr := &github.PullRequest{
+				ID: 77, Number: 77, Title: "t", Repo: "org/repo",
+				User: github.User{Login: "alice"}, State: "open",
+				UpdatedAt: time.Now().Add(-time.Hour),
+				HTMLURL:   "https://github.com/org/repo/pull/77",
+				Head:      github.Branch{SHA: "oldsha"},
+			}
+			runFirstReview(t, p, pr)
+			pr.Head.SHA = "newsha"
+			pr.UpdatedAt = time.Now()
+			if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+				t.Fatalf("re-review run: %v", err)
+			}
+			if exec.calls != tc.want {
+				t.Fatalf("exec.calls = %d, want %d", exec.calls, tc.want)
+			}
+		})
+	}
+}
