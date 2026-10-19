@@ -1386,9 +1386,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				// younger than one merge-tracking cycle, instead of searching.
 				ghClient.SetInventoryReuse(interval)
 				stats := mergeTrackReconciler.Tick(ctx, monitoredReposFn())
-				if stats.Evaluated > 0 || stats.Actions > 0 || stats.Errors > 0 {
+				if stats.Evaluated > 0 || stats.Unchanged > 0 || stats.Actions > 0 || stats.Errors > 0 {
 					slog.Info("merge tracking: cycle complete",
-						"discovered", stats.Discovered, "evaluated", stats.Evaluated,
+						"discovered", stats.Discovered, "evaluated", stats.Evaluated, "unchanged", stats.Unchanged,
 						"actions", stats.Actions, "errors", stats.Errors)
 				}
 			}
@@ -2890,6 +2890,32 @@ func (c *cachingArchivedChecker) IsRepoArchived(repo string) (bool, error) {
 	return archived, nil
 }
 
+// repoMetaPrefetcher resolves many repositories' metadata in batched requests.
+type repoMetaPrefetcher interface {
+	PrefetchRepoMeta(repos []string)
+}
+
+// PrefetchRepoMeta batches the lookups of every repo whose cached answer is
+// missing or expired, when the wrapped checker can batch.
+func (c *cachingArchivedChecker) PrefetchRepoMeta(repos []string) {
+	pf, ok := c.inner.(repoMetaPrefetcher)
+	if !ok {
+		return
+	}
+	now := time.Now()
+	var stale []string
+	c.mu.Lock()
+	for _, r := range repos {
+		if e, hit := c.cache[r]; !hit || now.Sub(e.at) >= c.ttl {
+			stale = append(stale, r)
+		}
+	}
+	c.mu.Unlock()
+	if len(stale) > 0 {
+		pf.PrefetchRepoMeta(stale)
+	}
+}
+
 // githubCacheNamespace fingerprints the token for the persistent GitHub
 // caches. Only a prefix of the SHA-256 is kept: it separates accounts, it is
 // not a credential.
@@ -2920,6 +2946,11 @@ func sendDiscoveryRepos(
 	repos := discovery.MergeRepos(cfg.StaticRepos, cfg.ConfiguredRepos, discovered, cfg.NonMonitored)
 
 	if archiveChecker != nil {
+		// One batched lookup for every repository the cache cannot answer,
+		// instead of one GET /repos/{r} each inside FilterArchived.
+		if pf, ok := archiveChecker.(repoMetaPrefetcher); ok {
+			pf.PrefetchRepoMeta(repos)
+		}
 		active, archived := discovery.FilterArchived(repos, archiveChecker, discovered)
 		for _, r := range archived {
 			slog.Warn("tier1: dropping archived/deleted repo from active set", "repo", r)

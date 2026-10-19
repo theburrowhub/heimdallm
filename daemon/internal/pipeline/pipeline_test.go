@@ -3008,3 +3008,46 @@ func TestPipeline_Run_ReReviewsNewCommitsWhenTeamRequested(t *testing.T) {
 		})
 	}
 }
+
+// countingReviewerFetcher counts Pulls API lookups of requested reviewers.
+type countingReviewerFetcher struct {
+	fakeReviewerFetcher
+	calls int
+}
+
+func (f *countingReviewerFetcher) GetPRHeadInfo(repo string, number int) (github.PRHeadInfo, error) {
+	f.calls++
+	return f.fakeReviewerFetcher.GetPRHeadInfo(repo, number)
+}
+
+// A PR the worker just hydrated already carries its requested reviewers; the
+// gate must not ask the Pulls API for them again.
+func TestPipeline_Run_UsesHydratedRequestedReviewers(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	exec := &fakeExecCounter{}
+	p := pipeline.New(s, &fakeGHCounter{diff: "+line"}, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	rf := &countingReviewerFetcher{}
+	p.SetReviewerFetcher(rf)
+	pr := &github.PullRequest{
+		ID: 88, Number: 88, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/88",
+		Head:      github.Branch{SHA: "oldsha"},
+	}
+	runFirstReview(t, p, pr)
+	pr.Head.SHA = "newsha"
+	pr.UpdatedAt = time.Now()
+	pr.RequestedReviewers = []github.User{{Login: "Heimdallm-Bot"}}
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("re-review run: %v", err)
+	}
+	if exec.calls != 2 || rf.calls != 0 {
+		t.Fatalf("exec.calls=%d head-info lookups=%d, want a re-review with no lookup", exec.calls, rf.calls)
+	}
+}

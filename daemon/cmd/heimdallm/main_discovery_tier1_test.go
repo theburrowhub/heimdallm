@@ -144,3 +144,19 @@ func TestSendDiscoveryReposPublishesCachedReposWhenRefreshFails(t *testing.T) {
 		t.Errorf("published repos = %v, want %v", pub.repos, want)
 	}
 }
+
+// Tier 1 batches the archive lookups of the pass before filtering.
+func TestSendDiscoveryReposPrefetchesArchiveState(t *testing.T) {
+	pub := &fakeTier1Publisher{}
+	checker := &prefetchingArchiveChecker{archived: map[string]bool{"org/frozen": true}}
+	sendDiscoveryRepos(context.Background(), &fakeTier1Discovery{}, scheduler.NewRateLimiter(1), pub,
+		func() scheduler.Tier1Config {
+			return scheduler.Tier1Config{StaticRepos: []string{"org/live", "org/frozen"}}
+		}, checker)
+	if len(checker.prefetched) != 1 || len(checker.prefetched[0]) != 2 {
+		t.Fatalf("prefetched = %v", checker.prefetched)
+	}
+	if !reflect.DeepEqual(pub.repos, []string{"org/live"}) {
+		t.Fatalf("published = %v", pub.repos)
+	}
+}

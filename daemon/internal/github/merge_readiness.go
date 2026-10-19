@@ -328,13 +328,7 @@ query($owner:String!, $name:String!, $number:Int!, $threadCursor:String, $checkC
       }
       reviewThreads(first: $$THREADS$$, after: $threadCursor) {
         pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          isResolved
-          isOutdated
-          isCollapsed
-          resolvedBy { login }
-        }
+        $$THREAD_NODES$$
       }
       commits(last: 1) {
         nodes {
@@ -345,27 +339,7 @@ query($owner:String!, $name:String!, $number:Int!, $threadCursor:String, $checkC
               contexts(first: $$CHECKS$$, after: $checkCursor) {
                 totalCount
                 pageInfo { hasNextPage endCursor }
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name
-                    status
-                    conclusion
-                    isRequired(pullRequestNumber: $number)
-                    detailsUrl
-                    startedAt
-                    completedAt
-                    checkSuite { app { name } }
-                  }
-                  ... on StatusContext {
-                    context
-                    state
-                    isRequired(pullRequestNumber: $number)
-                    description
-                    targetUrl
-                    createdAt
-                  }
-                }
+                $$CHECK_NODES$$
               }
             }
           }
@@ -390,14 +364,95 @@ query($owner:String!, $name:String!, $number:Int!, $threadCursor:String, $checkC
   }
 }`
 
-// mergeStatusQuery is the template with the page sizes substituted, so the
-// constants above remain the single source of truth for both the query and the
+// reviewThreadNodes and checkContextNodes are the node selections shared by the
+// full query and the trimmed pagination queries, so a page decodes exactly
+// like the first one.
+const reviewThreadNodes = `nodes {
+          id
+          isResolved
+          isOutdated
+          isCollapsed
+          resolvedBy { login }
+        }`
+
+const checkContextNodes = `nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    status
+                    conclusion
+                    isRequired(pullRequestNumber: $number)
+                    detailsUrl
+                    startedAt
+                    completedAt
+                    checkSuite { app { name } }
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    isRequired(pullRequestNumber: $number)
+                    description
+                    targetUrl
+                    createdAt
+                  }
+                }`
+
+// mergeThreadPageQueryTemplate fetches only the next page of review threads.
+// Pages used to resend the whole merge-status query — every PR field, the
+// other connection's first page and branch protection — to keep one
+// connection out of it.
+const mergeThreadPageQueryTemplate = `
+query($owner:String!, $name:String!, $number:Int!, $threadCursor:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      reviewThreads(first: $$THREADS$$, after: $threadCursor) {
+        pageInfo { hasNextPage endCursor }
+        $$THREAD_NODES$$
+      }
+    }
+  }
+}`
+
+// mergeCheckPageQueryTemplate fetches only the next page of check contexts.
+const mergeCheckPageQueryTemplate = `
+query($owner:String!, $name:String!, $number:Int!, $checkCursor:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              state
+              contexts(first: $$CHECKS$$, after: $checkCursor) {
+                totalCount
+                pageInfo { hasNextPage endCursor }
+                $$CHECK_NODES$$
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+
+// mergeQueryReplacer substitutes the page sizes and shared selections, so the
+// constants above remain the single source of truth for the queries and the
 // pagination caps.
-var mergeStatusQuery = strings.NewReplacer(
+var mergeQueryReplacer = strings.NewReplacer(
 	"$$REVIEWS$$", strconv.Itoa(mergeReadinessReviewPageSize),
 	"$$THREADS$$", strconv.Itoa(mergeReadinessThreadPageSize),
 	"$$CHECKS$$", strconv.Itoa(mergeReadinessCheckPageSize),
-).Replace(mergeStatusQueryTemplate)
+	"$$THREAD_NODES$$", reviewThreadNodes,
+	"$$CHECK_NODES$$", checkContextNodes,
+)
+
+var (
+	mergeStatusQuery     = mergeQueryReplacer.Replace(mergeStatusQueryTemplate)
+	mergeThreadPageQuery = mergeQueryReplacer.Replace(mergeThreadPageQueryTemplate)
+	mergeCheckPageQuery  = mergeQueryReplacer.Replace(mergeCheckPageQueryTemplate)
+)
 
 // The GraphQL response is modelled with named types rather than nested
 // anonymous structs: the decoders below take these as parameters, and an
@@ -666,7 +721,7 @@ func (c *Client) paginateReviewThreads(owner, name string, number int, first *me
 		err := c.graphQLWith(graphQLOptions{
 			Accept:              mergeInfoPreviewAccept,
 			TolerateFieldErrors: true,
-		}, mergeStatusQuery, vars, &resp)
+		}, mergeThreadPageQuery, vars, &resp)
 		if err != nil {
 			var partial *PartialGraphQLError
 			if !errors.As(err, &partial) {
@@ -715,7 +770,7 @@ func (c *Client) paginateCheckContexts(owner, name string, number int, first *me
 		err := c.graphQLWith(graphQLOptions{
 			Accept:              mergeInfoPreviewAccept,
 			TolerateFieldErrors: true,
-		}, mergeStatusQuery, vars, &resp)
+		}, mergeCheckPageQuery, vars, &resp)
 		if err != nil {
 			var partial *PartialGraphQLError
 			if !errors.As(err, &partial) {

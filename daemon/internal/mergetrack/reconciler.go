@@ -154,8 +154,11 @@ func NewReconciler(o ReconcilerOptions) *Reconciler {
 type TickStats struct {
 	Discovered int
 	Evaluated  int
-	Actions    int
-	Errors     int
+	// Unchanged counts due rows whose GitHub state had not moved since their
+	// last decision, so the full merge-status query was not sent.
+	Unchanged int
+	Actions   int
+	Errors    int
 }
 
 // AnyEnabled reports whether merge tracking is on for at least one of the given
@@ -205,15 +208,23 @@ func (r *Reconciler) Tick(ctx context.Context, repos []string) TickStats {
 		return stats
 	}
 
+	fingerprints := r.fingerprints(due)
 	for _, row := range due {
 		if err := ctx.Err(); err != nil {
 			return stats
+		}
+		fp := r.decisionFingerprint(row, fingerprints)
+		if r.unchangedSinceDecision(row, fp, tickStart) {
+			r.deferUnchanged(row, tickStart)
+			stats.Unchanged++
+			continue
 		}
 		acted, err := r.ReconcilePR(ctx, row.PRID, tickStart, false)
 		stats.Evaluated++
 		if acted {
 			stats.Actions++
 		}
+		r.recordFingerprint(row.PRID, fp, acted, err)
 		if err != nil {
 			stats.Errors++
 			// A rate-limit rejection means every further call this cycle would
