@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -231,5 +232,81 @@ func TestWatchStore_Delete(t *testing.T) {
 	}
 	if !errors.Is(err, bus.ErrWatchNotFound) {
 		t.Errorf("expected ErrWatchNotFound, got %v", err)
+	}
+}
+
+func TestWatchStore_EvictStaleKeepsOpenPRs(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`CREATE TABLE prs (github_id INTEGER, state TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO prs VALUES (1,'open'),(2,'closed')`); err != nil {
+		t.Fatal(err)
+	}
+	w, err := bus.NewWatchStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, id := range []int64{1, 2, 3, 4} {
+		if err := w.Enroll(ctx, "pr", "o/r", int(id), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 1 (open) and 3 (no PR record) are old; 4 (no record) is recent; 2 is closed.
+	for _, id := range []int64{1, 3} {
+		e, err := w.Get(ctx, fmt.Sprintf("pr.%d", id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.LastSeen = time.Now().Add(-2 * bus.EvictAfter)
+		if err := w.ForceUpdate(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := w.EvictStale(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("evicted=%d err=%v, want the closed PR and the old orphan", n, err)
+	}
+	for id, want := range map[int64]bool{1: true, 2: false, 3: false, 4: true} {
+		_, err := w.Get(ctx, fmt.Sprintf("pr.%d", id))
+		if (err == nil) != want {
+			t.Errorf("pr.%d present=%v, want %v", id, err == nil, want)
+		}
+	}
+}
+
+func TestWatchStore_DeferMovesOnlyNextCheck(t *testing.T) {
+	w := newTestWatch(t)
+	ctx := context.Background()
+	if err := w.Enroll(ctx, "pr", "o/r", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := w.Get(ctx, "pr.1")
+	e.NextCheck = time.Now().Add(-time.Minute)
+	if err := w.ForceUpdate(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Defer(ctx, "pr.1", 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	ready, _ := w.ScanReady(ctx)
+	if len(ready) != 0 {
+		t.Fatal("deferred entry must not be ready")
+	}
+	got, _ := w.Get(ctx, "pr.1")
+	if got.BackoffNs != e.BackoffNs || !got.LastSeen.Equal(e.LastSeen) {
+		t.Fatal("Defer must not touch backoff or last_seen")
+	}
+	db, _ := sql.Open("sqlite", ":memory:")
+	closed, _ := bus.NewWatchStore(db)
+	db.Close()
+	if err := closed.Defer(ctx, "pr.1", time.Minute); err == nil {
+		t.Fatal("want error on a closed db")
 	}
 }

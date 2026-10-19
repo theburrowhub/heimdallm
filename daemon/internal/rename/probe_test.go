@@ -224,3 +224,34 @@ func TestRenameProbe_NonAPIError_DoesNotDispatch(t *testing.T) {
 		t.Errorf("dispatcher.calls = %d, want 0 on transport error", dispatcher.calls)
 	}
 }
+
+// prefetchingCanonical is a fakeCanonical that can batch, like the GitHub
+// client: the probe must hand it every repository of the pass up front.
+type prefetchingCanonical struct {
+	fakeCanonical
+	prefetched [][]string
+}
+
+func (f *prefetchingCanonical) PrefetchRepoMeta(repos []string) {
+	f.prefetched = append(f.prefetched, append([]string(nil), repos...))
+}
+
+func TestProbe_PrefetchesEveryRepoOncePerTick(t *testing.T) {
+	probe := &prefetchingCanonical{fakeCanonical: fakeCanonical{results: map[string]canonicalResult{
+		"org/a": {canonical: "org/a"}, "org/old": {canonical: "org/new"}, "org/nm": {canonical: "org/nm"},
+	}}}
+	disp := &fakeDispatcher{}
+	p := rename.NewProbe(rename.ProbeDeps{
+		Probe:        probe,
+		Dispatcher:   disp,
+		Repos:        func() []string { return []string{"org/a", "org/old"} },
+		NonMonitored: func() []string { return []string{"org/nm"} },
+	})
+	p.Tick(context.Background())
+	if len(probe.prefetched) != 1 || len(probe.prefetched[0]) != 3 {
+		t.Fatalf("prefetched = %v, want one batch with all three repos", probe.prefetched)
+	}
+	if disp.calls != 1 || disp.gotPairs[0] != [2]string{"org/old", "org/new"} {
+		t.Fatalf("dispatches = %v", disp.gotPairs)
+	}
+}

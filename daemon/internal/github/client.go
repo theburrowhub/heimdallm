@@ -93,6 +93,15 @@ type Client struct {
 	// diffs, when set, persists diffs keyed by the commits they span. A diff
 	// between two fixed commits never changes, so it is never re-downloaded.
 	diffs atomic.Pointer[DiffCacheBackend]
+	// inventory holds the last PR inventory; snapshots the hydrated PRs it and
+	// the batched Tier 3 lookups produced, for consumers inside their
+	// freshness window.
+	inventory inventoryState
+	snapshots snapshotCache
+	// teams caches the user's team memberships per organization.
+	teams teamCache
+	// repoMeta holds batched repository lookups (canonical name, archived).
+	repoMeta repoMetaCache
 
 	// The authenticated login is immutable for the lifetime of a client (the
 	// token is immutable too). Cache it after the first successful lookup so
@@ -481,7 +490,9 @@ func (c *Client) FetchPRsToReview() ([]*PullRequest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: resolve user: %w", err)
 	}
-	prs, err := c.fetchByQualifier(username, "review-requested", nil) // no repo filter
+	// Always fresh: this poll is what notices a new review request.
+	inv, invErr := c.FetchPRInventory(0)
+	prs, err := c.prsForQualifier(inv, invErr, username, qualifierReviewRequested)
 	if err != nil {
 		return nil, err
 	}
@@ -518,34 +529,6 @@ func githubLoginsEqual(a, b string) bool {
 
 func normalizeGitHubLoginForCompare(login string) string {
 	return strings.TrimSpace(strings.TrimLeft(login, "@"))
-}
-
-// FetchPRs fetches all open PRs where the user is reviewer, assignee, or author.
-// Used for the dashboard display only — NOT for triggering AI reviews.
-func (c *Client) FetchPRs(repos []string) ([]*PullRequest, error) {
-	username, err := c.AuthenticatedUser()
-	if err != nil {
-		return nil, fmt.Errorf("github: resolve user: %w", err)
-	}
-
-	qualifiers := []string{"review-requested", "assignee", "author"}
-	seen := make(map[int64]struct{})
-	var all []*PullRequest
-
-	for _, q := range qualifiers {
-		prs, err := c.fetchByQualifier(username, q, repos)
-		if err != nil {
-			slog.Warn("github: fetch PRs partial error", "qualifier", q, "err", err)
-			continue
-		}
-		for _, pr := range prs {
-			if _, dup := seen[pr.ID]; !dup {
-				seen[pr.ID] = struct{}{}
-				all = append(all, pr)
-			}
-		}
-	}
-	return all, nil
 }
 
 func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([]*PullRequest, error) {
@@ -857,6 +840,9 @@ func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
 // Non-200/404 responses are treated as errors and the caller should assume the
 // repo is still active (fail-open, so transient API errors do not purge repos).
 func (c *Client) IsRepoArchived(repo string) (bool, error) {
+	if m, ok := c.cachedRepoMeta(repo); ok {
+		return m.archived, nil
+	}
 	path := fmt.Sprintf("/repos/%s", repo)
 	resp, err := c.do("GET", path, "application/vnd.github+json")
 	if err != nil {
@@ -934,6 +920,7 @@ func (c *Client) RateLimit() (*RateLimit, error) {
 type PRHeadInfo struct {
 	HeadSHA            string
 	RequestedReviewers []string // lowercased logins
+	RequestedTeams     []Team
 }
 
 // ReviewRequestedFor reports whether login (case-insensitive) is still in the
@@ -996,7 +983,7 @@ func (c *Client) GetPRHeadInfo(repo string, number int) (PRHeadInfo, error) {
 	for i, u := range pr.RequestedReviewers {
 		logins[i] = strings.ToLower(u.Login)
 	}
-	return PRHeadInfo{HeadSHA: pr.Head.SHA, RequestedReviewers: logins}, nil
+	return PRHeadInfo{HeadSHA: pr.Head.SHA, RequestedReviewers: logins, RequestedTeams: pr.RequestedTeams}, nil
 }
 
 // PRSnapshot is the subset of PR fields Tier 3's guard evaluator needs.
@@ -1015,6 +1002,8 @@ type PRSnapshot struct {
 	// uses it to tell an updated_at bump (CI, comments, peer reviews) apart
 	// from an actual re-review request without walking the timeline.
 	RequestedReviewers []string
+	// RequestedTeams are the pending team requests (see PullRequest.RequestedTeams).
+	RequestedTeams []Team
 }
 
 // ReviewRequestedFor reports whether login (case-insensitive, leading "@"
@@ -1062,6 +1051,7 @@ func (c *Client) GetPRSnapshot(repo string, number int) (*PRSnapshot, error) {
 		UpdatedAt:          pr.UpdatedAt,
 		HeadSHA:            pr.Head.SHA,
 		RequestedReviewers: reviewers,
+		RequestedTeams:     pr.RequestedTeams,
 	}, nil
 }
 
@@ -1083,12 +1073,9 @@ func (c *Client) GetPR(repo string, number int) (*PullRequest, error) {
 	if err := json.Unmarshal(body, &pr); err != nil {
 		return nil, fmt.Errorf("github: get PR: unmarshal: %w", err)
 	}
-	// Populate the Repo field the same way FetchPRs does.
-	if pr.Head.Repo.FullName != "" {
-		pr.Repo = pr.Head.Repo.FullName
-	} else {
-		pr.Repo = repo
-	}
+	// The PR lives in the repository it was fetched from. head.repo is the
+	// fork for a cross-repository PR, and reviews posted there would miss it.
+	pr.Repo = repo
 	return &pr, nil
 }
 
@@ -1336,10 +1323,30 @@ type TimelineEvent struct {
 // error (never a partial slice) when the pagination cap is hit, so
 // callers can fail closed instead of acting on a truncated timeline
 // (#519).
+//
+// The events are read through GraphQL, filtered server-side to the two event
+// types and paged backwards only until the most recent relevant one — the
+// only event the caller decides on. The REST walk over every timeline event
+// remains as the fallback when GraphQL fails. A request to one of login's
+// teams counts as a request for login.
 func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login string) ([]TimelineEvent, error) {
 	if login == "" {
 		return nil, fmt.Errorf("github: GetPRTimelineEventsForReviewer: empty login")
 	}
+	events, err := c.timelineEventsGraphQL(repo, number, login)
+	if err == nil {
+		return events, nil
+	}
+	var rl *RateLimitError
+	if errors.As(err, &rl) {
+		return nil, err
+	}
+	slog.Warn("github: GraphQL timeline failed, walking the REST timeline", "repo", repo, "pr", number, "err", err)
+	return c.restTimelineEventsForReviewer(repo, number, login)
+}
+
+func (c *Client) restTimelineEventsForReviewer(repo string, number int, login string) ([]TimelineEvent, error) {
+	id := c.ReviewerIdentityFor(login, repo)
 	out := []TimelineEvent{}
 	for page := 1; page <= maxPaginationPages; page++ {
 		path := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=%d&page=%d", repo, number, perPage, page)
@@ -1362,6 +1369,9 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			RequestedReviewer *struct {
 				Login string `json:"login"`
 			} `json:"requested_reviewer,omitempty"`
+			RequestedTeam *struct {
+				Slug string `json:"slug"`
+			} `json:"requested_team,omitempty"`
 			DismissedReview *struct {
 				User struct {
 					Login string `json:"login"`
@@ -1376,7 +1386,9 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 		for _, ev := range raw {
 			switch ev.Event {
 			case "review_requested":
-				if ev.RequestedReviewer != nil && strings.EqualFold(ev.RequestedReviewer.Login, login) {
+				direct := ev.RequestedReviewer != nil && strings.EqualFold(ev.RequestedReviewer.Login, login)
+				team := ev.RequestedTeam != nil && teamRequested([]Team{{Slug: ev.RequestedTeam.Slug}}, id)
+				if direct || team {
 					out = append(out, TimelineEvent{
 						Event:     ev.Event,
 						Actor:     ev.Actor.Login,
@@ -1416,12 +1428,7 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			// kept total (a strict weak ordering): two same-second events of
 			// the same type compare as equal so the stable sort preserves
 			// their input order, rather than reporting both i<j and j<i.
-			sort.SliceStable(out, func(i, j int) bool {
-				if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-					return out[i].Event == "review_dismissed" && out[j].Event == "review_requested"
-				}
-				return out[i].CreatedAt.Before(out[j].CreatedAt)
-			})
+			sortTimelineEvents(out)
 			return out, nil
 		}
 	}

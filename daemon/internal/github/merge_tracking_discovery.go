@@ -9,8 +9,7 @@ import (
 // TrackedPR is a PR the authenticated user is on the hook for, tagged with the
 // search qualifier that found it.
 //
-// FetchPRs deduplicates by pr.ID and throws that distinction away; merge
-// tracking needs it, because "I wrote this" and "someone assigned this to me"
+// Merge tracking needs that distinction, because "I wrote this" and "someone assigned this to me"
 // are different levels of licence to act on a branch.
 type TrackedPR struct {
 	*PullRequest
@@ -37,12 +36,16 @@ func (c *Client) FetchMergeTrackingPRs(includeAssigned bool) ([]*TrackedPR, erro
 		qualifiers = append(qualifiers, "assignee")
 	}
 
+	// One shared inventory for both qualifiers: a snapshot the review poll
+	// fetched moments ago costs nothing here.
+	inv, invErr := c.FetchPRInventory(c.inventoryReuse())
+
 	byID := make(map[int64]*TrackedPR)
 	order := make([]int64, 0, 64)
 	var errs []error
 
 	for _, q := range qualifiers {
-		prs, err := c.fetchByQualifier(username, q, nil)
+		prs, err := c.prsForQualifier(inv, invErr, username, q)
 		if err != nil {
 			// One failing qualifier must not wipe the other: an author-only
 			// result is still useful, and the caller sees the joined error.

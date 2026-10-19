@@ -13,6 +13,13 @@ type Repo struct {
 	FullName string `json:"full_name"`
 }
 
+// Team is a team review request. The Pulls API omits the organization (a team
+// always belongs to the PR's repository owner), so Org may be empty.
+type Team struct {
+	Slug string `json:"slug"`
+	Org  string `json:"-"`
+}
+
 type Branch struct {
 	Repo Repo   `json:"repo"`
 	SHA  string `json:"sha"`
@@ -37,6 +44,10 @@ type PullRequest struct {
 	// bot is still a pending reviewer before enqueuing a review — the search
 	// index can lag behind the actual requested_reviewers list.
 	RequestedReviewers []User `json:"requested_reviewers"`
+	// RequestedTeams are the pending team review requests (Pulls API and the
+	// GraphQL inventory). A request to a team the user belongs to is a review
+	// request for the user.
+	RequestedTeams []Team `json:"requested_teams"`
 	// Assignees is populated by both the Search Issues API and the Pulls API.
 	// Merge tracking needs it to decide whether the authenticated user is on
 	// the hook for a PR they did not author.
@@ -48,6 +59,12 @@ type PullRequest struct {
 	RepositoryURL string `json:"repository_url"`
 	// Populated client-side from RepositoryURL or Head.Repo.FullName
 	Repo string `json:"-"`
+	// HeadRepoFullName is the head repository from the GraphQL inventory
+	// (differs from Repo for a fork PR).
+	HeadRepoFullName string `json:"-"`
+	// HydratedAt is when the GraphQL inventory or a batched snapshot read this
+	// PR live. Zero for a REST response.
+	HydratedAt time.Time `json:"-"`
 }
 
 // ReviewRequestedFor reports whether the current Pulls API representation
