@@ -637,7 +637,7 @@ func (p *Pipeline) shouldReReviewNewCommitsAsRequestedReviewer(pr *github.PullRe
 	if prevReview.HeadSHA == "" || prevReview.HeadSHA == pr.Head.SHA {
 		return false
 	}
-	info, err := p.reviewers.GetPRHeadInfo(pr.Repo, pr.Number)
+	info, err := p.requestedReviewers(pr)
 	if err != nil {
 		slog.Warn("pipeline: requested-reviewer lookup failed, keeping SHA skip (fail-closed)",
 			"repo", pr.Repo, "pr", pr.Number, "err", err)
@@ -648,6 +648,21 @@ func (p *Pipeline) shouldReReviewNewCommitsAsRequestedReviewer(pr *github.PullRe
 		return info.RequestedFor(resolver.ReviewerIdentityFor(p.botLogin, pr.Repo))
 	}
 	return info.ReviewRequestedFor(p.botLogin)
+}
+
+// requestedReviewers returns the PR's pending review requests. A PR the caller
+// hydrated moments ago (the review worker's Pulls or GraphQL read) already
+// carries them — RequestedReviewers is non-nil exactly then — so asking the
+// Pulls API again for the same fields is skipped.
+func (p *Pipeline) requestedReviewers(pr *github.PullRequest) (github.PRHeadInfo, error) {
+	if pr.RequestedReviewers != nil && pr.Head.SHA != "" {
+		logins := make([]string, len(pr.RequestedReviewers))
+		for i, u := range pr.RequestedReviewers {
+			logins[i] = strings.ToLower(u.Login)
+		}
+		return github.PRHeadInfo{HeadSHA: pr.Head.SHA, RequestedReviewers: logins, RequestedTeams: pr.RequestedTeams}, nil
+	}
+	return p.reviewers.GetPRHeadInfo(pr.Repo, pr.Number)
 }
 
 // reviewWasReanchoredToHead returns true when prevReview already covers the

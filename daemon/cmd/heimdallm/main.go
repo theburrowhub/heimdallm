@@ -2890,6 +2890,32 @@ func (c *cachingArchivedChecker) IsRepoArchived(repo string) (bool, error) {
 	return archived, nil
 }
 
+// repoMetaPrefetcher resolves many repositories' metadata in batched requests.
+type repoMetaPrefetcher interface {
+	PrefetchRepoMeta(repos []string)
+}
+
+// PrefetchRepoMeta batches the lookups of every repo whose cached answer is
+// missing or expired, when the wrapped checker can batch.
+func (c *cachingArchivedChecker) PrefetchRepoMeta(repos []string) {
+	pf, ok := c.inner.(repoMetaPrefetcher)
+	if !ok {
+		return
+	}
+	now := time.Now()
+	var stale []string
+	c.mu.Lock()
+	for _, r := range repos {
+		if e, hit := c.cache[r]; !hit || now.Sub(e.at) >= c.ttl {
+			stale = append(stale, r)
+		}
+	}
+	c.mu.Unlock()
+	if len(stale) > 0 {
+		pf.PrefetchRepoMeta(stale)
+	}
+}
+
 // githubCacheNamespace fingerprints the token for the persistent GitHub
 // caches. Only a prefix of the SHA-256 is kept: it separates accounts, it is
 // not a credential.
@@ -2920,6 +2946,11 @@ func sendDiscoveryRepos(
 	repos := discovery.MergeRepos(cfg.StaticRepos, cfg.ConfiguredRepos, discovered, cfg.NonMonitored)
 
 	if archiveChecker != nil {
+		// One batched lookup for every repository the cache cannot answer,
+		// instead of one GET /repos/{r} each inside FilterArchived.
+		if pf, ok := archiveChecker.(repoMetaPrefetcher); ok {
+			pf.PrefetchRepoMeta(repos)
+		}
 		active, archived := discovery.FilterArchived(repos, archiveChecker, discovered)
 		for _, r := range archived {
 			slog.Warn("tier1: dropping archived/deleted repo from active set", "repo", r)

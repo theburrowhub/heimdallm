@@ -14,6 +14,11 @@ import (
 func timelineServer(t *testing.T, raw string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/graphql" {
+			// No GraphQL: these cases pin the REST fallback walk.
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path != "/repos/org/repo/issues/7/timeline" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
