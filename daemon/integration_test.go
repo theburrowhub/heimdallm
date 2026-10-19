@@ -20,6 +20,15 @@ import (
 func fakeGHServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/user" {
+			json.NewEncoder(w).Encode(map[string]string{"login": "alice"})
+			return
+		}
+		if r.URL.Path == "/graphql" {
+			// No GraphQL here: discovery falls back to the REST search.
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path == "/search/issues" {
 			prs := struct {
 				Items []*gh.PullRequest `json:"items"`
@@ -63,7 +72,7 @@ func TestIntegration_FullPipeline(t *testing.T) {
 	p := pipeline.New(s, ghClient, exec, &noopNotifier{})
 	srv := server.New(s, broker, p, "")
 
-	prs, err := ghClient.FetchPRs([]string{"org/repo"})
+	prs, err := ghClient.FetchPRsToReview()
 	if err != nil {
 		t.Fatalf("fetch prs: %v", err)
 	}

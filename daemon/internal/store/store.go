@@ -324,6 +324,7 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE merge_tracking ADD COLUMN last_activity_at TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE merge_tracking ADD COLUMN attention TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE merge_tracking ADD COLUMN stale_notified_at TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE merge_tracking ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_merge_tracking_repo ON merge_tracking(repo)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_merge_tracking_due ON merge_tracking(phase, cooldown_until)")
 	// A process that died mid-action leaves a row parked in an in-flight phase
@@ -443,6 +444,7 @@ func Open(dsn string) (*Store, error) {
 		backoff_ns INTEGER NOT NULL,
 		last_seen  TEXT NOT NULL
 	)`)
+	ensureGitHubCacheSchema(db)
 	dropIssuePipelineData(db)
 	return &Store{db: db}, nil
 }

@@ -235,3 +235,44 @@ func TestRun_StoresTokenUsage(t *testing.T) {
 		t.Errorf("an agent without usage must get an estimate: %+v", got2)
 	}
 }
+
+// fakeGHHeadDiff records which diff entry point the pipeline used.
+type fakeGHHeadDiff struct {
+	fakeGHCounter
+	atCalls        int
+	plainCalls     int
+	base, headSeen string
+}
+
+func (f *fakeGHHeadDiff) FetchDiff(repo string, number int) (string, error) {
+	f.plainCalls++
+	return f.diff, nil
+}
+
+func (f *fakeGHHeadDiff) FetchDiffAt(repo string, number int, base, head string) (string, error) {
+	f.atCalls++
+	f.base, f.headSeen = base, head
+	return f.diff, nil
+}
+
+func TestRun_FullDiffUsesCommitKeyedFetcher(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	gh := &fakeGHHeadDiff{fakeGHCounter: fakeGHCounter{diff: fileDiff("a.go", "+x")}}
+	p := pipeline.New(s, gh, &fakePromptExec{}, &fakeNotify{})
+	pr := tokenPR("ccccccc3")
+	pr.Base.SHA = "ddddddd4"
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if gh.atCalls != 1 || gh.plainCalls != 0 {
+		t.Fatalf("FetchDiffAt=%d FetchDiff=%d", gh.atCalls, gh.plainCalls)
+	}
+	if gh.base != "ddddddd4" || gh.headSeen != "ccccccc3" {
+		t.Fatalf("keyed on %s...%s", gh.base, gh.headSeen)
+	}
+}

@@ -18,7 +18,13 @@ import (
 // StatusCode=404) means the repo was deleted, not renamed, and is
 // handled separately by the caller (typically a "repo unreachable"
 // SSE event, not a rename).
+//
+// A batched PrefetchRepoMeta answer from the last few minutes is used without
+// a request.
 func (c *Client) GetCanonicalFullName(repo string) (string, error) {
+	if m, ok := c.cachedRepoMeta(repo); ok {
+		return m.canonical, nil
+	}
 	resp, err := c.do("GET", "/repos/"+repo, "application/vnd.github+json")
 	if err != nil {
 		return "", fmt.Errorf("github: get canonical full_name: %w", err)

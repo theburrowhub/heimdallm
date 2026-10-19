@@ -12,7 +12,11 @@ import (
 const (
 	InitialBackoff = 1 * time.Minute
 	MaxBackoff     = 15 * time.Minute
-	EvictAfter     = 1 * time.Hour
+	// EvictAfter is how long an entry with no open PR record is kept. An entry
+	// whose PR is recorded open is never evicted by age: it settles at
+	// MaxBackoff instead. Evicting those only had enrollOpenItems re-enrol them
+	// at InitialBackoff, so an unchanged PR was polled ~7 times an hour forever.
+	EvictAfter = 1 * time.Hour
 )
 
 // ErrWatchNotFound identifies a watch entry that was removed after a state
@@ -171,6 +175,23 @@ func (w *WatchStore) IncreaseBackoff(_ context.Context, key string) error {
 	return nil
 }
 
+// Defer pushes an entry's next check out by d without touching its backoff,
+// so an item already dispatched is not dispatched again on every scan while
+// its check is still queued. The check itself then sets the real schedule.
+func (w *WatchStore) Defer(_ context.Context, key string, d time.Duration) error {
+	next := time.Now().Add(d).Format(timeFormat)
+	if _, err := w.db.Exec(`UPDATE watch_state SET next_check = ? WHERE key = ?`, next, key); err != nil {
+		return fmt.Errorf("watch: defer %s: %w", key, err)
+	}
+	return nil
+}
+
+func (w *WatchStore) hasPRsTable() bool {
+	var n int
+	err := w.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'prs'`).Scan(&n)
+	return err == nil && n > 0
+}
+
 // Delete removes an entry from the watch list.
 func (w *WatchStore) Delete(_ context.Context, key string) error {
 	_, err := w.db.Exec(`DELETE FROM watch_state WHERE key = ?`, key)
@@ -226,11 +247,20 @@ func (w *WatchStore) ScanReady(_ context.Context) ([]WatchEntry, error) {
 	return ready, rows.Err()
 }
 
-// EvictStale removes entries whose LastSeen is older than EvictAfter.
-// Returns the number of entries evicted.
+// EvictStale removes entries that no longer need watching: PRs the store
+// records as no longer open, and entries older than EvictAfter that have no
+// open PR record at all. Without a prs table (a standalone watch database)
+// every entry older than EvictAfter is evicted. Returns the number evicted.
 func (w *WatchStore) EvictStale(_ context.Context) (int, error) {
 	cutoff := time.Now().Add(-EvictAfter).Format(timeFormat)
-	res, err := w.db.Exec(`DELETE FROM watch_state WHERE last_seen < ?`, cutoff)
+	query := `DELETE FROM watch_state WHERE last_seen < ?`
+	args := []any{cutoff}
+	if w.hasPRsTable() {
+		query = `DELETE FROM watch_state WHERE type = 'pr' AND (
+			github_id IN (SELECT github_id FROM prs WHERE state != 'open')
+			OR (last_seen < ? AND github_id NOT IN (SELECT github_id FROM prs WHERE state = 'open')))`
+	}
+	res, err := w.db.Exec(query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("watch: evict stale: %w", err)
 	}

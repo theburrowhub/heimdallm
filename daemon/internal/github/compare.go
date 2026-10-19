@@ -32,10 +32,28 @@ type compareResponse struct {
 // head (force-push, rebase), or the range contains a merge commit (an "Update
 // branch" would otherwise drag the base branch's changes into the diff), or
 // the range is empty.
+//
+// Both commits are fixed, so the answer never changes: with a diff cache
+// attached it is kept — the "not linear" verdict too, as an empty body — and
+// a repeated re-review of the same range costs no request.
 func (c *Client) FetchCompareDiff(repo, base, head string) (diff string, ok bool, err error) {
 	if !commitSHAPattern.MatchString(base) || !commitSHAPattern.MatchString(head) {
 		return "", false, nil
 	}
+	cache := c.diffCache()
+	if cache != nil {
+		if body, hit := cache.GetDiff(compareCacheKey(repo, base, head)); hit {
+			return body, body != "", nil
+		}
+	}
+	diff, ok, err = c.fetchCompareDiff(repo, base, head)
+	if err == nil && cache != nil {
+		cache.PutDiff(compareCacheKey(repo, base, head), diff)
+	}
+	return diff, ok, err
+}
+
+func (c *Client) fetchCompareDiff(repo, base, head string) (diff string, ok bool, err error) {
 	path := fmt.Sprintf("/repos/%s/compare/%s...%s", repo, base, head)
 
 	resp, err := c.do("GET", path, "application/vnd.github+json")

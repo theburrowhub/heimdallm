@@ -537,6 +537,7 @@ func TestSkipIfPeerPublishedEventNamesThePeerAndThePR(t *testing.T) {
 		}
 	}
 }
+
 // Instances on builds older than #756 (≤ v0.8.14) publish a different body:
 // a "## 🤖 Heimdallm AI Review" heading and a "· Reviewed by <name>" footer
 // with no link, where <name> is a configurable reviewer label. Those reviews

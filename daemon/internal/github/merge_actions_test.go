@@ -239,12 +239,17 @@ func TestDisableAutoMerge_TreatsAlreadyDisabledAsSuccess(t *testing.T) {
 	}
 }
 
-// FetchMergeTrackingPRs deduplicates across the two search qualifiers and,
-// unlike FetchPRs, keeps track of which one matched.
+// FetchMergeTrackingPRs deduplicates across the two search qualifiers and
+// keeps track of which one matched. These cases run the REST search fallback
+// (the server has no GraphQL endpoint), which must behave exactly like the
+// GraphQL inventory.
 func TestFetchMergeTrackingPRs_MergesAuthorAndAssigneeFlags(t *testing.T) {
 	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/graphql":
+			http.NotFound(w, r)
+			return
 		case "/user":
 			_, _ = w.Write([]byte(`{"login":"octocat"}`))
 			return
@@ -306,6 +311,10 @@ func TestFetchMergeTrackingPRs_AuthorOnlyWhenAssigneesExcluded(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/user" {
 			_, _ = w.Write([]byte(`{"login":"octocat"}`))
+			return
+		}
+		if r.URL.Path == "/graphql" {
+			http.NotFound(w, r)
 			return
 		}
 		queries = append(queries, r.URL.Query().Get("q"))

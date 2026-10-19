@@ -703,7 +703,9 @@ func (s *Store) SetMergeTrackingExcluded(prID int64, excluded bool) error {
 // "re-evaluate now" action in the UI and CLI.
 func (s *Store) ClearMergeTrackingCooldown(prID int64) error {
 	_, err := s.db.Exec(
-		"UPDATE merge_tracking SET cooldown_until = '', updated_at = ? WHERE pr_id = ?",
+		// An explicit re-check also forgets the fingerprint, so it re-reads
+		// the full merge status instead of reusing the last decision.
+		"UPDATE merge_tracking SET cooldown_until = '', fingerprint = '', updated_at = ? WHERE pr_id = ?",
 		time.Now().UTC().Format(sqliteTimeFormat), prID)
 	if err != nil {
 		return fmt.Errorf("store: clear merge tracking cooldown: %w", err)
@@ -760,4 +762,38 @@ func (s *Store) DeleteUntrackedMergeTracking(active []string) (int, error) {
 		return 0, fmt.Errorf("store: delete untracked merge tracking rowsaffected: %w", err)
 	}
 	return int(n), nil
+}
+
+// MergeTrackingFingerprint returns the fingerprint recorded with the row's
+// last full evaluation, or "" when there is none.
+func (s *Store) MergeTrackingFingerprint(prID int64) (string, error) {
+	var fp string
+	err := s.db.QueryRow("SELECT fingerprint FROM merge_tracking WHERE pr_id = ?", prID).Scan(&fp)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("store: merge tracking fingerprint: %w", err)
+	}
+	return fp, nil
+}
+
+// SetMergeTrackingFingerprint records the fingerprint the row was last
+// evaluated against. "" forces the next evaluation to run in full.
+func (s *Store) SetMergeTrackingFingerprint(prID int64, fp string) error {
+	if _, err := s.db.Exec("UPDATE merge_tracking SET fingerprint = ? WHERE pr_id = ?", fp, prID); err != nil {
+		return fmt.Errorf("store: set merge tracking fingerprint: %w", err)
+	}
+	return nil
+}
+
+// DeferMergeTracking moves only the row's next evaluation, keeping its last
+// decision: used when GitHub's state is unchanged since that decision.
+func (s *Store) DeferMergeTracking(prID int64, until time.Time) error {
+	_, err := s.db.Exec("UPDATE merge_tracking SET cooldown_until = ? WHERE pr_id = ?",
+		until.UTC().Format(sqliteTimeFormat), prID)
+	if err != nil {
+		return fmt.Errorf("store: defer merge tracking: %w", err)
+	}
+	return nil
 }
