@@ -239,7 +239,11 @@ func stderrIsTerminal() bool {
 // exists. It checks the network at most once per auto_update.check_interval
 // and never applies anything.
 func maybeHintUpdate(cmd *cobra.Command, version string) {
-	if isDevVersion(version) || hintSkipped[cmd.Name()] || !stderrIsTerminal() {
+	maybeHint(cmd, version, stderrIsTerminal())
+}
+
+func maybeHint(cmd *cobra.Command, version string, interactive bool) {
+	if isDevVersion(version) || hintSkipped[cmd.Name()] || !interactive {
 		return
 	}
 	cfg, _ := loadCLIConfig()

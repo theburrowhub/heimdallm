@@ -150,8 +150,9 @@ func TestMaybeHintUpdateGuards(t *testing.T) {
 	skipped := &cobra.Command{Use: "dashboard"}
 	root.AddCommand(status, skipped)
 
-	maybeHintUpdate(skipped, "0.10.4")
-	maybeHintUpdate(status, "dev")
+	maybeHint(skipped, "0.10.4", true)
+	maybeHint(status, "dev", true)
+	maybeHint(status, "0.10.4", false)
 	if calls != 0 {
 		t.Fatalf("guards failed, calls=%d", calls)
 	}
@@ -160,18 +161,20 @@ func TestMaybeHintUpdateGuards(t *testing.T) {
 	if err := saveCLIConfig(&cliConfig{AutoUpdate: &autoUpdateConfig{Enabled: &off}}); err != nil {
 		t.Fatal(err)
 	}
-	maybeHintUpdate(status, "0.10.4")
+	maybeHint(status, "0.10.4", true)
 	if calls != 0 {
 		t.Fatalf("disabled config should skip, calls=%d", calls)
 	}
 
-	// With the default config the outcome depends on whether stderr is a TTY;
-	// either way it must not panic.
 	if err := saveCLIConfig(&cliConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	status.SetContext(context.Background())
-	maybeHintUpdate(status, "0.10.4")
+	status.SetErr(&bytes.Buffer{})
+	maybeHint(status, "0.10.4", true)
+	if calls != 1 {
+		t.Fatalf("enabled config should check once, calls=%d", calls)
+	}
 	_ = stderrIsTerminal()
 }
 
