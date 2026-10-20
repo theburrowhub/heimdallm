@@ -8,8 +8,8 @@
       "total": 17833
     },
     "cli": {
-      "covered": 1970,
-      "total": 2965
+      "covered": 2318,
+      "total": 3330
     },
     "flutter": {
       "covered": 14445,
