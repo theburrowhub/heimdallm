@@ -49,6 +49,11 @@ func NewRootCmd(version string) *cobra.Command {
 		Short:   "CLI client for the Heimdallm daemon",
 		Long:    "Monitor and interact with the Heimdallm daemon from the terminal.",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// update/version never talk to the daemon; skip instance and
+			// token resolution so they work with no daemon configured.
+			if cmd.Parent() == cmd.Root() && (cmd.Name() == "update" || cmd.Name() == "version") {
+				return
+			}
 			// Resolution priority:
 			// 1. --token / --host flags (already in flagToken/flagHost)
 			// 2. Environment variables
@@ -104,6 +109,9 @@ func NewRootCmd(version string) *cobra.Command {
 			ctx = context.WithValue(ctx, instanceKey, resolvedInstance)
 			cmd.SetContext(ctx)
 		},
+		PersistentPostRun: func(cmd *cobra.Command, args []string) {
+			maybeHintUpdate(cmd, version)
+		},
 		SilenceUsage: true,
 	}
 
@@ -129,6 +137,8 @@ func NewRootCmd(version string) *cobra.Command {
 		newInstancesCmd(),
 		newRoutingCmd(),
 		newPropagateConfigCmd(),
+		newUpdateCmd(version),
+		newVersionCmd(version),
 	)
 
 	return root
