@@ -28,6 +28,9 @@ type cliConfig struct {
 
 	// Instances are the registered daemons, keyed by id.
 	Instances map[string]cliInstance `toml:"instances,omitempty"`
+
+	// AutoUpdate tunes the update check. Absent means the defaults.
+	AutoUpdate *autoUpdateConfig `toml:"auto_update,omitempty"`
 }
 
 // cliInstance is one daemon the CLI can talk to.

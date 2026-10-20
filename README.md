@@ -127,6 +127,17 @@ brew install theburrowhub/tap/heimdallm-cli
 heimdallm-cli dashboard
 ```
 
+**Updating the CLI.** `heimdallm-cli update` downloads the latest release for your OS/arch, verifies it against the release's `cli-checksums.txt`, and replaces the binary (the previous one is kept as `heimdallm-cli.bak` and restored if the new one fails to start). `heimdallm-cli update --check` or `heimdallm-cli version --check` only report whether a newer release exists. Homebrew installs should use `brew upgrade theburrowhub/tap/heimdallm-cli`. The daemon and the desktop app update on their own; Docker deployments update via `make up-build` or an image pull.
+
+Interactive commands print a one-line notice when a newer release exists (checked at most once per interval, never applied automatically). Tune it in `~/.config/heimdallm/cli.toml`:
+
+```toml
+[auto_update]
+enabled = true          # default; false silences the notice
+check_interval = "24h"  # default
+channel = "stable"      # "stable" (releases only) or "latest" (includes pre-releases)
+```
+
 ### Docker
 
 For headless/server deployment, Heimdallm runs as a Docker container with all four AI CLIs bundled. The repository ships Make wrappers around `docker compose` so you don't have to remember the compose path.
