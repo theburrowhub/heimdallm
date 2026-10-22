@@ -1,0 +1,25 @@
+{
+  "name": "codex",
+  "display_name": "Codex",
+  "icon_color": "#10A37F",
+  "fields": [
+    {
+      "key": "model",
+      "type": "select",
+      "label": "Model",
+      "flag": "--model",
+      "options": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark"],
+      "allow_custom": true,
+      "empty_label": "CLI default"
+    },
+    {
+      "key": "approval_mode",
+      "type": "select",
+      "label": "--ask-for-approval",
+      "description": "When Codex asks before running a command. Legacy values (full-auto, auto-edit, suggest) are translated to the current ones.",
+      "flag": "--ask-for-approval",
+      "options": ["never", "on-request", "on-failure", "untrusted", "full-auto", "auto-edit", "suggest"],
+      "empty_label": "CLI default"
+    }
+  ]
+}

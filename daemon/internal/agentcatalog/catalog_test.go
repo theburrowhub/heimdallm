@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/heimdallm/daemon/internal/agentschema"
+	"github.com/heimdallm/daemon/internal/executor"
 )
 
 type fakeFS map[string]bool
@@ -398,5 +401,60 @@ func TestCappedBuffer(t *testing.T) {
 	}
 	if b.String() != "abcde" {
 		t.Errorf("buffer = %q, want the first 5 bytes", b.String())
+	}
+}
+
+func TestScan_ReportsCustomAgentsWithoutProbingThem(t *testing.T) {
+	installed := map[string]string{"aider": "/home/u/.local/bin/aider"}
+	d := testDetector("/home/u", installed, fakeFS{}, map[string]string{})
+	var runs atomic.Int32
+	d.Run = func(context.Context, string, ...string) (string, error) {
+		runs.Add(1)
+		return "", errors.New("must not run")
+	}
+	d.Custom = func() []Entry {
+		return []Entry{
+			{ID: "aider", Name: "Aider", Kind: KindCustom, ConfigAgent: "aider", Binary: "aider"},
+			{ID: "ghost", Name: "ghost", Kind: KindCustom, ConfigAgent: "ghost", Binary: "ghost-cli"},
+		}
+	}
+	got := byID(d.Scan(context.Background()))
+	a := got["aider"]
+	if a.Kind != KindCustom || !a.Installed || !a.Configured || !a.Executable || a.Binary != "aider" || a.Path != "~/.local/bin/aider" {
+		t.Fatalf("aider = %+v", a)
+	}
+	if a.Version != "" {
+		t.Fatalf("a custom agent's binary must not be probed, got version %q", a.Version)
+	}
+	if g := got["ghost"]; g.Installed || !g.Configured {
+		t.Fatalf("ghost = %+v", g)
+	}
+	if len(got) != len(Catalog)+2 {
+		t.Fatalf("scan returned %d agents, want %d", len(got), len(Catalog)+2)
+	}
+	if n := runs.Load(); n != 0 {
+		t.Fatalf("the scan ran %d probes; only built-in agents are probed", n)
+	}
+}
+
+func TestCustomEntriesFollowTheExecutorRegistry(t *testing.T) {
+	schema, err := agentschema.Parse([]byte(`{"display_name":"Aider","fields":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := agentschema.Parse([]byte(`{"fields":[]}`))
+	if err := executor.SetCustomAgents([]executor.CustomAgent{
+		{Name: "aider", Binary: "aider", Schema: schema},
+		{Name: "tool", Binary: "tool-cli", Schema: plain},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = executor.SetCustomAgents(nil) })
+	entries := CustomEntries()
+	if len(entries) != 2 || entries[0].Name != "Aider" || entries[1].Name != "tool" || entries[1].Binary != "tool-cli" || entries[0].Kind != KindCustom {
+		t.Fatalf("CustomEntries = %+v", entries)
+	}
+	if NewDetector().Custom == nil {
+		t.Fatal("the real detector reports custom agents")
 	}
 }

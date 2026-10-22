@@ -1,0 +1,25 @@
+{
+  "name": "gemini",
+  "display_name": "Gemini CLI",
+  "icon_color": "#4285F4",
+  "fields": [
+    {
+      "key": "model",
+      "type": "select",
+      "label": "Model",
+      "flag": "--model",
+      "options": ["gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
+      "allow_custom": true,
+      "empty_label": "CLI default"
+    },
+    {
+      "key": "approval_mode",
+      "type": "select",
+      "label": "--approval-mode",
+      "description": "How Gemini approves tool calls. yolo is never offered: it removes every approval prompt.",
+      "flag": "--approval-mode",
+      "options": ["default", "auto_edit", "plan"],
+      "empty_label": "CLI default"
+    }
+  ]
+}

@@ -632,6 +632,110 @@ startup or discarding unrelated stored settings. When execution falls back to a
 different CLI, provider-specific options from the unavailable primary are not
 forwarded.
 
+### Agent schemas and custom agents
+
+Every agent describes its options with a **schema**: the fields its settings
+form shows (dropdowns, toggles, numbers and text), their types, defaults,
+allowed values and the CLI flag each one sets. The GUI and the TUI render each
+agent's settings from its schema, and the daemon validates what it stores
+against it. `GET /agent-schemas` returns every schema; `GET
+/agent-schemas/{name}` returns one.
+
+The built-in agents (`claude`, `codex`, `gemini`, `copilot`, `cursor_cli`,
+`opencode`, `openrouter`) ship their schemas inside the daemon. An upgrade
+updates them (new models, new options) and leaves your values in `config.toml`
+untouched. Their command lines are still built by Heimdallm itself, with the
+safeguards described above.
+
+#### Custom agents
+
+Any other CLI that takes the review prompt on stdin and prints the review JSON
+can be added as a **custom agent**. The `binary` key is what makes an
+`[ai.agents.<name>]` table a custom agent:
+
+```toml
+[ai.agents.aider]
+binary      = "aider"               # an executable on the daemon's PATH
+schema_path = "aider.schema.json"   # next to config.toml (or inline: schema = { … })
+model       = "gpt-4o"              # option values sit next to the shared settings
+auto_commits = true
+edit_format  = "diff"
+extra_flags  = "--verbose"          # flags the schema does not cover
+```
+
+```json
+{
+  "display_name": "Aider",
+  "icon_color": "#6B7FFF",
+  "fields": [
+    {"key": "model", "type": "select", "label": "Model", "flag": "--model",
+     "options": ["gpt-4o", "claude-sonnet-4-6", "deepseek-chat"], "default": "gpt-4o"},
+    {"key": "auto_commits", "type": "bool", "label": "--auto-commits",
+     "flag": "--auto-commits", "false_flag": "--no-auto-commits", "default": true},
+    {"key": "edit_format", "type": "select", "label": "--edit-format",
+     "flag": "--edit-format", "options": ["whole", "diff", "udiff"], "default": "diff"}
+  ]
+}
+```
+
+| Field attribute | Meaning |
+|---|---|
+| `key` | Where the value is stored under `[ai.agents.<name>]`. `prompt`, `extra_flags`, `execution_timeout`, `review_limits`, `binary`, `schema`, `schema_path` and `options` are reserved. `model` is the shared model setting. |
+| `type` | `select`, `bool`, `number` or `text` |
+| `label`, `description` | What the settings form shows |
+| `flag` | The CLI option the value is passed with |
+| `false_flag` | For a `bool` that is on by default: the flag passed when it is turned off |
+| `options`, `allow_custom`, `empty_label` | A `select`'s values; `allow_custom` turns them into suggestions |
+| `default` | The value used until you set one |
+| `min`, `max` | Bounds of a `number` |
+| `warning` | A dangerous `bool`: the app and the API may only turn it off |
+
+A custom agent's command line is built from its schema: `select` and `text`
+values become `<flag> <value>` when not empty, a `number` becomes `<flag>
+<value>` when not zero, a `bool` becomes `<flag>` when on (or `<false_flag>`
+when off). Its `extra_flags` may only contain flags, with values attached as
+`--flag=value`, and never a flag the schema already sets.
+
+**Security model.** A custom agent runs an executable of your choosing and
+reads a pull request's content on stdin, so:
+
+- Defining one (its `binary` and schema) is a `config.toml` decision, like
+  `dangerously_skip_perms`. `PATCH /config` can change its option values,
+  validated against its schema, but never its `binary`, `schema` or
+  `schema_path`. Its `extra_flags` are a `config.toml` decision too: Heimdallm
+  cannot know which flags of an arbitrary CLI turn off its sandbox or
+  approvals. An option marked `warning` can only be turned off over HTTP.
+- The app can create, edit and delete custom agents (`PUT` and `DELETE
+  /agent-schemas/{name}`) only when `config.toml` opts in. The API cannot change
+  this flag. Without it, the app's editor generates the JSON schema and the
+  TOML to paste into `config.toml` instead. The opt-in also lets the app change
+  a custom agent's `extra_flags`.
+
+  **Turning it on hands command execution, as the daemon's user, to anyone who
+  can reach the API** — including everyone who can open the web UI of a Docker
+  deployment, whose proxy adds the API token to every request. A custom agent's
+  schema decides the arguments its binary gets, and many ordinary programs can
+  run a command when given the right arguments. Enable it only where the
+  people who can reach the API are trusted to run programs on that machine.
+
+  ```toml
+  [ai]
+  allow_custom_agents_api = true
+  ```
+
+- `binary` must be a bare executable name found on PATH: no paths. Shells and
+  interpreters (`sh`, `bash`, `python`, `node`, `env`, …) are refused, because
+  they would execute the prompt. This list catches mistakes; it is not a
+  sandbox, so it does not make the API opt-in safe.
+- `schema_path` must stay inside the directory of `config.toml`.
+- Custom agents only review: they run in an empty, throwaway workspace and
+  never see the repository checkout. They do not resolve merge conflicts and
+  the flow assistant never drafts with them.
+
+A custom agent can be picked as a primary or fallback agent, and in review
+flows, like any built-in one. One that is still selected somewhere cannot be
+deleted.
+
 ### Review prompts
 
 The `prompt` field picks the agent profile used when reviewing pull requests.

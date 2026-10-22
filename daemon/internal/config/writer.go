@@ -137,13 +137,32 @@ func ReadTOMLMap(path string) (map[string]any, error) {
 // Validation and structural errors are wrapped in *ValidationError so callers
 // can use errors.As to distinguish 400 (bad input) from 500 (infra failure).
 func ValidateMap(m map[string]any) error {
+	return ValidateMapAt(m, "")
+}
+
+// ValidateMapAt is ValidateMap for a map that will be written to path: a
+// custom agent's schema_path is resolved next to it, exactly as Load will
+// resolve it after the write. The map is projected the way Load projects a
+// file, so a custom agent's option values are validated against its schema.
+func ValidateMapAt(m map[string]any, path string) error {
+	known, err := projectKnownConfigMap(m)
+	if err != nil {
+		return &ValidationError{Err: fmt.Errorf("config: invalid config structure: %w", err)}
+	}
 	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(m); err != nil {
+	if err := toml.NewEncoder(&buf).Encode(known); err != nil {
 		return fmt.Errorf("config: encode map to TOML: %w", err)
 	}
 	var cfg Config
 	if err := toml.Unmarshal(buf.Bytes(), &cfg); err != nil {
 		return &ValidationError{Err: fmt.Errorf("config: invalid config structure: %w", err)}
+	}
+	configDir := ""
+	if path != "" {
+		configDir = filepath.Dir(path)
+	}
+	if err := cfg.resolveCustomAgentSchemas(configDir); err != nil {
+		return &ValidationError{Err: err}
 	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {

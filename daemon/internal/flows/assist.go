@@ -31,8 +31,9 @@ var noDraftAgents = map[string]bool{"opencode": true}
 
 // CanDraft reports whether the assistant may run agent: a CLI agent (HTTP
 // agents only run reviews) whose tool use the daemon does not leave open.
+// Custom agents only review: Heimdallm cannot know what their tools do.
 func CanDraft(agent string) bool {
-	return !executor.IsHTTPOnly(agent) && !noDraftAgents[agent]
+	return !executor.IsHTTPOnly(agent) && !noDraftAgents[agent] && !executor.IsCustomAgent(agent)
 }
 
 // DefaultAssistTimeout bounds one agent run.

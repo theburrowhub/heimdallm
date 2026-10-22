@@ -27,6 +27,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/activity"
 	"github.com/heimdallm/daemon/internal/agentcatalog"
+	"github.com/heimdallm/daemon/internal/agentschema"
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
@@ -334,6 +335,16 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		slog.Error("config load failed", "path", cfgPath, "err", err)
+		return 1
+	}
+	if err := agentschema.BuiltinError(); err != nil {
+		slog.Error("built-in agent schemas are broken", "err", err)
+		return 1
+	}
+	// Register the custom agents before anything validates an agent name
+	// against the executor (the store layer, flows, the HTTP handlers).
+	if err := executor.SetCustomAgents(cfg.CustomAgents()); err != nil {
+		slog.Error("config: custom agents rejected", "path", cfgPath, "err", err)
 		return 1
 	}
 
@@ -2085,21 +2096,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 		agentConfigs := make(map[string]map[string]any)
 		for name, ac := range c.AI.Agents {
-			agentConfigs[name] = map[string]any{
-				"model":                  ac.Model,
-				"max_turns":              ac.MaxTurns,
-				"approval_mode":          ac.ApprovalMode,
-				"extra_flags":            ac.ExtraFlags,
-				"prompt":                 ac.PromptID,
-				"effort":                 ac.Effort,
-				"permission_mode":        ac.PermissionMode,
-				"bare":                   ac.Bare,
-				"dangerously_skip_perms": ac.DangerouslySkipPerms,
-				"no_session_persistence": ac.NoSessionPersistence,
-			}
-			if ac.ReviewLimits != nil {
-				agentConfigs[name]["review_limits"] = reviewLimitsMap(*ac.ReviewLimits)
-			}
+			agentConfigs[name] = agentConfigMap(ac)
 		}
 		// Expose first-seen timestamps so the Flutter app can show NEW
 		// badges on auto-discovered repos. Read-only; populated by the
@@ -2272,10 +2269,21 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// next tier1ConfigFn tick, etc.) reflect it right away, whether or not
 		// the pollers restart. The agent-model snapshot follows the swap, so
 		// flows never see a model buildRunOpts lacks.
+		// Swap the custom-agent registry with the config: from here on the
+		// executor runs exactly the agents newCfg declares.
+		if err := executor.SetCustomAgents(newCfg.CustomAgents()); err != nil {
+			return fmt.Errorf("reload: custom agents: %w", err)
+		}
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
+		customAgentsChanged := !sameCustomAgents(cfg, newCfg)
 		cfg = newCfg
 		cfgMu.Unlock()
+		if customAgentsChanged {
+			// GET /cli-agents lists custom agents; show the change without
+			// waiting for the next background scan.
+			go agentCatalog.Refresh(runtimeCtx)
+		}
 		models.refresh(newCfg, agentDetected)
 		// The kill-switches live on the client and limiter, not the pollers,
 		// so they need applying even when nothing restarts.

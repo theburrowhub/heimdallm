@@ -253,7 +253,12 @@ func mergeStoredAgentConfig(cli string, base CLIAgentConfig, payload json.RawMes
 			candidate.ApprovalMode = normalized
 		}
 	}
-	if storeAgentFieldPresent(fields, "extra_flags") {
+	if storeAgentFieldPresent(fields, "extra_flags") && base.IsCustom() {
+		// A custom agent's extra_flags are a config.toml decision (PUT
+		// /config refuses them); never take them from the store.
+		warnIgnoredStoreAgentField(cli, "extra_flags", fmt.Errorf("custom agents take extra_flags from config.toml only"))
+		candidate.ExtraFlags = base.ExtraFlags
+	} else if storeAgentFieldPresent(fields, "extra_flags") {
 		modelPresent := storeAgentFieldPresent(fields, "model")
 		maxTurnsPresent := storeAgentFieldPresent(fields, "max_turns")
 		effortPresent := storeAgentFieldPresent(fields, "effort")

@@ -1,0 +1,16 @@
+{
+  "name": "opencode",
+  "display_name": "OpenCode",
+  "icon_color": "#F5A524",
+  "fields": [
+    {
+      "key": "model",
+      "type": "select",
+      "label": "Model",
+      "description": "provider/model, e.g. anthropic/claude-sonnet-5.",
+      "flag": "-m",
+      "allow_custom": true,
+      "empty_label": "CLI default"
+    }
+  ]
+}

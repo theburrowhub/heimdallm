@@ -532,7 +532,7 @@ func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (ma
 	if err := mutateFn(m); err != nil {
 		return nil, err
 	}
-	if err := config.ValidateMap(m); err != nil {
+	if err := config.ValidateMapAt(m, srv.configPath); err != nil {
 		return nil, err
 	}
 	if err := config.AtomicWriteTOML(srv.configPath, m); err != nil {
@@ -721,6 +721,10 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Put("/cli-agents/{id}/key", srv.handlePutAgentKey)
 	r.Delete("/cli-agents/{id}/key", srv.handleDeleteAgentKey)
 	r.Get("/cli-agents/{id}/usage", srv.handleAgentUsage)
+	r.Get("/agent-schemas", srv.handleListAgentSchemas)
+	r.Get("/agent-schemas/{name}", srv.handleGetAgentSchema)
+	r.Put("/agent-schemas/{name}", srv.handlePutAgentSchema)
+	r.Delete("/agent-schemas/{name}", srv.handleDeleteAgentSchema)
 	r.Get("/quotas", srv.handleQuotas)
 	r.Get("/flows", srv.handleListFlows)
 	r.Post("/flows/simulate", srv.handleSimulateFlow)
@@ -1540,8 +1544,14 @@ func (srv *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	config.NormalizeNumbers(patch)
+	customFlags := customAgentExtraFlagsInPatch(patch)
 
 	result, err := srv.patchTOML(func(m map[string]any) error {
+		if len(customFlags) > 0 && !config.CustomAgentsAPIEnabled(m) {
+			return &config.ValidationError{Err: fmt.Errorf(
+				"config PATCH key %q: a custom agent's extra_flags reach its CLI unchecked, so they are set in config.toml unless [ai] allow_custom_agents_api = true",
+				customFlags[0])}
+		}
 		merged := config.DeepMerge(m, patch)
 		for k, v := range merged {
 			m[k] = v
@@ -3064,7 +3074,7 @@ func validateCanonicalAgentConfigKeys(cli string, agent map[string]any, path str
 
 func validateCanonicalAgentCollection(agents map[string]any, path string) error {
 	for cli, raw := range agents {
-		for _, canonical := range []string{"claude", "gemini", "codex", "opencode"} {
+		for _, canonical := range executor.SupportedCLIs() {
 			if strings.EqualFold(cli, canonical) && cli != canonical {
 				return fmt.Errorf(
 					"config PATCH key %q must use canonical casing %q",
@@ -3078,6 +3088,23 @@ func validateCanonicalAgentCollection(agents map[string]any, path string) error 
 		agent, ok := raw.(map[string]any)
 		if !ok {
 			return fmt.Errorf("config PATCH key %q must be an object", path+"."+cli)
+		}
+		// What an agent runs is defined in config.toml (or through the
+		// opt-in /agent-schemas endpoints), never by a settings PATCH.
+		for key := range agent {
+			for _, def := range config.CustomAgentDefinitionKeys {
+				if strings.EqualFold(key, def) {
+					return fmt.Errorf(
+						"config PATCH key %q cannot be set via PATCH; define custom agents in config.toml or with PUT /agent-schemas/{name}",
+						path+"."+cli+"."+key)
+				}
+			}
+		}
+		if custom, isCustom := executor.CustomAgentFor(cli); isCustom {
+			if err := validateCustomAgentPatchKeys(custom, agent, path+"."+cli); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := validateCanonicalAgentConfigKeys(cli, agent, path+"."+cli); err != nil {
 			return err
@@ -3121,6 +3148,13 @@ func validateCanonicalConfigPatchKeys(patch map[string]any) error {
 		return err
 	}
 	if ok {
+		for key := range ai {
+			if strings.EqualFold(key, "allow_custom_agents_api") {
+				return fmt.Errorf(
+					"config PATCH key %q cannot be set via HTTP API; set it in config.toml",
+					"ai."+key)
+			}
+		}
 		if err := validateCanonicalAgentPatchKeysAtPath(ai, "ai"); err != nil {
 			return err
 		}
@@ -3160,6 +3194,12 @@ func rejectSectionAgentPatch(patch map[string]any, path string) error {
 	)
 }
 
+// customAgentPutKeys are the agent_configs keys PUT /config accepts for a
+// custom agent: the settings every agent shares.
+var customAgentPutKeys = map[string]bool{
+	"model": true, "prompt": true, "execution_timeout": true,
+}
+
 // normalizeAgentConfigsForPut validates the agent_configs payload from PUT
 // /config. The payload must be a JSON object keyed by CLI name (claude, gemini,
 // codex, opencode), where each value is itself an object whose keys are in
@@ -3184,8 +3224,20 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 		if !ok {
 			return nil, fmt.Errorf("agent_configs[%q] must be an object", cli)
 		}
+		custom, isCustom := executor.CustomAgentFor(cli)
 		normalized := make(map[string]any, len(inner))
 		for k, val := range inner {
+			if isCustom && !customAgentPutKeys[k] {
+				// The store layer carries only the settings every agent
+				// shares; a custom agent's options are schema-validated and
+				// written to config.toml by PATCH /config.
+				return nil, fmt.Errorf("agent_configs[%q]: %q is not a shared setting; set custom agent options with PATCH /config", cli, k)
+			}
+			if isCustom && k == "model" {
+				if _, err := custom.Schema.ValidateValue(k, val); err != nil {
+					return nil, fmt.Errorf("agent_configs[%q].model: %v", cli, err)
+				}
+			}
 			if strings.EqualFold(k, dangerousAgentFlagKey) {
 				if k != dangerousAgentFlagKey {
 					return nil, fmt.Errorf(

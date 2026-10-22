@@ -229,7 +229,11 @@ func ValidateFlowID(id string) error {
 
 // ValidateFlow checks one flow and returns its first error.
 func ValidateFlow(id string, f FlowConfig) error {
-	if errs, _ := CheckFlow(id, f); len(errs) > 0 {
+	return validateFlowWith(id, f, executor.ValidateCLIName)
+}
+
+func validateFlowWith(id string, f FlowConfig, validAgent func(string) error) error {
+	if errs, _ := checkFlow(id, f, validAgent); len(errs) > 0 {
 		return fmt.Errorf("config: ai.flows.%s: %s", id, errs[0].Error())
 	}
 	return nil
@@ -237,7 +241,13 @@ func ValidateFlow(id string, f FlowConfig) error {
 
 // CheckFlow validates a flow graph. Errors make the flow unusable; warnings
 // (unreachable nodes) are shown by the editor and ignored by evaluation.
+// Agents are checked against the executor's registry (built-in agents plus
+// the custom agents of the live config).
 func CheckFlow(id string, f FlowConfig) (errs, warns []FlowIssue) {
+	return checkFlow(id, f, executor.ValidateCLIName)
+}
+
+func checkFlow(id string, f FlowConfig, validAgent func(string) error) (errs, warns []FlowIssue) {
 	add := func(node, field, format string, a ...any) {
 		errs = append(errs, FlowIssue{Node: node, Field: field, Message: fmt.Sprintf(format, a...)})
 	}
@@ -292,7 +302,7 @@ func CheckFlow(id string, f FlowConfig) (errs, warns []FlowIssue) {
 				add(nid, "", "has too many conditions (max %d)", maxConditionsPerNode)
 			}
 			for _, ck := range OrderKeys(mapKeys(n.Quota)) {
-				if err := validateQuotaCondition(n.Quota[ck]); err != nil {
+				if err := validateQuotaCondition(n.Quota[ck], validAgent); err != nil {
 					add(nid, "quota."+ck, "%s", err)
 				}
 			}
@@ -313,7 +323,7 @@ func CheckFlow(id string, f FlowConfig) (errs, warns []FlowIssue) {
 			if n.No != "" {
 				add(nid, "no", "an agent step continues through next, not no")
 			}
-			if err := executor.ValidateCLIName(n.Agent); err != nil {
+			if err := validAgent(n.Agent); err != nil {
 				add(nid, "agent", "%s", err)
 			}
 			edge("next", n.Next)
@@ -396,8 +406,8 @@ func reachable(f FlowConfig) map[string]bool {
 	return seen
 }
 
-func validateQuotaCondition(q QuotaCondition) error {
-	if err := executor.ValidateCLIName(q.Agent); err != nil {
+func validateQuotaCondition(q QuotaCondition, validAgent func(string) error) error {
+	if err := validAgent(q.Agent); err != nil {
 		return fmt.Errorf("agent: %w", err)
 	}
 	if !validQuotaWin[q.Window] && !(strings.HasPrefix(q.Window, modelWindowPfx) && len(q.Window) > len(modelWindowPfx) && len(q.Window) <= 128) {
@@ -438,7 +448,7 @@ func (c *Config) validateFlows() error {
 		if err := ValidateFlowID(id); err != nil {
 			return err
 		}
-		if err := ValidateFlow(id, f); err != nil {
+		if err := validateFlowWith(id, f, c.validateAgentName); err != nil {
 			return err
 		}
 	}

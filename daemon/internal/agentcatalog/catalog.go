@@ -24,6 +24,7 @@ const (
 	KindAgent    = "agent"    // a CLI that can run reviews
 	KindIDE      = "ide"      // detected for information; reviews go through another entry
 	KindProvider = "provider" // an API the daemon calls in-process (needs a key)
+	KindCustom   = "custom"   // a CLI the operator declared in config.toml with a schema
 )
 
 // Entry is the static description of one supported agent.
@@ -47,6 +48,8 @@ type Entry struct {
 	// ModelsArgs lists the CLI's models when non-nil; parseModels reads them.
 	ModelsArgs  []string
 	parseModels func(string) []string
+	// Binary is a custom agent's executable, reported as is.
+	Binary string
 }
 
 // Catalog is every agent Heimdallm knows, in display order.
@@ -122,6 +125,8 @@ type Agent struct {
 	Homepage    string   `json:"homepage"`
 	InstallHint string   `json:"install_hint"`
 	Models      []string `json:"models,omitempty"`
+	// Binary is the executable a custom agent runs.
+	Binary string `json:"binary,omitempty"`
 }
 
 // Detector holds every side effect a scan needs, so tests can fake the
@@ -139,6 +144,9 @@ type Detector struct {
 	// Provider reports an in-process provider's state (key configured and
 	// the models it offers). Nil leaves providers undetected.
 	Provider func(ctx context.Context, id string) (configured bool, models []string)
+	// Custom lists the custom agents to report after the catalog. Nil
+	// reports none.
+	Custom func() []Entry
 }
 
 // RefreshInterval is how often the daemon rescans the catalog in the
@@ -174,7 +182,26 @@ func NewDetector() Detector {
 		Stat:     os.Stat,
 		Getenv:   os.Getenv,
 		Run:      runCommand,
+		Custom:   CustomEntries,
 	}
+}
+
+// CustomEntries describes the custom agents registered with the executor.
+func CustomEntries() []Entry {
+	agents := executor.CustomAgents()
+	out := make([]Entry, 0, len(agents))
+	for _, a := range agents {
+		name := a.Schema.DisplayName
+		if name == "" {
+			name = a.Name
+		}
+		out = append(out, Entry{
+			ID: a.Name, Name: name, Kind: KindCustom, ConfigAgent: a.Name,
+			Binary:      a.Binary,
+			InstallHint: "Install " + a.Binary + " and make sure it is on the daemon's PATH.",
+		})
+	}
+	return out
 }
 
 // runCommand runs one probe in a process group of its own. Many agents are
@@ -214,9 +241,13 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 // Scan detects every catalog entry. Version and model probes run in parallel
 // and are bounded, so a hung CLI cannot stall the scan.
 func (d Detector) Scan(ctx context.Context) []Agent {
-	out := make([]Agent, len(Catalog))
+	entries := append([]Entry(nil), Catalog...)
+	if d.Custom != nil {
+		entries = append(entries, d.Custom()...)
+	}
+	out := make([]Agent, len(entries))
 	var wg sync.WaitGroup
-	for i, e := range Catalog {
+	for i, e := range entries {
 		wg.Add(1)
 		go func(i int, e Entry) {
 			defer wg.Done()
@@ -232,6 +263,7 @@ func (d Detector) scanOne(ctx context.Context, e Entry) Agent {
 		ID: e.ID, Name: e.Name, Kind: e.Kind, ConfigAgent: e.ConfigAgent,
 		Homepage: e.Homepage, InstallHint: e.InstallHint,
 		Executable: e.Kind != KindIDE,
+		Binary:     e.Binary,
 	}
 	if e.Kind == KindProvider {
 		if d.Provider != nil {
@@ -262,9 +294,15 @@ func (d Detector) scanOne(ctx context.Context, e Entry) Agent {
 			break
 		}
 	}
+	if e.Kind == KindCustom {
+		// Declared in config.toml: that is its configuration.
+		a.Configured = true
+	}
 	// IDE entries are informational (reviews go through ConfigAgent), so
-	// their launcher is not run: its version cannot run a review.
-	if path != "" && d.Run != nil && e.Kind != KindIDE {
+	// their launcher is not run: its version cannot run a review. A custom
+	// agent's binary is not probed either: Heimdallm does not know how it
+	// treats --version, and a scan must not start an unknown program.
+	if path != "" && d.Run != nil && e.Kind != KindIDE && e.Kind != KindCustom {
 		a.Version = d.version(ctx, path)
 		if e.ModelsArgs != nil && e.parseModels != nil {
 			a.Models = d.models(ctx, path, e)
@@ -274,7 +312,7 @@ func (d Detector) scanOne(ctx context.Context, e Entry) Agent {
 }
 
 func (d Detector) binaryPath(e Entry) string {
-	if e.Kind == KindAgent {
+	if e.Kind == KindAgent || e.Kind == KindCustom {
 		if d.Resolve == nil {
 			return ""
 		}

@@ -1,0 +1,30 @@
+{
+  "name": "openrouter",
+  "display_name": "OpenRouter",
+  "description": "Reviews run in-process through Heimdallm's own harness; OpenRouter takes no command-line flags.",
+  "icon_color": "#6467F2",
+  "fields": [
+    {
+      "key": "model",
+      "type": "select",
+      "label": "Model",
+      "description": "Required: OpenRouter has no default model.",
+      "allow_custom": true
+    },
+    {
+      "key": "max_turns",
+      "type": "number",
+      "label": "Max tool rounds",
+      "description": "How many rounds of repository reads (files, grep) the reviewer may do before answering. 40 at most.",
+      "min": 0,
+      "max": 40
+    },
+    {
+      "key": "effort",
+      "type": "select",
+      "label": "Reasoning effort",
+      "options": ["low", "medium", "high", "max"],
+      "empty_label": "Model default"
+    }
+  ]
+}
