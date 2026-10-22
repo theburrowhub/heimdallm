@@ -17,6 +17,8 @@ import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 
+import '../support/agent_schemas.dart';
+
 class _MockApiClient extends Mock implements ApiClient {}
 
 const _catalogJson = {
@@ -135,6 +137,9 @@ Future<(_MockApiClient, GoRouter)> _pump(
     () => api.rescanCliAgents(),
   ).thenAnswer((_) async => CliAgentCatalog.fromJson(catalog));
   when(() => api.patchConfig(any())).thenAnswer((_) async => {});
+  when(
+    () => api.fetchAgentSchemas(),
+  ).thenAnswer((_) async => agentSchemaCatalog());
   if (quotasFail) {
     when(() => api.fetchQuotas()).thenThrow(ApiException('404'));
   } else {
@@ -176,6 +181,11 @@ Future<(_MockApiClient, GoRouter)> _pump(
         path: '/cli-agents',
         builder: (_, _) => const Scaffold(body: AgentCatalogScreen()),
         routes: [
+          GoRoute(
+            path: 'custom/:name',
+            builder: (_, state) =>
+                Scaffold(body: Text('editor ${state.pathParameters['name']}')),
+          ),
           GoRoute(
             path: ':id',
             builder: (_, state) => Scaffold(
@@ -447,7 +457,7 @@ void main() {
     verifyNever(() => api.setAgentKey('openrouter', ''));
 
     await tester.enterText(
-      find.byKey(const ValueKey('openrouter-tool-rounds')),
+      find.byKey(const ValueKey('agent-field-openrouter-max_turns')),
       '20',
     );
     await tester.pump(const Duration(milliseconds: 801));
@@ -572,7 +582,9 @@ void main() {
     final field = find.byKey(const ValueKey('model-openrouter'));
     await tester.enterText(field, 'half-typed');
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('openrouter-tool-rounds')));
+    await tester.tap(
+      find.byKey(const ValueKey('agent-field-openrouter-max_turns')),
+    );
     await tester.pump(const Duration(milliseconds: 801));
     await tester.pumpAndSettle();
     expect(tester.widget<TextField>(field).controller!.text, 'openai/gpt-5');
@@ -754,6 +766,50 @@ void main() {
     expect(s.configured, isTrue);
     expect(s.source, 'env');
     expect(AgentKeyStatus.fromJson(const {}).configured, isFalse);
+  });
+
+  group('custom agents', () {
+    final withCustom = <String, dynamic>{
+      ..._catalogJson,
+      'agents': [
+        ...(_catalogJson['agents']! as List),
+        {
+          'id': 'aider',
+          'name': 'Aider',
+          'kind': 'custom',
+          'executable': true,
+          'installed': true,
+          'configured': true,
+          'path': '~/.local/bin/aider',
+          'config_agent': 'aider',
+          'binary': 'aider',
+        },
+      ],
+    };
+
+    testWidgets('the catalog shows custom agents and adds new ones', (
+      tester,
+    ) async {
+      await _pump(tester, catalog: withCustom);
+      expect(find.byKey(const ValueKey('agent-custom-aider')), findsOneWidget);
+      expect(find.text('Custom · aider'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agents-add-custom')));
+      await tester.pumpAndSettle();
+      expect(find.text('editor new'), findsOneWidget);
+    });
+
+    testWidgets('a custom agent page links to its definition', (tester) async {
+      await _pump(tester, location: '/cli-agents/aider', catalog: withCustom);
+      await tester.tap(find.byKey(const ValueKey('agent-edit-definition')));
+      await tester.pumpAndSettle();
+      expect(find.text('editor aider'), findsOneWidget);
+    });
+
+    test('custom agents parse from the catalog', () {
+      final info = CliAgentCatalog.fromJson(withCustom).byId('aider')!;
+      expect(info.isCustom, isTrue);
+      expect(info.binary, 'aider');
+    });
   });
 }
 

@@ -16,6 +16,7 @@ import '../../shared/widgets/token_saving_editor.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
+import '../cli_agents/agent_schemas_provider.dart';
 import '../dashboard/dashboard_providers.dart';
 import '../flows/flows_list_screen.dart' show flowsProvider;
 import '../repositories/widgets/feature_palette.dart';
@@ -319,7 +320,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                         label: 'Primary',
                         globalValue: appConfig.aiPrimary,
                         overrideValue: _config.aiPrimary,
-                        options: reviewAgentIds,
+                        options: ref.watch(reviewAgentIdsProvider),
                         onChanged: (v) =>
                             _update(_config.copyWith(aiPrimary: v)),
                         onReset: () => _resetField('primary'),
@@ -331,7 +332,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                             ? 'none'
                             : appConfig.aiFallback,
                         overrideValue: _config.aiFallback,
-                        options: reviewAgentIds,
+                        options: ref.watch(reviewAgentIdsProvider),
                         onChanged: (v) =>
                             _update(_config.copyWith(aiFallback: v)),
                         onReset: () => _resetField('fallback'),

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/models/agent_schema.dart';
 import '../../core/models/config_model.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
@@ -9,6 +9,8 @@ import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
 import '../../shared/widgets/review_limits_editor.dart';
+import 'agent_schema_form.dart';
+import 'agent_schemas_provider.dart';
 import 'provider_model_field.dart';
 
 const _defaultCliNames = ['claude', 'gemini', 'codex'];
@@ -61,10 +63,12 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
     for (final n in widget.agentIds) n: _AgentState(),
   };
 
-  List<String> _modelsFor(String name) {
+  List<String> _modelsFor(String name, [AgentSchema? schema]) {
     final discovered = widget.discoveredModels[name] ?? const <String>[];
-    return discovered.isNotEmpty
-        ? discovered
+    if (discovered.isNotEmpty) return discovered;
+    final fromSchema = schema?.field('model')?.options ?? const <String>[];
+    return fromSchema.isNotEmpty
+        ? fromSchema
         : CLIAgentConfig.modelOptions[name] ?? const <String>[];
   }
 
@@ -140,6 +144,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   Widget build(BuildContext context) {
     final configAsync = ref.watch(configNotifierProvider);
     final prompts = ref.watch(agentsProvider).value ?? [];
+    final schemas = ref.watch(agentSchemasProvider).value;
 
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -162,7 +167,10 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                       key: ValueKey('agent-section-$name'),
                       name: name,
                       state: _agents[name]!,
-                      models: _modelsFor(name),
+                      schema: schemas?.byName(name),
+                      customAgentsApiEnabled:
+                          schemas?.customAgentsApiEnabled ?? false,
+                      models: _modelsFor(name, schemas?.byName(name)),
                       isProvider: widget.providerIds.contains(name),
                       modelsLoading: widget.modelsLoading,
                       keyConfigured: !widget.providersWithoutKey.contains(name),
@@ -271,8 +279,63 @@ class _AgentState {
   bool dangerouslySkipPerms = false;
   bool noSessionPersistence = false;
   ReviewLimits reviewLimits = const ReviewLimits();
+  String executionTimeout = '';
+  // Custom agents: their executable (read-only here) and option values.
+  String binary = '';
+  Map<String, dynamic> options = {};
 
   _AgentState();
+
+  bool get isCustom => binary.isNotEmpty;
+
+  /// The value of a schema field. A built-in agent's fields are its typed
+  /// settings; a custom agent's are its options.
+  Object? valueOf(String key) {
+    if (isCustom) return key == 'model' ? model : options[key];
+    return switch (key) {
+      'model' => model,
+      'max_turns' => maxTurns,
+      'approval_mode' => approvalMode,
+      'effort' => effort,
+      'permission_mode' => permissionMode,
+      'bare' => bare,
+      'dangerously_skip_perms' => dangerouslySkipPerms,
+      'no_session_persistence' => noSessionPersistence,
+      _ => null,
+    };
+  }
+
+  /// Sets a schema field's value; null means "not set".
+  void setValue(String key, Object? value) {
+    if (isCustom) {
+      if (key == 'model') {
+        model = (value as String?) ?? '';
+      } else if (value == null) {
+        options.remove(key);
+      } else {
+        options[key] = value;
+      }
+      return;
+    }
+    switch (key) {
+      case 'model':
+        model = (value as String?) ?? '';
+      case 'max_turns':
+        maxTurns = (value as num?)?.toInt() ?? 0;
+      case 'approval_mode':
+        approvalMode = (value as String?) ?? '';
+      case 'effort':
+        effort = (value as String?) ?? '';
+      case 'permission_mode':
+        permissionMode = (value as String?) ?? '';
+      case 'bare':
+        bare = (value as bool?) ?? false;
+      case 'dangerously_skip_perms':
+        dangerouslySkipPerms = (value as bool?) ?? false;
+      case 'no_session_persistence':
+        noSessionPersistence = (value as bool?) ?? false;
+    }
+  }
 
   _AgentState.from(CLIAgentConfig ac, {required List<String> modelOptions}) {
     model = ac.model;
@@ -289,6 +352,9 @@ class _AgentState {
     dangerouslySkipPerms = ac.dangerouslySkipPerms;
     noSessionPersistence = ac.noSessionPersistence;
     reviewLimits = ac.reviewLimits;
+    executionTimeout = ac.executionTimeout;
+    binary = ac.binary;
+    options = {...ac.options};
   }
 
   CLIAgentConfig toConfig() => CLIAgentConfig(
@@ -303,6 +369,9 @@ class _AgentState {
     dangerouslySkipPerms: dangerouslySkipPerms,
     noSessionPersistence: noSessionPersistence,
     reviewLimits: reviewLimits,
+    executionTimeout: executionTimeout,
+    binary: binary,
+    options: Map<String, dynamic>.unmodifiable(options),
   );
 
   bool get hasOverrides => toConfig().hasConfig;
@@ -313,6 +382,13 @@ class _AgentState {
 class _AgentSection extends StatefulWidget {
   final String name;
   final _AgentState state;
+
+  /// The agent's options schema; null while it loads or on a daemon without
+  /// schemas, in which case only the shared settings are shown.
+  final AgentSchema? schema;
+
+  /// Whether config.toml lets the app change a custom agent's extra flags.
+  final bool customAgentsApiEnabled;
   final List<String> models;
   final bool isProvider;
   final bool modelsLoading;
@@ -325,6 +401,8 @@ class _AgentSection extends StatefulWidget {
     super.key,
     required this.name,
     required this.state,
+    this.schema,
+    this.customAgentsApiEnabled = false,
     required this.models,
     this.isProvider = false,
     this.modelsLoading = false,
@@ -420,6 +498,18 @@ class _AgentSectionState extends State<_AgentSection> {
         ? preservedUnlistedModel
         : null;
 
+    final schema = widget.schema;
+    final modelField = schema?.field('model');
+    // Built-in agents always take a model; a custom agent only when its
+    // schema declares one.
+    final showModel = !s.isCustom || modelField != null;
+    final optionFields = [
+      for (final f in schema?.fields ?? const <AgentSchemaField>[])
+        if (f.key != 'model') f,
+    ];
+    final modelEmptyLabel = modelField?.emptyLabel.isNotEmpty == true
+        ? modelField!.emptyLabel
+        : 'CLI default';
     final needsModel = widget.isProvider && s.model.trim().isEmpty;
     final accent = needsModel
         ? AppColors.warning.resolve(context)
@@ -449,166 +539,83 @@ class _AgentSectionState extends State<_AgentSection> {
           ),
           const SizedBox(height: 12),
 
-          Row(
-            children: [
-              Expanded(
-                child: widget.isProvider
-                    ? ProviderModelField(
-                        key: ValueKey('provider-model-field-$name'),
-                        fieldKey: ValueKey('model-$name'),
-                        model: s.model,
-                        models: models,
-                        loading: widget.modelsLoading,
-                        keyConfigured: widget.keyConfigured,
-                        onRetry: widget.onReloadModels,
-                        onChanged: (v) {
-                          setState(() => s.model = v);
-                          widget.onChanged(s);
-                        },
-                      )
-                    : DropdownButtonFormField<String>(
-                        key: ValueKey('model-$name'),
-                        // ignore: deprecated_member_use
-                        value: s.model.isEmpty ? null : s.model,
-                        decoration: const InputDecoration(
-                          labelText: 'Model',
-                          border: OutlineInputBorder(),
-                        ),
-                        items: [
-                          const DropdownMenuItem<String>(
-                            value: null,
-                            child: Text('CLI default'),
+          if (showModel)
+            Row(
+              children: [
+                Expanded(
+                  child: widget.isProvider
+                      ? ProviderModelField(
+                          key: ValueKey('provider-model-field-$name'),
+                          fieldKey: ValueKey('model-$name'),
+                          model: s.model,
+                          models: models,
+                          loading: widget.modelsLoading,
+                          keyConfigured: widget.keyConfigured,
+                          onRetry: widget.onReloadModels,
+                          onChanged: (v) {
+                            setState(() => s.model = v);
+                            widget.onChanged(s);
+                          },
+                        )
+                      : DropdownButtonFormField<String>(
+                          key: ValueKey('model-$name'),
+                          // ignore: deprecated_member_use
+                          value: s.model.isEmpty ? null : s.model,
+                          decoration: InputDecoration(
+                            labelText: modelField?.label ?? 'Model',
+                            border: const OutlineInputBorder(),
                           ),
-                          if (unlistedModel != null)
-                            DropdownMenuItem(
-                              value: unlistedModel,
-                              child: Text('$unlistedModel (not listed)'),
+                          items: [
+                            DropdownMenuItem<String>(
+                              value: null,
+                              child: Text(modelEmptyLabel),
                             ),
-                          ...models.map(
-                            (m) => DropdownMenuItem(value: m, child: Text(m)),
-                          ),
-                        ],
-                        onChanged: (v) {
-                          setState(() => s.model = v ?? '');
-                          widget.onChanged(s);
-                        },
-                      ),
-              ),
-              if (name == 'claude') ...[
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 140,
-                  child: TextFormField(
-                    initialValue: s.maxTurns > 0 ? '${s.maxTurns}' : '',
-                    decoration: const InputDecoration(
-                      labelText: '--max-turns',
-                      hintText: 'default',
-                      border: OutlineInputBorder(),
-                    ),
-                    keyboardType: TextInputType.number,
-                    onChanged: (v) {
-                      setState(() => s.maxTurns = int.tryParse(v) ?? 0);
-                      widget.onChanged(s);
-                    },
-                  ),
+                            if (unlistedModel != null)
+                              DropdownMenuItem(
+                                value: unlistedModel,
+                                child: Text('$unlistedModel (not listed)'),
+                              ),
+                            ...models.map(
+                              (m) => DropdownMenuItem(value: m, child: Text(m)),
+                            ),
+                          ],
+                          onChanged: (v) {
+                            setState(() => s.model = v ?? '');
+                            widget.onChanged(s);
+                          },
+                        ),
                 ),
               ],
-              if (name == 'codex') ...[
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 190,
-                  child: DropdownButtonFormField<String>(
-                    // ignore: deprecated_member_use
-                    value: s.approvalMode.isEmpty ? null : s.approvalMode,
-                    decoration: const InputDecoration(
-                      labelText: '--ask-for-approval',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: [
-                      const DropdownMenuItem<String>(
-                        value: null,
-                        child: Text('CLI default'),
-                      ),
-                      ...CLIAgentConfig.approvalModeOptions.map(
-                        (v) => DropdownMenuItem(value: v, child: Text(v)),
-                      ),
-                    ],
-                    onChanged: (v) {
-                      setState(() => s.approvalMode = v ?? '');
-                      widget.onChanged(s);
-                    },
-                  ),
-                ),
-              ],
-            ],
-          ),
+            ),
           const SizedBox(height: 10),
 
           _promptDropdown(s),
           const SizedBox(height: 12),
 
-          if (name == 'claude') ...[
+          if (schema != null && schema.description.isNotEmpty) ...[
+            Text(
+              schema.description,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (optionFields.isNotEmpty) ...[
             AppSurface(
               elevation: AppSurfaceElevation.canvas,
               padding: const EdgeInsets.all(12),
-              child: _claudeOptions(s),
-            ),
-            const SizedBox(height: 12),
-          ],
-          if (name == 'copilot' || name == 'openrouter') ...[
-            if (name == 'openrouter') ...[
-              TextFormField(
-                key: const ValueKey('openrouter-tool-rounds'),
-                initialValue: s.maxTurns > 0 ? '${s.maxTurns}' : '',
-                decoration: const InputDecoration(
-                  labelText: 'Max tool rounds',
-                  hintText: '12',
-                  helperText:
-                      'How many rounds of repository reads (files, grep) the '
-                      'reviewer may do before answering. 40 at most.',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                onChanged: (v) {
-                  setState(() => s.maxTurns = int.tryParse(v) ?? 0);
+              child: AgentSchemaForm(
+                key: ValueKey('agent-schema-form-$name'),
+                keyPrefix: name,
+                fields: optionFields,
+                defaultEmptyLabel: widget.isProvider
+                    ? 'Model default'
+                    : 'CLI default',
+                valueOf: s.valueOf,
+                onChanged: (key, value) {
+                  setState(() => s.setValue(key, value));
                   widget.onChanged(s);
                 },
               ),
-              const SizedBox(height: 12),
-            ],
-            _tipDropdown<String>(
-              label: name == 'openrouter'
-                  ? 'Reasoning effort'
-                  : '--reasoning-effort',
-              value: s.effort.isEmpty ? null : s.effort,
-              tooltip:
-                  'How hard Copilot reasons before answering. Higher effort '
-                  'improves quality but uses more premium requests and time.',
-              items: [
-                DropdownMenuItem<String>(
-                  value: null,
-                  child: Text(
-                    widget.isProvider ? 'Model default' : 'CLI default',
-                  ),
-                ),
-                ...CLIAgentConfig.effortOptions.map(
-                  (v) => DropdownMenuItem(value: v, child: Text(v)),
-                ),
-              ],
-              onChanged: (v) {
-                setState(() => s.effort = v ?? '');
-                widget.onChanged(s);
-              },
-            ),
-            const SizedBox(height: 12),
-          ],
-          if (name == 'cursor_cli') ...[
-            Text(
-              'Cursor reviews from the diff only, in an empty workspace: '
-              'trusting the PR checkout would load its .cursor configuration.',
-              style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
           ],
@@ -639,279 +646,135 @@ class _AgentSectionState extends State<_AgentSection> {
             color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
           const SizedBox(height: 8),
+          if (s.isCustom && !widget.customAgentsApiEnabled)
+            _customFlagsLocked(context)
+          else
+            ..._flagsEditor(name),
+        ],
+      ),
+    );
+  }
 
-          if (_flags.isNotEmpty)
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: List.generate(_flags.length, (idx) {
-                if (_editingIndex == idx) {
-                  return SizedBox(
-                    width: 260,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Expanded(
-                          child: TextFormField(
-                            controller: _editCtrl,
-                            autofocus: true,
-                            decoration: const InputDecoration(
-                              border: OutlineInputBorder(),
-                              isDense: true,
-                              contentPadding: EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 6,
-                              ),
-                            ),
-                            onFieldSubmitted: (_) => _confirmEdit(),
+  /// A custom agent's extra flags reach its CLI unchecked, so the daemon only
+  /// accepts them from config.toml unless it opts in to the app managing
+  /// custom agents.
+  Widget _customFlagsLocked(BuildContext context) {
+    final flags = widget.state.extraFlags;
+    return AppSurface(
+      key: ValueKey('custom-flags-locked-${widget.name}'),
+      elevation: AppSurfaceElevation.canvas,
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (flags.isNotEmpty) ...[
+            SelectableText(
+              flags,
+              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+            ),
+            const SizedBox(height: 6),
+          ],
+          const AppText.muted(
+            'A custom agent\'s extra flags are set in config.toml '
+            '(extra_flags under its [ai.agents] section), unless '
+            '[ai] allow_custom_agents_api = true lets this app manage them.',
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _flagsEditor(String name) {
+    return [
+      if (_flags.isNotEmpty)
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: List.generate(_flags.length, (idx) {
+            if (_editingIndex == idx) {
+              return SizedBox(
+                width: 260,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _editCtrl,
+                        autofocus: true,
+                        decoration: const InputDecoration(
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 6,
                           ),
                         ),
-                        const SizedBox(width: 4),
-                        IconButton(
-                          icon: const Icon(Icons.check, size: 16),
-                          onPressed: _confirmEdit,
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close, size: 16),
-                          onPressed: _cancelEdit,
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                        ),
-                      ],
+                        onFieldSubmitted: (_) => _confirmEdit(),
+                      ),
                     ),
-                  );
-                }
-                return InputChip(
-                  label: Text(
-                    _flags[idx],
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontFamily: 'monospace',
+                    const SizedBox(width: 4),
+                    IconButton(
+                      icon: const Icon(Icons.check, size: 16),
+                      onPressed: _confirmEdit,
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
                     ),
-                  ),
-                  deleteIcon: const Icon(Icons.close, size: 14),
-                  onDeleted: () => _removeFlag(idx),
-                  onPressed: () => _startEdit(idx),
-                  labelPadding: const EdgeInsets.symmetric(horizontal: 4),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  tooltip: 'Tap to edit',
-                );
-              }),
-            )
-          else
-            AppSurface(
-              elevation: AppSurfaceElevation.canvas,
-              padding: const EdgeInsets.all(12),
-              child: const AppText.muted('No extra execution flags'),
-            ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 16),
+                      onPressed: _cancelEdit,
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                    ),
+                  ],
+                ),
+              );
+            }
+            return InputChip(
+              label: Text(
+                _flags[idx],
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+              ),
+              deleteIcon: const Icon(Icons.close, size: 14),
+              onDeleted: () => _removeFlag(idx),
+              onPressed: () => _startEdit(idx),
+              labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              tooltip: 'Tap to edit',
+            );
+          }),
+        )
+      else
+        AppSurface(
+          elevation: AppSurfaceElevation.canvas,
+          padding: const EdgeInsets.all(12),
+          child: const AppText.muted('No extra execution flags'),
+        ),
 
-          if (_flags.isNotEmpty) const SizedBox(height: 8),
+      if (_flags.isNotEmpty) const SizedBox(height: 8),
 
-          Row(
-            children: [
-              Expanded(
-                child: TextFormField(
-                  controller: _newFlagCtrl,
-                  decoration: InputDecoration(
-                    hintText: _extraFlagsHint(name),
-                    border: const OutlineInputBorder(),
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                  ),
-                  onFieldSubmitted: (_) => _addFlag(),
+      Row(
+        children: [
+          Expanded(
+            child: TextFormField(
+              controller: _newFlagCtrl,
+              decoration: InputDecoration(
+                hintText: _extraFlagsHint(name),
+                border: const OutlineInputBorder(),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
                 ),
               ),
-              const SizedBox(width: 8),
-              AppButton.secondary(label: 'Add', onPressed: _addFlag),
-            ],
+              onFieldSubmitted: (_) => _addFlag(),
+            ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(width: 8),
+          AppButton.secondary(label: 'Add', onPressed: _addFlag),
         ],
       ),
-    );
-  }
-
-  Widget _claudeOptions(_AgentState s) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Dropdowns: effort + permission-mode
-        Row(
-          children: [
-            Expanded(
-              child: _tipDropdown<String>(
-                label: '--effort',
-                value: s.effort.isEmpty ? null : s.effort,
-                tooltip:
-                    'How much compute Claude uses.\n'
-                    'low = quick scan · medium = balanced · high = thorough · max = exhaustive.\n'
-                    'Higher effort improves quality but increases cost and latency.',
-                items: [
-                  const DropdownMenuItem<String>(
-                    value: null,
-                    child: Text('Not set (CLI default)'),
-                  ),
-                  ...CLIAgentConfig.effortOptions.map(
-                    (v) => DropdownMenuItem(value: v, child: Text(v)),
-                  ),
-                ],
-                onChanged: (v) {
-                  setState(() => s.effort = v ?? '');
-                  widget.onChanged(s);
-                },
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _tipDropdown<String>(
-                label: '--permission-mode',
-                value: s.permissionMode.isEmpty ? null : s.permissionMode,
-                tooltip:
-                    'Controls how Claude handles tool permissions.\n'
-                    'default: standard prompts · auto: minimal prompts · '
-                    'bypassPermissions: no prompts (use with local dir) · '
-                    'acceptEdits: auto-accept file edits · dontAsk: never ask.',
-                items: [
-                  const DropdownMenuItem<String>(
-                    value: null,
-                    child: Text('Not set (CLI default)'),
-                  ),
-                  ...CLIAgentConfig.permissionModeOptions.map(
-                    (v) => DropdownMenuItem(value: v, child: Text(v)),
-                  ),
-                ],
-                onChanged: (v) {
-                  setState(() => s.permissionMode = v ?? '');
-                  widget.onChanged(s);
-                },
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        // Toggles
-        Wrap(
-          spacing: 24,
-          runSpacing: 8,
-          children: [
-            _tipToggle(
-              label: '--bare',
-              value: s.bare,
-              tooltip:
-                  'Minimal mode: disables auto-memory, hooks, LSP, plugins '
-                  'and CLAUDE.md discovery.\nFaster and more predictable for automated reviews.',
-              onChanged: (v) {
-                setState(() => s.bare = v);
-                widget.onChanged(s);
-              },
-            ),
-            _tipToggle(
-              label: '--no-session-persistence',
-              value: s.noSessionPersistence,
-              tooltip:
-                  'Disables saving sessions to disk.\n'
-                  'Keeps automated reviews clean and isolated — '
-                  'prevents session accumulation over time.',
-              onChanged: (v) {
-                setState(() => s.noSessionPersistence = v);
-                widget.onChanged(s);
-              },
-            ),
-            _tipToggle(
-              switchKey: ValueKey(
-                'dangerously-skip-permissions-${widget.name}',
-              ),
-              label: '--dangerously-skip-permissions',
-              value: s.dangerouslySkipPerms,
-              tooltip:
-                  '⚠️ Bypasses ALL permission checks.\n'
-                  'This screen can only disable it. To enable it, edit '
-                  'config.toml directly in a sandboxed or trusted environment.',
-              onChanged: s.dangerouslySkipPerms
-                  ? (v) {
-                      setState(() => s.dangerouslySkipPerms = v);
-                      widget.onChanged(s);
-                    }
-                  : null,
-              danger: true,
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _tipDropdown<T>({
-    required String label,
-    required T? value,
-    required String tooltip,
-    required List<DropdownMenuItem<T>> items,
-    required ValueChanged<T?> onChanged,
-  }) {
-    return Tooltip(
-      message: tooltip,
-      waitDuration: const Duration(milliseconds: 600),
-      child: DropdownButtonFormField<T>(
-        // ignore: deprecated_member_use
-        value: value,
-        decoration: InputDecoration(
-          labelText: label,
-          border: const OutlineInputBorder(),
-          suffixIcon: Icon(
-            Icons.info_outline,
-            size: 16,
-            color: Colors.grey.shade500,
-          ),
-        ),
-        items: items,
-        onChanged: onChanged,
-      ),
-    );
-  }
-
-  Widget _tipToggle({
-    Key? switchKey,
-    required String label,
-    required bool value,
-    required String tooltip,
-    required ValueChanged<bool>? onChanged,
-    bool danger = false,
-  }) {
-    return Tooltip(
-      message: tooltip,
-      waitDuration: const Duration(milliseconds: 600),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Switch(
-            key: switchKey,
-            value: value,
-            onChanged: onChanged,
-            // ignore: deprecated_member_use
-            activeColor: danger ? Colors.orange.shade700 : null,
-          ),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              fontFamily: 'monospace',
-              color: danger
-                  ? (value ? Colors.orange.shade700 : Colors.grey.shade500)
-                  : null,
-            ),
-          ),
-          const SizedBox(width: 4),
-          Icon(Icons.info_outline, size: 13, color: Colors.grey.shade500),
-        ],
-      ),
-    );
+      const SizedBox(height: 8),
+    ];
   }
 
   Widget _promptDropdown(_AgentState s) {

@@ -12,6 +12,11 @@ import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/widgets/review_limits_editor.dart';
 
+import 'package:heimdallm/core/models/agent_schema.dart';
+import 'package:heimdallm/shared/design_system/components/components.dart';
+
+import '../support/agent_schemas.dart';
+
 class _MockApiClient extends Mock implements ApiClient {}
 
 class _TestConfigNotifier extends ConfigNotifier {
@@ -35,6 +40,9 @@ Map<String, dynamic> _agentConfigJson(CLIAgentConfig config) => {
   'bare': config.bare,
   'dangerously_skip_perms': config.dangerouslySkipPerms,
   'no_session_persistence': config.noSessionPersistence,
+  'execution_timeout': config.executionTimeout,
+  if (config.isCustom) 'binary': config.binary,
+  if (config.isCustom) 'options': config.options,
 };
 
 Widget _hosted(Widget child) {
@@ -56,6 +64,8 @@ void main() {
     Map<String, CLIAgentConfig> agentConfigs = const {},
     List<ReviewPrompt> prompts = const [],
     Size size = const Size(1400, 600),
+    List<String>? agentIds,
+    AgentSchemaCatalog? schemas,
   }) async {
     // Keep only the first (Claude) card in the ListView build/cache extent.
     // The pre-existing fixed-width Codex approval dropdown overflows under
@@ -76,6 +86,9 @@ void main() {
     final api = _MockApiClient();
     when(api.fetchConfig).thenAnswer((_) async => configJson);
     when(() => api.patchConfig(any())).thenAnswer((_) async => configJson);
+    when(() => api.fetchAgentSchemas()).thenAnswer(
+      (_) async => schemas ?? agentSchemaCatalog(),
+    );
 
     await tester.pumpWidget(
       ProviderScope(
@@ -84,7 +97,11 @@ void main() {
           configNotifierProvider.overrideWith(_TestConfigNotifier.new),
           agentsProvider.overrideWith((ref) => Future.value(prompts)),
         ],
-        child: _hosted(const CLIAgentsScreen()),
+        child: _hosted(
+          agentIds == null
+              ? const CLIAgentsScreen()
+              : CLIAgentsScreen(agentIds: agentIds),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -102,7 +119,7 @@ void main() {
     );
 
     final finder = find.byKey(
-      const ValueKey('dangerously-skip-permissions-claude'),
+      const ValueKey('agent-field-claude-dangerously_skip_perms'),
     );
     final toggle = tester.widget<Switch>(finder);
     expect(toggle.value, isFalse);
@@ -118,7 +135,7 @@ void main() {
     );
 
     final finder = find.byKey(
-      const ValueKey('dangerously-skip-permissions-claude'),
+      const ValueKey('agent-field-claude-dangerously_skip_perms'),
     );
     expect(tester.widget<Switch>(finder).onChanged, isNotNull);
 
@@ -291,6 +308,8 @@ void main() {
     await tester.tap(find.byIcon(Icons.check).last);
     await tester.pumpAndSettle();
 
+    await tester.ensureVisible(find.byIcon(Icons.close).last);
+    await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.close).last);
     await tester.pumpAndSettle();
 
@@ -451,5 +470,159 @@ void main() {
       'per_day': 0,
     });
   });
-}
 
+  group('custom agents', () {
+    final aider = AgentSchema.fromJson({
+      'name': 'aider',
+      'display_name': 'Aider',
+      'binary': 'aider',
+      'description': 'Aider pairs on the diff.',
+      'fields': [
+        {
+          'key': 'model',
+          'type': 'select',
+          'label': 'Model',
+          'flag': '--model',
+          'options': ['gpt-4o', 'deepseek-chat'],
+          'empty_label': 'Aider default',
+        },
+        {
+          'key': 'auto_commits',
+          'type': 'bool',
+          'label': '--auto-commits',
+          'flag': '--auto-commits',
+          'default': true,
+        },
+        {
+          'key': 'edit_format',
+          'type': 'select',
+          'label': '--edit-format',
+          'flag': '--edit-format',
+          'options': ['whole', 'diff'],
+        },
+      ],
+    });
+    const aiderConfig = CLIAgentConfig(
+      binary: 'aider',
+      extraFlags: '--verbose',
+      options: {'edit_format': 'diff'},
+    );
+
+    testWidgets('renders the schema and saves options as flat keys', (
+      tester,
+    ) async {
+      final api = await pumpScreen(
+        tester,
+        agentIds: const ['aider'],
+        agentConfigs: const {'aider': aiderConfig},
+        schemas: agentSchemaCatalog(custom: [aider]),
+        size: const Size(1400, 1000),
+      );
+      expect(find.text('Aider pairs on the diff.'), findsOneWidget);
+      expect(find.text('Aider default'), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const ValueKey('agent-field-aider-auto_commits')),
+      );
+      await tester.pump();
+      await tester.tap(
+        find.byKey(const ValueKey('agent-field-aider-edit_format')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('whole').last);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 801));
+      await tester.pumpAndSettle();
+
+      final patch =
+          verify(() => api.patchConfig(captureAny())).captured.last
+              as Map<String, dynamic>;
+      final agent = patch['ai']['agents']['aider'] as Map<String, dynamic>;
+      expect(agent, {'auto_commits': false, 'edit_format': 'whole'});
+    });
+
+    testWidgets('extra flags are read-only without the opt-in', (
+      tester,
+    ) async {
+      await pumpScreen(
+        tester,
+        agentIds: const ['aider'],
+        agentConfigs: const {'aider': aiderConfig},
+        schemas: agentSchemaCatalog(custom: [aider]),
+        size: const Size(1400, 1000),
+      );
+      expect(
+        find.byKey(const ValueKey('custom-flags-locked-aider')),
+        findsOneWidget,
+      );
+      expect(find.text('--verbose'), findsOneWidget);
+      expect(find.widgetWithText(AppButton, 'Add'), findsNothing);
+    });
+
+    testWidgets('extra flags are editable with the opt-in', (tester) async {
+      await pumpScreen(
+        tester,
+        agentIds: const ['aider'],
+        agentConfigs: const {'aider': aiderConfig},
+        schemas: agentSchemaCatalog(
+          custom: [aider],
+          customAgentsApiEnabled: true,
+        ),
+        size: const Size(1400, 1000),
+      );
+      expect(
+        find.byKey(const ValueKey('custom-flags-locked-aider')),
+        findsNothing,
+      );
+      expect(find.widgetWithText(InputChip, '--verbose'), findsOneWidget);
+    });
+
+    testWidgets('an agent without a model field shows no model', (
+      tester,
+    ) async {
+      final noModel = AgentSchema.fromJson({
+        'name': 'tool',
+        'binary': 'tool',
+        'fields': [
+          {'key': 'fast', 'type': 'bool', 'label': 'Fast', 'flag': '--fast'},
+        ],
+      });
+      await pumpScreen(
+        tester,
+        agentIds: const ['tool'],
+        agentConfigs: const {'tool': CLIAgentConfig(binary: 'tool')},
+        schemas: agentSchemaCatalog(custom: [noModel]),
+      );
+      final fast = find.byKey(const ValueKey('agent-field-tool-fast'));
+      expect(find.byKey(const ValueKey('model-tool')), findsNothing);
+      await tester.tap(fast);
+      await tester.pump();
+      expect(tester.widget<Switch>(fast).value, isTrue);
+    });
+
+    testWidgets('a daemon without schemas keeps the shared settings', (
+      tester,
+    ) async {
+      final api = _MockApiClient();
+      when(api.fetchConfig).thenAnswer((_) async => const AppConfig().toJson());
+      when(() => api.fetchAgentSchemas()).thenThrow(ApiException('404'));
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            apiClientProvider.overrideWithValue(api),
+            agentsProvider.overrideWith(
+              (ref) => Future.value(const <ReviewPrompt>[]),
+            ),
+          ],
+          child: _hosted(const CLIAgentsScreen(agentIds: ['claude'])),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('model-claude')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('agent-schema-form-claude')),
+        findsNothing,
+      );
+    });
+  });
+}

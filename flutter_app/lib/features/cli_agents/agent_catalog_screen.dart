@@ -108,6 +108,13 @@ class _AgentCatalogScreenState extends ConsumerState<AgentCatalogScreen> {
             ),
             const SizedBox(width: 12),
             OutlinedButton.icon(
+              key: const ValueKey('agents-add-custom'),
+              onPressed: () => context.go('/cli-agents/custom/new'),
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('Custom agent'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
               key: const ValueKey('agents-rescan'),
               onPressed: _rescanning ? null : _rescan,
               icon: _rescanning
@@ -227,9 +234,17 @@ class AgentCatalogCard extends StatelessWidget {
                       : AppColors.surfaceRaised.resolve(context),
                   border: agent.installed ? ok.withValues(alpha: 0.35) : border,
                 ),
-                if (agent.configured && !agent.isProvider)
+                if (agent.configured && !agent.isProvider && !agent.isCustom)
                   AppBadge(
                     label: 'Signed in / configured',
+                    foreground: muted,
+                    background: AppColors.surfaceRaised.resolve(context),
+                    border: border,
+                  ),
+                if (agent.isCustom)
+                  AppBadge(
+                    key: ValueKey('agent-custom-${agent.id}'),
+                    label: 'Custom · ${agent.binary}',
                     foreground: muted,
                     background: AppColors.surfaceRaised.resolve(context),
                     border: border,
@@ -380,7 +395,14 @@ class AgentConfigScreen extends ConsumerWidget {
               ),
               Text(agentEmoji(agentId), style: const TextStyle(fontSize: 20)),
               const SizedBox(width: 8),
-              AppText.sectionTitle(info?.name ?? agentId),
+              Expanded(child: AppText.sectionTitle(info?.name ?? agentId)),
+              if (info != null && info.isCustom)
+                OutlinedButton.icon(
+                  key: const ValueKey('agent-edit-definition'),
+                  onPressed: () => context.go('/cli-agents/custom/$agentId'),
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  label: const Text('Edit definition'),
+                ),
             ],
           ),
         ),

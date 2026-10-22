@@ -9,8 +9,9 @@ const neverApproveMinSeverityOptions = ['low', 'medium', 'high'];
 /// sync, otherwise the dropdown shows a value the daemon is not using.
 const defaultNeverApproveMinSeverity = 'medium';
 
-/// Agents that can run reviews (the daemon's executor allowlist), in display
-/// order. Cursor IDE is not one: it reviews through `cursor_cli`.
+/// Built-in agents that can run reviews (the daemon's executor allowlist), in
+/// display order. Cursor IDE is not one: it reviews through `cursor_cli`.
+/// Custom agents come after them (reviewAgentIdsProvider).
 const reviewAgentIds = [
   'claude',
   'codex',
@@ -43,6 +44,18 @@ class CLIAgentConfig {
   /// back to the next agent or defers the review.
   final ReviewLimits reviewLimits;
 
+  /// Per-agent execution timeout override, e.g. "20m" ('' = global).
+  final String executionTimeout;
+
+  /// The executable of a custom agent ('' for built-in agents). It comes
+  /// from config.toml and is never sent back in a settings PATCH.
+  final String binary;
+
+  /// A custom agent's option values, keyed by its schema's field keys.
+  final Map<String, dynamic> options;
+
+  bool get isCustom => binary.isNotEmpty;
+
   const CLIAgentConfig({
     this.model = '',
     this.maxTurns = 0,
@@ -55,6 +68,9 @@ class CLIAgentConfig {
     this.dangerouslySkipPerms = false,
     this.noSessionPersistence = false,
     this.reviewLimits = const ReviewLimits(),
+    this.executionTimeout = '',
+    this.binary = '',
+    this.options = const {},
   });
 
   bool get hasConfig =>
@@ -68,7 +84,9 @@ class CLIAgentConfig {
       bare ||
       dangerouslySkipPerms ||
       noSessionPersistence ||
-      !reviewLimits.isEmpty;
+      !reviewLimits.isEmpty ||
+      executionTimeout.isNotEmpty ||
+      options.isNotEmpty;
 
   CLIAgentConfig copyWith({
     String? model,
@@ -82,6 +100,9 @@ class CLIAgentConfig {
     bool? dangerouslySkipPerms,
     bool? noSessionPersistence,
     ReviewLimits? reviewLimits,
+    String? executionTimeout,
+    String? binary,
+    Map<String, dynamic>? options,
   }) => CLIAgentConfig(
     model: model ?? this.model,
     maxTurns: maxTurns ?? this.maxTurns,
@@ -94,6 +115,9 @@ class CLIAgentConfig {
     dangerouslySkipPerms: dangerouslySkipPerms ?? this.dangerouslySkipPerms,
     noSessionPersistence: noSessionPersistence ?? this.noSessionPersistence,
     reviewLimits: reviewLimits ?? this.reviewLimits,
+    executionTimeout: executionTimeout ?? this.executionTimeout,
+    binary: binary ?? this.binary,
+    options: options ?? this.options,
   );
 
   factory CLIAgentConfig.fromJson(Map<String, dynamic> json) => CLIAgentConfig(
@@ -110,6 +134,11 @@ class CLIAgentConfig {
     reviewLimits:
         ReviewLimits.maybeFromJson(json['review_limits']) ??
         const ReviewLimits(),
+    executionTimeout: (json['execution_timeout'] as String?) ?? '',
+    binary: (json['binary'] as String?) ?? '',
+    options: Map<String, dynamic>.unmodifiable(
+      (json['options'] as Map?)?.cast<String, dynamic>() ?? const {},
+    ),
   );
 
   // Temporary fallback until safe provider capability discovery lands (#734).

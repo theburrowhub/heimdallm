@@ -18,6 +18,7 @@ import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
 import '../dashboard/dashboard_providers.dart';
 import '../flows/flows_list_screen.dart' show flowsProvider;
+import '../cli_agents/agent_schemas_provider.dart';
 import 'repo_diff.dart';
 import 'widgets/feature_palette.dart';
 import 'widgets/feature_switch.dart';
@@ -335,7 +336,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                       globalValue: orgConfig?.aiPrimary ?? appConfig.aiPrimary,
                       inheritedLabel: source(orgConfig?.aiPrimary != null),
                       overrideValue: _config.aiPrimary,
-                      options: reviewAgentIds,
+                      options: ref.watch(reviewAgentIdsProvider),
                       onChanged: (v) => _update(_config.copyWith(aiPrimary: v)),
                       onReset: () => _resetField('primary'),
                     ),
@@ -349,7 +350,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                           : (orgConfig?.aiFallback ?? appConfig.aiFallback),
                       inheritedLabel: source(orgConfig?.aiFallback != null),
                       overrideValue: _config.aiFallback,
-                      options: reviewAgentIds,
+                      options: ref.watch(reviewAgentIdsProvider),
                       onChanged: (v) =>
                           _update(_config.copyWith(aiFallback: v)),
                       onReset: () => _resetField('fallback'),

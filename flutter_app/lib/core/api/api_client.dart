@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/activity.dart';
+import '../models/agent_schema.dart';
 import '../models/cli_agent.dart';
 import '../models/flow.dart';
 import '../models/merge_tracking.dart';
@@ -711,6 +712,55 @@ class ApiClient {
     return CliAgentCatalog.fromJson(
       jsonDecode(resp.body) as Map<String, dynamic>,
     );
+  }
+
+  /// Every agent's options schema, and whether custom agents may be managed
+  /// from the app (GET /agent-schemas).
+  Future<AgentSchemaCatalog> fetchAgentSchemas() async {
+    final resp = await _client.get(
+      _uri('/agent-schemas'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /agent-schemas failed: ${resp.statusCode}');
+    }
+    return AgentSchemaCatalog.fromJson(
+      jsonDecode(resp.body) as Map<String, dynamic>,
+    );
+  }
+
+  /// Creates or replaces a custom agent (PUT /agent-schemas/{name}). The
+  /// daemon refuses it (403) unless config.toml opts in.
+  Future<void> putAgentSchema(AgentSchema schema) async {
+    final resp = await _client.put(
+      _uri('/agent-schemas/${Uri.encodeComponent(schema.name)}'),
+      headers: await _authHeaders(),
+      body: jsonEncode(schema.toJson()),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(
+        _errorMessage(
+          resp.body,
+          'Could not save the agent (${resp.statusCode})',
+        ),
+      );
+    }
+  }
+
+  /// Removes a custom agent (DELETE /agent-schemas/{name}).
+  Future<void> deleteAgentSchema(String name) async {
+    final resp = await _client.delete(
+      _uri('/agent-schemas/${Uri.encodeComponent(name)}'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(
+        _errorMessage(
+          resp.body,
+          'Could not delete the agent (${resp.statusCode})',
+        ),
+      );
+    }
   }
 
   /// Whether an in-process agent (OpenRouter) has an API key, and where it
