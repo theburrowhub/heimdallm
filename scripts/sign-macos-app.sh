@@ -70,9 +70,20 @@ bundle_contains_macho() {
   return 1
 }
 
-# Sign every Mach-O first. This includes the bundled Go daemon, Flutter's main
-# executable and dylibs.
+# The app's own main executable is sealed by the outer bundle signature below.
+# Signing it on its own here would make codesign validate its siblings in
+# Contents/MacOS, so a helper that find(1) happens to list after it (the
+# bundled CLI) would fail as "not signed at all".
+main_executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+  "$app_bundle/Contents/Info.plist")
+[[ -n "$main_executable" ]] || { echo "CFBundleExecutable is empty" >&2; exit 65; }
+
+# Sign every other Mach-O first. This includes the bundled Go daemon and CLI,
+# and Flutter's dylibs.
 while IFS= read -r -d '' candidate; do
+  if [[ "$candidate" == "$app_bundle/Contents/MacOS/$main_executable" ]]; then
+    continue
+  fi
   if /usr/bin/file -b "$candidate" | /usr/bin/grep -q 'Mach-O'; then
     sign_nested "$candidate"
   fi
