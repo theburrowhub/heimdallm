@@ -177,6 +177,9 @@ func newUpdateCmd(version string) *cobra.Command {
 			if managedByPackageManager(exe) {
 				return fmt.Errorf("%s is managed by Homebrew; run `brew upgrade theburrowhub/tap/heimdallm-cli` instead", exe)
 			}
+			if bundledWithDesktopApp(exe) {
+				return fmt.Errorf("%s ships inside the Heimdallm desktop installer; update the desktop app instead (it replaces the bundled CLI)", exe)
+			}
 			fmt.Fprintf(out, "Updating %s -> %s ...\n", version, rel.Tag)
 			if err := up.Apply(cmd.Context(), rel, exe); err != nil {
 				return err
@@ -196,6 +199,15 @@ func newUpdateCmd(version string) *cobra.Command {
 func managedByPackageManager(exe string) bool {
 	p := filepath.ToSlash(exe)
 	return strings.Contains(p, "/Cellar/") || strings.Contains(p, "/Homebrew/")
+}
+
+// bundledWithDesktopApp reports whether exe is the copy of the CLI shipped by
+// the desktop installers (Heimdallm.app/Contents/MacOS on macOS, /opt/heimdallm
+// for the .deb/.rpm). Rewriting it would break the app bundle's code seal or a
+// package-owned file, so the desktop updater owns it.
+func bundledWithDesktopApp(exe string) bool {
+	p := filepath.ToSlash(exe)
+	return strings.Contains(p, ".app/Contents/MacOS/") || strings.HasPrefix(p, "/opt/heimdallm/")
 }
 
 type updateState struct {

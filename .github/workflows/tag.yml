@@ -53,7 +53,9 @@ jobs:
           set -euo pipefail
 
           # ── Last released tag ──────────────────────────────────────────────
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          # Unified vX.Y.Z tags only: component releases (daemon/v*, gui/v*,
+          # cli/v*) live on the same history and would otherwise win.
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo "v0.0.0")
           echo "Last tag: $LAST_TAG"
 
           # ── Parse current version ──────────────────────────────────────────

@@ -32,7 +32,7 @@ else
   APP_BUNDLE       := $(FLUTTER_BUILD)/bundle
 endif
 
-.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli test-web-tooling test-compose-isolation \
+.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli test-release-scripts test-web-tooling test-compose-isolation \
         test-smoke test-github test-e2e test-web dev-cli test-docker dev dev-daemon dev-stop \
         coverage coverage-daemon coverage-cli coverage-flutter coverage-check coverage-ci test-coverage-gate \
         release-local package-macos install-service verify-linux run-linux test-install-macos \
@@ -52,11 +52,12 @@ endif
 # the same format as goreleaser's {{.Version}} (e.g. "0.7.10", not "v0.7.10").
 # Release paths must override this with the version being released:
 #   make build-daemon GIT_VERSION=0.7.11
-# Only v-prefixed tags are considered (--match 'v*'): repos accumulate
-# non-version tags (backups, accidental `git tag list`) that would otherwise
-# win the describe and get stamped into the binary.
+# Only unified version tags are considered (--match 'v[0-9]*'): repos accumulate
+# non-version tags (backups, accidental `git tag list`) and per-component
+# release tags (daemon/v*, gui/v*, cli/v*) that would otherwise win the
+# describe and get stamped into the binary.
 # Lazily expanded (=) so git describe only runs for targets that use it.
-GIT_VERSION = $(shell (git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo dev) | sed 's/^v//')
+GIT_VERSION = $(shell (git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo dev) | sed 's/^v//')
 
 build-daemon:
 	cd daemon && make build VERSION=$(GIT_VERSION)
@@ -95,6 +96,11 @@ test-install-macos:
 test-install-linux:
 	@sh -n scripts/test-linux-install.sh
 	@./scripts/test-linux-install.sh
+
+# Offline tests for the release helpers in scripts/release (tag parsing, exact
+# asset sets, versions.json, component finalizer) with a fake `gh`.
+test-release-scripts:
+	@./scripts/release/test-release-scripts.sh
 
 test-web-tooling:
 	@sh docker/scripts/tests/test-web-tooling.sh
@@ -294,7 +300,7 @@ clean-clones:
 #   - gh CLI authenticated: gh auth login
 
 VERSION ?= $(shell \
-	LAST=$$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"); \
+	LAST=$$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo "v0.0.0"); \
 	VER=$${LAST\#v}; \
 	MAJ=$$(echo $$VER | cut -d. -f1); \
 	MIN=$$(echo $$VER | cut -d. -f2); \

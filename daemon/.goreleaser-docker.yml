@@ -16,7 +16,7 @@ builds:
       - -s -w -X main.version={{.Version}}
 
 # ── Docker image — pushed to GHCR ────────────────────────────────────────────
-# Used by: goreleaser-daemon job (release.yml)
+# Used by: goreleaser-daemon job (release-unified.yml)
 dockers:
   - ids:
       - daemon

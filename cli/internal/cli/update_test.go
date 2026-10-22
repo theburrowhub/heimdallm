@@ -175,6 +175,16 @@ func TestUpdateRefusesDevBuildAndHomebrew(t *testing.T) {
 	}
 }
 
+func TestUpdateRefusesBundledCopy(t *testing.T) {
+	isolateConfig(t)
+	srv := releaseServer(t, tarGz(t, "x"))
+	stubUpdater(t, srv, "/opt/heimdallm/heimdallm-cli")
+
+	if _, err := runVersioned(t, "0.10.4", "update"); err == nil || !strings.Contains(err.Error(), "desktop app") {
+		t.Fatalf("bundled err = %v", err)
+	}
+}
+
 func TestUpdateRejectsUnknownChannel(t *testing.T) {
 	isolateConfig(t)
 	if _, err := runVersioned(t, "0.10.4", "update", "--channel", "nightly"); err == nil {

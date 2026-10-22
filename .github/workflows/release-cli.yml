@@ -1,0 +1,142 @@
+name: Release (cli component)
+
+# Reusable: builds the standalone heimdallm-cli archives for a cli/vX.Y.Z release,
+# uploads them with their checksums.txt to the draft release-please created,
+# and publishes it — never as the repository's "latest" release, which stays
+# the unified vX.Y.Z installer. Called by release.yml after the shared test
+# gate. Release-please tags created with GITHUB_TOKEN trigger no workflow, so
+# this runs chained from the release-please run, not on tag pushes.
+#
+# See docs/release-pipeline.md.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Component release tag (cli/vX.Y.Z)'
+        required: true
+        type: string
+      ref:
+        description: 'Commit or tag to build'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build only: upload and publish nothing'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TAG: ${{ inputs.tag }}
+  SOURCE_REF: ${{ inputs.ref }}
+
+jobs:
+  build:
+    name: Build heimdallm-cli archives (GoReleaser)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Release tooling comes from the workflow revision, not from the
+      # (possibly historical) source being built.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          sparse-checkout: scripts/release
+          persist-credentials: false
+
+      - name: Resolve release version
+        run: |
+          set -euo pipefail
+          read -r KIND VERSION <<< "$(release-tooling/scripts/release/parse-tag.sh "$TAG")"
+          test "$KIND" = cli || {
+            echo "::error::$TAG is not a cli release tag"
+            exit 1
+          }
+          git rev-parse --verify "${SOURCE_REF}^{commit}" >/dev/null
+          {
+            echo "VERSION=$VERSION"
+            # GoReleaser OSS cannot parse a "cli/" tag prefix; the config
+            # never publishes, so the bare version tag is only a version source.
+            echo "GORELEASER_CURRENT_TAG=v$VERSION"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: GoReleaser — build archives + checksums.txt
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          distribution: goreleaser
+          version: 'v2.17.1'
+          args: >-
+            release --clean --config .goreleaser-component.yml --skip=publish,validate
+          workdir: cli
+
+      - name: Verify archives
+        run: |
+          set -euo pipefail
+          mkdir -p upload
+          while IFS= read -r ASSET; do
+            test -f "cli/dist/$ASSET" || {
+              echo "::error::GoReleaser did not produce $ASSET"
+              exit 1
+            }
+            cp "cli/dist/$ASSET" upload/
+          done < <(release-tooling/scripts/release/expected-assets.sh cli "$VERSION")
+          (cd upload && sha256sum --check --strict checksums.txt)
+          ARCHIVES=$(( $(release-tooling/scripts/release/expected-assets.sh cli "$VERSION" | wc -l) - 1 ))
+          test "$(wc -l < upload/checksums.txt)" -eq "$ARCHIVES"
+          tar -xzf "upload/heimdallm-cli_${VERSION}_linux_amd64.tar.gz" -C "$RUNNER_TEMP" heimdallm-cli
+          test "$("$RUNNER_TEMP/heimdallm-cli" version)" = "heimdallm-cli version $VERSION"
+          ls -l upload
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-${{ env.VERSION }}
+          path: upload/
+          retention-days: 90
+
+      - name: Upload to the draft release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          release-tooling/scripts/release/require-draft.sh "$TAG"
+          gh release upload "$TAG" upload/* --clobber
+
+  finalize:
+    name: Publish cli release (not latest)
+    needs: build
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify assets and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/release/finalize-component.sh "$TAG" "$GITHUB_SHA"
