@@ -176,33 +176,24 @@ func warnIfAheadOfDaemon(cmd *cobra.Command, up *update.Updater, current string,
 }
 
 // daemonProbeClient points at the daemon the other commands would talk to
-// (--host/--token, then HEIMDALLM_HOST/HEIMDALLM_TOKEN, then cli.toml). update
-// and version skip the root's client resolution so they work with no daemon
-// configured; this resolves it lazily, without exiting on a bad config and
-// without the Docker token discovery, since /health needs no token.
+// (--host, then HEIMDALLM_HOST, then cli.toml). update and version skip the
+// root's client resolution so they work with no daemon configured; this
+// resolves the host lazily, without exiting on a bad config. /health needs no
+// credential, so the probe never sends the token anywhere.
 func daemonProbeClient(cmd *cobra.Command) *api.Client {
 	host, _ := cmd.Flags().GetString("host")
-	token, _ := cmd.Flags().GetString("token")
 	instance, _ := cmd.Flags().GetString("instance")
 	if host == "" {
 		host = os.Getenv("HEIMDALLM_HOST")
 	}
-	if token == "" {
-		token = os.Getenv("HEIMDALLM_TOKEN")
-	}
-	if host == "" || token == "" {
+	if host == "" {
 		if cfg, err := loadCLIConfig(); err == nil {
-			if h, t, err := cfg.resolve(instance); err == nil {
-				if host == "" {
-					host = h
-				}
-				if token == "" {
-					token = t
-				}
+			if h, _, err := cfg.resolve(instance); err == nil {
+				host = h
 			}
 		}
 	}
-	c := api.New(host, token)
+	c := api.New(host, "")
 	c.HTTPClient = &http.Client{Timeout: daemonHealthTimeout}
 	return c
 }

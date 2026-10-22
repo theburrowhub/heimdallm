@@ -75,12 +75,16 @@ alters something a client depends on, and a client's minimum together with the
 client change that starts depending on it.
 
 The matrix is published in the unified `versions.json` and as `compat.json` on
-every component release. The existing updaters use it to **warn, never block**:
+every component release. A component tag whose source predates `compat.json`
+(re-run or repaired later) ships without it: the pipelines and the finalizer
+check the tagged source and expect the asset only when it is there. The
+existing updaters use it to **warn, never block**:
 
 - `heimdallm-cli update`, `update --check` and `version --check` read the target
   release's `versions.json` and, when the daemon the CLI is configured for
   (`--host`, `HEIMDALLM_HOST`, `cli.toml`) serves an older API than
-  `min_daemon_api.cli`, print a warning. The update still installs.
+  `min_daemon_api.cli`, print a warning. The update still installs. The
+  `/health` probe sends no token.
 - The desktop update banner shows the same warning when the connected daemon
   serves an older API than `min_daemon_api.gui`. The bundled daemon is replaced
   together with the app, so this matters for a separately managed daemon

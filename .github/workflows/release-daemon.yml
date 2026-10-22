@@ -92,6 +92,10 @@ jobs:
           mkdir -p upload
           # compat.json is the source's compatibility matrix (daemon API
           # revision and client minimums); everything else is GoReleaser's.
+          # A source ref that predates compat.json ships without it.
+          COMPAT_ASSET=0
+          [ -f compat.json ] && COMPAT_ASSET=1
+          export COMPAT_ASSET
           while IFS= read -r ASSET; do
             SOURCE="daemon/dist/$ASSET"
             [ "$ASSET" = compat.json ] && SOURCE=compat.json
@@ -101,9 +105,12 @@ jobs:
             }
             cp "$SOURCE" upload/
           done < <(release-tooling/scripts/release/expected-assets.sh daemon "$VERSION")
-          jq -e '.daemon_api and .min_daemon_api' upload/compat.json >/dev/null
+          if [ "$COMPAT_ASSET" = 1 ]; then
+            jq -e '.daemon_api and .min_daemon_api' upload/compat.json >/dev/null
+          fi
           (cd upload && sha256sum --check --strict checksums.txt)
-          ARCHIVES=$(( $(release-tooling/scripts/release/expected-assets.sh daemon "$VERSION" | wc -l) - 2 ))
+          ARCHIVES=$(release-tooling/scripts/release/expected-assets.sh daemon "$VERSION" \
+            | grep -cvx -e checksums.txt -e compat.json)
           test "$(wc -l < upload/checksums.txt)" -eq "$ARCHIVES"
           tar -xzf "upload/heimdalld_${VERSION}_linux_amd64.tar.gz" -C "$RUNNER_TEMP" heimdalld
           test "$("$RUNNER_TEMP/heimdalld" version)" = "$VERSION"

@@ -63,13 +63,21 @@ func compatReleaseServer(t *testing.T, versionsJSON string) *httptest.Server {
 	return srv
 }
 
-// daemonServer answers /health with the given body.
-func daemonServer(t *testing.T, health string) *httptest.Server {
+// daemonServer answers /health with the given body, using the status code the
+// real daemon sends with it: 503 while it is starting or degraded. Every token
+// header it receives is recorded in *tokens when tokens is not nil.
+func daemonServer(t *testing.T, health string, tokens ...*[]string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {
 			http.NotFound(w, r)
 			return
+		}
+		for _, rec := range tokens {
+			*rec = append(*rec, r.Header.Get("X-Heimdallm-Token"))
+		}
+		if strings.Contains(health, `"status":"degraded"`) || strings.Contains(health, `"status":"starting"`) {
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		fmt.Fprint(w, health)
 	}))
@@ -91,6 +99,7 @@ func TestVersionCheckWarnsWhenAheadOfDaemon(t *testing.T) {
 		"release without versions.json":      {`{"status":"ok","api_version":1}`, "", false},
 		"versions.json without compat data":  {`{"status":"ok","api_version":1}`, `{"daemon":"0.11.0","gui":"0.11.0","cli":"0.11.0"}`, false},
 		"degraded daemon still reports":      {`{"status":"degraded","api_version":1}`, needsAPI2, true},
+		"starting daemon still reports":      {`{"status":"starting","api_version":1}`, needsAPI2, true},
 		"undecodable daemon health is quiet": {`<html>`, needsAPI2, false},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -206,4 +215,22 @@ func TestCompatProbeResolvesDaemonFromEnvAndConfig(t *testing.T) {
 			t.Fatalf("out=%q err=%v", out, err)
 		}
 	})
+}
+
+// /health needs no credential: the probe must not hand the token to whatever
+// host it is pointed at, even when one is configured.
+func TestCompatProbeSendsNoToken(t *testing.T) {
+	isolateConfig(t)
+	stubUpdater(t, compatReleaseServer(t, needsAPI2), "")
+	var tokens []string
+	daemon := daemonServer(t, `{"status":"ok","api_version":1}`, &tokens)
+	t.Setenv("HEIMDALLM_TOKEN", "secret-token")
+
+	out, err := runVersioned(t, "0.10.4", "version", "--check", "--host", daemon.URL, "--token", "flag-token")
+	if err != nil || !strings.Contains(out, "needs daemon API 2 or newer") {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	if len(tokens) != 1 || tokens[0] != "" {
+		t.Fatalf("probe sent tokens %q, want one request without a token", tokens)
+	}
 }

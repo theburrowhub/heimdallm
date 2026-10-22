@@ -2,11 +2,19 @@
 # Print, one per line, the exact asset set a published release must carry.
 # The finalizers compare a draft against this list before publishing it, so a
 # missing, duplicated or unexpected asset blocks the release.
+#
+# Component releases ship the source's compat.json. A source ref that predates
+# it has none to ship: COMPAT_ASSET=0 drops it from the list.
 set -euo pipefail
 
 [ "$#" -eq 2 ] || { echo "usage: $0 KIND VERSION" >&2; exit 64; }
 KIND=$1
 VERSION=$2
+case "${COMPAT_ASSET:-1}" in
+  1) ;;
+  0) COMPAT_ASSET=1 "$0" "$KIND" "$VERSION" | grep -vx compat.json; exit 0 ;;
+  *) echo "COMPAT_ASSET must be 0 or 1" >&2; exit 64 ;;
+esac
 
 case "$KIND" in
   unified)
