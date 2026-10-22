@@ -190,6 +190,19 @@ func TestManagedByPackageManager(t *testing.T) {
 	}
 }
 
+func TestBundledWithDesktopApp(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/Applications/Heimdallm.app/Contents/MacOS/heimdallm-cli": true,
+		"/opt/heimdallm/heimdallm-cli":                             true,
+		"/usr/local/bin/heimdallm-cli":                             false,
+		"/home/me/opt/heimdallm/heimdallm-cli":                     false,
+	} {
+		if got := bundledWithDesktopApp(p); got != want {
+			t.Errorf("%s = %v", p, got)
+		}
+	}
+}
+
 func TestDefaultExecutablePath(t *testing.T) {
 	p, err := executablePath()
 	if err != nil || p == "" {

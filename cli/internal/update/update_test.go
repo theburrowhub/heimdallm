@@ -222,6 +222,29 @@ func TestLatestChannels(t *testing.T) {
 	}
 }
 
+// Per-component releases (theburrowhub/heimdallm#437) share the repository's
+// release list. Their tags are not plain semver, so the latest channel must
+// keep resolving to unified vX.Y.Z releases even when they are newer.
+func TestLatestChannelSkipsComponentReleases(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/releases", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"tag_name":"cli/v9.0.0"},{"tag_name":"daemon/v9.0.0"},{"tag_name":"gui/v9.0.0"},{"tag_name":"v0.11.0"}]`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	u := &Updater{Client: srv.Client(), APIBase: srv.URL}
+
+	rel, err := u.Latest(context.Background(), ChannelLatest)
+	if err != nil || rel.Tag != "v0.11.0" {
+		t.Fatalf("latest = %+v, %v", rel, err)
+	}
+	for _, tag := range []string{"cli/v1.2.3", "daemon/v1.2.3", "gui/v1.2.3"} {
+		if _, err := parseSemver(tag); err == nil {
+			t.Errorf("%s should not parse as a unified release", tag)
+		}
+	}
+}
+
 func TestLatestStableSkipsPrerelease(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"tag_name":"v1.0.0-rc.1","prerelease":true}`)

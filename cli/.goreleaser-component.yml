@@ -1,0 +1,43 @@
+version: 2
+
+# ── cli/vX.Y.Z component release ─────────────────────────────────────────────
+# Used by: release-cli.yml. Same binaries and archive names as .goreleaser.yml
+# (which serves the unified vX.Y.Z release and the Homebrew formula), with a
+# plain checksums.txt. GoReleaser OSS cannot parse a "cli/" tag prefix, so the
+# workflow passes GORELEASER_CURRENT_TAG=vX.Y.Z — which is why this config must
+# never publish: that tag names the unified release, not this one. The workflow
+# uploads dist/ to the cli/vX.Y.Z draft itself.
+project_name: heimdallm-cli
+
+builds:
+  - main: ./cmd/heimdallm-cli
+    binary: heimdallm-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  disable: true
+
+release:
+  disable: true

@@ -180,7 +180,9 @@ supplies the local endpoint; do not put a second daemon URL back into it.
 `release-please` reads commit prefixes to bump semver and generate the
 changelog. Stick to: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`,
 `ci:`, `test:`. A `feat!:` or trailer `BREAKING CHANGE:` forces a major
-bump.
+bump. Component releases (`daemon/v*`, `gui/v*`, `cli/v*`) are bumped by the
+commits that touch `daemon/`, `flutter_app/` or `cli/` respectively; every
+commit bumps the unified `vX.Y.Z`. See `docs/release-pipeline.md`.
 
 ## Do not
 
