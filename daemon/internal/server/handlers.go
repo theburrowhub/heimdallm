@@ -806,6 +806,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // body would classify those as ours and silently never spawn a daemon.
 const HeaderDaemon = "X-Heimdallm-Daemon"
 
+// APIVersion is the revision of the HTTP API this daemon serves, reported as
+// api_version on /health. Clients declare the minimum revision they need, and
+// the updaters warn (never block) before installing a GUI or CLI that is ahead
+// of the daemon it talks to.
+//
+// Bump it in the same change that adds or alters an endpoint or payload a
+// client depends on, together with "daemon_api" in the repository's
+// compat.json (a test keeps them equal). Daemons built before the field
+// existed omit it; clients read that as revision 1, the API at the time.
+const APIVersion = 1
+
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	w.Header().Set(HeaderDaemon, "1")
@@ -817,7 +828,7 @@ func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// spawn a rival instance. The UI may still enter its diagnostic surface
 	// while startup finishes (#646).
 	if srv.starting.Load() {
-		resp := map[string]any{"status": srv.unavailableStatus()}
+		resp := map[string]any{"status": srv.unavailableStatus(), "api_version": APIVersion}
 		if srv.version != "" {
 			resp["version"] = srv.version
 		}
@@ -836,8 +847,9 @@ func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		status = "degraded"
 	}
 	resp := map[string]any{
-		"status": status,
-		"checks": checks,
+		"status":      status,
+		"checks":      checks,
+		"api_version": APIVersion,
 	}
 	if srv.version != "" {
 		resp["version"] = srv.version

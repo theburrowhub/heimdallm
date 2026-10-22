@@ -10,9 +10,9 @@ whatever it released.
 | Release | Tag | Bumped by | Assets |
 |---------|-----|-----------|--------|
 | Unified installer | `vX.Y.Z` | any change in the repository | `Heimdallm-vX.Y.Z.dmg`, `heimdallm_X.Y.Z_amd64.deb` / `.rpm`, `Heimdallm-X.Y.Z-x86_64.AppImage`, `heimdallm-cli_X.Y.Z_{os}_{arch}` archives, `daemon-checksums.txt`, `cli-checksums.txt`, `linux-checksums.txt` (+ `.sig`), `versions.json`; GHCR image `ghcr.io/theburrowhub/heimdallm:X.Y.Z`; Homebrew formula |
-| Daemon | `daemon/vX.Y.Z` | changes under `daemon/` | `heimdalld_X.Y.Z_{linux,darwin}_{amd64,arm64}.tar.gz`, `checksums.txt` |
-| GUI | `gui/vX.Y.Z` | changes under `flutter_app/` | `Heimdallm-X.Y.Z.dmg`, `heimdallm_X.Y.Z_amd64.deb` / `.rpm`, `Heimdallm-X.Y.Z-x86_64.AppImage`, `checksums.txt` |
-| CLI | `cli/vX.Y.Z` | changes under `cli/` | `heimdallm-cli_X.Y.Z_{linux,darwin,windows}_{amd64,arm64}` archives (`.zip` on Windows), `checksums.txt` |
+| Daemon | `daemon/vX.Y.Z` | changes under `daemon/` | `heimdalld_X.Y.Z_{linux,darwin}_{amd64,arm64}.tar.gz`, `checksums.txt`, `compat.json` |
+| GUI | `gui/vX.Y.Z` | changes under `flutter_app/` | `Heimdallm-X.Y.Z.dmg`, `heimdallm_X.Y.Z_amd64.deb` / `.rpm`, `Heimdallm-X.Y.Z-x86_64.AppImage`, `checksums.txt`, `compat.json` |
+| CLI | `cli/vX.Y.Z` | changes under `cli/` | `heimdallm-cli_X.Y.Z_{linux,darwin,windows}_{amd64,arm64}` archives (`.zip` on Windows), `checksums.txt`, `compat.json` |
 
 `release-please-config.json` declares four packages: the repository root
 (`.`, untagged component, so its tags stay `vX.Y.Z`) and `daemon`,
@@ -39,14 +39,59 @@ window now covers about five release cycles.
 ### versions.json
 
 Each unified release carries a `versions.json` with the component versions
-recorded in `.release-please-manifest.json` at the release commit:
+recorded in `.release-please-manifest.json` at the release commit, plus the
+compatibility matrix from `compat.json` (see below):
 
 ```json
-{ "daemon": "0.11.0", "gui": "0.11.0", "cli": "0.10.5" }
+{
+  "daemon": "0.11.0", "gui": "0.11.0", "cli": "0.10.5",
+  "daemon_api": 1,
+  "min_daemon_api": { "gui": 1, "cli": 1 }
+}
 ```
 
 Releases cut before the split only had the root entry; every component shipped
-with the unified version then, so it is used as the fallback.
+with the unified version then, so it is used as the fallback. Releases cut
+before `compat.json` existed carry no compatibility keys.
+
+### Compatibility matrix
+
+`compat.json` at the repository root is the single source of truth:
+
+```json
+{ "daemon_api": 1, "min_daemon_api": { "gui": 1, "cli": 1 } }
+```
+
+- `daemon_api` is the revision of the daemon's HTTP API. The daemon reports it
+  as `api_version` on `/health` (`APIVersion` in `daemon/internal/server/handlers.go`); daemons
+  built before the field existed omit it and count as revision 1.
+- `min_daemon_api.gui` / `.cli` are the oldest daemon API each client works
+  against (`flutter_app/lib/core/compat.dart`, `cli/internal/compat`).
+
+Tests in each module fail if a constant drifts from `compat.json`, and
+`scripts/release/versions-json.sh` rejects a matrix whose minimums exceed
+`daemon_api`. Bump `daemon_api` together with the daemon change that adds or
+alters something a client depends on, and a client's minimum together with the
+client change that starts depending on it.
+
+The matrix is published in the unified `versions.json` and as `compat.json` on
+every component release. A component tag whose source predates `compat.json`
+(re-run or repaired later) ships without it: the pipelines and the finalizer
+check the tagged source and expect the asset only when it is there. The
+existing updaters use it to **warn, never block**:
+
+- `heimdallm-cli update`, `update --check` and `version --check` read the target
+  release's `versions.json` and, when the daemon the CLI is configured for
+  (`--host`, `HEIMDALLM_HOST`, `cli.toml`) serves an older API than
+  `min_daemon_api.cli`, print a warning. The update still installs. The
+  `/health` probe sends no token.
+- The desktop update banner shows the same warning when the connected daemon
+  serves an older API than `min_daemon_api.gui`. The bundled daemon is replaced
+  together with the app, so this matters for a separately managed daemon
+  (Docker, another machine).
+
+A missing or unreadable `versions.json`, or an unreachable daemon, prints
+nothing: the warning only speaks on evidence.
 
 ### Desktop bundles and the bundled CLI
 

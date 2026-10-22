@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/theburrowhub/heimdallm/cli/internal/api"
+	"github.com/theburrowhub/heimdallm/cli/internal/compat"
 	"github.com/theburrowhub/heimdallm/cli/internal/update"
 )
 
@@ -100,11 +103,16 @@ func newVersionCmd(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rel, err := newUpdater().Latest(cmd.Context(), ch)
+			up := newUpdater()
+			rel, err := up.Latest(cmd.Context(), ch)
 			if err != nil {
 				return fmt.Errorf("checking for updates: %w", err)
 			}
-			return reportCheck(out, version, rel)
+			if err := reportCheck(out, version, rel); err != nil {
+				return err
+			}
+			warnIfAheadOfDaemon(cmd, up, version, rel)
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "check for a newer release without installing it")
@@ -124,6 +132,70 @@ func reportCheck(out io.Writer, current string, rel *update.Release) error {
 	}
 	fmt.Fprintf(out, "Update available: %s -> %s\nRun `heimdallm-cli update` to install it.\n", current, rel.Tag)
 	return nil
+}
+
+// daemonHealthTimeout bounds the /health probe behind the compatibility
+// warning: it is advisory, so an unreachable daemon must not stall an update.
+const daemonHealthTimeout = 3 * time.Second
+
+// warnIfAheadOfDaemon prints a warning, never an error, when the release about
+// to be installed needs a newer daemon API than the connected daemon serves.
+// Releases without compatibility data, an unreachable daemon or a release that
+// is not newer print nothing: the warning only speaks on evidence.
+func warnIfAheadOfDaemon(cmd *cobra.Command, up *update.Updater, current string, rel *update.Release) {
+	if newer, err := isNewer(current, rel); err != nil || !newer {
+		return
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), daemonHealthTimeout)
+	defer cancel()
+	c, err := up.Compat(ctx, rel)
+	if err != nil {
+		return
+	}
+	need, ok := c.MinDaemonAPI["cli"]
+	if !ok {
+		return
+	}
+	client := daemonProbeClient(cmd)
+	h, err := client.GetHealth()
+	if err != nil {
+		return
+	}
+	have := compat.EffectiveDaemonAPI(h.APIVersion)
+	if have >= need {
+		return
+	}
+	daemon := "the daemon"
+	if v := h.DisplayVersion(); v != "" {
+		daemon = "daemon " + v
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(),
+		"Warning: heimdallm-cli %s needs daemon API %d or newer, but %s at %s serves API %d.\n"+
+			"The CLI can still be installed; update the daemon too (desktop app, package or Docker image).\n",
+		rel.Version(), need, daemon, client.Host, have)
+}
+
+// daemonProbeClient points at the daemon the other commands would talk to
+// (--host, then HEIMDALLM_HOST, then cli.toml). update and version skip the
+// root's client resolution so they work with no daemon configured; this
+// resolves the host lazily, without exiting on a bad config. /health needs no
+// credential, so the probe never sends the token anywhere.
+func daemonProbeClient(cmd *cobra.Command) *api.Client {
+	host, _ := cmd.Flags().GetString("host")
+	instance, _ := cmd.Flags().GetString("instance")
+	if host == "" {
+		host = os.Getenv("HEIMDALLM_HOST")
+	}
+	if host == "" {
+		if cfg, err := loadCLIConfig(); err == nil {
+			if h, _, err := cfg.resolve(instance); err == nil {
+				host = h
+			}
+		}
+	}
+	c := api.New(host, "")
+	c.HTTPClient = &http.Client{Timeout: daemonHealthTimeout}
+	return c
 }
 
 func isNewer(current string, rel *update.Release) (bool, error) {
@@ -157,7 +229,11 @@ func newUpdateCmd(version string) *cobra.Command {
 				return fmt.Errorf("checking for updates: %w", err)
 			}
 			if check {
-				return reportCheck(out, version, rel)
+				if err := reportCheck(out, version, rel); err != nil {
+					return err
+				}
+				warnIfAheadOfDaemon(cmd, up, version, rel)
+				return nil
 			}
 			if isDevVersion(version) {
 				return fmt.Errorf("this is a development build (%q); install a release to enable self-update", version)
@@ -180,6 +256,7 @@ func newUpdateCmd(version string) *cobra.Command {
 			if bundledWithDesktopApp(exe) {
 				return fmt.Errorf("%s ships inside the Heimdallm desktop installer; update the desktop app instead (it replaces the bundled CLI)", exe)
 			}
+			warnIfAheadOfDaemon(cmd, up, version, rel)
 			fmt.Fprintf(out, "Updating %s -> %s ...\n", version, rel.Tag)
 			if err := up.Apply(cmd.Context(), rel, exe); err != nil {
 				return err

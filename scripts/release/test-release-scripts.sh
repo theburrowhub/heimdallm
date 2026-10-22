@@ -41,9 +41,26 @@ done
 # ── expected-assets.sh ──────────────────────────────────────────────────────
 count() { "$HERE/expected-assets.sh" "$1" "$2" | wc -l | tr -d ' '; }
 expect_out "unified asset count" 15 count unified 0.11.0
-expect_out "daemon asset count" 5 count daemon 0.11.0
-expect_out "gui asset count" 5 count gui 0.11.0
-expect_out "cli asset count" 7 count cli 0.11.0
+expect_out "daemon asset count" 6 count daemon 0.11.0
+expect_out "gui asset count" 6 count gui 0.11.0
+expect_out "cli asset count" 8 count cli 0.11.0
+for kind in daemon gui cli; do
+  if "$HERE/expected-assets.sh" "$kind" 0.11.0 | grep -qx compat.json; then
+    pass
+  else
+    fail "$kind releases ship compat.json"
+  fi
+done
+for kind in daemon gui cli; do
+  if [ "$(COMPAT_ASSET=0 "$HERE/expected-assets.sh" "$kind" 0.11.0)" = \
+       "$("$HERE/expected-assets.sh" "$kind" 0.11.0 | grep -vx compat.json)" ]; then
+    pass
+  else
+    fail "COMPAT_ASSET=0 drops only compat.json from the $kind set"
+  fi
+done
+expect_out "COMPAT_ASSET=0 leaves unified alone" 15 sh -c "COMPAT_ASSET=0 '$HERE/expected-assets.sh' unified 0.11.0 | wc -l | tr -d ' '"
+expect_fail "invalid COMPAT_ASSET" env COMPAT_ASSET=yes "$HERE/expected-assets.sh" cli 0.11.0
 expect_fail "unknown kind" "$HERE/expected-assets.sh" web 0.11.0
 if "$HERE/expected-assets.sh" unified 0.11.0 | grep -qx 'Heimdallm-v0.11.0.dmg' &&
    "$HERE/expected-assets.sh" gui 0.11.0 | grep -qx 'Heimdallm-0.11.0.dmg'; then
@@ -64,6 +81,24 @@ printf '{".":"0.10.4","cli":"latest"}' > "$WORK/bad.json"
 expect_fail "non-semver version" "$HERE/versions-json.sh" "$WORK/bad.json"
 printf '{"cli":"0.10.4"}' > "$WORK/noroot.json"
 expect_fail "missing root version" "$HERE/versions-json.sh" "$WORK/noroot.json"
+printf '{"daemon_api":2,"min_daemon_api":{"gui":1,"cli":2}}' > "$WORK/compat.json"
+expect_out "compat data is merged in" \
+  '{"daemon":"0.11.1","gui":"0.12.0","cli":"0.10.5","daemon_api":2,"min_daemon_api":{"gui":1,"cli":2}}' \
+  sh -c "'$HERE/versions-json.sh' '$WORK/m.json' '$WORK/compat.json' | jq -c ."
+for bad in '{"daemon_api":1,"min_daemon_api":{"gui":2,"cli":1}}' \
+           '{"daemon_api":"1","min_daemon_api":{"gui":1,"cli":1}}' \
+           '{"daemon_api":1,"min_daemon_api":{"gui":1}}' \
+           '{"daemon_api":1.5,"min_daemon_api":{"gui":1,"cli":1}}' \
+           '{"daemon_api":0,"min_daemon_api":{"gui":0,"cli":0}}'; do
+  printf '%s' "$bad" > "$WORK/badcompat.json"
+  expect_fail "reject compat $bad" "$HERE/versions-json.sh" "$WORK/m.json" "$WORK/badcompat.json"
+done
+if jq -e '.daemon_api >= ([.min_daemon_api[]] | max)' "$HERE/../../compat.json" >/dev/null &&
+   "$HERE/versions-json.sh" "$WORK/m.json" "$HERE/../../compat.json" >/dev/null; then
+  pass
+else
+  fail "the repository's compat.json is valid"
+fi
 
 # ── fake gh ─────────────────────────────────────────────────────────────────
 STATE="$WORK/state"
@@ -139,7 +174,9 @@ git -C "$REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m one
 git -C "$REPO" tag cli/v1.2.3
 git -C "$REPO" tag v0.11.0
 OLD=$(git -C "$REPO" rev-parse HEAD)
-git -C "$REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m two
+echo '{}' > "$REPO/compat.json"
+git -C "$REPO" add compat.json
+git -C "$REPO" -c user.name=t -c user.email=t@t commit -q -m two
 HEAD_SHA=$(git -C "$REPO" rev-parse HEAD)
 git -C "$REPO" tag cli/v1.3.0
 finalize() { (cd "$REPO" && "$HERE/finalize-component.sh" "$@"); }
@@ -155,8 +192,15 @@ if [ ! -s "$STATE/edits" ] || [ "$(wc -l < "$STATE/edits" | tr -d ' ')" = 1 ]; t
 seed_release cli/v1.3.0 "$HEAD_SHA" true v0.11.0 "${CLI_ASSETS[@]//1.2.3/1.3.0}"
 FAKE_GH_EDIT_MOVES_LATEST=1 expect_fail "component became latest" finalize cli/v1.3.0 "$HEAD_SHA"
 
+# cli/v1.2.3 predates compat.json, so its release carries none.
+OLD_CLI_ASSETS=()
+for a in "${CLI_ASSETS[@]}"; do [ "$a" = compat.json ] || OLD_CLI_ASSETS+=("$a"); done
+seed_release cli/v1.2.3 "$OLD" true v0.11.0 "${OLD_CLI_ASSETS[@]}"
+expect_ok "repair of an ancestor tag without compat.json" finalize cli/v1.2.3 "$HEAD_SHA"
 seed_release cli/v1.2.3 "$OLD" true v0.11.0 "${CLI_ASSETS[@]}"
-expect_ok "repair of an ancestor tag" finalize cli/v1.2.3 "$HEAD_SHA"
+expect_fail "compat.json on a tag whose source has none" finalize cli/v1.2.3 "$HEAD_SHA"
+seed_release cli/v1.3.0 "$HEAD_SHA" true v0.11.0 "${OLD_CLI_ASSETS[@]//1.2.3/1.3.0}"
+expect_fail "compat.json missing on a tag whose source has it" finalize cli/v1.3.0 "$HEAD_SHA"
 seed_release cli/v1.3.0 "$HEAD_SHA" true v0.11.0 "${CLI_ASSETS[@]//1.2.3/1.3.0}"
 expect_fail "tag not on the workflow ref" finalize cli/v1.3.0 "$OLD"
 seed_release cli/v1.3.0 "$OLD" true v0.11.0 "${CLI_ASSETS[@]//1.2.3/1.3.0}"

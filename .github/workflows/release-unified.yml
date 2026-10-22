@@ -264,7 +264,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.ref }}
-          sparse-checkout: .release-please-manifest.json
+          sparse-checkout: |
+            .release-please-manifest.json
+            compat.json
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -279,8 +281,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # Releases cut before compat.json existed carry versions only.
+          COMPAT=()
+          [ -f compat.json ] && COMPAT=(compat.json)
           release-tooling/scripts/release/versions-json.sh .release-please-manifest.json \
-            > dist/versions.json
+            "${COMPAT[@]}" > dist/versions.json
           cat dist/versions.json
 
       - name: Upload versions.json to the draft release
