@@ -34,6 +34,7 @@ func newAgentsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&rescan, "rescan", false, "scan the daemon's machine again before listing (needs a token)")
+	cmd.AddCommand(newAgentSchemaCmds()...)
 	return cmd
 }
 
@@ -47,6 +48,12 @@ func printAgents(w io.Writer, cat *api.CLIAgentCatalog) {
 		notes := ""
 		if a.Configured {
 			notes = "configured"
+		}
+		if a.Kind == "custom" {
+			if notes != "" {
+				notes += ", "
+			}
+			notes += "custom: " + api.DisplayText(a.Binary, 40)
 		}
 		if a.Kind == "ide" {
 			if notes != "" {

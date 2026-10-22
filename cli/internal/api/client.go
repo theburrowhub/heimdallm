@@ -90,9 +90,29 @@ func (c *Client) send(req *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, &HTTPError{Status: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	return data, nil
+}
+
+// HTTPError is a response with a status of 400 and above. Callers that need
+// to tell one status from another (403 from 400) use errors.As.
+type HTTPError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
+
+// Message is the daemon's {"error": "..."} text, or the raw body.
+func (e *HTTPError) Message() string {
+	var body struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(e.Body), &body) == nil && body.Error != "" {
+		return body.Error
+	}
+	return e.Body
 }
 
 // doJSON is do() with a JSON request body.
