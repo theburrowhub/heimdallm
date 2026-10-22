@@ -17,7 +17,7 @@ entitlements=$3
 [[ -n "$signing_identity" ]] || { echo "signing identity is empty" >&2; exit 64; }
 # Canonical path, so the paths find(1) prints below compare equal to the ones
 # built from it (a trailing slash or ./a/../ would otherwise defeat them).
-app_bundle=$(cd "$app_bundle" && pwd -P)
+app_bundle=$(CDPATH='' cd -- "$app_bundle" && pwd -P)
 
 keychain_args=()
 if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
