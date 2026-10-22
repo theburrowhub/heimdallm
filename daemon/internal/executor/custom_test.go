@@ -211,3 +211,33 @@ func TestMigrateLegacyExtraFlagsLeavesCustomAgentsAlone(t *testing.T) {
 		t.Fatalf("custom agents have no legacy flags to migrate: %+v %v", out, migrated)
 	}
 }
+
+func TestValidateCustomAgentsDoesNotRegister(t *testing.T) {
+	agents := []executor.CustomAgent{{Name: "aider", Binary: "aider", Schema: aiderSchema(t)}}
+	if err := executor.ValidateCustomAgents(agents); err != nil {
+		t.Fatal(err)
+	}
+	if executor.IsCustomAgent("aider") {
+		t.Fatal("ValidateCustomAgents must not register anything")
+	}
+	if err := executor.ValidateCustomAgents([]executor.CustomAgent{{Name: "aider", Binary: "bash", Schema: aiderSchema(t)}}); err == nil {
+		t.Fatal("a shell binary must be refused")
+	}
+}
+
+func TestResolveCLIPathUsesABinaryNamedDifferently(t *testing.T) {
+	schema, err := agentschema.Parse([]byte(`{"fields":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.SetCustomAgents([]executor.CustomAgent{{Name: "tool", Binary: "tool-cli", Schema: schema}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = executor.SetCustomAgents(nil) })
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return nil })()
+	fakeAgentBin(t, "tool-cli")
+	if p := executor.ResolveCLIPath("tool"); filepath.Base(p) != "tool-cli" {
+		t.Fatalf("ResolveCLIPath(tool) = %q, want the tool-cli binary", p)
+	}
+}

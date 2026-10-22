@@ -83,7 +83,7 @@ func TestFlowListingIncludesCustomAgentsAsReviewOnly(t *testing.T) {
 			found = &a
 		}
 	}
-	if found == nil || !found.Installed || found.WriteCapable || found.CanDraft || found.ReviewOnly {
+	if found == nil || !found.Installed || found.WriteCapable || found.CanDraft || !found.ReviewOnly {
 		t.Fatalf("aider listing = %+v", found)
 	}
 	if flows.CanDraft("aider") {

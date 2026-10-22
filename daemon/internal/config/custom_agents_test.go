@@ -417,3 +417,46 @@ func TestStoreNeverSetsACustomAgentsExtraFlags(t *testing.T) {
 		t.Fatalf("merged = %+v", got)
 	}
 }
+
+// On reload the store layer is merged before the executor learns about the
+// new config's custom agents: an override for one must not be dropped.
+func TestStoreOverridesACustomAgentTheExecutorDoesNotKnowYet(t *testing.T) {
+	if executor.IsCustomAgent("aider") {
+		t.Fatal("precondition: aider is not registered")
+	}
+	base := CLIAgentConfig{Binary: "aider", PromptID: "old"}
+	got, apply, err := mergeStoredAgentConfig("aider", base, []byte(`{"prompt":"new","model":"gpt-4o"}`))
+	if err != nil || !apply {
+		t.Fatalf("merge: apply=%v err=%v", apply, err)
+	}
+	if got.PromptID != "new" || got.Model != "gpt-4o" || got.Binary != "aider" {
+		t.Fatalf("merged = %+v", got)
+	}
+	// An agent that is neither built in nor declared is still ignored.
+	if _, apply, _ := mergeStoredAgentConfig("ghost", CLIAgentConfig{}, []byte(`{"prompt":"x"}`)); apply {
+		t.Fatal("an unknown agent's override must be ignored")
+	}
+}
+
+// Built-in agents keep their typed validation: their schema only describes
+// them for the UIs, so a value outside it (OpenRouter allows 40 tool rounds
+// in its form) still loads.
+func TestBuiltinValuesAreNotCheckedAgainstTheirSchema(t *testing.T) {
+	path := writeConfigDir(t, `
+[ai]
+primary = "claude"
+
+[ai.agents.openrouter]
+max_turns = 120
+
+[ai.agents.claude]
+model = "claude-legacy-1"
+`, nil)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AI.Agents["openrouter"].MaxTurns != 120 {
+		t.Fatal("value lost")
+	}
+}

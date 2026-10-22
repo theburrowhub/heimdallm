@@ -33,23 +33,38 @@ func IsBuiltinCLI(name string) bool {
 // skipped config validation still cannot register a path, a shell or a name
 // that collides with a built-in agent.
 func SetCustomAgents(agents []CustomAgent) error {
+	next, err := buildCustomRegistry(agents)
+	if err != nil {
+		return err
+	}
+	customAgents.Store(&next)
+	return nil
+}
+
+// ValidateCustomAgents runs SetCustomAgents' checks without registering the
+// agents, so a reload can refuse a config before it has any side effect.
+func ValidateCustomAgents(agents []CustomAgent) error {
+	_, err := buildCustomRegistry(agents)
+	return err
+}
+
+func buildCustomRegistry(agents []CustomAgent) (map[string]CustomAgent, error) {
 	next := make(map[string]CustomAgent, len(agents))
 	for _, a := range agents {
 		if a.Schema == nil {
-			return fmt.Errorf("executor: custom agent %q has no schema", a.Name)
+			return nil, fmt.Errorf("executor: custom agent %q has no schema", a.Name)
 		}
 		schema := a.Schema.Clone()
 		schema.Name, schema.Binary = a.Name, a.Binary
 		if err := schema.ValidateCustom(IsBuiltinCLI); err != nil {
-			return fmt.Errorf("executor: custom agent %q: %w", a.Name, err)
+			return nil, fmt.Errorf("executor: custom agent %q: %w", a.Name, err)
 		}
 		if _, dup := next[a.Name]; dup {
-			return fmt.Errorf("executor: custom agent %q is declared twice", a.Name)
+			return nil, fmt.Errorf("executor: custom agent %q is declared twice", a.Name)
 		}
 		next[a.Name] = CustomAgent{Name: a.Name, Binary: a.Binary, Schema: schema}
 	}
-	customAgents.Store(&next)
-	return nil
+	return next, nil
 }
 
 // CustomAgentFor returns a registered custom agent.

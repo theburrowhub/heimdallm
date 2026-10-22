@@ -2211,6 +2211,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		if err != nil {
 			return fmt.Errorf("reload: %w", err)
 		}
+		// Refuse a config whose custom agents the executor would reject
+		// before any side effect (store merge, cluster propagation). The
+		// registry itself is swapped together with cfg below.
+		newCustomAgents := newCfg.CustomAgents()
+		if err := executor.ValidateCustomAgents(newCustomAgents); err != nil {
+			return fmt.Errorf("reload: custom agents: %w", err)
+		}
 		// On reload we have a working cfg already — a transient DB error or
 		// a corrupted row must NOT silently revert the running daemon to
 		// TOML+env and wipe operator customisations. Propagate the error;
@@ -2269,14 +2276,16 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// next tier1ConfigFn tick, etc.) reflect it right away, whether or not
 		// the pollers restart. The agent-model snapshot follows the swap, so
 		// flows never see a model buildRunOpts lacks.
-		// Swap the custom-agent registry with the config: from here on the
-		// executor runs exactly the agents newCfg declares.
-		if err := executor.SetCustomAgents(newCfg.CustomAgents()); err != nil {
-			return fmt.Errorf("reload: custom agents: %w", err)
-		}
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
 		customAgentsChanged := !sameCustomAgents(cfg, newCfg)
+		// Swap the custom-agent registry together with cfg, under cfgMu, so
+		// code that reads cfg under the lock (buildRunOpts) never pairs one
+		// config with the other's agents. Validated above, so it cannot fail.
+		if err := executor.SetCustomAgents(newCustomAgents); err != nil {
+			cfgMu.Unlock()
+			return fmt.Errorf("reload: custom agents: %w", err)
+		}
 		cfg = newCfg
 		cfgMu.Unlock()
 		if customAgentsChanged {

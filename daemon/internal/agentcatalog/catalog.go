@@ -191,7 +191,10 @@ func CustomEntries() []Entry {
 	agents := executor.CustomAgents()
 	out := make([]Entry, 0, len(agents))
 	for _, a := range agents {
-		name := a.Schema.DisplayName
+		name := ""
+		if a.Schema != nil {
+			name = a.Schema.DisplayName
+		}
 		if name == "" {
 			name = a.Name
 		}

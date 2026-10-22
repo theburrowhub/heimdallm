@@ -732,6 +732,11 @@ reads a pull request's content on stdin, so:
   never see the repository checkout. They do not resolve merge conflicts and
   the flow assistant never drafts with them.
 
+Option values are settings, not secrets: `GET /config` returns them like any
+other setting, to every API client (and through a hub to the whole fleet).
+Keep API keys in the CLI's own environment or configuration, not in a schema
+field.
+
 A custom agent can be picked as a primary or fallback agent, and in review
 flows, like any built-in one. One that is still selected somewhere cannot be
 deleted.

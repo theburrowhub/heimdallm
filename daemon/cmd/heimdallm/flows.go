@@ -218,7 +218,7 @@ func flowListing(c *config.Config, installed map[string]bool) map[string]any {
 		agents = append(agents, FlowAgent{
 			ID:           id,
 			Installed:    installed[id],
-			ReviewOnly:   executor.IsHTTPOnly(id),
+			ReviewOnly:   executor.IsHTTPOnly(id) || executor.IsCustomAgent(id), // custom agents only review too
 			WriteCapable: executor.WriteCapable(id),
 			CanDraft:     flows.CanDraft(id),
 		})
