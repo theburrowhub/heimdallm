@@ -35,6 +35,7 @@ heimdalld_${VERSION}_darwin_arm64.tar.gz
 heimdalld_${VERSION}_linux_amd64.tar.gz
 heimdalld_${VERSION}_linux_arm64.tar.gz
 checksums.txt
+compat.json
 LIST
     ;;
   gui)
@@ -44,6 +45,7 @@ Heimdallm-${VERSION}-x86_64.AppImage
 heimdallm_${VERSION}_amd64.deb
 heimdallm_${VERSION}_amd64.rpm
 checksums.txt
+compat.json
 LIST
     ;;
   cli)
@@ -55,6 +57,7 @@ heimdallm-cli_${VERSION}_linux_arm64.tar.gz
 heimdallm-cli_${VERSION}_windows_amd64.zip
 heimdallm-cli_${VERSION}_windows_arm64.zip
 checksums.txt
+compat.json
 LIST
     ;;
   *)

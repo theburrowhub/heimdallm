@@ -63,6 +63,40 @@ void main() {
       ]);
     });
 
+    test('passes the minimum daemon API of versions.json along', () async {
+      for (final (versions, expected) in [
+        (
+          http.Response(
+            '{"daemon_api":2,"min_daemon_api":{"gui":2,"cli":2}}',
+            HttpStatus.ok,
+          ),
+          2,
+        ),
+        (http.Response('{"daemon":"0.8.10"}', HttpStatus.ok), null),
+        (http.Response('gone', HttpStatus.notFound), null),
+      ]) {
+        final updates = <AppUpdateStatus>[];
+        final updater = _updater(
+          executable: executable,
+          temporaryDirectory: temporaryDirectory,
+          statuses: updates,
+          client: MockClient((request) async {
+            if (request.url.path.endsWith('/versions.json')) return versions;
+            return _releaseResponse('0.8.10', withVersionsManifest: true);
+          }),
+        );
+        addTearDown(updater.dispose);
+
+        expect(await updater.initialize(), isTrue);
+        await updater.checkForUpdates();
+
+        expect(updater.availableRelease?.version, '0.8.10');
+        expect(updater.availableRelease?.minDaemonApi, expected);
+        expect(updates.last.phase, AppUpdatePhase.available);
+        expect(updates.last.minDaemonApi, expected);
+      }
+    });
+
     test('reports an up-to-date installation', () async {
       final updater = _updater(
         executable: executable,
@@ -424,7 +458,10 @@ MacOSAppUpdater _updater({
   );
 }
 
-http.Response _releaseResponse(String version) {
+http.Response _releaseResponse(
+  String version, {
+  bool withVersionsManifest = false,
+}) {
   return http.Response(
     jsonEncode({
       'tag_name': 'v$version',
@@ -435,6 +472,13 @@ http.Response _releaseResponse(String version) {
               'https://github.com/theburrowhub/heimdallm/releases/download/'
               'v$version/Heimdallm-v$version.dmg',
         },
+        if (withVersionsManifest)
+          {
+            'name': 'versions.json',
+            'browser_download_url':
+                'https://github.com/theburrowhub/heimdallm/releases/download/'
+                'v$version/versions.json',
+          },
       ],
     }),
     HttpStatus.ok,

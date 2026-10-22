@@ -379,7 +379,7 @@ jobs:
             # GoReleaser already published the .deb/.rpm to this tag.
             FILES=("$APPIMAGE_PATH" dist/linux-checksums.txt dist/linux-checksums.txt.sig)
           else
-            FILES=("$APPIMAGE_PATH" "$DEB_PATH" "$RPM_PATH")
+            FILES=("$APPIMAGE_PATH" "$DEB_PATH" "$RPM_PATH" compat.json)
           fi
           release-tooling/scripts/release/require-draft.sh "$TAG"
           gh release upload "$TAG" "${FILES[@]}" --clobber

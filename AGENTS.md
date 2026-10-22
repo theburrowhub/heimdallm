@@ -175,6 +175,18 @@ On the Flutter side, `DaemonEndpoint` (`lib/core/api/daemon_endpoint.dart`) is
 what an `ApiClient` targets. `PlatformServices` still owns OS capabilities and
 supplies the local endpoint; do not put a second daemon URL back into it.
 
+## Daemon API version
+
+`compat.json` (repository root) declares the daemon's HTTP API revision
+(`daemon_api`, served as `api_version` on `/health`) and the oldest revision the
+GUI and the CLI need (`min_daemon_api`). Bump `daemon_api` in the change that
+adds or alters an endpoint or payload a client depends on, and a client's
+minimum in the change that starts depending on it — together with the matching
+constant (`daemon/internal/server/handlers.go`, `cli/internal/compat`,
+`flutter_app/lib/core/compat.dart`); tests fail on drift. The updaters warn,
+never block, when an update would leave a client ahead of its daemon. See
+`docs/release-pipeline.md`.
+
 ## Conventional commits
 
 `release-please` reads commit prefixes to bump semver and generate the

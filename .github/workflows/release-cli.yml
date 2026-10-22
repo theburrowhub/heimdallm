@@ -90,15 +90,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p upload
+          # compat.json is the source's compatibility matrix (daemon API
+          # revision and client minimums); everything else is GoReleaser's.
           while IFS= read -r ASSET; do
-            test -f "cli/dist/$ASSET" || {
-              echo "::error::GoReleaser did not produce $ASSET"
+            SOURCE="cli/dist/$ASSET"
+            [ "$ASSET" = compat.json ] && SOURCE=compat.json
+            test -f "$SOURCE" || {
+              echo "::error::$SOURCE is missing"
               exit 1
             }
-            cp "cli/dist/$ASSET" upload/
+            cp "$SOURCE" upload/
           done < <(release-tooling/scripts/release/expected-assets.sh cli "$VERSION")
+          jq -e '.daemon_api and .min_daemon_api' upload/compat.json >/dev/null
           (cd upload && sha256sum --check --strict checksums.txt)
-          ARCHIVES=$(( $(release-tooling/scripts/release/expected-assets.sh cli "$VERSION" | wc -l) - 1 ))
+          ARCHIVES=$(( $(release-tooling/scripts/release/expected-assets.sh cli "$VERSION" | wc -l) - 2 ))
           test "$(wc -l < upload/checksums.txt)" -eq "$ARCHIVES"
           tar -xzf "upload/heimdallm-cli_${VERSION}_linux_amd64.tar.gz" -C "$RUNNER_TEMP" heimdallm-cli
           test "$("$RUNNER_TEMP/heimdallm-cli" version)" = "heimdallm-cli version $VERSION"

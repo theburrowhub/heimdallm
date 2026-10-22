@@ -276,3 +276,38 @@ func TestChangelogSummary(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestCompat(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"daemon":"1.0.0","daemon_api":3,"min_daemon_api":{"gui":2,"cli":3}}`)
+	})
+	mux.HandleFunc("/nocompat", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"daemon":"1.0.0","gui":"1.0.0","cli":"1.0.0"}`)
+	})
+	mux.HandleFunc("/bad", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{nope`) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	u := &Updater{Client: srv.Client(), APIBase: srv.URL, AllowURL: func(*url.URL) bool { return true }}
+	rel := func(path string) *Release {
+		return &Release{Tag: "v1.0.0", Assets: []Asset{{Name: "versions.json", URL: srv.URL + path}}}
+	}
+
+	c, err := u.Compat(context.Background(), rel("/ok"))
+	if err != nil || c.DaemonAPI != 3 || c.MinDaemonAPI["cli"] != 3 || c.MinDaemonAPI["gui"] != 2 {
+		t.Fatalf("compat = %+v, %v", c, err)
+	}
+	if _, err := u.Compat(context.Background(), rel("/nocompat")); !errors.Is(err, ErrNoCompat) {
+		t.Fatalf("manifest without compat data: %v", err)
+	}
+	if _, err := u.Compat(context.Background(), &Release{Tag: "v1.0.0"}); !errors.Is(err, ErrNoCompat) {
+		t.Fatalf("release without versions.json: %v", err)
+	}
+	if _, err := u.Compat(context.Background(), rel("/bad")); err == nil {
+		t.Fatal("undecodable versions.json should fail")
+	}
+	strict := &Updater{Client: srv.Client(), APIBase: srv.URL}
+	if _, err := strict.Compat(context.Background(), rel("/ok")); err == nil || !strings.Contains(err.Error(), "untrusted") {
+		t.Fatalf("non-GitHub URL must be refused: %v", err)
+	}
+}

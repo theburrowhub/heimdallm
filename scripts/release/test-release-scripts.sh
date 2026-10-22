@@ -41,9 +41,16 @@ done
 # ── expected-assets.sh ──────────────────────────────────────────────────────
 count() { "$HERE/expected-assets.sh" "$1" "$2" | wc -l | tr -d ' '; }
 expect_out "unified asset count" 15 count unified 0.11.0
-expect_out "daemon asset count" 5 count daemon 0.11.0
-expect_out "gui asset count" 5 count gui 0.11.0
-expect_out "cli asset count" 7 count cli 0.11.0
+expect_out "daemon asset count" 6 count daemon 0.11.0
+expect_out "gui asset count" 6 count gui 0.11.0
+expect_out "cli asset count" 8 count cli 0.11.0
+for kind in daemon gui cli; do
+  if "$HERE/expected-assets.sh" "$kind" 0.11.0 | grep -qx compat.json; then
+    pass
+  else
+    fail "$kind releases ship compat.json"
+  fi
+done
 expect_fail "unknown kind" "$HERE/expected-assets.sh" web 0.11.0
 if "$HERE/expected-assets.sh" unified 0.11.0 | grep -qx 'Heimdallm-v0.11.0.dmg' &&
    "$HERE/expected-assets.sh" gui 0.11.0 | grep -qx 'Heimdallm-0.11.0.dmg'; then
@@ -64,6 +71,24 @@ printf '{".":"0.10.4","cli":"latest"}' > "$WORK/bad.json"
 expect_fail "non-semver version" "$HERE/versions-json.sh" "$WORK/bad.json"
 printf '{"cli":"0.10.4"}' > "$WORK/noroot.json"
 expect_fail "missing root version" "$HERE/versions-json.sh" "$WORK/noroot.json"
+printf '{"daemon_api":2,"min_daemon_api":{"gui":1,"cli":2}}' > "$WORK/compat.json"
+expect_out "compat data is merged in" \
+  '{"daemon":"0.11.1","gui":"0.12.0","cli":"0.10.5","daemon_api":2,"min_daemon_api":{"gui":1,"cli":2}}' \
+  sh -c "'$HERE/versions-json.sh' '$WORK/m.json' '$WORK/compat.json' | jq -c ."
+for bad in '{"daemon_api":1,"min_daemon_api":{"gui":2,"cli":1}}' \
+           '{"daemon_api":"1","min_daemon_api":{"gui":1,"cli":1}}' \
+           '{"daemon_api":1,"min_daemon_api":{"gui":1}}' \
+           '{"daemon_api":1.5,"min_daemon_api":{"gui":1,"cli":1}}' \
+           '{"daemon_api":0,"min_daemon_api":{"gui":0,"cli":0}}'; do
+  printf '%s' "$bad" > "$WORK/badcompat.json"
+  expect_fail "reject compat $bad" "$HERE/versions-json.sh" "$WORK/m.json" "$WORK/badcompat.json"
+done
+if jq -e '.daemon_api >= ([.min_daemon_api[]] | max)' "$HERE/../../compat.json" >/dev/null &&
+   "$HERE/versions-json.sh" "$WORK/m.json" "$HERE/../../compat.json" >/dev/null; then
+  pass
+else
+  fail "the repository's compat.json is valid"
+fi
 
 # ── fake gh ─────────────────────────────────────────────────────────────────
 STATE="$WORK/state"

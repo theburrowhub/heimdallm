@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import 'package:http/http.dart' as http;
 
+import '../compat.dart';
 import 'platform_services.dart';
 
 typedef MacOSUpdateProcessRunner =
@@ -14,10 +15,17 @@ typedef MacOSVersionLoader = Future<AppVersionInfo> Function();
 typedef MacOSTempDirectoryFactory = Future<Directory> Function();
 
 class MacOSRelease {
-  const MacOSRelease({required this.version, required this.downloadURL});
+  const MacOSRelease({
+    required this.version,
+    required this.downloadURL,
+    this.minDaemonApi,
+  });
 
   final String version;
   final Uri downloadURL;
+
+  /// `min_daemon_api.gui` from the release's versions.json, when published.
+  final int? minDaemonApi;
 }
 
 class MacOSInstallPlan {
@@ -127,6 +135,7 @@ class MacOSAppUpdater {
             phase: AppUpdatePhase.available,
             version: release.version,
             message: 'Heimdallm ${release.version} is ready to install.',
+            minDaemonApi: release.minDaemonApi,
           ),
         );
       } else {
@@ -282,17 +291,51 @@ class MacOSAppUpdater {
     }
     final version = tag.startsWith('v') ? tag.substring(1) : tag;
     final expectedAsset = 'Heimdallm-v$version.dmg';
+    Uri? downloadURL;
+    Uri? versionsURL;
     for (final asset in assets) {
-      if (asset is! Map<String, dynamic> || asset['name'] != expectedAsset) {
-        continue;
-      }
+      if (asset is! Map<String, dynamic>) continue;
       final url = Uri.tryParse(asset['browser_download_url']?.toString() ?? '');
-      if (url != null && url.scheme == 'https') {
-        return MacOSRelease(version: version, downloadURL: url);
-      }
+      if (url == null || url.scheme != 'https') continue;
+      if (asset['name'] == expectedAsset) downloadURL ??= url;
+      if (asset['name'] == versionsManifestAsset) versionsURL ??= url;
     }
-    throw FormatException('Release $tag has no $expectedAsset asset.');
+    if (downloadURL == null) {
+      throw FormatException('Release $tag has no $expectedAsset asset.');
+    }
+    return MacOSRelease(
+      version: version,
+      downloadURL: downloadURL,
+      minDaemonApi: versionsURL == null
+          ? null
+          : await _fetchMinDaemonApi(versionsURL),
+    );
   }
+
+  /// Best effort: the compatibility data only feeds a warning, so a missing or
+  /// unreadable versions.json never blocks an update.
+  Future<int?> _fetchMinDaemonApi(Uri url) async {
+    try {
+      final request = http.Request('GET', url)
+        ..headers['User-Agent'] = 'Heimdallm-updater';
+      final response = await _client.send(request);
+      if (response.statusCode != HttpStatus.ok) {
+        await response.stream.drain<void>();
+        return null;
+      }
+      final bytes = <int>[];
+      await for (final chunk in response.stream) {
+        bytes.addAll(chunk);
+        if (bytes.length > _maxVersionsManifestBytes) return null;
+      }
+      return minDaemonApiFromVersionsManifest(utf8.decode(bytes), 'gui');
+    } catch (error) {
+      debugPrint('could not read $versionsManifestAsset: $error');
+      return null;
+    }
+  }
+
+  static const _maxVersionsManifestBytes = 64 * 1024;
 
   Future<void> _download(Uri url, File destination) async {
     final request = http.Request('GET', url)

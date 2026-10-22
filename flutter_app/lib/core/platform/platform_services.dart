@@ -54,7 +54,12 @@ enum AppUpdatePhase { idle, checking, available, installing, restarting, error }
 
 /// Platform-neutral update state consumed by the dashboard and system tray.
 class AppUpdateStatus {
-  const AppUpdateStatus({required this.phase, this.version, this.message});
+  const AppUpdateStatus({
+    required this.phase,
+    this.version,
+    this.message,
+    this.minDaemonApi,
+  });
 
   const AppUpdateStatus.idle({String? message})
     : this(phase: AppUpdatePhase.idle, message: message);
@@ -62,6 +67,10 @@ class AppUpdateStatus {
   final AppUpdatePhase phase;
   final String? version;
   final String? message;
+
+  /// Minimum daemon API revision the available release declares in its
+  /// `versions.json`, or null when it declares none (or it was unreadable).
+  final int? minDaemonApi;
 
   bool get updateAvailable => phase == AppUpdatePhase.available;
   bool get busy =>
@@ -76,6 +85,9 @@ class AppUpdateStatus {
       phase: phase.isEmpty ? AppUpdatePhase.idle : phase.first,
       version: value['version']?.toString(),
       message: value['message']?.toString(),
+      minDaemonApi: value['minDaemonApi'] is int
+          ? value['minDaemonApi'] as int
+          : null,
     );
   }
 }
