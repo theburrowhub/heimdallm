@@ -187,10 +187,19 @@ func NewDetector() Detector {
 }
 
 // CustomEntries describes the custom agents registered with the executor.
+// An agent whose name is already a catalog ID is left out, so every ID in a
+// scan is unique (config validation refuses such names in the first place).
 func CustomEntries() []Entry {
 	agents := executor.CustomAgents()
+	taken := make(map[string]bool, len(Catalog))
+	for _, e := range Catalog {
+		taken[e.ID] = true
+	}
 	out := make([]Entry, 0, len(agents))
 	for _, a := range agents {
+		if taken[a.Name] {
+			continue
+		}
 		name := ""
 		if a.Schema != nil {
 			name = a.Schema.DisplayName

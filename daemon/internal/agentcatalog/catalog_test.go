@@ -458,3 +458,49 @@ func TestCustomEntriesFollowTheExecutorRegistry(t *testing.T) {
 		t.Fatal("the real detector reports custom agents")
 	}
 }
+
+func TestCustomEntriesSkipCatalogIDs(t *testing.T) {
+	schema, err := agentschema.Parse([]byte(`{"fields":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The executor only knows its own agents; "cursor" is a catalog-only ID.
+	if err := executor.SetCustomAgents([]executor.CustomAgent{
+		{Name: "cursor", Binary: "cursor-x", Schema: schema},
+		{Name: "tool", Binary: "tool-cli", Schema: schema},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = executor.SetCustomAgents(nil) })
+	entries := CustomEntries()
+	if len(entries) != 1 || entries[0].ID != "tool" {
+		t.Fatalf("CustomEntries = %+v", entries)
+	}
+}
+
+// The detector looks a custom agent up through the executor, which runs the
+// agent's own binary: a name that differs from its executable is found.
+func TestScanFindsACustomAgentByItsBinary(t *testing.T) {
+	schema, err := agentschema.Parse([]byte(`{"fields":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.SetCustomAgents([]executor.CustomAgent{{Name: "mytool", Binary: "tool-cli", Schema: schema}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = executor.SetCustomAgents(nil) })
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "tool-cli"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	d := Detector{Home: t.TempDir(), Resolve: executor.ResolveCLIPath, Custom: CustomEntries,
+		Stat: func(string) (os.FileInfo, error) { return nil, fs.ErrNotExist }}
+	var custom Agent
+	for _, e := range d.Custom() {
+		custom = d.scanOne(context.Background(), e)
+	}
+	if !custom.Installed || custom.Binary != "tool-cli" || custom.Path != filepath.Join(bin, "tool-cli") {
+		t.Fatalf("mytool = %+v", custom)
+	}
+}

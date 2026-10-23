@@ -9,6 +9,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/heimdallm/daemon/internal/agentcatalog"
 	"github.com/heimdallm/daemon/internal/agentschema"
 	"github.com/heimdallm/daemon/internal/executor"
 )
@@ -458,5 +459,13 @@ model = "claude-legacy-1"
 	}
 	if cfg.AI.Agents["openrouter"].MaxTurns != 120 {
 		t.Fatal("value lost")
+	}
+}
+
+func TestEveryCatalogIDIsReserved(t *testing.T) {
+	for _, e := range agentcatalog.Catalog {
+		if !ReservedAgentName(e.ID) || !ReservedAgentName(e.ConfigAgent) {
+			t.Errorf("%s (%s) must be reserved", e.ID, e.ConfigAgent)
+		}
 	}
 }

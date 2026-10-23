@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/heimdallm/daemon/internal/agentcatalog"
 	"github.com/heimdallm/daemon/internal/agentschema"
 	"github.com/heimdallm/daemon/internal/executor"
 )
@@ -252,12 +253,19 @@ func (a CLIAgentConfig) CustomAgentSchema(name string) (*agentschema.Schema, err
 }
 
 // reservedAgentName reports whether name belongs to Heimdallm's own agents:
-// a built-in agent, or another entry of the agent catalog (the Cursor IDE).
+// a built-in agent, or any entry of the agent catalog (the Cursor IDE, and
+// whatever the catalog lists in the future), so a custom agent can never
+// share an ID with one in GET /cli-agents.
 func reservedAgentName(name string) bool {
 	if executor.IsBuiltinCLI(name) {
 		return true
 	}
-	return name == "cursor"
+	for _, e := range agentcatalog.Catalog {
+		if e.ID == name || e.ConfigAgent == name {
+			return true
+		}
+	}
+	return false
 }
 
 // customAgentValues returns a custom agent's option values plus its model,
