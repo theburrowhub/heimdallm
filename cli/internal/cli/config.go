@@ -8,6 +8,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+
+	"github.com/theburrowhub/heimdallm/cli/internal/api"
 )
 
 var (
@@ -145,14 +147,12 @@ func cfgAILines(cfg map[string]any) []string {
 		if !ok {
 			continue
 		}
+		// Each agent's settings come from its schema (a custom agent's
+		// options included), so every setting that is set is listed.
 		var sub []string
-		sub = cfgSubKV(sub, "Model", ac["model"])
-		sub = cfgSubKV(sub, "Max turns", ac["max_turns"])
-		sub = cfgSubKV(sub, "Approval mode", ac["approval_mode"])
-		sub = cfgSubKV(sub, "Extra flags", ac["extra_flags"])
-		sub = cfgSubKV(sub, "Prompt", ac["prompt"])
-		sub = cfgSubKV(sub, "Effort", ac["effort"])
-		sub = cfgSubKV(sub, "Permission mode", ac["permission_mode"])
+		for _, kv := range api.AgentConfigValues(ac) {
+			sub = cfgSubKV(sub, api.DisplayText(api.SettingLabel(kv[0]), 40), api.DisplayText(kv[1], 120))
+		}
 		if len(sub) > 0 {
 			out = append(out, fmt.Sprintf("  %s", cfgKeyStyle.Render("Agent: "+name)))
 			out = append(out, sub...)

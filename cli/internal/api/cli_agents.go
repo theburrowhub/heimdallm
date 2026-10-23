@@ -19,6 +19,8 @@ type CLIAgent struct {
 	ConfigAgent string   `json:"config_agent"`
 	InstallHint string   `json:"install_hint"`
 	Models      []string `json:"models"`
+	// Binary is the executable a custom agent runs.
+	Binary string `json:"binary"`
 }
 
 // CLIAgentCatalog is the GET /cli-agents body.

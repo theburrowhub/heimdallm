@@ -95,6 +95,9 @@ type Dashboard struct {
 	showDetail   bool
 	detailScroll int
 	detailLines  []string
+
+	// agentsPanel is the Config tab's agent editor ([a]).
+	agentsPanel agentsPanel
 }
 
 type tickMsg time.Time
@@ -328,6 +331,9 @@ func (d *Dashboard) checkHealth(lastEventAt time.Time) tea.Cmd {
 }
 
 func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if cmd, handled := d.handleAgentsMsg(msg); handled {
+		return d, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return d.handleKey(msg)
@@ -534,6 +540,9 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if d.showDetail {
 		return d.handleDetailKey(msg)
 	}
+	if d.agentsPanel.open && !d.confirmShutdown {
+		return d.handleAgentsKey(msg)
+	}
 	if d.confirmShutdown {
 		switch msg.String() {
 		case "y", "Y":
@@ -635,6 +644,10 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		if d.activeTab == tabPRs {
 			d.cycleRepoFilter()
+		}
+	case "a":
+		if d.activeTab == tabConfig {
+			return d, d.openAgentsPanel()
 		}
 	case "enter":
 		if d.activeTab == tabPRs && d.cursor < len(d.visiblePRs()) {
@@ -906,6 +919,9 @@ func (d *Dashboard) renderStatusBar() string {
 func (d *Dashboard) renderContent(height int) string {
 	if d.showDetail {
 		return d.renderDetail(height)
+	}
+	if d.agentsPanel.open {
+		return d.renderAgentsPanel(height)
 	}
 	switch d.activeTab {
 	case tabActivity:
@@ -1265,8 +1281,14 @@ func (d *Dashboard) renderHelp() string {
 	if d.activeTab == tabPRs {
 		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [o]pen  [f]ilter repo  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
 	}
+	if d.agentsPanel.open {
+		return helpStyle.Render(d.agentsHelp())
+	}
 	if d.activeTab == tabActivity {
 		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump  [G]follow")
+	}
+	if d.activeTab == tabConfig {
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [a]gents  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
 	}
 	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
 }
@@ -1425,15 +1447,13 @@ func (d *Dashboard) buildConfigLines() []string {
 			for _, name := range configSortedKeys(ac) {
 				lines = append(lines, valStyle.Render("    "+name))
 				if agent, ok := ac[name].(map[string]any); ok {
-					for _, field := range []string{"model", "max_turns", "approval_mode", "effort", "permission_mode", "prompt"} {
-						if v, ok := agent[field]; ok {
-							s := fmt.Sprintf("%v", v)
-							if s != "" && s != "0" && s != "false" {
-								lines = append(lines, fmt.Sprintf("      %s %s",
-									keyStyle.Render(fmt.Sprintf("%-20s", field+":")),
-									valStyle.Render(s)))
-							}
-						}
+					// Every setting that is set, a custom agent's options
+					// included: the fields come from each agent's schema, so
+					// there is no fixed list to show.
+					for _, kvp := range api.AgentConfigValues(agent) {
+						lines = append(lines, fmt.Sprintf("      %s %s",
+							keyStyle.Render(fmt.Sprintf("%-20s", api.DisplayText(kvp[0], 19)+":")),
+							valStyle.Render(api.DisplayText(kvp[1], 80))))
 					}
 				}
 			}
