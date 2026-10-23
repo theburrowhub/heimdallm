@@ -18,7 +18,7 @@ const testSchemas = `{"custom_agents_api_enabled":%s,"schemas":[
    {"key":"effort","type":"select","label":"--effort","flag":"--effort","options":["low","high"]},
    {"key":"max_turns","type":"number","label":"--max-turns","flag":"--max-turns","min":0},
    {"key":"dangerously_skip_perms","type":"bool","label":"danger","flag":"--dangerously-skip-permissions","warning":true}]},
- {"name":"aider","binary":"aider","fields":[{"key":"notes","type":"text","label":"Notes","flag":"--notes"}]}]}`
+ {"name":"aider","binary":"aider","fields":[{"key":"notes","type":"text","label":"Notes","flag":"--notes"},{"key":"fast","type":"bool","label":"Fast","flag":"--fast"}]}]}`
 
 type schemaDaemon struct {
 	apiEnabled bool
@@ -181,7 +181,12 @@ func TestAgentsSetCommand(t *testing.T) {
 	if _, err := runAgentsCmd(t, &schemaDaemon{}, "", "set", "aider", "notes="); err != nil {
 		t.Fatal(err)
 	}
-	// An empty value clears a toggle too.
+	// A custom agent's toggle cannot be unset over the API: false would be
+	// an explicit choice, not "not set".
+	if _, err := runAgentsCmd(t, &schemaDaemon{}, "", "set", "aider", "fast="); err == nil || !strings.Contains(err.Error(), "config.toml") {
+		t.Fatalf("set aider fast= = %v", err)
+	}
+	// An empty value clears a built-in agent's toggle.
 	f = &schemaDaemon{}
 	if _, err := runAgentsCmd(t, f, "", "set", "claude", "dangerously_skip_perms="); err != nil {
 		t.Fatal(err)

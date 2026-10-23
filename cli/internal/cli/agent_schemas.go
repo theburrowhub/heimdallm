@@ -158,7 +158,9 @@ func newAgentSetCmd() *cobra.Command {
 		Use:   "set <agent> <key>=<value>...",
 		Short: "Change an agent's settings; the keys come from its schema (`agents schema <agent>`)",
 		Long: "Change an agent's settings. Each key is a field of the agent's schema; an empty\n" +
-			"value unsets it. Dangerous toggles can only be turned off here.",
+			"value unsets it, except a custom agent's toggle, which is set to true or false\n" +
+			"(false may pass the option's \"flag when off\"). Dangerous toggles can only be\n" +
+			"turned off here.",
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := clientFromContext(cmd.Context())
@@ -203,6 +205,12 @@ func parseAgentSettings(schema api.AgentSchema, pairs []string) (map[string]any,
 		v, err := field.ParseValue(raw)
 		if err != nil {
 			return nil, err
+		}
+		if v == nil && field.Type == api.FieldBool && !schema.Builtin {
+			// A custom agent's option is stored only when set, and false is
+			// an explicit choice (it may pass a false_flag). PATCH /config
+			// cannot remove a key, so there is no way to unset it here.
+			return nil, fmt.Errorf("%s: a custom agent's toggle is set to true or false; to unset it, remove %s from [ai.agents.%s] in config.toml", key, key, schema.Name)
 		}
 		if v == nil {
 			switch field.Type {

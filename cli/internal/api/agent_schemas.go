@@ -133,7 +133,8 @@ func (f AgentSchemaField) ParseValue(raw string) (any, error) {
 	switch f.Type {
 	case FieldBool:
 		if raw == "" {
-			// Not set: the daemon stores it as off.
+			// Not set. A built-in agent's typed toggle stores that as off;
+			// callers decide what it means for a custom agent's option.
 			return nil, nil
 		}
 		b, err := strconv.ParseBool(raw)
