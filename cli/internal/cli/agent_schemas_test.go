@@ -181,6 +181,14 @@ func TestAgentsSetCommand(t *testing.T) {
 	if _, err := runAgentsCmd(t, &schemaDaemon{}, "", "set", "aider", "notes="); err != nil {
 		t.Fatal(err)
 	}
+	// An empty value clears a toggle too.
+	f = &schemaDaemon{}
+	if _, err := runAgentsCmd(t, f, "", "set", "claude", "dangerously_skip_perms="); err != nil {
+		t.Fatal(err)
+	}
+	if f.bodies[1] != `{"ai":{"agents":{"claude":{"dangerously_skip_perms":false}}}}` {
+		t.Fatalf("PATCH = %s", f.bodies[1])
+	}
 	for name, args := range map[string][]string{
 		"unknown agent": {"set", "nope", "a=b"},
 		"unknown key":   {"set", "claude", "nope=1"},

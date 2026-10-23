@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -131,6 +132,10 @@ func (f AgentSchemaField) ParseValue(raw string) (any, error) {
 	raw = strings.TrimSpace(raw)
 	switch f.Type {
 	case FieldBool:
+		if raw == "" {
+			// Not set: the daemon stores it as off.
+			return nil, nil
+		}
 		b, err := strconv.ParseBool(raw)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %q is not true or false", f.Key, raw)
@@ -144,13 +149,16 @@ func (f AgentSchemaField) ParseValue(raw string) (any, error) {
 			return nil, nil
 		}
 		n, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 			return nil, fmt.Errorf("%s: %q is not a number", f.Key, raw)
 		}
+		// Never negative, whatever Min says: the daemon refuses a negative
+		// value (and a negative min or max in a schema) because "-1" would
+		// reach the CLI as an option.
 		if n < 0 || (f.Min != nil && n < *f.Min) || (f.Max != nil && n > *f.Max) {
 			return nil, fmt.Errorf("%s: %v is out of range%s", f.Key, n, f.rangeText())
 		}
-		if n == float64(int64(n)) {
+		if n == math.Trunc(n) && n <= maxExactInt {
 			return int64(n), nil
 		}
 		return n, nil
@@ -167,6 +175,10 @@ func (f AgentSchemaField) ParseValue(raw string) (any, error) {
 		return raw, nil
 	}
 }
+
+// maxExactInt is the largest whole number a float64 holds exactly; larger
+// whole numbers stay float64 rather than convert to a wrong int64.
+const maxExactInt = 1 << 53
 
 func (f AgentSchemaField) rangeText() string {
 	switch {
@@ -241,6 +253,11 @@ func (s AgentSchema) ValidateCustom(reserved map[string]bool) []string {
 			errs = append(errs, where+": key is used twice")
 		}
 		keys[f.Key] = true
+		switch f.Type {
+		case FieldSelect, FieldBool, FieldNumber, FieldText:
+		default:
+			errs = append(errs, where+": type must be select, bool, number or text")
+		}
 		if strings.TrimSpace(f.Label) == "" {
 			errs = append(errs, where+": label is required")
 		}
@@ -309,6 +326,10 @@ func FormatValue(v any) string {
 // schema decides), so there is no fixed list.
 func AgentConfigValues(agent map[string]any) [][2]string {
 	var out [][2]string
+	// A built-in agent's typed settings report zero values when not set; a
+	// custom agent's options are only present when set, so an explicit false
+	// (which may pass a false_flag such as --no-auto-commits) is shown.
+	option := false
 	add := func(key string, v any) {
 		switch x := v.(type) {
 		case nil, map[string]any, []any:
@@ -318,7 +339,7 @@ func AgentConfigValues(agent map[string]any) [][2]string {
 				return
 			}
 		case bool:
-			if !x {
+			if !x && !option {
 				return
 			}
 		case float64:
@@ -334,6 +355,7 @@ func AgentConfigValues(agent map[string]any) [][2]string {
 		}
 	}
 	if options, ok := agent["options"].(map[string]any); ok {
+		option = true
 		for _, key := range sortedKeys(options) {
 			add(key, options[key])
 		}

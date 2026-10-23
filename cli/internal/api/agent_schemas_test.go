@@ -113,7 +113,8 @@ func TestParseValue(t *testing.T) {
 	}{
 		{sel, "a", "a"}, {sel, "", nil}, {custom, "anything", "anything"},
 		{num, "5", int64(5)}, {num, "2.5", 2.5}, {num, "", nil},
-		{toggle, "true", true}, {toggle, "false", false}, {danger, "false", false},
+		{toggle, "true", true}, {toggle, "false", false}, {danger, "false", false}, {toggle, "", nil},
+		{unbounded, "1e300", 1e300},
 		{text, " hi ", "hi"},
 	} {
 		got, err := tc.f.ParseValue(tc.in)
@@ -129,6 +130,7 @@ func TestParseValue(t *testing.T) {
 		{sel, "c", "not one of"}, {num, "x", "not a number"}, {num, "11", "(1–10)"},
 		{onlyMax, "11", "(0–10)"}, {onlyMin, "1", "at least 2"}, {unbounded, "-1", "not negative"},
 		{toggle, "maybe", "not true or false"}, {danger, "true", "config.toml"}, {text, "--x", "must not begin"},
+		{unbounded, "NaN", "not a number"}, {unbounded, "Inf", "not a number"}, {unbounded, "-Inf", "not a number"},
 	} {
 		if _, err := tc.f.ParseValue(tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s.ParseValue(%q) error = %v, want %q", tc.f.Key, tc.in, err, tc.want)
@@ -151,9 +153,10 @@ func TestValidateCustom(t *testing.T) {
 		{Key: "dup", Type: FieldText, Label: "x", Flag: "--a"},
 		{Key: "s", Type: FieldSelect, Label: "x", Flag: "--s"},
 		{Key: "o", Type: FieldSelect, Label: "x", Flag: "--o", Options: []string{"-x"}},
+		{Key: "t", Type: "boolean", Label: "x", Flag: "--t"},
 	}}
 	errs := bad.ValidateCustom(map[string]bool{"claude": true})
-	for _, want := range []string{"built-in", "binary", "lowercase", "reserved", "used twice", "label", "--name", "flag --a is used twice", "needs options", "must not begin"} {
+	for _, want := range []string{"built-in", "binary", "lowercase", "reserved", "used twice", "label", "--name", "flag --a is used twice", "needs options", "must not begin", "type must be"} {
 		if !strings.Contains(strings.Join(errs, "\n"), want) {
 			t.Errorf("missing %q in %v", want, errs)
 		}
@@ -210,7 +213,7 @@ func TestAgentConfigValues(t *testing.T) {
 	})
 	want := [][2]string{
 		{"binary", "aider"}, {"dangerously_skip_perms", "true"}, {"execution_timeout", "5m"},
-		{"model", "gpt-4o"}, {"edit_format", "diff"}, {"map_tokens", "1024"},
+		{"model", "gpt-4o"}, {"auto_commits", "false"}, {"edit_format", "diff"}, {"map_tokens", "1024"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("AgentConfigValues = %v", got)

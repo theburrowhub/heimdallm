@@ -205,9 +205,12 @@ func parseAgentSettings(schema api.AgentSchema, pairs []string) (map[string]any,
 			return nil, err
 		}
 		if v == nil {
-			if field.Type == api.FieldNumber {
+			switch field.Type {
+			case api.FieldNumber:
 				v = 0
-			} else {
+			case api.FieldBool:
+				v = false
+			default:
 				v = ""
 			}
 		}
