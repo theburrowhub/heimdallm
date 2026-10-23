@@ -374,7 +374,7 @@ func ValidateBinary(binary string) error {
 }
 
 // deniedBinaries are shells, interpreters and launchers that run their input
-// or another program.
+// or another program. Entries are lowercase: isDeniedBinary lowercases.
 var deniedBinaries = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "ksh": true,
 	"mksh": true, "csh": true, "tcsh": true, "ash": true, "busybox": true, "nu": true,
@@ -386,26 +386,41 @@ var deniedBinaries = map[string]bool{
 	"ruby": true, "irb": true, "perl": true, "php": true, "lua": true, "luajit": true,
 	"tclsh": true, "wish": true, "osascript": true, "awk": true, "gawk": true,
 	"mawk": true, "nawk": true, "sed": true, "jshell": true, "java": true,
-	"groovy": true, "scala": true, "R": true, "Rscript": true, "julia": true,
+	"groovy": true, "scala": true, "r": true, "rscript": true, "julia": true,
 	"swift": true, "dotnet": true, "go": true, "make": true, "gdb": true, "lldb": true,
 	"vim": true, "vi": true, "nvim": true, "emacs": true, "ed": true, "ex": true,
 	"docker": true, "podman": true, "kubectl": true, "ssh": true, "nc": true,
 	"ncat": true, "socat": true, "curl": true, "wget": true, "git": true, "find": true,
-	"heimdallm": true,
+	"heimdallm": true, "ipython": true, "bpython": true,
 }
 
+// interpreterFamilies match versioned or variant names of the denied
+// programs: python3, python3.12, ksh93, tclsh8.6, ipython3, perl5.36…
+var interpreterFamilies = []string{
+	"python", "pypy", "ipython", "bpython", "perl", "ruby", "irb", "php",
+	"node", "lua", "luajit", "deno", "bun", "julia", "rscript", "java",
+	"tclsh", "wish", "awk", "gawk", "sh", "ash", "dash", "bash", "zsh",
+	"ksh", "mksh", "csh", "tcsh", "fish", "pwsh", "powershell",
+}
+
+// isDeniedBinary compares case-insensitively and without a Windows
+// executable suffix: on a case-insensitive filesystem RSCRIPT runs Rscript,
+// and bash.exe is bash.
 func isDeniedBinary(binary string) bool {
-	if deniedBinaries[binary] || deniedBinaries[strings.ToLower(binary)] {
+	name := strings.ToLower(binary)
+	for _, ext := range []string{".exe", ".com", ".cmd", ".bat"} {
+		if strings.HasSuffix(name, ext) {
+			name = strings.TrimSuffix(name, ext)
+			break
+		}
+	}
+	if deniedBinaries[name] {
 		return true
 	}
-	lower := strings.ToLower(binary)
-	// Versioned interpreters: python, python3, python3.12, pypy3, perl5.36…
-	for _, prefix := range []string{"python", "pypy", "perl", "ruby", "php", "node", "lua", "bash", "zsh"} {
-		if strings.HasPrefix(lower, prefix) {
-			rest := strings.TrimPrefix(lower, prefix)
-			if rest == "" || strings.Trim(rest, "0123456789.-") == "" {
-				return true
-			}
+	for _, prefix := range interpreterFamilies {
+		if rest, ok := strings.CutPrefix(name, prefix); ok &&
+			(rest == "" || strings.Trim(rest, "0123456789.-") == "") {
+			return true
 		}
 	}
 	return false

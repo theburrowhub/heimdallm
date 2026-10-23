@@ -1518,5 +1518,261 @@
     }
    ]
   }
+ },
+ {
+  "case": "denied binary ksh93",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "ksh93",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary tclsh8.6",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tclsh8.6",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary wish8.6",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "wish8.6",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary ipython",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "ipython",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary ipython3",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "ipython3",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary bpython",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bpython",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary bash.exe",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bash.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary pwsh.exe",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "pwsh.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary cmd.exe",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "cmd.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary Python3.EXE",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "Python3.EXE",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary RSCRIPT",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "RSCRIPT",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary rscript",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "rscript",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary r",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "r",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "allowed binary shellcheck",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "shellcheck",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "allowed binary tool.exe",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "tool.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "allowed binary aider",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "aider",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
  }
 ]

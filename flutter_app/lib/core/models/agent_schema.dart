@@ -300,7 +300,8 @@ const maxSchemaTextValueLength = 512;
 final iconColorPattern = RegExp(r'^#[0-9A-Fa-f]{6}$');
 
 /// Shells, interpreters and launchers a custom agent may not run: they would
-/// execute the review prompt they read on stdin. Mirrors the daemon's list.
+/// execute the review prompt they read on stdin. Mirrors the daemon's list;
+/// entries are lowercase because the check lowercases.
 const deniedAgentBinaries = {
   'sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'mksh', 'csh', 'tcsh', 'ash', //
   'busybox', 'nu', 'elvish', 'xonsh', 'pwsh', 'powershell', 'cmd', 'env', //
@@ -317,25 +318,36 @@ const deniedAgentBinaries = {
   'lua',
   'luajit', //
   'tclsh', 'wish', 'osascript', 'awk', 'gawk', 'mawk', 'nawk', 'sed', //
-  'jshell', 'java', 'groovy', 'scala', 'R', 'Rscript', 'julia', 'swift', //
+  'jshell', 'java', 'groovy', 'scala', 'r', 'rscript', 'julia', 'swift', //
   'dotnet', 'go', 'make', 'gdb', 'lldb', 'vim', 'vi', 'nvim', 'emacs', 'ed', //
   'ex', 'docker', 'podman', 'kubectl', 'ssh', 'nc', 'ncat', 'socat', 'curl', //
-  'wget', 'git', 'find', 'heimdallm',
+  'wget', 'git', 'find', 'heimdallm', 'ipython', 'bpython',
 };
 
-/// Whether [binary] is a shell or an interpreter, versioned ones included
-/// (python3, python3.12, perl5.36…).
+/// Versioned or variant names of the denied programs: python3, python3.12,
+/// ksh93, tclsh8.6, ipython3, perl5.36… Mirrors the daemon's list.
+const _interpreterFamilies = [
+  'python', 'pypy', 'ipython', 'bpython', 'perl', 'ruby', 'irb', 'php', //
+  'node', 'lua', 'luajit', 'deno', 'bun', 'julia', 'rscript', 'java', //
+  'tclsh', 'wish', 'awk', 'gawk', 'sh', 'ash', 'dash', 'bash', 'zsh', //
+  'ksh', 'mksh', 'csh', 'tcsh', 'fish', 'pwsh', 'powershell', //
+];
+
+/// Whether [binary] is a shell or an interpreter. It compares
+/// case-insensitively and without a Windows executable suffix: on a
+/// case-insensitive filesystem RSCRIPT runs Rscript, and bash.exe is bash.
 bool isDeniedAgentBinary(String binary) {
-  if (deniedAgentBinaries.contains(binary) ||
-      deniedAgentBinaries.contains(binary.toLowerCase())) {
-    return true;
+  var name = binary.toLowerCase();
+  for (final ext in const ['.exe', '.com', '.cmd', '.bat']) {
+    if (name.endsWith(ext)) {
+      name = name.substring(0, name.length - ext.length);
+      break;
+    }
   }
-  final lower = binary.toLowerCase();
-  for (final prefix in const [
-    'python', 'pypy', 'perl', 'ruby', 'php', 'node', 'lua', 'bash', 'zsh', //
-  ]) {
-    if (lower.startsWith(prefix)) {
-      final rest = lower.substring(prefix.length);
+  if (deniedAgentBinaries.contains(name)) return true;
+  for (final prefix in _interpreterFamilies) {
+    if (name.startsWith(prefix)) {
+      final rest = name.substring(prefix.length);
       if (rest.isEmpty || RegExp(r'^[0-9.\-]+$').hasMatch(rest)) return true;
     }
   }
