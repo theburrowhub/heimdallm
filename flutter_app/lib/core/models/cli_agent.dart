@@ -9,7 +9,8 @@ class CliAgentInfo {
   final String name;
 
   /// 'agent' (runs reviews), 'ide' (detected only; reviews go through
-  /// [configAgent]) or 'provider' (an API called in-process).
+  /// [configAgent]), 'provider' (an API called in-process) or 'custom' (a
+  /// CLI the operator declared with a schema).
   final String kind;
   final bool executable;
   final bool installed;
@@ -26,6 +27,9 @@ class CliAgentInfo {
   /// them).
   final List<String> models;
 
+  /// The executable a custom agent runs.
+  final String binary;
+
   const CliAgentInfo({
     required this.id,
     required this.name,
@@ -39,6 +43,7 @@ class CliAgentInfo {
     this.homepage = '',
     this.installHint = '',
     this.models = const [],
+    this.binary = '',
   }) : configAgent = configAgent ?? id;
 
   bool get isIde => kind == 'ide';
@@ -46,6 +51,9 @@ class CliAgentInfo {
   /// An API the daemon calls in-process; it needs a key instead of an
   /// installed binary.
   bool get isProvider => kind == 'provider';
+
+  /// A CLI declared in config.toml with an options schema.
+  bool get isCustom => kind == 'custom';
 
   factory CliAgentInfo.fromJson(Map<String, dynamic> json) {
     final id = (json['id'] as String?) ?? '';
@@ -64,6 +72,7 @@ class CliAgentInfo {
       models: ((json['models'] as List<dynamic>?) ?? const [])
           .whereType<String>()
           .toList(),
+      binary: (json['binary'] as String?) ?? '',
     );
   }
 }

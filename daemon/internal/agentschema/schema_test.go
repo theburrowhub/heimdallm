@@ -3,6 +3,7 @@ package agentschema
 import (
 	"encoding/json"
 	"math"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -345,5 +346,35 @@ func TestBuiltins(t *testing.T) {
 	}
 	if !IsAgentName("aider") || IsAgentName("Aider") {
 		t.Fatal("IsAgentName")
+	}
+}
+
+// testdata/custom_schema_cases.json is shared with the app's tests
+// (flutter_app/test/core/models/agent_schema_test.dart), so the app's
+// client-side checks cannot drift from these rules.
+func TestSharedCustomSchemaCases(t *testing.T) {
+	data, err := os.ReadFile("testdata/custom_schema_cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Case   string          `json:"case"`
+		Valid  bool            `json:"valid"`
+		Schema json.RawMessage `json:"schema"`
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	builtin := func(n string) bool { return n == "claude" }
+	for _, c := range cases {
+		t.Run(c.Case, func(t *testing.T) {
+			s, err := Parse(c.Schema)
+			if err == nil {
+				err = s.ValidateCustom(builtin)
+			}
+			if (err == nil) != c.Valid {
+				t.Fatalf("valid = %v, want %v (err: %v)", err == nil, c.Valid, err)
+			}
+		})
 	}
 }

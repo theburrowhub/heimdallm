@@ -1,0 +1,1778 @@
+[
+ {
+  "case": "valid",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "model",
+     "type": "select",
+     "label": "Model",
+     "flag": "--model",
+     "options": [
+      "gpt-4o",
+      "deepseek"
+     ],
+     "default": "gpt-4o",
+     "empty_label": "CLI default"
+    },
+    {
+     "key": "auto",
+     "type": "bool",
+     "label": "Auto",
+     "flag": "--auto",
+     "false_flag": "--no-auto",
+     "default": true
+    },
+    {
+     "key": "depth",
+     "type": "number",
+     "label": "Depth",
+     "flag": "--depth",
+     "min": 0,
+     "max": 10,
+     "default": 3
+    },
+    {
+     "key": "yolo",
+     "type": "bool",
+     "label": "Yolo",
+     "flag": "--dangerously-yolo",
+     "warning": true
+    },
+    {
+     "key": "notes",
+     "type": "text",
+     "label": "Notes",
+     "flag": "-n"
+    },
+    {
+     "key": "variant",
+     "type": "select",
+     "label": "Variant",
+     "flag": "--variant",
+     "allow_custom": true
+    }
+   ],
+   "display_name": "Tool",
+   "icon_color": "#12AB34",
+   "description": "A tool"
+  }
+ },
+ {
+  "case": "bad name",
+  "valid": false,
+  "schema": {
+   "name": "Bad Name",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "builtin name",
+  "valid": false,
+  "schema": {
+   "name": "claude",
+   "binary": "claude",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "no binary",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "path binary",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "/usr/bin/tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "shell binary",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bash",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "upper shell binary",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "BASH",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "versioned python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3.12",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "env binary",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "env",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "pythonic is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "pythonic",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "long display name",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ],
+   "display_name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ {
+  "case": "long description",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ],
+   "description": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ {
+  "case": "control in description",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ],
+   "description": "a\u0000b"
+  }
+ },
+ {
+  "case": "bad colour",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ],
+   "icon_color": "red"
+  }
+ },
+ {
+  "case": "too many fields",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "k0",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k0"
+    },
+    {
+     "key": "k1",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k1"
+    },
+    {
+     "key": "k2",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k2"
+    },
+    {
+     "key": "k3",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k3"
+    },
+    {
+     "key": "k4",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k4"
+    },
+    {
+     "key": "k5",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k5"
+    },
+    {
+     "key": "k6",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k6"
+    },
+    {
+     "key": "k7",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k7"
+    },
+    {
+     "key": "k8",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k8"
+    },
+    {
+     "key": "k9",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k9"
+    },
+    {
+     "key": "k10",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k10"
+    },
+    {
+     "key": "k11",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k11"
+    },
+    {
+     "key": "k12",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k12"
+    },
+    {
+     "key": "k13",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k13"
+    },
+    {
+     "key": "k14",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k14"
+    },
+    {
+     "key": "k15",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k15"
+    },
+    {
+     "key": "k16",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k16"
+    },
+    {
+     "key": "k17",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k17"
+    },
+    {
+     "key": "k18",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k18"
+    },
+    {
+     "key": "k19",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k19"
+    },
+    {
+     "key": "k20",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k20"
+    },
+    {
+     "key": "k21",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k21"
+    },
+    {
+     "key": "k22",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k22"
+    },
+    {
+     "key": "k23",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k23"
+    },
+    {
+     "key": "k24",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k24"
+    },
+    {
+     "key": "k25",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k25"
+    },
+    {
+     "key": "k26",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k26"
+    },
+    {
+     "key": "k27",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k27"
+    },
+    {
+     "key": "k28",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k28"
+    },
+    {
+     "key": "k29",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k29"
+    },
+    {
+     "key": "k30",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k30"
+    },
+    {
+     "key": "k31",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k31"
+    },
+    {
+     "key": "k32",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k32"
+    },
+    {
+     "key": "k33",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k33"
+    },
+    {
+     "key": "k34",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k34"
+    },
+    {
+     "key": "k35",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k35"
+    },
+    {
+     "key": "k36",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k36"
+    },
+    {
+     "key": "k37",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k37"
+    },
+    {
+     "key": "k38",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k38"
+    },
+    {
+     "key": "k39",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k39"
+    },
+    {
+     "key": "k40",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k40"
+    },
+    {
+     "key": "k41",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k41"
+    },
+    {
+     "key": "k42",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k42"
+    },
+    {
+     "key": "k43",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k43"
+    },
+    {
+     "key": "k44",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k44"
+    },
+    {
+     "key": "k45",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k45"
+    },
+    {
+     "key": "k46",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k46"
+    },
+    {
+     "key": "k47",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k47"
+    },
+    {
+     "key": "k48",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k48"
+    },
+    {
+     "key": "k49",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k49"
+    },
+    {
+     "key": "k50",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k50"
+    },
+    {
+     "key": "k51",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k51"
+    },
+    {
+     "key": "k52",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k52"
+    },
+    {
+     "key": "k53",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k53"
+    },
+    {
+     "key": "k54",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k54"
+    },
+    {
+     "key": "k55",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k55"
+    },
+    {
+     "key": "k56",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k56"
+    },
+    {
+     "key": "k57",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k57"
+    },
+    {
+     "key": "k58",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k58"
+    },
+    {
+     "key": "k59",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k59"
+    },
+    {
+     "key": "k60",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k60"
+    },
+    {
+     "key": "k61",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k61"
+    },
+    {
+     "key": "k62",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k62"
+    },
+    {
+     "key": "k63",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k63"
+    },
+    {
+     "key": "k64",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--k64"
+    }
+   ]
+  }
+ },
+ {
+  "case": "duplicate key",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    },
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--other"
+    }
+   ]
+  }
+ },
+ {
+  "case": "duplicate flag",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    },
+    {
+     "key": "other",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "false flag reuses flag",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "bool",
+     "label": "Opt",
+     "flag": "--opt",
+     "false_flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "bad key",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "Bad-Key",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "reserved key",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "extra_flags",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "no label",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": " ",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "long label",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "long field description",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "description": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ]
+  }
+ },
+ {
+  "case": "control in empty label",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "empty_label": "\u0001"
+    }
+   ]
+  }
+ },
+ {
+  "case": "no flag",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "bad flag",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "model"
+    }
+   ]
+  }
+ },
+ {
+  "case": "false flag on text",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "false_flag": "--no-opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "bad false flag",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "bool",
+     "label": "Opt",
+     "flag": "--opt",
+     "false_flag": "no"
+    }
+   ]
+  }
+ },
+ {
+  "case": "danger flag on text",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--dangerously-do-it"
+    }
+   ]
+  }
+ },
+ {
+  "case": "danger bool without warning",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "bool",
+     "label": "Opt",
+     "flag": "--allow-dangerously-x"
+    }
+   ]
+  }
+ },
+ {
+  "case": "select without options",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "select",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "too many options",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "select",
+     "label": "Opt",
+     "flag": "--opt",
+     "options": [
+      "o0",
+      "o1",
+      "o2",
+      "o3",
+      "o4",
+      "o5",
+      "o6",
+      "o7",
+      "o8",
+      "o9",
+      "o10",
+      "o11",
+      "o12",
+      "o13",
+      "o14",
+      "o15",
+      "o16",
+      "o17",
+      "o18",
+      "o19",
+      "o20",
+      "o21",
+      "o22",
+      "o23",
+      "o24",
+      "o25",
+      "o26",
+      "o27",
+      "o28",
+      "o29",
+      "o30",
+      "o31",
+      "o32",
+      "o33",
+      "o34",
+      "o35",
+      "o36",
+      "o37",
+      "o38",
+      "o39",
+      "o40",
+      "o41",
+      "o42",
+      "o43",
+      "o44",
+      "o45",
+      "o46",
+      "o47",
+      "o48",
+      "o49",
+      "o50",
+      "o51",
+      "o52",
+      "o53",
+      "o54",
+      "o55",
+      "o56",
+      "o57",
+      "o58",
+      "o59",
+      "o60",
+      "o61",
+      "o62",
+      "o63",
+      "o64",
+      "o65",
+      "o66",
+      "o67",
+      "o68",
+      "o69",
+      "o70",
+      "o71",
+      "o72",
+      "o73",
+      "o74",
+      "o75",
+      "o76",
+      "o77",
+      "o78",
+      "o79",
+      "o80",
+      "o81",
+      "o82",
+      "o83",
+      "o84",
+      "o85",
+      "o86",
+      "o87",
+      "o88",
+      "o89",
+      "o90",
+      "o91",
+      "o92",
+      "o93",
+      "o94",
+      "o95",
+      "o96",
+      "o97",
+      "o98",
+      "o99",
+      "o100",
+      "o101",
+      "o102",
+      "o103",
+      "o104",
+      "o105",
+      "o106",
+      "o107",
+      "o108",
+      "o109",
+      "o110",
+      "o111",
+      "o112",
+      "o113",
+      "o114",
+      "o115",
+      "o116",
+      "o117",
+      "o118",
+      "o119",
+      "o120",
+      "o121",
+      "o122",
+      "o123",
+      "o124",
+      "o125",
+      "o126",
+      "o127",
+      "o128",
+      "o129",
+      "o130",
+      "o131",
+      "o132",
+      "o133",
+      "o134",
+      "o135",
+      "o136",
+      "o137",
+      "o138",
+      "o139",
+      "o140",
+      "o141",
+      "o142",
+      "o143",
+      "o144",
+      "o145",
+      "o146",
+      "o147",
+      "o148",
+      "o149",
+      "o150",
+      "o151",
+      "o152",
+      "o153",
+      "o154",
+      "o155",
+      "o156",
+      "o157",
+      "o158",
+      "o159",
+      "o160",
+      "o161",
+      "o162",
+      "o163",
+      "o164",
+      "o165",
+      "o166",
+      "o167",
+      "o168",
+      "o169",
+      "o170",
+      "o171",
+      "o172",
+      "o173",
+      "o174",
+      "o175",
+      "o176",
+      "o177",
+      "o178",
+      "o179",
+      "o180",
+      "o181",
+      "o182",
+      "o183",
+      "o184",
+      "o185",
+      "o186",
+      "o187",
+      "o188",
+      "o189",
+      "o190",
+      "o191",
+      "o192",
+      "o193",
+      "o194",
+      "o195",
+      "o196",
+      "o197",
+      "o198",
+      "o199",
+      "o200"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "option begins with dash",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "select",
+     "label": "Opt",
+     "flag": "--opt",
+     "options": [
+      "-x"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "empty option",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "select",
+     "label": "Opt",
+     "flag": "--opt",
+     "options": [
+      ""
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "long option",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "select",
+     "label": "Opt",
+     "flag": "--opt",
+     "options": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "duplicate option",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "select",
+     "label": "Opt",
+     "flag": "--opt",
+     "options": [
+      "a",
+      "a"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "min above max",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "number",
+     "label": "Opt",
+     "flag": "--opt",
+     "min": 5,
+     "max": 1
+    }
+   ]
+  }
+ },
+ {
+  "case": "negative min",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "number",
+     "label": "Opt",
+     "flag": "--opt",
+     "min": -5
+    }
+   ]
+  }
+ },
+ {
+  "case": "unknown type",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "date",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "options on text",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "options": [
+      "a"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "allow custom on bool",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "bool",
+     "label": "Opt",
+     "flag": "--opt",
+     "allow_custom": true
+    }
+   ]
+  }
+ },
+ {
+  "case": "min on text",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "min": 1
+    }
+   ]
+  }
+ },
+ {
+  "case": "warning on text",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "warning": true
+    }
+   ]
+  }
+ },
+ {
+  "case": "model as bool",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "model",
+     "type": "bool",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "text default is a number",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "default": 3
+    }
+   ]
+  }
+ },
+ {
+  "case": "bool default is a string",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "bool",
+     "label": "Opt",
+     "flag": "--opt",
+     "default": "yes"
+    }
+   ]
+  }
+ },
+ {
+  "case": "select default not an option",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "select",
+     "label": "Opt",
+     "flag": "--opt",
+     "options": [
+      "a"
+     ],
+     "default": "b"
+    }
+   ]
+  }
+ },
+ {
+  "case": "number default above max",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "number",
+     "label": "Opt",
+     "flag": "--opt",
+     "max": 5,
+     "default": 6
+    }
+   ]
+  }
+ },
+ {
+  "case": "number default negative",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "number",
+     "label": "Opt",
+     "flag": "--opt",
+     "default": -1
+    }
+   ]
+  }
+ },
+ {
+  "case": "text default begins with dash",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "default": "--x"
+    }
+   ]
+  }
+ },
+ {
+  "case": "text default bypass",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt",
+     "default": "bypassPermissions"
+    }
+   ]
+  }
+ },
+ {
+  "case": "warning default on",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tool",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "bool",
+     "label": "Opt",
+     "flag": "--opt",
+     "warning": true,
+     "default": true
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary ksh93",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "ksh93",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary tclsh8.6",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "tclsh8.6",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary wish8.6",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "wish8.6",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary ipython",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "ipython",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary ipython3",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "ipython3",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary bpython",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bpython",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary bash.exe",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bash.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary pwsh.exe",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "pwsh.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary cmd.exe",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "cmd.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary Python3.EXE",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "Python3.EXE",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary RSCRIPT",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "RSCRIPT",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary rscript",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "rscript",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "denied binary r",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "r",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "allowed binary shellcheck",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "shellcheck",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "allowed binary tool.exe",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "tool.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "allowed binary aider",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "aider",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ }
+]

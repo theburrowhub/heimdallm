@@ -426,6 +426,17 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     if (o.reviewLimits != n.reviewLimits) {
       ad['review_limits'] = n.reviewLimits.toJson();
     }
+    if (o.executionTimeout != n.executionTimeout) {
+      ad['execution_timeout'] = n.executionTimeout;
+    }
+    // A custom agent's option values sit next to its shared settings in
+    // config.toml, so they are patched as flat keys. Its binary and schema
+    // are never part of a settings PATCH.
+    for (final key in {...o.options.keys, ...n.options.keys}) {
+      final before = o.options[key];
+      final after = n.options[key];
+      if (before != after && after != null) ad[key] = after;
+    }
     if (ad.isNotEmpty) agentsDiff[name] = ad;
   }
   if (agentsDiff.isNotEmpty) aiDiff['agents'] = agentsDiff;

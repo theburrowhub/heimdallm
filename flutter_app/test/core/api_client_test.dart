@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/models/agent_schema.dart';
 import 'package:heimdallm/core/models/flow.dart';
 import 'platform/fake_platform_services.dart';
 
@@ -36,6 +37,61 @@ void main() {
       status = 503;
       expect(client.fetchCliAgents(), throwsA(isA<ApiException>()));
       expect(client.rescanCliAgents(), throwsA(isA<ApiException>()));
+    });
+
+    test('agent schema endpoints', () async {
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+        token: 'abc-123',
+      );
+      var status = 200;
+      final seen = <String>[];
+      final client = ApiClient(
+        httpClient: MockClient((request) async {
+          seen.add('${request.method} ${request.url.path}');
+          if (request.method == 'PUT') {
+            expect(jsonDecode(request.body)['binary'], 'aider');
+          }
+          return http.Response(
+            status == 200
+                ? jsonEncode({
+                    'schemas': [
+                      {'name': 'claude', 'builtin': true, 'fields': []},
+                    ],
+                    'custom_agents_api_enabled': true,
+                  })
+                : jsonEncode({'error': 'nope'}),
+            status,
+          );
+        }),
+        platform: platform,
+      );
+      final catalog = await client.fetchAgentSchemas();
+      expect(catalog.customAgentsApiEnabled, isTrue);
+      expect(catalog.byName('claude')!.builtin, isTrue);
+      const schema = AgentSchema(name: 'aider', binary: 'aider');
+      await client.putAgentSchema(schema);
+      await client.deleteAgentSchema('aider');
+      expect(seen, [
+        'GET /agent-schemas',
+        'PUT /agent-schemas/aider',
+        'DELETE /agent-schemas/aider',
+      ]);
+      status = 403;
+      await expectLater(
+        client.fetchAgentSchemas(),
+        throwsA(isA<ApiException>()),
+      );
+      await expectLater(
+        client.putAgentSchema(schema),
+        throwsA(
+          isA<ApiException>().having((e) => '$e', 'message', contains('nope')),
+        ),
+      );
+      await expectLater(
+        client.deleteAgentSchema('aider'),
+        throwsA(isA<ApiException>()),
+      );
     });
 
     test('agent key and usage endpoints', () async {
