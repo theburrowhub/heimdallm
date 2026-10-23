@@ -10,6 +10,17 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.10.5](https://github.com/theburrowhub/heimdallm/compare/v0.10.4...v0.10.5) (2026-10-23)
+
+
+### Features
+
+* **app:** render agent settings from schemas and edit custom agents ([#875](https://github.com/theburrowhub/heimdallm/issues/875)) ([d2c53e0](https://github.com/theburrowhub/heimdallm/commit/d2c53e0a7fc673fa838fc114289cf82c79739c89))
+* **cli:** schema-driven agent settings and a custom agent wizard ([#877](https://github.com/theburrowhub/heimdallm/issues/877)) ([b95b97a](https://github.com/theburrowhub/heimdallm/commit/b95b97a4da60ce389b63dd8d38bffb90b49a0b19))
+* **compat:** daemon API version and per-component compatibility matrix ([#874](https://github.com/theburrowhub/heimdallm/issues/874)) ([bbcb2b4](https://github.com/theburrowhub/heimdallm/commit/bbcb2b4d9ad1be1fa44ed957b8a2313a2bcfa83b))
+* **daemon:** schema-driven agent options and custom CLI agents ([#873](https://github.com/theburrowhub/heimdallm/issues/873)) ([20ad82e](https://github.com/theburrowhub/heimdallm/commit/20ad82edc183c2bf7064dc25602c44d1f9fea685))
+* **release:** per-component releases next to the unified installer ([#872](https://github.com/theburrowhub/heimdallm/issues/872)) ([5c6a52f](https://github.com/theburrowhub/heimdallm/commit/5c6a52f2d32aa82852262a43fb902915b08dd818))
+
 ## [0.10.4](https://github.com/theburrowhub/heimdallm/compare/v0.10.3...v0.10.4) (2026-10-19)
 
 
