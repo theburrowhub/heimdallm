@@ -5,8 +5,9 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
+import '../compat.dart';
 import 'platform_services.dart';
 
 typedef LinuxUpdateProcessRunner =
@@ -26,6 +27,7 @@ class LinuxUpdateRelease {
     required this.assetURL,
     required this.checksumsURL,
     required this.checksumsSignatureURL,
+    this.minDaemonApi,
   });
 
   final String version;
@@ -34,12 +36,16 @@ class LinuxUpdateRelease {
   final Uri checksumsURL;
   final Uri checksumsSignatureURL;
 
+  /// `min_daemon_api.gui` from the release's versions.json, when published.
+  final int? minDaemonApi;
+
   Map<String, Object> toJson() => {
     'version': version,
     'assetName': assetName,
     'assetURL': assetURL.toString(),
     'checksumsURL': checksumsURL.toString(),
     'checksumsSignatureURL': checksumsSignatureURL.toString(),
+    'minDaemonApi': ?minDaemonApi,
   };
 }
 
@@ -279,6 +285,7 @@ class LinuxAppUpdater {
           phase: AppUpdatePhase.available,
           version: cachedRelease.version,
           message: 'Heimdallm ${cachedRelease.version} is ready to install.',
+          minDaemonApi: cachedRelease.minDaemonApi,
         ),
       );
     }
@@ -322,6 +329,7 @@ class LinuxAppUpdater {
             phase: AppUpdatePhase.available,
             version: release.version,
             message: 'Heimdallm ${release.version} is ready to install.',
+            minDaemonApi: release.minDaemonApi,
           ),
         );
       } else {
@@ -625,6 +633,7 @@ class LinuxAppUpdater {
     Uri? assetURL;
     Uri? checksumsURL;
     Uri? checksumsSignatureURL;
+    Uri? versionsURL;
     final assets = decoded['assets'];
     if (assets is! List) {
       throw const FormatException('Release assets are missing.');
@@ -638,6 +647,7 @@ class LinuxAppUpdater {
       if (name == wantedAsset) assetURL = uri;
       if (name == _checksumsName) checksumsURL = uri;
       if (name == _checksumsSignatureName) checksumsSignatureURL = uri;
+      if (name == versionsManifestAsset) versionsURL = uri;
     }
     if (assetURL == null ||
         checksumsURL == null ||
@@ -650,8 +660,25 @@ class LinuxAppUpdater {
       assetURL: assetURL,
       checksumsURL: checksumsURL,
       checksumsSignatureURL: checksumsSignatureURL,
+      minDaemonApi: versionsURL == null
+          ? null
+          : await _fetchMinDaemonApi(versionsURL),
     );
   }
+
+  /// Best effort: the compatibility data only feeds a warning, so a missing or
+  /// unreadable versions.json never blocks an update.
+  Future<int?> _fetchMinDaemonApi(Uri url) async {
+    try {
+      final data = await _readHTTPS(url, _maxVersionsManifestBytes);
+      return minDaemonApiFromVersionsManifest(utf8.decode(data), 'gui');
+    } catch (error) {
+      debugPrint('could not read $versionsManifestAsset: $error');
+      return null;
+    }
+  }
+
+  static const _maxVersionsManifestBytes = 64 * 1024;
 
   bool _assetMatchesInstall(String name) => switch (_installKind) {
     LinuxInstallKind.appImage => name.endsWith('-x86_64.AppImage'),
@@ -1150,6 +1177,7 @@ class LinuxAppUpdater {
     if (!_isTrustedReleaseURL(checksumsSignatureURL, version)) {
       return null;
     }
+    final minDaemonApi = rawRelease['minDaemonApi'];
     return (
       checkedAt.toUtc(),
       LinuxUpdateRelease(
@@ -1158,6 +1186,9 @@ class LinuxAppUpdater {
         assetURL: assetURL,
         checksumsURL: checksumsURL,
         checksumsSignatureURL: checksumsSignatureURL,
+        minDaemonApi: minDaemonApi is int && minDaemonApi > 0
+            ? minDaemonApi
+            : null,
       ),
     );
   }

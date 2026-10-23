@@ -16,8 +16,8 @@ builds:
       - -s -w -X main.version={{.Version}}
 
 # ── Linux packages — .deb + .rpm ─────────────────────────────────────────────
-# Used by: build-linux job (release.yml)
-# Requires: staging/ prepared by the workflow (Flutter bundle + icons + desktop entry)
+# Used by: build-linux job (build-desktop.yml, unified and gui releases)
+# Requires: staging/ prepared by the workflow (Flutter bundle + CLI + icons + desktop entry)
 nfpms:
   - id: linux-packages
     ids:
@@ -53,6 +53,11 @@ nfpms:
         type: tree
       - dst: /usr/bin/heimdallm
         src: /opt/heimdallm/heimdallm
+        type: symlink
+      # The CLI ships in the staging tree (/opt/heimdallm/heimdallm-cli); the
+      # desktop updater owns it, so `heimdallm-cli update` refuses to rewrite it.
+      - dst: /usr/bin/heimdallm-cli
+        src: /opt/heimdallm/heimdallm-cli
         type: symlink
       - src: ../staging/usr/share/applications/com.theburrowhub.heimdallm.desktop
         dst: /usr/share/applications/com.theburrowhub.heimdallm.desktop

@@ -1,27 +1,86 @@
 {
   "draft": true,
   "force-tag-creation": true,
+  "bootstrap-sha": "dd31ed6b61cbba1c61586ecea8f79d87b5be880e",
+  "tag-separator": "/",
+  "group-pull-request-title-pattern": "chore(${branch}): release ${version}",
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "changelog-sections": [
+    {
+      "type": "feat",
+      "section": "Features"
+    },
+    {
+      "type": "fix",
+      "section": "Bug Fixes"
+    },
+    {
+      "type": "perf",
+      "section": "Performance"
+    },
+    {
+      "type": "deps",
+      "section": "Dependencies"
+    },
+    {
+      "type": "docs",
+      "section": "Documentation"
+    },
+    {
+      "type": "chore",
+      "section": "Miscellaneous",
+      "hidden": true
+    },
+    {
+      "type": "ci",
+      "section": "CI/CD",
+      "hidden": true
+    },
+    {
+      "type": "refactor",
+      "section": "Refactoring",
+      "hidden": true
+    },
+    {
+      "type": "test",
+      "section": "Tests",
+      "hidden": true
+    }
+  ],
   "packages": {
     ".": {
       "release-type": "simple",
       "initial-version": "0.1.0",
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true,
       "extra-files": [
-        { "type": "generic", "path": "docs/index.html" },
-        { "type": "generic", "path": "flutter_app/pubspec.yaml" }
+        {
+          "type": "generic",
+          "path": "docs/index.html"
+        },
+        {
+          "type": "generic",
+          "path": "flutter_app/pubspec.yaml"
+        }
       ],
-      "changelog-sections": [
-        { "type": "feat", "section": "Features" },
-        { "type": "fix", "section": "Bug Fixes" },
-        { "type": "perf", "section": "Performance" },
-        { "type": "deps", "section": "Dependencies" },
-        { "type": "docs", "section": "Documentation" },
-        { "type": "chore", "section": "Miscellaneous", "hidden": true },
-        { "type": "ci", "section": "CI/CD", "hidden": true },
-        { "type": "refactor", "section": "Refactoring", "hidden": true },
-        { "type": "test", "section": "Tests", "hidden": true }
-      ]
+      "include-component-in-tag": false
+    },
+    "daemon": {
+      "release-type": "go",
+      "component": "daemon",
+      "package-name": "heimdalld",
+      "include-component-in-tag": true
+    },
+    "flutter_app": {
+      "release-type": "simple",
+      "component": "gui",
+      "package-name": "heimdallm-gui",
+      "include-component-in-tag": true
+    },
+    "cli": {
+      "release-type": "go",
+      "component": "cli",
+      "package-name": "heimdallm-cli",
+      "include-component-in-tag": true
     }
   },
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json"

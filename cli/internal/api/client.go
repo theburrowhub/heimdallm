@@ -116,13 +116,15 @@ func (c *Client) Health() error {
 	return err
 }
 
-// Health is the subset of /health the dashboard renders. Version is empty for
-// daemons built before version stamping (they omit the field), so callers must
-// treat "" as unknown rather than an error.
+// Health is the subset of /health the CLI reads. Version is empty for daemons
+// built before version stamping (they omit the field), so callers must treat ""
+// as unknown rather than an error. APIVersion is likewise 0 for daemons that
+// predate it; compat.EffectiveDaemonAPI maps that to the baseline revision.
 type Health struct {
-	Status    string    `json:"status"`
-	Version   string    `json:"version"`
-	StartedAt time.Time `json:"started_at"`
+	Status     string    `json:"status"`
+	Version    string    `json:"version"`
+	StartedAt  time.Time `json:"started_at"`
+	APIVersion int       `json:"api_version"`
 }
 
 // Caps for the rendered fields, in runes. Both sit comfortably above what the

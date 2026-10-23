@@ -1,15 +1,32 @@
 name: Release
 
+# Orchestrates every release. release-please (one grouped release PR) cuts a
+# draft per released package on merge:
+#
+#   vX.Y.Z         unified installer, the "latest" release  → release-unified.yml
+#   daemon/vX.Y.Z  standalone daemon archives               → release-daemon.yml
+#   gui/vX.Y.Z     desktop bundles stamped with gui version → release-gui.yml
+#   cli/vX.Y.Z     standalone CLI archives                  → release-cli.yml
+#
+# The component pipelines are chained from this run rather than triggered by
+# their tags: release-please may create tags with GITHUB_TOKEN, which never
+# triggers another workflow. A failing component pipeline does not hold back
+# the unified release, and vice versa. See docs/release-pipeline.md.
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build assets for (e.g. v0.6.0)'
+        description: 'Existing release tag to repair (e.g. v0.6.0, daemon/v0.11.0, gui/v0.11.0, cli/v0.11.0)'
         required: true
       channels_only:
-        description: 'Repair mutable GHCR aliases for an already published release'
+        description: 'Repair mutable GHCR aliases for an already published unified release'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Build the release for this tag version from the selected branch; upload, push and publish nothing'
         required: false
         default: false
         type: boolean
@@ -18,13 +35,12 @@ permissions:
   contents: read
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
   # Opt-in to Node.js 24 for all JavaScript actions (Node 20 deprecated Sep 2026)
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# Merged release-please commits contain `chore(main): release`. Keep those and
-# manual repairs serialized because they mutate a shared draft, GHCR aliases,
+# Merged release-please commits contain `chore(main): release` (the grouped
+# release PR title is pinned in release-please-config.json). Keep those and
+# manual repairs serialized because they mutate shared drafts, GHCR aliases,
 # and the Homebrew tap. Ordinary pushes use a separate coalescing group, so they
 # cannot evict or delay a pending release.
 concurrency:
@@ -45,8 +61,15 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      daemon_release_created: ${{ steps.release.outputs['daemon--release_created'] }}
+      daemon_tag_name: ${{ steps.release.outputs['daemon--tag_name'] }}
+      gui_release_created: ${{ steps.release.outputs['flutter_app--release_created'] }}
+      gui_tag_name: ${{ steps.release.outputs['flutter_app--tag_name'] }}
+      cli_release_created: ${{ steps.release.outputs['cli--release_created'] }}
+      cli_tag_name: ${{ steps.release.outputs['cli--tag_name'] }}
     steps:
       - name: Run release-please
         id: release
@@ -61,50 +84,113 @@ jobs:
           # via the workflow_dispatch added to tests.yml / docker-publish.yml).
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
-  # ═══════════════════════════════════════════════════════════════════════════
-  # Test gate — all build jobs depend on this
-  # ═══════════════════════════════════════════════════════════════════════════
-  tests:
-    name: Tests
+  # Decide which release pipelines this run drives, and validate every tag
+  # before any job uses it.
+  plan:
+    name: Plan release pipelines
     needs: release-please
     if: >-
       always() &&
-      (needs.release-please.outputs.release_created == 'true' ||
-       (github.event_name == 'workflow_dispatch' && inputs.channels_only != true))
-    runs-on: ubuntu-22.04
-    # Draft releases are only visible to credentials with push access. Without
-    # contents: write, the recovery preflight sees an existing draft as a 404.
-    permissions:
-      contents: write
+      (github.event_name == 'workflow_dispatch' ||
+       (needs.release-please.result == 'success' &&
+        needs.release-please.outputs.releases_created == 'true'))
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.plan.outputs.ref }}
+      unified_tag: ${{ steps.plan.outputs.unified_tag }}
+      daemon_tag: ${{ steps.plan.outputs.daemon_tag }}
+      gui_tag: ${{ steps.plan.outputs.gui_tag }}
+      cli_tag: ${{ steps.plan.outputs.cli_tag }}
+      build: ${{ steps.plan.outputs.build }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          sparse-checkout: scripts/release
           persist-credentials: false
 
-      - name: Validate draft release target
+      - name: Resolve tags
+        id: plan
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          CHANNELS_ONLY: ${{ inputs.channels_only }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          UNIFIED_CREATED: ${{ needs.release-please.outputs.release_created }}
+          UNIFIED_TAG: ${{ needs.release-please.outputs.tag_name }}
+          DAEMON_CREATED: ${{ needs.release-please.outputs.daemon_release_created }}
+          DAEMON_TAG: ${{ needs.release-please.outputs.daemon_tag_name }}
+          GUI_CREATED: ${{ needs.release-please.outputs.gui_release_created }}
+          GUI_TAG: ${{ needs.release-please.outputs.gui_tag_name }}
+          CLI_CREATED: ${{ needs.release-please.outputs.cli_release_created }}
+          CLI_TAG: ${{ needs.release-please.outputs.cli_tag_name }}
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "::error::Invalid release tag: $TAG"
-            exit 1
-          }
-          TAG_COMMIT=$(git rev-parse "${TAG}^{commit}")
-          test "$TAG_COMMIT" = "$(git rev-parse HEAD)" || {
-            echo "::error::$TAG does not resolve to the checked-out commit"
-            exit 1
-          }
-          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft) || {
-            echo "::error::Release $TAG does not exist; manual runs only repair an existing draft"
-            exit 1
-          }
-          test "$IS_DRAFT" = true || {
-            echo "::error::Release $TAG is already published and immutable"
-            exit 1
-          }
+          declare -A TAGS=([unified]='' [daemon]='' [gui]='' [cli]='')
+
+          if [ "$EVENT_NAME" = push ]; then
+            REF="$GITHUB_SHA"
+            [ "$UNIFIED_CREATED" = true ] && TAGS[unified]=$UNIFIED_TAG
+            [ "$DAEMON_CREATED" = true ] && TAGS[daemon]=$DAEMON_TAG
+            [ "$GUI_CREATED" = true ] && TAGS[gui]=$GUI_TAG
+            [ "$CLI_CREATED" = true ] && TAGS[cli]=$CLI_TAG
+          else
+            read -r KIND _ <<< "$(scripts/release/parse-tag.sh "$INPUT_TAG")"
+            if [ "$CHANNELS_ONLY" = true ] && [ "$KIND" != unified ]; then
+              echo "::error::channels_only only applies to unified vX.Y.Z releases"
+              exit 1
+            fi
+            if [ "$CHANNELS_ONLY" = true ] && [ "$DRY_RUN" = true ]; then
+              echo "::error::channels_only and dry_run are mutually exclusive"
+              exit 1
+            fi
+            TAGS[$KIND]=$INPUT_TAG
+            # A dry run builds the selected branch; a repair rebuilds the tag.
+            if [ "$DRY_RUN" = true ]; then REF="$GITHUB_SHA"; else REF="$INPUT_TAG"; fi
+          fi
+
+          BUILD=false
+          for KIND in unified daemon gui cli; do
+            TAG=${TAGS[$KIND]}
+            if [ -n "$TAG" ]; then
+              read -r TAG_KIND _ <<< "$(scripts/release/parse-tag.sh "$TAG")"
+              test "$TAG_KIND" = "$KIND" || {
+                echo "::error::release-please reported $TAG for the $KIND package"
+                exit 1
+              }
+              BUILD=true
+            fi
+            echo "${KIND}_tag=$TAG" >> "$GITHUB_OUTPUT"
+          done
+          [ "$CHANNELS_ONLY" = true ] && BUILD=false
+          {
+            echo "ref=$REF"
+            echo "build=$BUILD"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Release plan"
+            echo ""
+            echo "| Pipeline | Tag |"
+            echo "|----------|-----|"
+            for KIND in unified daemon gui cli; do
+              echo "| $KIND | \`${TAGS[$KIND]:-—}\` |"
+            done
+            echo ""
+            echo "Source: \`$REF\` · channels only: ${CHANNELS_ONLY:-false} · dry run: ${DRY_RUN:-false}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Test gate — every build pipeline depends on this
+  # ═══════════════════════════════════════════════════════════════════════════
+  tests:
+    name: Tests
+    needs: plan
+    if: always() && needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -181,963 +267,61 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Docker image — GoReleaser → GHCR
+  # Release pipelines — independent of each other
   # ═══════════════════════════════════════════════════════════════════════════
-  goreleaser-daemon:
-    name: Docker image (GoReleaser)
-    needs: [release-please, tests]
-    if: always() && needs.tests.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-      attestations: write
-      id-token: write
-    env:
-      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-    outputs:
-      digest: ${{ steps.docker-digest.outputs.digest }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: daemon/go.mod
-          cache-dependency-path: daemon/go.sum
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: GoReleaser — build daemon + push Docker image
-        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
-        with:
-          distribution: goreleaser
-          version: 'v2.17.1'
-          args: >-
-            release --clean --config .goreleaser-docker.yml --skip=archive
-          workdir: daemon
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_CURRENT_TAG: ${{ env.TAG }}
-
-      - name: Get Docker image digest
-        id: docker-digest
-        run: |
-          set -euo pipefail
-          VERSION="${TAG#v}"
-          DIGEST=$(docker buildx imagetools inspect \
-            "ghcr.io/theburrowhub/heimdallm:${VERSION}" 2>&1 \
-            | grep -m1 'Digest:' | awk '{print $2}')
-          test -n "$DIGEST"
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.docker-digest.outputs.digest }}
-          push-to-registry: true
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # Linux packages — .deb, .rpm (GoReleaser nfpms) + .AppImage
-  #
-  # .deb/.rpm are built by GoReleaser's nfpms integration.
-  # .AppImage stays separate: GoReleaser has no AppImage support and
-  # the format requires appimagetool + a custom AppDir structure.
-  # See docs/release-pipeline.md for rationale.
-  # ═══════════════════════════════════════════════════════════════════════════
-  build-linux:
-    name: Build Linux packages (.deb / .rpm / .AppImage)
-    needs: [release-please, tests]
-    if: always() && needs.tests.result == 'success'
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    env:
-      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-          fetch-depth: 0
-
-      # ── Toolchains ──────────────────────────────────────────────────────────
-      - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: daemon/go.mod
-          cache-dependency-path: daemon/go.sum
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
-        with:
-          flutter-version: '3.41.9'
-          channel: stable
-          cache: true
-
-      # ── System dependencies ─────────────────────────────────────────────────
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            clang cmake ninja-build pkg-config \
-            libgtk-3-dev liblzma-dev libstdc++-12-dev \
-            libayatana-appindicator3-dev libnotify-dev \
-            libsecret-1-dev \
-            libfuse2
-
-      # ── App dependencies ─────────────────────────────────────────────────────
-      - name: Flutter pub get
-        working-directory: flutter_app
-        run: flutter pub get
-
-      # ── Build ────────────────────────────────────────────────────────────────
-      - name: Build daemon
-        # Pass the release version explicitly: the checkout is shallow and
-        # untagged (git describe would yield a bare SHA), and earlier steps
-        # can dirty the worktree (pubspec.lock / Podfile.lock regeneration).
-        # TAG goes through env, not inline ${{ }} interpolation, so a crafted
-        # workflow_dispatch input cannot inject shell into this job.
-        run: |
-          set -euo pipefail
-          test -n "$TAG" || { echo "release tag is empty — refusing to stamp a blank version"; exit 1; }
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "::error::Invalid release tag: $TAG"
-            exit 1
-          }
-          git rev-parse --verify "${TAG}^{commit}" >/dev/null
-          BUILD_NUMBER=$(git rev-list --count "${TAG}^{commit}")
-          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
-            echo "::error::Could not derive a deterministic build number for $TAG"
-            exit 1
-          }
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
-          make build-daemon GIT_VERSION="${TAG#v}"
-
-      - name: Build Flutter app (Linux release)
-        working-directory: flutter_app
-        run: |
-          VERSION="${TAG#v}"
-          flutter build linux --release \
-            --build-name="$VERSION" \
-            --build-number="$BUILD_NUMBER"
-
-      # ── Prepare staging tree (for GoReleaser nfpms) ──────────────────────────
-      # The staging directory contains the Flutter GUI bundle, icons, and desktop
-      # entry. The daemon binary is NOT included here — GoReleaser adds it via
-      # nfpms bindir from its own build output.
-      - name: Prepare staging directory
-        run: |
-          VERSION="${{ inputs.tag || needs.release-please.outputs.tag_name }}"
-          VERSION="${VERSION#v}"
-          BUNDLE="flutter_app/build/linux/x64/release/bundle"
-
-          if [ ! -d "$BUNDLE" ]; then
-            echo "::error::Bundle not found at $BUNDLE"
-            exit 1
-          fi
-          if [ ! -f "daemon/bin/heimdallm" ]; then
-            echo "::error::daemon/bin/heimdallm not found"
-            exit 1
-          fi
-
-          chmod +x "$BUNDLE/heimdallm"
-
-          STAGING="staging"
-          OPT="$STAGING/opt/heimdallm"
-          mkdir -p "$OPT"
-          mkdir -p "$STAGING/usr/share/applications"
-          mkdir -p dist
-
-          cp -r "$BUNDLE/." "$OPT/"
-          chmod +x "$OPT/heimdallm"
-
-          for SIZE in 48 128 256 512; do
-            ICON_DIR="$STAGING/usr/share/icons/hicolor/${SIZE}x${SIZE}/apps"
-            mkdir -p "$ICON_DIR"
-            cp "flutter_app/assets/icons/${SIZE}.png" "$ICON_DIR/heimdallm.png"
-          done
-
-          printf '%s\n' \
-            '[Desktop Entry]' \
-            'Name=Heimdallm' \
-            'Comment=AI-powered GitHub PR review agent' \
-            'Exec=/opt/heimdallm/heimdallm' \
-            'Icon=heimdallm' \
-            'Type=Application' \
-            'Categories=Development;' \
-            'StartupWMClass=com.theburrowhub.heimdallm' \
-            'StartupNotify=true' \
-            > "$STAGING/usr/share/applications/com.theburrowhub.heimdallm.desktop"
-
-          echo "Bundle contents:"
-          ls -lh "$OPT"
-
-          echo "BUNDLE=$BUNDLE"   >> "$GITHUB_ENV"
-          echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
-
-      # ── .deb + .rpm (GoReleaser nfpms) ──────────────────────────────────────
-      - name: GoReleaser — build .deb + .rpm
-        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
-        with:
-          distribution: goreleaser
-          version: 'v2.17.1'
-          args: >-
-            release --clean --skip=archive,validate
-          workdir: daemon
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_CURRENT_TAG: ${{ env.TAG }}
-
-      # ── .AppImage (stays separate — no GoReleaser support) ──────────────────
-      - name: Build AppImage
-        run: |
-          cp "daemon/bin/heimdallm" "$BUNDLE/heimdalld"
-          chmod +x "$BUNDLE/heimdalld"
-
-          APPDIR="AppDir"
-          mkdir -p "$APPDIR"
-
-          cp -r "$BUNDLE/." "$APPDIR/"
-
-          # The single quotes deliberately preserve runtime variables in AppRun.
-          # shellcheck disable=SC2016
-          printf '%s\n' \
-            '#!/bin/bash' \
-            'SELF="$(readlink -f "$0")"' \
-            'HERE="${SELF%/*}"' \
-            'exec "$HERE/heimdallm" "$@"' \
-            > "$APPDIR/AppRun"
-          chmod +x "$APPDIR/AppRun"
-
-          printf '%s\n' \
-            '[Desktop Entry]' \
-            'Name=Heimdallm' \
-            'Comment=AI-powered GitHub PR review agent' \
-            'Exec=heimdallm' \
-            'Icon=heimdallm' \
-            'Type=Application' \
-            'Categories=Development;' \
-            'StartupWMClass=com.theburrowhub.heimdallm' \
-            'StartupNotify=true' \
-            > "$APPDIR/heimdallm.desktop"
-
-          cp flutter_app/assets/icon.png "$APPDIR/heimdallm.png"
-
-          wget -q \
-            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
-            -O appimagetool
-          echo \
-            "b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2  appimagetool" \
-            | sha256sum --check --strict
-          chmod +x appimagetool
-
-          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \
-            ./appimagetool "$APPDIR" "dist/Heimdallm-${VERSION}-x86_64.AppImage"
-
-          ls -lh "dist/Heimdallm-${VERSION}-x86_64.AppImage"
-          echo "APPIMAGE_PATH=dist/Heimdallm-${VERSION}-x86_64.AppImage" >> "$GITHUB_ENV"
-
-      - name: Generate Linux desktop checksums
-        env:
-          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "$SPARKLE_EDDSA_PRIVATE_KEY" || {
-            echo "::error::Required GitHub Actions secret SPARKLE_EDDSA_PRIVATE_KEY is missing"
-            exit 1
-          }
-          DEB=$(find daemon/dist -type f -name "heimdallm_${VERSION}_amd64.deb" -print -quit)
-          RPM=$(find daemon/dist -type f -name "heimdallm_${VERSION}_amd64.rpm" -print -quit)
-          test -f "$DEB"
-          test -f "$RPM"
-          test -f "$APPIMAGE_PATH"
-          : > dist/linux-checksums.txt
-          for ASSET in "$DEB" "$RPM" "$APPIMAGE_PATH"; do
-            SHA256=$(sha256sum "$ASSET" | awk '{print $1}')
-            printf '%s  %s\n' "$SHA256" "$(basename "$ASSET")" \
-              >> dist/linux-checksums.txt
-          done
-          test "$(wc -l < dist/linux-checksums.txt)" -eq 3
-          sha256sum --check --strict <(
-            while read -r SHA NAME; do
-              case "$NAME" in
-                *.deb) PATHNAME="$DEB" ;;
-                *.rpm) PATHNAME="$RPM" ;;
-                *.AppImage) PATHNAME="$APPIMAGE_PATH" ;;
-                *) exit 1 ;;
-              esac
-              printf '%s  %s\n' "$SHA" "$PATHNAME"
-            done < dist/linux-checksums.txt
-          )
-          PRIVATE_KEY="$RUNNER_TEMP/heimdallm-linux-update-key.der"
-          cleanup_update_key() { rm -f "$PRIVATE_KEY"; }
-          trap cleanup_update_key EXIT
-          {
-            printf '302e020100300506032b657004220420' | xxd -r -p
-            printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | openssl base64 -d -A
-          } > "$PRIVATE_KEY"
-          test "$(wc -c < "$PRIVATE_KEY" | tr -d '[:space:]')" = 48
-          DERIVED_PUBLIC_KEY=$(
-            openssl pkey -in "$PRIVATE_KEY" -inform DER -pubout -outform DER \
-              2>/dev/null \
-              | tail -c 32 \
-              | openssl base64 -A
-          )
-          test "$DERIVED_PUBLIC_KEY" = \
-            'eBiLZ1yDuQ/NVCx7VJoQZJm6FpB8S0yH9WHtxaRfEDw=' || {
-            echo "::error::Linux update signing key does not match the embedded public key"
-            exit 1
-          }
-          openssl pkeyutl -sign -rawin \
-            -inkey "$PRIVATE_KEY" -keyform DER \
-            -in dist/linux-checksums.txt \
-            | openssl base64 -A > dist/linux-checksums.txt.sig
-          test "$(openssl base64 -d -A < dist/linux-checksums.txt.sig | wc -c | tr -d '[:space:]')" = 64
-
-      # ── Publish ──────────────────────────────────────────────────────────────
-      - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: Heimdallm-linux-${{ env.VERSION }}
-          path: dist/
-          retention-days: 90
-
-      - name: Upload AppImage and signed desktop checksums to GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-          draft: true
-          overwrite_files: true
-          fail_on_unmatched_files: true
-          files: |
-            ${{ env.APPIMAGE_PATH }}
-            dist/linux-checksums.txt
-            dist/linux-checksums.txt.sig
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # macOS .dmg
-  #
-  # Stays separate from GoReleaser: requires macOS runner, Flutter build,
-  # ad-hoc code sealing and create-dmg — neither of which GoReleaser supports.
-  # See docs/release-pipeline.md for rationale.
-  # ═══════════════════════════════════════════════════════════════════════════
-  build-macos:
-    name: Build Heimdallm.dmg
-    needs: [release-please, tests]
-    if: always() && needs.tests.result == 'success'
-    runs-on: macos-14
-    permissions:
-      contents: write
-    env:
-      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-      BUNDLE_GEMFILE: ${{ github.workspace }}/flutter_app/macos/Gemfile
-
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-          fetch-depth: 0
-
-      # ── Toolchains ──────────────────────────────────────────────────────────
-      - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: daemon/go.mod
-          cache-dependency-path: daemon/go.sum
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
-        with:
-          flutter-version: '3.41.9'
-          channel: stable
-          cache: true
-
-      - name: Set up Ruby and pinned CocoaPods
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
-        with:
-          ruby-version: '3.3'
-          bundler-cache: true
-          working-directory: flutter_app/macos
-
-      # ── Dependencies ────────────────────────────────────────────────────────
-      - name: Flutter pub get
-        working-directory: flutter_app
-        run: flutter pub get
-
-      # Both Flutter macOS builds invoke `pod` internally. `bundle exec` makes
-      # those subprocesses use the locked CocoaPods instead of the runner copy.
-      - name: Generate macOS Flutter configuration
-        working-directory: flutter_app
-        run: bundle exec flutter build macos --debug --config-only
-
-      - name: CocoaPods
-        working-directory: flutter_app/macos
-        run: bundle exec pod install --deployment --clean-install
-
-      - name: macOS runner tests
-        working-directory: flutter_app/macos
-        run: |
-          set -euo pipefail
-          xcodebuild test \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Debug \
-            -destination 'platform=macOS' \
-            -parallel-testing-enabled NO \
-            -only-testing:RunnerTests \
-            HEIMDALLM_BUNDLE_IDENTIFIER=com.theburrowhub.heimdallm.ci
-
-      # ── Build ───────────────────────────────────────────────────────────────
-      - name: Build universal daemon
-        run: |
-          set -euo pipefail
-          test -n "$TAG" || { echo "release tag is empty — refusing to stamp a blank version"; exit 1; }
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "::error::Invalid release tag: $TAG"
-            exit 1
-          }
-          VERSION="${TAG#v}"
-          # Keep official release build numbers above historical builds.
-          SOURCE_BUILD_NUMBER=$(git rev-list --count "${TAG}^{commit}")
-          BUILD_NUMBER=$((100000 + SOURCE_BUILD_NUMBER))
-          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
-            echo "::error::Could not derive a deterministic build number for $TAG"
-            exit 1
-          }
-          mkdir -p daemon/bin/macos
-          for ARCH in arm64 amd64; do
-            (
-              cd daemon
-              CGO_ENABLED=0 GOOS=darwin GOARCH="$ARCH" \
-                go build -trimpath \
-                  -ldflags "-s -w -X main.version=$VERSION" \
-                  -o "bin/macos/heimdalld-$ARCH" \
-                  ./cmd/heimdallm
-            )
-          done
-          lipo -create \
-            daemon/bin/macos/heimdalld-arm64 \
-            daemon/bin/macos/heimdalld-amd64 \
-            -output daemon/bin/heimdalld-universal
-          lipo daemon/bin/heimdalld-universal -verify_arch arm64 x86_64
-          DAEMON_VERSION=$(daemon/bin/heimdalld-universal version)
-          test "$DAEMON_VERSION" = "$VERSION" || {
-            echo "::error::Bundled daemon reports $DAEMON_VERSION, expected $VERSION"
-            exit 1
-          }
-          {
-            echo "VERSION=$VERSION"
-            echo "BUILD_NUMBER=$BUILD_NUMBER"
-          } >> "$GITHUB_ENV"
-
-      - name: Build Flutter app (release)
-        working-directory: flutter_app
-        run: |
-          bundle exec flutter build macos --release \
-            --build-name="$VERSION" \
-            --build-number="$BUILD_NUMBER"
-
-      # ── Bundle ──────────────────────────────────────────────────────────────
-      - name: Locate .app and embed daemon
-        run: |
-          set -euo pipefail
-          RELEASE_DIR="flutter_app/build/macos/Build/Products/Release"
-
-          APP=$(find "$RELEASE_DIR" -maxdepth 1 -name "*.app" -print -quit)
-          if [ -z "$APP" ]; then
-            echo "::error::No .app bundle found in $RELEASE_DIR"
-            ls -la "$RELEASE_DIR" || true
-            exit 1
-          fi
-          echo "Found bundle: $APP"
-
-          if [ ! -f "daemon/bin/heimdalld-universal" ]; then
-            echo "::error::universal daemon binary not found"
-            exit 1
-          fi
-
-          cp "daemon/bin/heimdalld-universal" "$APP/Contents/MacOS/heimdalld"
-          chmod +x "$APP/Contents/MacOS/heimdalld"
-
-          echo "Bundle contents after embedding:"
-          ls -lh "$APP/Contents/MacOS/"
-
-          if [ ! -f "$APP/Contents/MacOS/Heimdallm" ]; then
-            echo "::error::Flutter binary Heimdallm missing"
-            exit 1
-          fi
-          if [ ! -f "$APP/Contents/MacOS/heimdalld" ]; then
-            echo "::error::Daemon binary heimdalld missing"
-            exit 1
-          fi
-          FLUTTER_SIZE=$(stat -f%z "$APP/Contents/MacOS/Heimdallm")
-          DAEMON_SIZE=$(stat -f%z "$APP/Contents/MacOS/heimdalld")
-          if [ "$FLUTTER_SIZE" -eq "$DAEMON_SIZE" ] && \
-             cmp -s "$APP/Contents/MacOS/Heimdallm" "$APP/Contents/MacOS/heimdalld"; then
-            echo "::error::Both binaries are identical — case collision detected!"
-            exit 1
-          fi
-          echo "Flutter binary: ${FLUTTER_SIZE} bytes"
-          echo "Daemon binary:  ${DAEMON_SIZE} bytes"
-          echo "Both binaries embedded and distinct"
-
-          lipo "$APP/Contents/MacOS/Heimdallm" -verify_arch arm64 x86_64
-          lipo "$APP/Contents/MacOS/heimdalld" -verify_arch arm64 x86_64
-          BUNDLE_VERSION=$(/usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
-          test "$BUNDLE_VERSION" = "$VERSION" || {
-            echo "::error::App version $BUNDLE_VERSION does not match release $VERSION"
-            exit 1
-          }
-          echo "APP=$APP" >> "$GITHUB_ENV"
-
-      # Download and verify create-dmg before executing it.
-      - name: Install pinned create-dmg
-        run: |
-          set -euo pipefail
-          ARCHIVE="$RUNNER_TEMP/create-dmg-v1.3.0.tar.gz"
-          TOOL_DIR="$RUNNER_TEMP/create-dmg-v1.3.0"
-          curl --fail --location --silent --show-error \
-            'https://github.com/create-dmg/create-dmg/archive/refs/tags/v1.3.0.tar.gz' \
-            --output "$ARCHIVE"
-          echo \
-            'c50d2bc97c3d6292642bac55f530d247eaf4bf65ee605f26b4caf339383e381c  '"$ARCHIVE" \
-            | shasum -a 256 --check
-          mkdir -p "$TOOL_DIR"
-          tar -xzf "$ARCHIVE" --strip-components=1 -C "$TOOL_DIR"
-          test -x "$TOOL_DIR/create-dmg"
-          echo "CREATE_DMG=$TOOL_DIR/create-dmg" >> "$GITHUB_ENV"
-
-      # ── Code sealing ───────────────────────────────────────────────────────
-      - name: Ad-hoc seal app bundle
-        run: |
-          set -euo pipefail
-          # A draft recovery checks out the historical tag for reproducible app
-          # sources, but release tooling must come from the workflow revision
-          # that was explicitly dispatched.
-          SIGN_TOOL="$RUNNER_TEMP/sign-macos-app.sh"
-          git show "${GITHUB_SHA}:scripts/sign-macos-app.sh" > "$SIGN_TOOL"
-          chmod +x "$SIGN_TOOL"
-          "$SIGN_TOOL" \
-            "$APP" \
-            - \
-            flutter_app/macos/Runner/Release.entitlements
-          SIGNATURE=$(codesign --display --verbose=4 "$APP" 2>&1)
-          grep -Fq 'Signature=adhoc' <<< "$SIGNATURE"
-          grep -Fq 'TeamIdentifier=not set' <<< "$SIGNATURE"
-          if grep -Eq 'flags=.*\(.*runtime.*\)' <<< "$SIGNATURE"; then
-            echo "::error::Ad-hoc app must not enable hardened runtime without a Team ID"
-            exit 1
-          fi
-
-      # ── Package ─────────────────────────────────────────────────────────────
-
-      - name: Create DMG
-        run: |
-          set -euo pipefail
-          DMG="dist/Heimdallm-${TAG}.dmg"
-          mkdir -p dist
-
-          CREATE_DMG_ARGS=(
-            --volname "Heimdallm ${TAG}"
-            --window-pos 200 120
-            --window-size 660 400
-            --icon-size 128
-            --icon "Heimdallm.app" 165 185
-            --hide-extension "Heimdallm.app"
-            --app-drop-link 495 185
-          )
-
-          if [ -f "assets/dmg-background.png" ]; then
-            CREATE_DMG_ARGS+=(--background "assets/dmg-background.png")
-          fi
-
-          "$CREATE_DMG" "${CREATE_DMG_ARGS[@]}" "$DMG" "$APP"
-
-          ls -lh "$DMG"
-          echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
-
-      # ── Publish ─────────────────────────────────────────────────────────────
-      - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: Heimdallm-macos-${{ env.VERSION }}
-          path: ${{ env.DMG_PATH }}
-          retention-days: 90
-
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-          draft: true
-          overwrite_files: true
-          fail_on_unmatched_files: true
-          files: ${{ env.DMG_PATH }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # CLI binaries — cross-platform via GoReleaser
-  # ═══════════════════════════════════════════════════════════════════════════
-  goreleaser-cli:
-    name: Build CLI binaries (GoReleaser)
-    needs: [release-please, tests]
-    if: always() && needs.tests.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-          fetch-depth: 0
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: cli/go.mod
-      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
-        with:
-          distribution: goreleaser
-          version: 'v2.17.1'
-          args: >-
-            release --clean
-          workdir: cli
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_CURRENT_TAG: ${{ env.TAG }}
-
-      - name: Stage generated Homebrew formula
-        run: |
-          set -euo pipefail
-          mapfile -d '' formulas < <(find cli/dist -type f -name '*.rb' -print0)
-          test "${#formulas[@]}" -eq 1 || {
-            echo "::error::Expected exactly one generated Homebrew formula, found ${#formulas[@]}"
-            exit 1
-          }
-          mkdir -p staged-homebrew
-          cp "${formulas[0]}" staged-homebrew/heimdallm-cli.rb
-
-      - name: Upload staged Homebrew formula
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: cli-homebrew-formula-${{ env.TAG }}
-          path: staged-homebrew/heimdallm-cli.rb
-          if-no-files-found: error
-          retention-days: 7
-
-  # The GitHub release remains a draft until every independently built asset
-  # has passed. A normal manual run repairs an existing draft through the same
-  # gate; channels-only never rebuilds assets and only repairs mutable aliases.
-  publish-release:
-    name: Publish release and reconcile Docker aliases
-    needs:
-      - release-please
-      - tests
-      - goreleaser-daemon
-      - build-linux
-      - build-macos
-      - goreleaser-cli
+  unified:
+    name: Unified vX.Y.Z
+    needs: [plan, tests]
     if: >-
-      always() &&
-      ((github.event_name == 'push' &&
-        needs.release-please.outputs.release_created == 'true' &&
-        needs.tests.result == 'success' &&
-        needs.goreleaser-daemon.result == 'success' &&
-        needs.build-linux.result == 'success' &&
-        needs.build-macos.result == 'success' &&
-        needs.goreleaser-cli.result == 'success') ||
-       (github.event_name == 'workflow_dispatch' &&
-        inputs.channels_only != true &&
-        needs.tests.result == 'success' &&
-        needs.goreleaser-daemon.result == 'success' &&
-        needs.build-linux.result == 'success' &&
-        needs.build-macos.result == 'success' &&
-        needs.goreleaser-cli.result == 'success') ||
-       (github.event_name == 'workflow_dispatch' && inputs.channels_only == true))
-    runs-on: ubuntu-latest
+      always() && needs.plan.outputs.unified_tag != '' &&
+      (needs.tests.result == 'success' || inputs.channels_only)
     permissions:
-      attestations: read
+      attestations: write
       contents: write
+      id-token: write
       packages: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-      IMAGE_DIGEST: ${{ needs.goreleaser-daemon.outputs.digest }}
-      EXPECTED_COMMIT: ${{ github.sha }}
-    steps:
-      - name: Download staged Homebrew formula
-        if: github.event_name == 'push' || inputs.channels_only != true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: cli-homebrew-formula-${{ inputs.tag || needs.release-please.outputs.tag_name }}
-          path: staged-homebrew
+    uses: ./.github/workflows/release-unified.yml
+    with:
+      tag: ${{ needs.plan.outputs.unified_tag }}
+      ref: ${{ needs.plan.outputs.ref }}
+      channels_only: ${{ inputs.channels_only == true }}
+      dry_run: ${{ inputs.dry_run == true }}
+    secrets:
+      SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+      TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
 
-      - name: Verify staged Homebrew formula
-        if: github.event_name == 'push' || inputs.channels_only != true
-        run: |
-          set -euo pipefail
-          test -f staged-homebrew/heimdallm-cli.rb
-          grep -Fq "$TAG" staged-homebrew/heimdallm-cli.rb
+  daemon:
+    name: Component daemon/vX.Y.Z
+    needs: [plan, tests]
+    if: always() && needs.plan.outputs.daemon_tag != '' && needs.tests.result == 'success'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-daemon.yml
+    with:
+      tag: ${{ needs.plan.outputs.daemon_tag }}
+      ref: ${{ needs.plan.outputs.ref }}
+      dry_run: ${{ inputs.dry_run == true }}
 
-      - name: Verify release identity and exact asset set
-        run: |
-          set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "::error::Invalid release tag: $TAG"
-            exit 1
-          }
-          RELEASE_JSON=$(gh release view "$TAG" \
-            --json tagName,isDraft,isPrerelease,targetCommitish)
-          test "$(jq -r .tagName <<< "$RELEASE_JSON")" = "$TAG"
-          test "$(jq -r .isPrerelease <<< "$RELEASE_JSON")" = false || {
-            echo "::error::Prereleases must not mutate the stable distribution channels"
-            exit 1
-          }
-          TAG_COMMIT=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)
-          echo "RELEASE_COMMIT=$TAG_COMMIT" >> "$GITHUB_ENV"
-          RELEASE_TARGET=$(jq -r .targetCommitish <<< "$RELEASE_JSON")
-          test "$RELEASE_TARGET" = "$TAG_COMMIT" || {
-            echo "::error::Release target $RELEASE_TARGET does not match $TAG ($TAG_COMMIT)"
-            exit 1
-          }
-          IS_DRAFT=$(jq -r .isDraft <<< "$RELEASE_JSON")
-          LATEST_TAG=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/releases/latest" \
-            --jq .tag_name 2>/dev/null || true)
-          if [ "${{ github.event_name }}" = workflow_dispatch ] && \
-             [ "${{ inputs.channels_only }}" = true ]; then
-            test "$IS_DRAFT" = false || {
-              echo "::error::channels_only requires an already-published release"
-              exit 1
-            }
-            test "$LATEST_TAG" = "$TAG" || {
-              echo "::error::$TAG is not the current latest release ($LATEST_TAG); refusing alias rollback"
-              exit 1
-            }
-          else
-            if [ "$IS_DRAFT" != true ] && [ "$LATEST_TAG" != "$TAG" ]; then
-              echo "::error::$TAG is published but is not the latest release; refusing recovery"
-              exit 1
-            fi
-            if [ "${{ github.event_name }}" = push ]; then
-              test "$TAG_COMMIT" = "$EXPECTED_COMMIT" || {
-                echo "::error::$TAG does not point at this release workflow commit"
-                exit 1
-              }
-            else
-              WORKFLOW_STATUS=$(gh api \
-                "repos/${GITHUB_REPOSITORY}/compare/${TAG_COMMIT}...${EXPECTED_COMMIT}" \
-                --jq .status)
-              case "$WORKFLOW_STATUS" in
-                ahead|identical) ;;
-                *)
-                  echo "::error::$TAG is not on the workflow ref; refusing draft recovery"
-                  exit 1
-                  ;;
-              esac
-            fi
-            if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$TAG" ]; then
-              COMPARE_STATUS=$(gh api \
-                "repos/${GITHUB_REPOSITORY}/compare/${LATEST_TAG}...${TAG}" \
-                --jq .status)
-              test "$COMPARE_STATUS" = ahead || {
-                echo "::error::$TAG is not ahead of latest release $LATEST_TAG; refusing rollback"
-                exit 1
-              }
-            fi
-          fi
+  gui:
+    name: Component gui/vX.Y.Z
+    needs: [plan, tests]
+    if: always() && needs.plan.outputs.gui_tag != '' && needs.tests.result == 'success'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-gui.yml
+    with:
+      tag: ${{ needs.plan.outputs.gui_tag }}
+      ref: ${{ needs.plan.outputs.ref }}
+      dry_run: ${{ inputs.dry_run == true }}
 
-          VERSION="${TAG#v}"
-          EXPECTED_ASSETS=(
-            "Heimdallm-${TAG}.dmg"
-            "Heimdallm-${VERSION}-x86_64.AppImage"
-            "heimdallm_${VERSION}_amd64.deb"
-            "heimdallm_${VERSION}_amd64.rpm"
-            daemon-checksums.txt
-            linux-checksums.txt
-            linux-checksums.txt.sig
-            cli-checksums.txt
-            "heimdallm-cli_${VERSION}_darwin_amd64.tar.gz"
-            "heimdallm-cli_${VERSION}_darwin_arm64.tar.gz"
-            "heimdallm-cli_${VERSION}_linux_amd64.tar.gz"
-            "heimdallm-cli_${VERSION}_linux_arm64.tar.gz"
-            "heimdallm-cli_${VERSION}_windows_amd64.zip"
-            "heimdallm-cli_${VERSION}_windows_arm64.zip"
-          )
-          mapfile -t ACTUAL_ASSETS < <(
-            gh release view "$TAG" --json assets --jq '.assets[].name'
-          )
-          if [ "${#ACTUAL_ASSETS[@]}" -ne "${#EXPECTED_ASSETS[@]}" ]; then
-            echo "::error::Release $TAG has ${#ACTUAL_ASSETS[@]} assets; expected ${#EXPECTED_ASSETS[@]}"
-            printf 'actual asset: %s\n' "${ACTUAL_ASSETS[@]}"
-            exit 1
-          fi
-          for EXPECTED_ASSET in "${EXPECTED_ASSETS[@]}"; do
-            MATCHES=0
-            for ACTUAL_ASSET in "${ACTUAL_ASSETS[@]}"; do
-              if [ "$ACTUAL_ASSET" = "$EXPECTED_ASSET" ]; then
-                MATCHES=$((MATCHES + 1))
-              fi
-            done
-            test "$MATCHES" -eq 1 || {
-              echo "::error::Expected exactly one $EXPECTED_ASSET, found $MATCHES"
-              printf 'actual asset: %s\n' "${ACTUAL_ASSETS[@]}"
-              exit 1
-            }
-          done
-
-      - name: Set up Docker Buildx for tag promotion
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Verify immutable Docker image
-        id: immutable-image
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          VERSION="${TAG#v}"
-          IMAGE="ghcr.io/${IMAGE_NAME}"
-          printf '%s' "$GHCR_TOKEN" | \
-            docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          RESOLVED_DIGEST=$(docker buildx imagetools inspect \
-            "${IMAGE}:${VERSION}" 2>&1 \
-            | grep -m1 'Digest:' | awk '{print $2}')
-          [[ "$RESOLVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "::error::Could not resolve immutable image ${IMAGE}:${VERSION}"
-            exit 1
-          }
-          if [ -n "$IMAGE_DIGEST" ]; then
-            test "$RESOLVED_DIGEST" = "$IMAGE_DIGEST" || {
-              echo "::error::Immutable image resolves to $RESOLVED_DIGEST, build reported $IMAGE_DIGEST"
-              exit 1
-            }
-          fi
-          echo "digest=${RESOLVED_DIGEST}" >> "$GITHUB_OUTPUT"
-          gh attestation verify \
-            "oci://${IMAGE}@${RESOLVED_DIGEST}" \
-            --repo "$GITHUB_REPOSITORY"
-          docker pull "${IMAGE}@${RESOLVED_DIGEST}" >/dev/null
-          IMAGE_VERSION=$(docker image inspect \
-            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
-            "${IMAGE}@${RESOLVED_DIGEST}")
-          IMAGE_REVISION=$(docker image inspect \
-            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-            "${IMAGE}@${RESOLVED_DIGEST}")
-          test "$IMAGE_VERSION" = "$VERSION" || {
-            echo "::error::Immutable image version $IMAGE_VERSION does not match $VERSION"
-            exit 1
-          }
-          test "$IMAGE_REVISION" = "$RELEASE_COMMIT" || {
-            echo "::error::Immutable image revision $IMAGE_REVISION does not match $RELEASE_COMMIT"
-            exit 1
-          }
-
-      # Publishing first leaves a fully usable GitHub release and immutable
-      # Docker version tag even if an alias update fails. The operation is
-      # idempotent so a failed finalizer can safely be rerun.
-      - name: Publish or verify GitHub release
-        run: |
-          set -euo pipefail
-          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
-          LATEST_TAG=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/releases/latest" \
-            --jq .tag_name 2>/dev/null || true)
-          if [ "$IS_DRAFT" = true ]; then
-            test "${{ inputs.channels_only }}" != true
-            gh release edit "$TAG" --draft=false --latest
-          elif [ "$LATEST_TAG" != "$TAG" ]; then
-            test "${{ inputs.channels_only }}" != true
-            gh release edit "$TAG" --latest
-          fi
-          for _ in $(seq 1 12); do
-            IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
-            LATEST_TAG=$(gh api \
-              "repos/${GITHUB_REPOSITORY}/releases/latest" \
-              --jq .tag_name 2>/dev/null || true)
-            if [ "$IS_DRAFT" = false ] && [ "$LATEST_TAG" = "$TAG" ]; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::Release $TAG was not observable as the latest published release"
-          exit 1
-
-      - name: Promote and verify mutable Docker tags
-        run: |
-          set -euo pipefail
-          IMAGE_DIGEST="${{ steps.immutable-image.outputs.digest }}"
-          test -n "$IMAGE_DIGEST"
-          VERSION="${TAG#v}"
-          CORE_VERSION="${VERSION%%-*}"
-          IFS=. read -r MAJOR MINOR PATCH <<< "$CORE_VERSION"
-          [[ "$MAJOR" =~ ^[0-9]+$ && "$MINOR" =~ ^[0-9]+$ && "$PATCH" =~ ^[0-9]+$ ]] || {
-            echo "::error::Cannot derive mutable Docker tags from $TAG"
-            exit 1
-          }
-          IMAGE="ghcr.io/${IMAGE_NAME}"
-          docker buildx imagetools create --prefer-index=false \
-            --tag "${IMAGE}:${MAJOR}.${MINOR}" \
-            --tag "${IMAGE}:${MAJOR}" \
-            --tag "${IMAGE}:latest" \
-            "${IMAGE}@${IMAGE_DIGEST}"
-          for MUTABLE_TAG in "${MAJOR}.${MINOR}" "$MAJOR" latest; do
-            PROMOTED_DIGEST=$(docker buildx imagetools inspect \
-              "${IMAGE}:${MUTABLE_TAG}" 2>&1 \
-              | grep -m1 'Digest:' | awk '{print $2}')
-            test "$PROMOTED_DIGEST" = "$IMAGE_DIGEST" || {
-              echo "::error::${IMAGE}:${MUTABLE_TAG} points to $PROMOTED_DIGEST, expected $IMAGE_DIGEST"
-              exit 1
-            }
-          done
-
-      # Updating the tap after publication cannot expose a formula whose assets
-      # are still private. This is deliberately best-effort: if it fails, the
-      # previous formula remains valid and the published release is usable.
-      - name: Publish Homebrew formula
-        if: github.event_name == 'push' || inputs.channels_only != true
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::TAP_GITHUB_TOKEN is unavailable; keeping the previous formula"
-            exit 0
-          fi
-          FORMULA=staged-homebrew/heimdallm-cli.rb
-          test -f "$FORMULA"
-          CONTENT=$(base64 -w 0 "$FORMULA")
-          EXISTING_SHA=$(
-            gh api \
-              repos/theburrowhub/homebrew-tap/contents/Formula/heimdallm-cli.rb \
-              --jq .sha 2>/dev/null || true
-          )
-          API_ARGS=(
-            --method PUT
-            repos/theburrowhub/homebrew-tap/contents/Formula/heimdallm-cli.rb
-            -f "message=chore: update heimdallm-cli to $TAG"
-            -f "content=$CONTENT"
-          )
-          if [ -n "$EXISTING_SHA" ]; then
-            API_ARGS+=(-f "sha=$EXISTING_SHA")
-          fi
-          gh api "${API_ARGS[@]}" >/dev/null
+  cli:
+    name: Component cli/vX.Y.Z
+    needs: [plan, tests]
+    if: always() && needs.plan.outputs.cli_tag != '' && needs.tests.result == 'success'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-cli.yml
+    with:
+      tag: ${{ needs.plan.outputs.cli_tag }}
+      ref: ${{ needs.plan.outputs.ref }}
+      dry_run: ${{ inputs.dry_run == true }}

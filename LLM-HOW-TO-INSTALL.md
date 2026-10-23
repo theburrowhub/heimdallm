@@ -6,6 +6,13 @@ Step-by-step guide for Claude Code or any AI agent to install Heimdallm on macOS
 - **macOS without a checkout**: use steps 1–5 (manual DMG fallback)
 - **Linux**: jump to [Linux installation](#linux-installation)
 
+Always install from the unified `vX.Y.Z` release, the repository's *latest*
+release (`gh release view` without a tag resolves it). The `daemon/v*`, `gui/v*`
+and `cli/v*` releases are per-component and never marked latest. The desktop
+installers also include the CLI (`heimdallm-cli`): inside
+`Heimdallm.app/Contents/MacOS/` on macOS, at `/usr/bin/heimdallm-cli` from the
+`.deb` / `.rpm`.
+
 ---
 
 ## macOS from a repository checkout (preferred)

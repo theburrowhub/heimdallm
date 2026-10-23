@@ -1,0 +1,41 @@
+version: 2
+
+# ── daemon/vX.Y.Z component release ──────────────────────────────────────────
+# Used by: release-daemon.yml. Builds the standalone heimdalld archives and
+# their checksums.txt into dist/; the workflow uploads them to the daemon/vX.Y.Z
+# draft itself. GoReleaser OSS cannot parse a "daemon/" tag prefix, so the
+# workflow passes GORELEASER_CURRENT_TAG=vX.Y.Z — which is why this config must
+# never publish: that tag names the unified release, not this one.
+project_name: heimdalld
+
+builds:
+  - id: daemon
+    main: ./cmd/heimdallm
+    binary: heimdalld
+    env:
+      - CGO_ENABLED=0
+    # No Windows: the daemon manages process groups with syscall.Kill.
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "heimdalld_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  disable: true
+
+release:
+  disable: true

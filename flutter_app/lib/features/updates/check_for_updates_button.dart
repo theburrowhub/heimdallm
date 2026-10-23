@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/compat.dart';
 import '../../core/platform/platform_services.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
+import '../server/server_providers.dart';
 
 final appUpdateStatusProvider = StreamProvider<AppUpdateStatus>((ref) async* {
   final platform = ref.watch(platformServicesProvider);
@@ -329,6 +331,14 @@ class AppUpdateBanner extends ConsumerWidget {
     final busy =
         status.phase == AppUpdatePhase.installing ||
         status.phase == AppUpdatePhase.restarting;
+    // Only polls the daemon when the release declares a minimum; the warning
+    // never blocks the update (#437).
+    final compatWarning = status.minDaemonApi == null || busy
+        ? null
+        : daemonCompatWarning(
+            requiredApi: status.minDaemonApi,
+            daemonApi: ref.watch(serverHealthDetailProvider).value?.apiVersion,
+          );
     return Material(
       key: const Key('app-update-banner'),
       color: AppColors.accentMuted.resolve(context),
@@ -345,13 +355,40 @@ class AppUpdateBanner extends ConsumerWidget {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               else
-                Icon(Icons.system_update, color: AppColors.accent.resolve(context)),
+                Icon(
+                  Icons.system_update,
+                  color: AppColors.accent.resolve(context),
+                ),
               const SizedBox(width: 10),
               Expanded(
-                child: AppText(
-                  status.message ??
-                      'Heimdallm ${status.version ?? ''} is available.',
-                  role: AppTextRole.label,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AppText(
+                      status.message ??
+                          'Heimdallm ${status.version ?? ''} is available.',
+                      role: AppTextRole.label,
+                    ),
+                    if (compatWarning != null)
+                      Row(
+                        key: const Key('app-update-daemon-compat-warning'),
+                        children: [
+                          Icon(
+                            Icons.warning_amber_rounded,
+                            size: 16,
+                            color: AppColors.warning.resolve(context),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: AppText(
+                              compatWarning,
+                              role: AppTextRole.bodyMuted,
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
                 ),
               ),
               if (!busy)

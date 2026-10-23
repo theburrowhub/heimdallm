@@ -222,6 +222,29 @@ func TestLatestChannels(t *testing.T) {
 	}
 }
 
+// Per-component releases (theburrowhub/heimdallm#437) share the repository's
+// release list. Their tags are not plain semver, so the latest channel must
+// keep resolving to unified vX.Y.Z releases even when they are newer.
+func TestLatestChannelSkipsComponentReleases(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/releases", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"tag_name":"cli/v9.0.0"},{"tag_name":"daemon/v9.0.0"},{"tag_name":"gui/v9.0.0"},{"tag_name":"v0.11.0"}]`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	u := &Updater{Client: srv.Client(), APIBase: srv.URL}
+
+	rel, err := u.Latest(context.Background(), ChannelLatest)
+	if err != nil || rel.Tag != "v0.11.0" {
+		t.Fatalf("latest = %+v, %v", rel, err)
+	}
+	for _, tag := range []string{"cli/v1.2.3", "daemon/v1.2.3", "gui/v1.2.3"} {
+		if _, err := parseSemver(tag); err == nil {
+			t.Errorf("%s should not parse as a unified release", tag)
+		}
+	}
+}
+
 func TestLatestStableSkipsPrerelease(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"tag_name":"v1.0.0-rc.1","prerelease":true}`)
@@ -251,5 +274,40 @@ func TestChangelogSummary(t *testing.T) {
 	got := ChangelogSummary("a\r\nb\nc\nd", 2)
 	if got != "a\nb\n…" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCompat(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"daemon":"1.0.0","daemon_api":3,"min_daemon_api":{"gui":2,"cli":3}}`)
+	})
+	mux.HandleFunc("/nocompat", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"daemon":"1.0.0","gui":"1.0.0","cli":"1.0.0"}`)
+	})
+	mux.HandleFunc("/bad", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{nope`) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	u := &Updater{Client: srv.Client(), APIBase: srv.URL, AllowURL: func(*url.URL) bool { return true }}
+	rel := func(path string) *Release {
+		return &Release{Tag: "v1.0.0", Assets: []Asset{{Name: "versions.json", URL: srv.URL + path}}}
+	}
+
+	c, err := u.Compat(context.Background(), rel("/ok"))
+	if err != nil || c.DaemonAPI != 3 || c.MinDaemonAPI["cli"] != 3 || c.MinDaemonAPI["gui"] != 2 {
+		t.Fatalf("compat = %+v, %v", c, err)
+	}
+	if _, err := u.Compat(context.Background(), rel("/nocompat")); !errors.Is(err, ErrNoCompat) {
+		t.Fatalf("manifest without compat data: %v", err)
+	}
+	if _, err := u.Compat(context.Background(), &Release{Tag: "v1.0.0"}); !errors.Is(err, ErrNoCompat) {
+		t.Fatalf("release without versions.json: %v", err)
+	}
+	if _, err := u.Compat(context.Background(), rel("/bad")); err == nil {
+		t.Fatal("undecodable versions.json should fail")
+	}
+	strict := &Updater{Client: srv.Client(), APIBase: srv.URL}
+	if _, err := strict.Compat(context.Background(), rel("/ok")); err == nil || !strings.Contains(err.Error(), "untrusted") {
+		t.Fatalf("non-GitHub URL must be refused: %v", err)
 	}
 }

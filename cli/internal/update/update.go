@@ -34,6 +34,7 @@ const (
 
 	DefaultAPIBase = "https://api.github.com/repos/theburrowhub/heimdallm"
 	checksumsAsset = "cli-checksums.txt"
+	versionsAsset  = "versions.json"
 	binaryName     = "heimdallm-cli"
 
 	maxMetadataBytes = 4 << 20
@@ -58,6 +59,17 @@ type Release struct {
 	Prerelease bool    `json:"prerelease"`
 	Assets     []Asset `json:"assets"`
 }
+
+// Compat is the compatibility part of a unified release's versions.json: the
+// daemon API revision the release ships and the minimum each client needs.
+type Compat struct {
+	DaemonAPI    int            `json:"daemon_api"`
+	MinDaemonAPI map[string]int `json:"min_daemon_api"`
+}
+
+// ErrNoCompat is returned for releases that publish no compatibility data
+// (every release cut before it existed).
+var ErrNoCompat = errors.New("release has no compatibility data")
 
 // Version is the release tag without the leading "v".
 func (r *Release) Version() string { return strings.TrimPrefix(r.Tag, "v") }
@@ -187,6 +199,37 @@ func (u *Updater) Latest(ctx context.Context, channel string) (*Release, error) 
 	default:
 		return nil, fmt.Errorf("unknown channel %q (want %q or %q)", channel, ChannelStable, ChannelLatest)
 	}
+}
+
+// Compat downloads the release's versions.json and returns its compatibility
+// data. A release without that asset, or whose manifest carries no
+// min_daemon_api, yields ErrNoCompat.
+func (u *Updater) Compat(ctx context.Context, rel *Release) (*Compat, error) {
+	var assetURL string
+	for _, a := range rel.Assets {
+		if a.Name == versionsAsset {
+			assetURL = a.URL
+			break
+		}
+	}
+	if assetURL == "" {
+		return nil, ErrNoCompat
+	}
+	if err := u.allow(assetURL); err != nil {
+		return nil, err
+	}
+	data, err := u.get(ctx, assetURL, maxMetadataBytes)
+	if err != nil {
+		return nil, err
+	}
+	var c Compat
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("decoding %s: %w", versionsAsset, err)
+	}
+	if len(c.MinDaemonAPI) == 0 {
+		return nil, ErrNoCompat
+	}
+	return &c, nil
 }
 
 // ArchiveName is the release asset for this OS/arch.

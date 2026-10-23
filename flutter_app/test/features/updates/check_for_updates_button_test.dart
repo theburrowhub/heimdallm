@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
+import 'package:heimdallm/features/server/server_providers.dart';
 import 'package:heimdallm/features/updates/check_for_updates_button.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 
@@ -305,6 +306,68 @@ void main() {
     await tester.tap(find.byKey(const Key('check-for-updates')));
     await tester.pump();
     expect(platform.installAppUpdateCalls, 2);
+  });
+
+  group('banner daemon compatibility warning', () {
+    Future<void> pumpBanner(
+      WidgetTester tester, {
+      required int? minDaemonApi,
+      required int? daemonApi,
+    }) async {
+      final platform = FakePlatformServices(
+        appUpdateSupport: AppUpdateSupport.native,
+        appUpdateStatus: AppUpdateStatus(
+          phase: AppUpdatePhase.available,
+          version: '1.2.3',
+          message: 'Heimdallm 1.2.3 is ready to install.',
+          minDaemonApi: minDaemonApi,
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            platformServicesProvider.overrideWithValue(platform),
+            serverHealthDetailProvider.overrideWith(
+              (ref) => Stream.value(HealthDetail(apiVersion: daemonApi)),
+            ),
+          ],
+          child: MaterialApp(
+            builder: (context, child) =>
+                HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+            home: const Scaffold(body: AppUpdateBanner()),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    const warning = Key('app-update-daemon-compat-warning');
+
+    testWidgets('warns, without blocking, when the daemon is behind', (
+      tester,
+    ) async {
+      await pumpBanner(tester, minDaemonApi: 2, daemonApi: 1);
+      expect(find.byKey(warning), findsOneWidget);
+      expect(find.textContaining('needs daemon API 2'), findsOneWidget);
+      expect(find.byKey(const Key('install-app-update')), findsOneWidget);
+    });
+
+    testWidgets('stays quiet when the daemon is new enough', (tester) async {
+      await pumpBanner(tester, minDaemonApi: 2, daemonApi: 2);
+      expect(find.byKey(warning), findsNothing);
+    });
+
+    testWidgets('stays quiet when no daemon answered', (tester) async {
+      await pumpBanner(tester, minDaemonApi: 2, daemonApi: null);
+      expect(find.byKey(warning), findsNothing);
+    });
+
+    testWidgets('stays quiet for releases without compatibility data', (
+      tester,
+    ) async {
+      await pumpBanner(tester, minDaemonApi: null, daemonApi: 1);
+      expect(find.byKey(warning), findsNothing);
+    });
   });
 
   testWidgets('banner surfaces installation failures', (tester) async {

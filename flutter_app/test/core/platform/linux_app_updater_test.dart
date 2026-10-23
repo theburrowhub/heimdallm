@@ -533,6 +533,62 @@ void main() {
     );
 
     test(
+      'reads the minimum daemon API from versions.json without requiring it',
+      () async {
+        for (final (versions, expected) in [
+          (
+            _ResponseSpec.json({
+              'daemon': '1.1.0',
+              'daemon_api': 2,
+              'min_daemon_api': {'gui': 2, 'cli': 2},
+            }),
+            2,
+          ),
+          (_ResponseSpec.json({'daemon': '1.1.0'}), null),
+          (_ResponseSpec.text('unavailable', statusCode: 503), null),
+        ]) {
+          final directory = await _temporaryDirectory();
+          await _primeCache(directory);
+          final statuses = <AppUpdateStatus>[];
+          final metadata = {
+            'tag_name': 'v1.1.0',
+            'prerelease': false,
+            'assets': [
+              _assetMetadata('Heimdallm-1.1.0-x86_64.AppImage'),
+              _assetMetadata('linux-checksums.txt'),
+              _assetMetadata('linux-checksums.txt.sig'),
+              _assetMetadata('versions.json'),
+            ],
+          };
+          final updater = _updater(
+            directory,
+            installKind: LinuxInstallKind.appImage,
+            currentVersion: '1.0.0',
+            onStatus: statuses.add,
+            httpClientFactory: () => _FakeHttpClient(
+              (request) => request.uri.path.endsWith('/versions.json')
+                  ? versions
+                  : _ResponseSpec.json(metadata),
+            ),
+          );
+          addTearDown(updater.dispose);
+          expect(await updater.initialize(), isTrue);
+
+          await updater.checkForUpdates();
+          expect(updater.availableRelease?.minDaemonApi, expected);
+          expect(statuses.last.phase, AppUpdatePhase.available);
+          expect(statuses.last.minDaemonApi, expected);
+          if (expected != null) {
+            expect(
+              updater.availableRelease!.toJson()['minDaemonApi'],
+              expected,
+            );
+          }
+        }
+      },
+    );
+
+    test(
       'rejects prereleases, malformed metadata, missing assets, and HTTP failures',
       () async {
         final responses = <_ResponseSpec>[

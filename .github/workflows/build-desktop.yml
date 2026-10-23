@@ -1,0 +1,679 @@
+name: Build desktop bundles
+
+# Reusable: builds the desktop bundles (macOS .dmg, Linux .deb / .rpm /
+# .AppImage) and uploads them to an existing draft release. Called by
+# release-unified.yml (kind=unified, tag vX.Y.Z) and release-gui.yml (kind=gui,
+# tag gui/vX.Y.Z). Both kinds ship the same layout — Flutter app, daemon and
+# CLI — and stamp every binary with the release version; they differ only in
+# asset names and in the signed linux-checksums.txt, which belongs to the
+# unified release because the Linux desktop updater reads it from there.
+#
+# See docs/release-pipeline.md.
+on:
+  workflow_call:
+    inputs:
+      kind:
+        description: 'unified or gui'
+        required: true
+        type: string
+      tag:
+        description: 'Release tag the assets are uploaded to (vX.Y.Z or gui/vX.Y.Z)'
+        required: true
+        type: string
+      ref:
+        description: 'Commit or tag to build'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build only: upload nothing'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      SPARKLE_EDDSA_PRIVATE_KEY:
+        description: 'Signs linux-checksums.txt (unified releases only)'
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  KIND: ${{ inputs.kind }}
+  TAG: ${{ inputs.tag }}
+  SOURCE_REF: ${{ inputs.ref }}
+  DRY_RUN: ${{ inputs.dry_run }}
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Linux packages — .deb, .rpm (GoReleaser nfpms) + .AppImage
+  #
+  # .deb/.rpm are built by GoReleaser's nfpms integration.
+  # .AppImage stays separate: GoReleaser has no AppImage support and
+  # the format requires appimagetool + a custom AppDir structure.
+  # ═══════════════════════════════════════════════════════════════════════════
+  build-linux:
+    name: Build Linux packages (.deb / .rpm / .AppImage)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Release tooling comes from the workflow revision, not from the
+      # (possibly historical) source being built.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          sparse-checkout: scripts/release
+          persist-credentials: false
+
+      - name: Resolve release version
+        run: |
+          set -euo pipefail
+          read -r TAG_KIND VERSION <<< "$(release-tooling/scripts/release/parse-tag.sh "$TAG")"
+          test "$TAG_KIND" = "$KIND" || {
+            echo "::error::$TAG is a $TAG_KIND release, expected $KIND"
+            exit 1
+          }
+          git rev-parse --verify "${SOURCE_REF}^{commit}" >/dev/null
+          BUILD_NUMBER=$(git rev-list --count "${SOURCE_REF}^{commit}")
+          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::Could not derive a deterministic build number for $SOURCE_REF"
+            exit 1
+          }
+          {
+            echo "VERSION=$VERSION"
+            echo "BUILD_NUMBER=$BUILD_NUMBER"
+          } >> "$GITHUB_ENV"
+
+      # ── Toolchains ──────────────────────────────────────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: |
+            daemon/go.sum
+            cli/go.sum
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+
+      # ── System dependencies ─────────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libayatana-appindicator3-dev libnotify-dev \
+            libsecret-1-dev \
+            libfuse2
+
+      # ── App dependencies ─────────────────────────────────────────────────────
+      - name: Flutter pub get
+        working-directory: flutter_app
+        run: flutter pub get
+
+      # ── Build ────────────────────────────────────────────────────────────────
+      - name: Build daemon and CLI
+        # Pass the release version explicitly: the checkout may be untagged
+        # (git describe would yield a bare SHA), and earlier steps can dirty
+        # the worktree (pubspec.lock / Podfile.lock regeneration).
+        run: |
+          set -euo pipefail
+          make build-daemon GIT_VERSION="$VERSION"
+          CGO_ENABLED=0 make build-cli GIT_VERSION="$VERSION"
+          test "$(daemon/bin/heimdallm version)" = "$VERSION"
+          test "$(cli/bin/heimdallm-cli version)" = "heimdallm-cli version $VERSION"
+
+      - name: Build Flutter app (Linux release)
+        working-directory: flutter_app
+        run: |
+          flutter build linux --release \
+            --build-name="$VERSION" \
+            --build-number="$BUILD_NUMBER"
+
+      # ── Prepare staging tree (for GoReleaser nfpms) ──────────────────────────
+      # The staging directory contains the Flutter GUI bundle, the CLI, icons,
+      # and desktop entry. The daemon binary is NOT included here — GoReleaser
+      # adds it via nfpms bindir from its own build output.
+      - name: Prepare staging directory
+        run: |
+          set -euo pipefail
+          BUNDLE="flutter_app/build/linux/x64/release/bundle"
+
+          if [ ! -d "$BUNDLE" ]; then
+            echo "::error::Bundle not found at $BUNDLE"
+            exit 1
+          fi
+          if [ ! -f "daemon/bin/heimdallm" ]; then
+            echo "::error::daemon/bin/heimdallm not found"
+            exit 1
+          fi
+          if [ ! -f "cli/bin/heimdallm-cli" ]; then
+            echo "::error::cli/bin/heimdallm-cli not found"
+            exit 1
+          fi
+
+          chmod +x "$BUNDLE/heimdallm"
+
+          STAGING="staging"
+          OPT="$STAGING/opt/heimdallm"
+          mkdir -p "$OPT"
+          mkdir -p "$STAGING/usr/share/applications"
+          mkdir -p dist
+
+          cp -r "$BUNDLE/." "$OPT/"
+          chmod +x "$OPT/heimdallm"
+          install -m 0755 cli/bin/heimdallm-cli "$OPT/heimdallm-cli"
+
+          for SIZE in 48 128 256 512; do
+            ICON_DIR="$STAGING/usr/share/icons/hicolor/${SIZE}x${SIZE}/apps"
+            mkdir -p "$ICON_DIR"
+            cp "flutter_app/assets/icons/${SIZE}.png" "$ICON_DIR/heimdallm.png"
+          done
+
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Name=Heimdallm' \
+            'Comment=AI-powered GitHub PR review agent' \
+            'Exec=/opt/heimdallm/heimdallm' \
+            'Icon=heimdallm' \
+            'Type=Application' \
+            'Categories=Development;' \
+            'StartupWMClass=com.theburrowhub.heimdallm' \
+            'StartupNotify=true' \
+            > "$STAGING/usr/share/applications/com.theburrowhub.heimdallm.desktop"
+
+          echo "Bundle contents:"
+          ls -lh "$OPT"
+
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
+
+      # ── .deb + .rpm (GoReleaser nfpms) ──────────────────────────────────────
+      # GoReleaser OSS cannot parse a "gui/" tag prefix, so it always gets the
+      # bare vX.Y.Z. Only the unified release lets GoReleaser publish (to that
+      # very tag); a gui release uploads the packages itself further down.
+      - name: Select GoReleaser mode
+        run: |
+          set -euo pipefail
+          SKIP=archive,validate
+          if [ "$KIND" != unified ] || [ "$DRY_RUN" = true ]; then
+            SKIP="$SKIP,publish"
+          fi
+          {
+            echo "GORELEASER_CURRENT_TAG=v$VERSION"
+            echo "GORELEASER_SKIP=$SKIP"
+          } >> "$GITHUB_ENV"
+
+      - name: GoReleaser — build .deb + .rpm
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          distribution: goreleaser
+          version: 'v2.17.1'
+          args: >-
+            release --clean --skip=${{ env.GORELEASER_SKIP }}
+          workdir: daemon
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify package contents
+        run: |
+          set -euo pipefail
+          DEB="daemon/dist/heimdallm_${VERSION}_amd64.deb"
+          RPM="daemon/dist/heimdallm_${VERSION}_amd64.rpm"
+          test -f "$DEB"
+          test -f "$RPM"
+          for ENTRY in ./opt/heimdallm/heimdallm ./opt/heimdallm/heimdalld \
+                       ./opt/heimdallm/heimdallm-cli ./usr/bin/heimdallm \
+                       ./usr/bin/heimdallm-cli; do
+            dpkg-deb --contents "$DEB" | awk '{print $6}' | grep -qx "$ENTRY" || {
+              echo "::error::$DEB is missing $ENTRY"
+              exit 1
+            }
+          done
+          {
+            echo "DEB_PATH=$DEB"
+            echo "RPM_PATH=$RPM"
+          } >> "$GITHUB_ENV"
+
+      # ── .AppImage (stays separate — no GoReleaser support) ──────────────────
+      - name: Build AppImage
+        run: |
+          set -euo pipefail
+          cp "daemon/bin/heimdallm" "$BUNDLE/heimdalld"
+          chmod +x "$BUNDLE/heimdalld"
+          install -m 0755 cli/bin/heimdallm-cli "$BUNDLE/heimdallm-cli"
+
+          APPDIR="AppDir"
+          mkdir -p "$APPDIR"
+
+          cp -r "$BUNDLE/." "$APPDIR/"
+
+          # The single quotes deliberately preserve runtime variables in AppRun.
+          # shellcheck disable=SC2016
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'SELF="$(readlink -f "$0")"' \
+            'HERE="${SELF%/*}"' \
+            'exec "$HERE/heimdallm" "$@"' \
+            > "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
+
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Name=Heimdallm' \
+            'Comment=AI-powered GitHub PR review agent' \
+            'Exec=heimdallm' \
+            'Icon=heimdallm' \
+            'Type=Application' \
+            'Categories=Development;' \
+            'StartupWMClass=com.theburrowhub.heimdallm' \
+            'StartupNotify=true' \
+            > "$APPDIR/heimdallm.desktop"
+
+          cp flutter_app/assets/icon.png "$APPDIR/heimdallm.png"
+
+          wget -q \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
+            -O appimagetool
+          echo \
+            "b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2  appimagetool" \
+            | sha256sum --check --strict
+          chmod +x appimagetool
+
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \
+            ./appimagetool "$APPDIR" "dist/Heimdallm-${VERSION}-x86_64.AppImage"
+
+          ls -lh "dist/Heimdallm-${VERSION}-x86_64.AppImage"
+          echo "APPIMAGE_PATH=dist/Heimdallm-${VERSION}-x86_64.AppImage" >> "$GITHUB_ENV"
+
+      # The Linux desktop updater only reads the unified release, so only that
+      # one carries the signed manifest. A gui release gets a plain
+      # checksums.txt over all its assets from its finalizer. A dry run never
+      # touches the release key: nothing it builds may carry a valid signature.
+      - name: Generate Linux desktop checksums
+        if: inputs.kind == 'unified' && !inputs.dry_run
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SPARKLE_EDDSA_PRIVATE_KEY" || {
+            echo "::error::Required GitHub Actions secret SPARKLE_EDDSA_PRIVATE_KEY is missing"
+            exit 1
+          }
+          test -f "$APPIMAGE_PATH"
+          : > dist/linux-checksums.txt
+          for ASSET in "$DEB_PATH" "$RPM_PATH" "$APPIMAGE_PATH"; do
+            SHA256=$(sha256sum "$ASSET" | awk '{print $1}')
+            printf '%s  %s\n' "$SHA256" "$(basename "$ASSET")" \
+              >> dist/linux-checksums.txt
+          done
+          test "$(wc -l < dist/linux-checksums.txt)" -eq 3
+          sha256sum --check --strict <(
+            while read -r SHA NAME; do
+              case "$NAME" in
+                *.deb) PATHNAME="$DEB_PATH" ;;
+                *.rpm) PATHNAME="$RPM_PATH" ;;
+                *.AppImage) PATHNAME="$APPIMAGE_PATH" ;;
+                *) exit 1 ;;
+              esac
+              printf '%s  %s\n' "$SHA" "$PATHNAME"
+            done < dist/linux-checksums.txt
+          )
+          PRIVATE_KEY="$RUNNER_TEMP/heimdallm-linux-update-key.der"
+          cleanup_update_key() { rm -f "$PRIVATE_KEY"; }
+          trap cleanup_update_key EXIT
+          {
+            printf '302e020100300506032b657004220420' | xxd -r -p
+            printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | openssl base64 -d -A
+          } > "$PRIVATE_KEY"
+          test "$(wc -c < "$PRIVATE_KEY" | tr -d '[:space:]')" = 48
+          DERIVED_PUBLIC_KEY=$(
+            openssl pkey -in "$PRIVATE_KEY" -inform DER -pubout -outform DER \
+              2>/dev/null \
+              | tail -c 32 \
+              | openssl base64 -A
+          )
+          test "$DERIVED_PUBLIC_KEY" = \
+            'eBiLZ1yDuQ/NVCx7VJoQZJm6FpB8S0yH9WHtxaRfEDw=' || {
+            echo "::error::Linux update signing key does not match the embedded public key"
+            exit 1
+          }
+          openssl pkeyutl -sign -rawin \
+            -inkey "$PRIVATE_KEY" -keyform DER \
+            -in dist/linux-checksums.txt \
+            | openssl base64 -A > dist/linux-checksums.txt.sig
+          test "$(openssl base64 -d -A < dist/linux-checksums.txt.sig | wc -c | tr -d '[:space:]')" = 64
+
+      # ── Publish ──────────────────────────────────────────────────────────────
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Heimdallm-${{ inputs.kind }}-linux-${{ env.VERSION }}
+          path: |
+            dist/
+            ${{ env.DEB_PATH }}
+            ${{ env.RPM_PATH }}
+          retention-days: 90
+
+      - name: Upload Linux assets to the draft release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = unified ]; then
+            # GoReleaser already published the .deb/.rpm to this tag.
+            FILES=("$APPIMAGE_PATH" dist/linux-checksums.txt dist/linux-checksums.txt.sig)
+          else
+            FILES=("$APPIMAGE_PATH" "$DEB_PATH" "$RPM_PATH")
+            # A source ref that predates compat.json ships without it.
+            [ -f compat.json ] && FILES+=(compat.json)
+          fi
+          release-tooling/scripts/release/require-draft.sh "$TAG"
+          gh release upload "$TAG" "${FILES[@]}" --clobber
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # macOS .dmg
+  #
+  # Stays separate from GoReleaser: requires macOS runner, Flutter build,
+  # ad-hoc code sealing and create-dmg — neither of which GoReleaser supports.
+  # ═══════════════════════════════════════════════════════════════════════════
+  build-macos:
+    name: Build Heimdallm.dmg
+    runs-on: macos-14
+    permissions:
+      contents: write
+    env:
+      BUNDLE_GEMFILE: ${{ github.workspace }}/flutter_app/macos/Gemfile
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          # Cone mode also brings the files directly under scripts/,
+          # sign-macos-app.sh among them.
+          sparse-checkout: scripts/release
+          persist-credentials: false
+
+      # ── Toolchains ──────────────────────────────────────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: |
+            daemon/go.sum
+            cli/go.sum
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+
+      - name: Set up Ruby and pinned CocoaPods
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: flutter_app/macos
+
+      # ── Dependencies ────────────────────────────────────────────────────────
+      - name: Flutter pub get
+        working-directory: flutter_app
+        run: flutter pub get
+
+      # Both Flutter macOS builds invoke `pod` internally. `bundle exec` makes
+      # those subprocesses use the locked CocoaPods instead of the runner copy.
+      - name: Generate macOS Flutter configuration
+        working-directory: flutter_app
+        run: bundle exec flutter build macos --debug --config-only
+
+      - name: CocoaPods
+        working-directory: flutter_app/macos
+        run: bundle exec pod install --deployment --clean-install
+
+      - name: macOS runner tests
+        working-directory: flutter_app/macos
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -parallel-testing-enabled NO \
+            -only-testing:RunnerTests \
+            HEIMDALLM_BUNDLE_IDENTIFIER=com.theburrowhub.heimdallm.ci
+
+      # ── Build ───────────────────────────────────────────────────────────────
+      - name: Build universal daemon and CLI
+        run: |
+          set -euo pipefail
+          read -r TAG_KIND VERSION <<< "$(release-tooling/scripts/release/parse-tag.sh "$TAG")"
+          test "$TAG_KIND" = "$KIND" || {
+            echo "::error::$TAG is a $TAG_KIND release, expected $KIND"
+            exit 1
+          }
+          # Keep official release build numbers above historical builds.
+          SOURCE_BUILD_NUMBER=$(git rev-list --count "${SOURCE_REF}^{commit}")
+          BUILD_NUMBER=$((100000 + SOURCE_BUILD_NUMBER))
+          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::Could not derive a deterministic build number for $SOURCE_REF"
+            exit 1
+          }
+          mkdir -p daemon/bin/macos cli/bin/macos
+          for ARCH in arm64 amd64; do
+            (
+              cd daemon
+              CGO_ENABLED=0 GOOS=darwin GOARCH="$ARCH" \
+                go build -trimpath \
+                  -ldflags "-s -w -X main.version=$VERSION" \
+                  -o "bin/macos/heimdalld-$ARCH" \
+                  ./cmd/heimdallm
+            )
+            (
+              cd cli
+              CGO_ENABLED=0 GOOS=darwin GOARCH="$ARCH" \
+                go build -trimpath \
+                  -ldflags "-s -w -X main.version=$VERSION" \
+                  -o "bin/macos/heimdallm-cli-$ARCH" \
+                  ./cmd/heimdallm-cli
+            )
+          done
+          lipo -create \
+            daemon/bin/macos/heimdalld-arm64 \
+            daemon/bin/macos/heimdalld-amd64 \
+            -output daemon/bin/heimdalld-universal
+          lipo -create \
+            cli/bin/macos/heimdallm-cli-arm64 \
+            cli/bin/macos/heimdallm-cli-amd64 \
+            -output cli/bin/heimdallm-cli-universal
+          lipo daemon/bin/heimdalld-universal -verify_arch arm64 x86_64
+          lipo cli/bin/heimdallm-cli-universal -verify_arch arm64 x86_64
+          DAEMON_VERSION=$(daemon/bin/heimdalld-universal version)
+          test "$DAEMON_VERSION" = "$VERSION" || {
+            echo "::error::Bundled daemon reports $DAEMON_VERSION, expected $VERSION"
+            exit 1
+          }
+          CLI_VERSION=$(cli/bin/heimdallm-cli-universal version)
+          test "$CLI_VERSION" = "heimdallm-cli version $VERSION" || {
+            echo "::error::Bundled CLI reports '$CLI_VERSION', expected $VERSION"
+            exit 1
+          }
+          {
+            echo "VERSION=$VERSION"
+            echo "BUILD_NUMBER=$BUILD_NUMBER"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Flutter app (release)
+        working-directory: flutter_app
+        run: |
+          bundle exec flutter build macos --release \
+            --build-name="$VERSION" \
+            --build-number="$BUILD_NUMBER"
+
+      # ── Bundle ──────────────────────────────────────────────────────────────
+      - name: Locate .app and embed daemon and CLI
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="flutter_app/build/macos/Build/Products/Release"
+
+          APP=$(find "$RELEASE_DIR" -maxdepth 1 -name "*.app" -print -quit)
+          if [ -z "$APP" ]; then
+            echo "::error::No .app bundle found in $RELEASE_DIR"
+            ls -la "$RELEASE_DIR" || true
+            exit 1
+          fi
+          echo "Found bundle: $APP"
+
+          if [ ! -f "daemon/bin/heimdalld-universal" ]; then
+            echo "::error::universal daemon binary not found"
+            exit 1
+          fi
+          if [ ! -f "cli/bin/heimdallm-cli-universal" ]; then
+            echo "::error::universal CLI binary not found"
+            exit 1
+          fi
+
+          cp "daemon/bin/heimdalld-universal" "$APP/Contents/MacOS/heimdalld"
+          chmod +x "$APP/Contents/MacOS/heimdalld"
+          cp "cli/bin/heimdallm-cli-universal" "$APP/Contents/MacOS/heimdallm-cli"
+          chmod +x "$APP/Contents/MacOS/heimdallm-cli"
+
+          echo "Bundle contents after embedding:"
+          ls -lh "$APP/Contents/MacOS/"
+
+          for BINARY in Heimdallm heimdalld heimdallm-cli; do
+            if [ ! -f "$APP/Contents/MacOS/$BINARY" ]; then
+              echo "::error::$BINARY missing from the app bundle"
+              exit 1
+            fi
+            lipo "$APP/Contents/MacOS/$BINARY" -verify_arch arm64 x86_64
+          done
+          # APFS is case-insensitive: Heimdallm and heimdalld must stay distinct.
+          if cmp -s "$APP/Contents/MacOS/Heimdallm" "$APP/Contents/MacOS/heimdalld"; then
+            echo "::error::Both binaries are identical — case collision detected!"
+            exit 1
+          fi
+          echo "Flutter binary: $(stat -f%z "$APP/Contents/MacOS/Heimdallm") bytes"
+          echo "Daemon binary:  $(stat -f%z "$APP/Contents/MacOS/heimdalld") bytes"
+          echo "CLI binary:     $(stat -f%z "$APP/Contents/MacOS/heimdallm-cli") bytes"
+
+          BUNDLE_VERSION=$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+          test "$BUNDLE_VERSION" = "$VERSION" || {
+            echo "::error::App version $BUNDLE_VERSION does not match release $VERSION"
+            exit 1
+          }
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      # Download and verify create-dmg before executing it.
+      - name: Install pinned create-dmg
+        run: |
+          set -euo pipefail
+          ARCHIVE="$RUNNER_TEMP/create-dmg-v1.3.0.tar.gz"
+          TOOL_DIR="$RUNNER_TEMP/create-dmg-v1.3.0"
+          curl --fail --location --silent --show-error \
+            'https://github.com/create-dmg/create-dmg/archive/refs/tags/v1.3.0.tar.gz' \
+            --output "$ARCHIVE"
+          echo \
+            'c50d2bc97c3d6292642bac55f530d247eaf4bf65ee605f26b4caf339383e381c  '"$ARCHIVE" \
+            | shasum -a 256 --check
+          mkdir -p "$TOOL_DIR"
+          tar -xzf "$ARCHIVE" --strip-components=1 -C "$TOOL_DIR"
+          test -x "$TOOL_DIR/create-dmg"
+          echo "CREATE_DMG=$TOOL_DIR/create-dmg" >> "$GITHUB_ENV"
+
+      # ── Code sealing ───────────────────────────────────────────────────────
+      # The sealing script comes from the workflow revision: a draft recovery
+      # checks out the historical source, but release tooling must be the one
+      # that was explicitly dispatched. It seals every Mach-O in the bundle,
+      # the embedded daemon and CLI included.
+      - name: Ad-hoc seal app bundle
+        run: |
+          set -euo pipefail
+          release-tooling/scripts/sign-macos-app.sh \
+            "$APP" \
+            - \
+            flutter_app/macos/Runner/Release.entitlements
+          SIGNATURE=$(codesign --display --verbose=4 "$APP" 2>&1)
+          grep -Fq 'Signature=adhoc' <<< "$SIGNATURE"
+          grep -Fq 'TeamIdentifier=not set' <<< "$SIGNATURE"
+          if grep -Eq 'flags=.*\(.*runtime.*\)' <<< "$SIGNATURE"; then
+            echo "::error::Ad-hoc app must not enable hardened runtime without a Team ID"
+            exit 1
+          fi
+          codesign --verify --strict "$APP/Contents/MacOS/heimdallm-cli"
+
+      # ── Package ─────────────────────────────────────────────────────────────
+      # The unified DMG keeps its historical name (Heimdallm-vX.Y.Z.dmg): the
+      # macOS updater and scripts/macos-install.sh download it by that name.
+      - name: Create DMG
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = unified ]; then
+            LABEL="v${VERSION}"
+          else
+            LABEL="${VERSION}"
+          fi
+          DMG="dist/Heimdallm-${LABEL}.dmg"
+          mkdir -p dist
+
+          CREATE_DMG_ARGS=(
+            --volname "Heimdallm ${LABEL}"
+            --window-pos 200 120
+            --window-size 660 400
+            --icon-size 128
+            --icon "Heimdallm.app" 165 185
+            --hide-extension "Heimdallm.app"
+            --app-drop-link 495 185
+          )
+
+          if [ -f "assets/dmg-background.png" ]; then
+            CREATE_DMG_ARGS+=(--background "assets/dmg-background.png")
+          fi
+
+          "$CREATE_DMG" "${CREATE_DMG_ARGS[@]}" "$DMG" "$APP"
+
+          ls -lh "$DMG"
+          echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
+
+      # ── Publish ─────────────────────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Heimdallm-${{ inputs.kind }}-macos-${{ env.VERSION }}
+          path: ${{ env.DMG_PATH }}
+          retention-days: 90
+
+      - name: Upload DMG to the draft release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          release-tooling/scripts/release/require-draft.sh "$TAG"
+          gh release upload "$TAG" "$DMG_PATH" --clobber

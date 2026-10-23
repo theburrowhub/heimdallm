@@ -1,0 +1,559 @@
+name: Release (unified installer)
+
+# Reusable: builds and publishes the unified vX.Y.Z release — the full
+# installer that bundles the desktop app, the daemon and the CLI, the GHCR
+# image, the CLI archives, the Homebrew formula and versions.json. It is the
+# repository's "latest" release, which every updater and installer resolves.
+# Called by release.yml after the shared test gate.
+#
+# See docs/release-pipeline.md.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Unified release tag (vX.Y.Z)'
+        required: true
+        type: string
+      ref:
+        description: 'Commit or tag to build'
+        required: true
+        type: string
+      channels_only:
+        description: 'Only repair mutable GHCR aliases of a published release'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Build only: upload, push and publish nothing'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      SPARKLE_EDDSA_PRIVATE_KEY:
+        required: false
+      TAP_GITHUB_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TAG: ${{ inputs.tag }}
+  SOURCE_REF: ${{ inputs.ref }}
+  DRY_RUN: ${{ inputs.dry_run }}
+
+jobs:
+  # Draft releases are only visible to credentials with push access. Without
+  # contents: write, the preflight sees an existing draft as a 404.
+  preflight:
+    name: Validate draft release target
+    if: ${{ !inputs.channels_only && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          sparse-checkout: scripts/release
+          persist-credentials: false
+
+      - name: Validate draft release target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          read -r KIND _ <<< "$(release-tooling/scripts/release/parse-tag.sh "$TAG")"
+          test "$KIND" = unified || {
+            echo "::error::$TAG is not a unified release tag"
+            exit 1
+          }
+          TAG_COMMIT=$(git rev-parse "${TAG}^{commit}")
+          test "$TAG_COMMIT" = "$(git rev-parse HEAD)" || {
+            echo "::error::$TAG does not resolve to the checked-out commit"
+            exit 1
+          }
+          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft) || {
+            echo "::error::Release $TAG does not exist; manual runs only repair an existing draft"
+            exit 1
+          }
+          test "$IS_DRAFT" = true || {
+            echo "::error::Release $TAG is already published and immutable"
+            exit 1
+          }
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Docker image — GoReleaser → GHCR
+  # ═══════════════════════════════════════════════════════════════════════════
+  goreleaser-daemon:
+    name: Docker image (GoReleaser)
+    needs: preflight
+    if: ${{ always() && !inputs.channels_only && (inputs.dry_run || needs.preflight.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      attestations: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.docker-digest.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Select GoReleaser mode
+        run: |
+          set -euo pipefail
+          SKIP=archive
+          if [ "$DRY_RUN" = true ]; then
+            SKIP="$SKIP,publish,validate"
+          fi
+          echo "GORELEASER_SKIP=$SKIP" >> "$GITHUB_ENV"
+
+      - name: GoReleaser — build daemon + push Docker image
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          distribution: goreleaser
+          version: 'v2.17.1'
+          args: >-
+            release --clean --config .goreleaser-docker.yml --skip=${{ env.GORELEASER_SKIP }}
+          workdir: daemon
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag }}
+
+      - name: Get Docker image digest
+        id: docker-digest
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          DIGEST=$(docker buildx imagetools inspect \
+            "ghcr.io/theburrowhub/heimdallm:${VERSION}" 2>&1 \
+            | grep -m1 'Digest:' | awk '{print $2}')
+          test -n "$DIGEST"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate artifact attestation
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.docker-digest.outputs.digest }}
+          push-to-registry: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Desktop bundles — macOS .dmg, Linux .deb / .rpm / .AppImage
+  # ═══════════════════════════════════════════════════════════════════════════
+  desktop:
+    name: Desktop bundles
+    needs: preflight
+    if: ${{ always() && !inputs.channels_only && (inputs.dry_run || needs.preflight.result == 'success') }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-desktop.yml
+    with:
+      kind: unified
+      tag: ${{ inputs.tag }}
+      ref: ${{ inputs.ref }}
+      dry_run: ${{ inputs.dry_run }}
+    secrets:
+      SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # CLI binaries — cross-platform via GoReleaser
+  # ═══════════════════════════════════════════════════════════════════════════
+  goreleaser-cli:
+    name: Build CLI binaries (GoReleaser)
+    needs: preflight
+    if: ${{ always() && !inputs.channels_only && (inputs.dry_run || needs.preflight.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: cli/go.mod
+
+      - name: Select GoReleaser mode
+        run: |
+          set -euo pipefail
+          EXTRA=
+          if [ "$DRY_RUN" = true ]; then
+            EXTRA=--skip=publish,validate
+          fi
+          echo "GORELEASER_EXTRA=$EXTRA" >> "$GITHUB_ENV"
+
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          distribution: goreleaser
+          version: 'v2.17.1'
+          args: >-
+            release --clean ${{ env.GORELEASER_EXTRA }}
+          workdir: cli
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag }}
+
+      - name: Stage generated Homebrew formula
+        run: |
+          set -euo pipefail
+          mapfile -d '' formulas < <(find cli/dist -type f -name '*.rb' -print0)
+          test "${#formulas[@]}" -eq 1 || {
+            echo "::error::Expected exactly one generated Homebrew formula, found ${#formulas[@]}"
+            exit 1
+          }
+          mkdir -p staged-homebrew
+          cp "${formulas[0]}" staged-homebrew/heimdallm-cli.rb
+
+      - name: Upload staged Homebrew formula
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-homebrew-formula-${{ inputs.tag }}
+          path: staged-homebrew/heimdallm-cli.rb
+          if-no-files-found: error
+          retention-days: 7
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # versions.json — the component versions this installer bundles
+  # ═══════════════════════════════════════════════════════════════════════════
+  versions-manifest:
+    name: Version manifest (versions.json)
+    needs: preflight
+    if: ${{ always() && !inputs.channels_only && (inputs.dry_run || needs.preflight.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          sparse-checkout: |
+            .release-please-manifest.json
+            compat.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          sparse-checkout: scripts/release
+          persist-credentials: false
+
+      - name: Generate versions.json
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Releases cut before compat.json existed carry versions only.
+          COMPAT=()
+          [ -f compat.json ] && COMPAT=(compat.json)
+          release-tooling/scripts/release/versions-json.sh .release-please-manifest.json \
+            "${COMPAT[@]}" > dist/versions.json
+          cat dist/versions.json
+
+      - name: Upload versions.json to the draft release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          release-tooling/scripts/release/require-draft.sh "$TAG"
+          gh release upload "$TAG" dist/versions.json --clobber
+
+  # The GitHub release remains a draft until every independently built asset
+  # has passed. A normal manual run repairs an existing draft through the same
+  # gate; channels-only never rebuilds assets and only repairs mutable aliases.
+  publish-release:
+    name: Publish release and reconcile Docker aliases
+    needs:
+      - goreleaser-daemon
+      - desktop
+      - goreleaser-cli
+      - versions-manifest
+    if: >-
+      ${{ always() && !inputs.dry_run &&
+          (inputs.channels_only ||
+           (needs.goreleaser-daemon.result == 'success' &&
+            needs.desktop.result == 'success' &&
+            needs.goreleaser-cli.result == 'success' &&
+            needs.versions-manifest.result == 'success')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: read
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      IMAGE_DIGEST: ${{ needs.goreleaser-daemon.outputs.digest }}
+      EXPECTED_COMMIT: ${{ github.sha }}
+      EVENT_NAME: ${{ github.event_name }}
+      CHANNELS_ONLY: ${{ inputs.channels_only }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          sparse-checkout: scripts/release
+          persist-credentials: false
+
+      - name: Download staged Homebrew formula
+        if: ${{ !inputs.channels_only }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cli-homebrew-formula-${{ inputs.tag }}
+          path: staged-homebrew
+
+      - name: Verify staged Homebrew formula
+        if: ${{ !inputs.channels_only }}
+        run: |
+          set -euo pipefail
+          test -f staged-homebrew/heimdallm-cli.rb
+          grep -Fq "$TAG" staged-homebrew/heimdallm-cli.rb
+
+      - name: Verify release identity and exact asset set
+        run: |
+          set -euo pipefail
+          read -r KIND _ <<< "$(release-tooling/scripts/release/parse-tag.sh "$TAG")"
+          test "$KIND" = unified || {
+            echo "::error::$TAG is not a unified release tag"
+            exit 1
+          }
+          RELEASE_JSON=$(gh release view "$TAG" \
+            --json tagName,isDraft,isPrerelease,targetCommitish)
+          test "$(jq -r .tagName <<< "$RELEASE_JSON")" = "$TAG"
+          test "$(jq -r .isPrerelease <<< "$RELEASE_JSON")" = false || {
+            echo "::error::Prereleases must not mutate the stable distribution channels"
+            exit 1
+          }
+          TAG_COMMIT=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)
+          echo "RELEASE_COMMIT=$TAG_COMMIT" >> "$GITHUB_ENV"
+          RELEASE_TARGET=$(jq -r .targetCommitish <<< "$RELEASE_JSON")
+          test "$RELEASE_TARGET" = "$TAG_COMMIT" || {
+            echo "::error::Release target $RELEASE_TARGET does not match $TAG ($TAG_COMMIT)"
+            exit 1
+          }
+          IS_DRAFT=$(jq -r .isDraft <<< "$RELEASE_JSON")
+          LATEST_TAG=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" \
+            --jq .tag_name 2>/dev/null || true)
+          if [ "$CHANNELS_ONLY" = true ]; then
+            test "$IS_DRAFT" = false || {
+              echo "::error::channels_only requires an already-published release"
+              exit 1
+            }
+            test "$LATEST_TAG" = "$TAG" || {
+              echo "::error::$TAG is not the current latest release ($LATEST_TAG); refusing alias rollback"
+              exit 1
+            }
+          else
+            if [ "$IS_DRAFT" != true ] && [ "$LATEST_TAG" != "$TAG" ]; then
+              echo "::error::$TAG is published but is not the latest release; refusing recovery"
+              exit 1
+            fi
+            if [ "$EVENT_NAME" = push ]; then
+              test "$TAG_COMMIT" = "$EXPECTED_COMMIT" || {
+                echo "::error::$TAG does not point at this release workflow commit"
+                exit 1
+              }
+            else
+              WORKFLOW_STATUS=$(gh api \
+                "repos/${GITHUB_REPOSITORY}/compare/${TAG_COMMIT}...${EXPECTED_COMMIT}" \
+                --jq .status)
+              case "$WORKFLOW_STATUS" in
+                ahead|identical) ;;
+                *)
+                  echo "::error::$TAG is not on the workflow ref; refusing draft recovery"
+                  exit 1
+                  ;;
+              esac
+            fi
+            if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$TAG" ]; then
+              COMPARE_STATUS=$(gh api \
+                "repos/${GITHUB_REPOSITORY}/compare/${LATEST_TAG}...${TAG}" \
+                --jq .status)
+              test "$COMPARE_STATUS" = ahead || {
+                echo "::error::$TAG is not ahead of latest release $LATEST_TAG; refusing rollback"
+                exit 1
+              }
+            fi
+          fi
+
+          release-tooling/scripts/release/verify-assets.sh "$TAG"
+
+      - name: Set up Docker Buildx for tag promotion
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Verify immutable Docker image
+        id: immutable-image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          IMAGE="ghcr.io/${IMAGE_NAME}"
+          printf '%s' "$GHCR_TOKEN" | \
+            docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          RESOLVED_DIGEST=$(docker buildx imagetools inspect \
+            "${IMAGE}:${VERSION}" 2>&1 \
+            | grep -m1 'Digest:' | awk '{print $2}')
+          [[ "$RESOLVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Could not resolve immutable image ${IMAGE}:${VERSION}"
+            exit 1
+          }
+          if [ -n "$IMAGE_DIGEST" ]; then
+            test "$RESOLVED_DIGEST" = "$IMAGE_DIGEST" || {
+              echo "::error::Immutable image resolves to $RESOLVED_DIGEST, build reported $IMAGE_DIGEST"
+              exit 1
+            }
+          fi
+          echo "digest=${RESOLVED_DIGEST}" >> "$GITHUB_OUTPUT"
+          gh attestation verify \
+            "oci://${IMAGE}@${RESOLVED_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY"
+          docker pull "${IMAGE}@${RESOLVED_DIGEST}" >/dev/null
+          IMAGE_VERSION=$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+            "${IMAGE}@${RESOLVED_DIGEST}")
+          IMAGE_REVISION=$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "${IMAGE}@${RESOLVED_DIGEST}")
+          test "$IMAGE_VERSION" = "$VERSION" || {
+            echo "::error::Immutable image version $IMAGE_VERSION does not match $VERSION"
+            exit 1
+          }
+          test "$IMAGE_REVISION" = "$RELEASE_COMMIT" || {
+            echo "::error::Immutable image revision $IMAGE_REVISION does not match $RELEASE_COMMIT"
+            exit 1
+          }
+
+      # Publishing first leaves a fully usable GitHub release and immutable
+      # Docker version tag even if an alias update fails. The operation is
+      # idempotent so a failed finalizer can safely be rerun.
+      - name: Publish or verify GitHub release
+        run: |
+          set -euo pipefail
+          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+          LATEST_TAG=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" \
+            --jq .tag_name 2>/dev/null || true)
+          if [ "$IS_DRAFT" = true ]; then
+            test "$CHANNELS_ONLY" != true
+            gh release edit "$TAG" --draft=false --latest
+          elif [ "$LATEST_TAG" != "$TAG" ]; then
+            test "$CHANNELS_ONLY" != true
+            gh release edit "$TAG" --latest
+          fi
+          for _ in $(seq 1 12); do
+            IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            LATEST_TAG=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/latest" \
+              --jq .tag_name 2>/dev/null || true)
+            if [ "$IS_DRAFT" = false ] && [ "$LATEST_TAG" = "$TAG" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Release $TAG was not observable as the latest published release"
+          exit 1
+
+      - name: Promote and verify mutable Docker tags
+        env:
+          PROMOTE_DIGEST: ${{ steps.immutable-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$PROMOTE_DIGEST"
+          VERSION="${TAG#v}"
+          CORE_VERSION="${VERSION%%-*}"
+          IFS=. read -r MAJOR MINOR PATCH <<< "$CORE_VERSION"
+          [[ "$MAJOR" =~ ^[0-9]+$ && "$MINOR" =~ ^[0-9]+$ && "$PATCH" =~ ^[0-9]+$ ]] || {
+            echo "::error::Cannot derive mutable Docker tags from $TAG"
+            exit 1
+          }
+          IMAGE="ghcr.io/${IMAGE_NAME}"
+          docker buildx imagetools create --prefer-index=false \
+            --tag "${IMAGE}:${MAJOR}.${MINOR}" \
+            --tag "${IMAGE}:${MAJOR}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}@${PROMOTE_DIGEST}"
+          for MUTABLE_TAG in "${MAJOR}.${MINOR}" "$MAJOR" latest; do
+            PROMOTED_DIGEST=$(docker buildx imagetools inspect \
+              "${IMAGE}:${MUTABLE_TAG}" 2>&1 \
+              | grep -m1 'Digest:' | awk '{print $2}')
+            test "$PROMOTED_DIGEST" = "$PROMOTE_DIGEST" || {
+              echo "::error::${IMAGE}:${MUTABLE_TAG} points to $PROMOTED_DIGEST, expected $PROMOTE_DIGEST"
+              exit 1
+            }
+          done
+
+      # Updating the tap after publication cannot expose a formula whose assets
+      # are still private. This is deliberately best-effort: if it fails, the
+      # previous formula remains valid and the published release is usable.
+      - name: Publish Homebrew formula
+        if: ${{ !inputs.channels_only }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::TAP_GITHUB_TOKEN is unavailable; keeping the previous formula"
+            exit 0
+          fi
+          FORMULA=staged-homebrew/heimdallm-cli.rb
+          test -f "$FORMULA"
+          CONTENT=$(base64 -w 0 "$FORMULA")
+          EXISTING_SHA=$(
+            gh api \
+              repos/theburrowhub/homebrew-tap/contents/Formula/heimdallm-cli.rb \
+              --jq .sha 2>/dev/null || true
+          )
+          API_ARGS=(
+            --method PUT
+            repos/theburrowhub/homebrew-tap/contents/Formula/heimdallm-cli.rb
+            -f "message=chore: update heimdallm-cli to $TAG"
+            -f "content=$CONTENT"
+          )
+          if [ -n "$EXISTING_SHA" ]; then
+            API_ARGS+=(-f "sha=$EXISTING_SHA")
+          fi
+          gh api "${API_ARGS[@]}" >/dev/null

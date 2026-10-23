@@ -83,11 +83,20 @@ trap cleanup EXIT
 # vacuously. The writer outlives the assertions by an hour, and callers re-check
 # the process is alive immediately before acting, so a loaded machine cannot turn
 # an early exit into a false pass.
+#
+# uutils coreutils (the default on Ubuntu 26.04 runners) builds cat as a
+# multicall binary that dispatches on argv[0], so a copy renamed to heimdalld
+# exits with "unknown program". perl reading its program from the same fifo has
+# the identical shape (argv = [path], blocked on stdin), so it is the fallback.
 start_fixture() {
   _sf_path=$1
   mkdir -p "$(dirname "$_sf_path")"
-  cp /bin/cat "$_sf_path"
-  chmod +x "$_sf_path"
+  for _sf_bin in /bin/cat "$(command -v perl 2>/dev/null)"; do
+    [ -n "$_sf_bin" ] || continue
+    cp "$_sf_bin" "$_sf_path"
+    chmod +x "$_sf_path"
+    "$_sf_path" < /dev/null > /dev/null 2>&1 && break
+  done
   # mktemp, not a counter: this runs inside a command substitution, so a shell
   # variable incremented here would not survive into the next call.
   _sf_fifo=$(mktemp -u "$WORK/fifo.XXXXXX")

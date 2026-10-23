@@ -1,0 +1,87 @@
+name: Release (gui component)
+
+# Reusable: builds the desktop bundles for a gui/vX.Y.Z release — the same
+# layout as the unified installer (Flutter app, daemon and CLI of the same
+# commit), stamped with the gui version — adds a checksums.txt over every
+# asset and publishes the release, never as the repository's "latest" release,
+# which stays the unified vX.Y.Z installer. Called by release.yml after the
+# shared test gate. Release-please tags created with GITHUB_TOKEN trigger no
+# workflow, so this runs chained from the release-please run, not on tag pushes.
+#
+# See docs/release-pipeline.md.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Component release tag (gui/vX.Y.Z)'
+        required: true
+        type: string
+      ref:
+        description: 'Commit or tag to build'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build only: upload and publish nothing'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  desktop:
+    name: Desktop bundles
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-desktop.yml
+    with:
+      kind: gui
+      tag: ${{ inputs.tag }}
+      ref: ${{ inputs.ref }}
+      dry_run: ${{ inputs.dry_run }}
+
+  finalize:
+    name: Publish gui release (not latest)
+    needs: desktop
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The bundles are built on two runners, so the checksums are computed
+      # here over what the draft actually holds.
+      - name: Generate and upload checksums.txt
+        run: |
+          set -euo pipefail
+          read -r KIND VERSION <<< "$(scripts/release/parse-tag.sh "$TAG")"
+          test "$KIND" = gui
+          mkdir -p "$RUNNER_TEMP/assets"
+          : > "$RUNNER_TEMP/checksums.txt"
+          while IFS= read -r ASSET; do
+            case "$ASSET" in checksums.txt|compat.json) continue ;; esac
+            gh release download "$TAG" --pattern "$ASSET" \
+              --dir "$RUNNER_TEMP/assets" --clobber
+            test -f "$RUNNER_TEMP/assets/$ASSET"
+            (cd "$RUNNER_TEMP/assets" && sha256sum "$ASSET") >> "$RUNNER_TEMP/checksums.txt"
+          done < <(scripts/release/expected-assets.sh gui "$VERSION")
+          (cd "$RUNNER_TEMP/assets" && sha256sum --check --strict "$RUNNER_TEMP/checksums.txt")
+          cat "$RUNNER_TEMP/checksums.txt"
+          scripts/release/require-draft.sh "$TAG"
+          gh release upload "$TAG" "$RUNNER_TEMP/checksums.txt" --clobber
+
+      - name: Verify assets and publish
+        run: scripts/release/finalize-component.sh "$TAG" "$GITHUB_SHA"

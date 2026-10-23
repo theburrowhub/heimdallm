@@ -118,7 +118,7 @@ make uninstall-linux PURGE=1 # also wipe ~/.config + ~/.local/share state
 
 ### CLI / TUI
 
-The terminal client is distributed as `heimdallm-cli` via Homebrew and GitHub Releases. It connects to a running daemon and supports status checks, PR lists, manual review triggers, live event following, stats, config inspection, and a Bubble Tea dashboard.
+The terminal client is distributed as `heimdallm-cli` via Homebrew and GitHub Releases, and ships inside the desktop installers (`/Applications/Heimdallm.app/Contents/MacOS/heimdallm-cli` on macOS, `/usr/bin/heimdallm-cli` from the `.deb` / `.rpm`). It connects to a running daemon and supports status checks, PR lists, manual review triggers, live event following, stats, config inspection, and a Bubble Tea dashboard.
 
 ```bash
 brew install theburrowhub/tap/heimdallm-cli
@@ -127,7 +127,7 @@ brew install theburrowhub/tap/heimdallm-cli
 heimdallm-cli dashboard
 ```
 
-**Updating the CLI.** `heimdallm-cli update` downloads the latest release for your OS/arch, verifies it against the release's `cli-checksums.txt`, and replaces the binary (the previous one is kept as `heimdallm-cli.bak` and restored if the new one fails to start). `heimdallm-cli update --check` or `heimdallm-cli version --check` only report whether a newer release exists. Homebrew installs should use `brew upgrade theburrowhub/tap/heimdallm-cli`. The daemon and the desktop app update on their own; Docker deployments update via `make up-build` or an image pull.
+**Updating the CLI.** `heimdallm-cli update` downloads the latest release for your OS/arch, verifies it against the release's `cli-checksums.txt`, and replaces the binary (the previous one is kept as `heimdallm-cli.bak` and restored if the new one fails to start). `heimdallm-cli update --check` or `heimdallm-cli version --check` only report whether a newer release exists. Homebrew installs should use `brew upgrade theburrowhub/tap/heimdallm-cli`; the copy bundled with the desktop app is updated by the desktop app. The daemon and the desktop app update on their own; Docker deployments update via `make up-build` or an image pull.
 
 Interactive commands print a one-line notice when a newer release exists (checked at most once per interval, never applied automatically). Tune it in `~/.config/heimdallm/cli.toml`:
 
@@ -570,6 +570,8 @@ The `tag.yml` workflow analyses commits since the last tag:
 Pushing the tag triggers `build.yml`, which builds, signs, notarizes (if Developer ID configured), and publishes the DMG to GitHub Releases.
 
 Alternatively, **release-please** (via `release.yml`) automates this: it reads conventional commits, opens a Release PR with changelog, and on merge creates the tag + GitHub Release. This also triggers the Docker image build and push to `ghcr.io/theburrowhub/heimdallm`.
+
+Each component also has its own release line: release-please bumps `daemon/vX.Y.Z`, `gui/vX.Y.Z` and `cli/vX.Y.Z` from the commits under `daemon/`, `flutter_app/` and `cli/`, next to the unified `vX.Y.Z` installer, which stays the *latest* release and lists the component versions it bundles in `versions.json`. See [docs/release-pipeline.md](docs/release-pipeline.md).
 
 ---
 
