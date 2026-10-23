@@ -108,7 +108,12 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
     await _save(current);
   }
 
+  /// A field holds input it could not report (a number out of range):
+  /// saving now would store the last valid value, not what the field shows.
+  bool get _hasInvalidInput => _agents.values.any((a) => a.invalid.isNotEmpty);
+
   Future<void> _save(AppConfig current) async {
+    if (_hasInvalidInput) return;
     if (mounted) {
       setState(() {
         _saving = true;
@@ -221,6 +226,8 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                       child: AppText.muted(
                         _saving
                             ? 'Saving agent settings…'
+                            : _hasInvalidInput
+                            ? 'Fix the highlighted field to save.'
                             : _saved
                             ? 'Saved'
                             : 'Changes auto-save after edits.',
@@ -249,7 +256,9 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                       label: Text(
                         _saving ? 'Saving…' : (_saved ? 'Saved' : 'Save'),
                       ),
-                      onPressed: _saving ? null : () => _save(config),
+                      onPressed: _saving || _hasInvalidInput
+                          ? null
+                          : () => _save(config),
                     ),
                   ],
                 ),
@@ -287,6 +296,9 @@ class _AgentState {
   _AgentState();
 
   bool get isCustom => binary.isNotEmpty;
+
+  // UI-only: fields whose typed input is invalid, which blocks saving.
+  final Set<String> invalid = {};
 
   /// The value of a schema field. A built-in agent's fields are its typed
   /// settings; a custom agent's are its options.
@@ -611,8 +623,21 @@ class _AgentSectionState extends State<_AgentSection> {
                     ? 'Model default'
                     : 'CLI default',
                 valueOf: s.valueOf,
+                // A built-in agent's numeric settings are integers (its
+                // typed config fields); a custom agent's may be decimals.
+                integerNumbers: !s.isCustom,
                 onChanged: (key, value) {
                   setState(() => s.setValue(key, value));
+                  widget.onChanged(s);
+                },
+                onInvalidChanged: (key, invalid) {
+                  setState(() {
+                    if (invalid) {
+                      s.invalid.add(key);
+                    } else {
+                      s.invalid.remove(key);
+                    }
+                  });
                   widget.onChanged(s);
                 },
               ),

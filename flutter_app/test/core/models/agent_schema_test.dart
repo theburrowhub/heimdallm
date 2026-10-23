@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/models/agent_schema.dart';
@@ -71,7 +72,7 @@ void main() {
       s.toJson(),
     );
     expect(s.toPrettyJson(), contains('\n  "fields"'));
-    expect(AgentFieldType.parse('weird'), AgentFieldType.text);
+    expect(AgentFieldType.parse('weird'), AgentFieldType.unknown);
     expect(const AgentSchema(name: 'x').title, 'x');
   });
 
@@ -247,5 +248,51 @@ void main() {
       );
       expect(dup, hasLength(2));
     });
+  });
+
+  // The daemon's tests run the same cases (TestSharedCustomSchemaCases), so
+  // the editor accepts exactly the schemas the daemon loads.
+  test('matches the daemon on every shared schema case', () {
+    final cases =
+        jsonDecode(
+              File(
+                '../daemon/internal/agentschema/testdata/custom_schema_cases.json',
+              ).readAsStringSync(),
+            )
+            as List;
+    expect(cases, isNotEmpty);
+    for (final c in cases.cast<Map<String, dynamic>>()) {
+      final errors = validateCustomSchema(
+        AgentSchema.fromJson(c['schema'] as Map<String, dynamic>),
+        builtinNames: {'claude'},
+      );
+      expect(errors.isEmpty, c['valid'], reason: '${c['case']}: $errors');
+    }
+  });
+
+  test('fieldValueProblem checks a value like the daemon', () {
+    final schema = AgentSchema.fromJson(_aider);
+    expect(fieldValueProblem(schema.field('model')!, 'gpt-4o'), isNull);
+    expect(fieldValueProblem(schema.field('model')!, 'other'), isNotNull);
+    expect(fieldValueProblem(schema.field('variant')!, 'other'), isNull);
+    expect(fieldValueProblem(schema.field('auto_commits')!, 'yes'), isNotNull);
+    expect(
+      fieldValueProblem(schema.field('map_tokens')!, double.nan),
+      isNotNull,
+    );
+    expect(fieldValueProblem(schema.field('notes')!, 3), isNotNull);
+    expect(
+      fieldValueProblem(
+        const AgentSchemaField(
+          key: 'x',
+          type: AgentFieldType.unknown,
+          label: 'X',
+        ),
+        'a',
+      ),
+      isNotNull,
+    );
+    expect(isDeniedAgentBinary('Python3'), isTrue);
+    expect(isDeniedAgentBinary('aider'), isFalse);
   });
 }

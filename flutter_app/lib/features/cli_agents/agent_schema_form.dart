@@ -8,10 +8,19 @@ import '../../shared/design_system/components/components.dart';
 /// fields, switches for toggles, and text inputs for numbers and text. The
 /// form holds no state of its own: [valueOf] reads the current value and
 /// [onChanged] reports an edit (null means "not set").
+///
+/// Values come from config.toml, which can be edited by hand, so they are
+/// read leniently: a value of the wrong type shows as "not set" (or as its
+/// text) instead of breaking the page.
 class AgentSchemaForm extends StatelessWidget {
   final List<AgentSchemaField> fields;
   final Object? Function(String key) valueOf;
   final void Function(String key, Object? value) onChanged;
+
+  /// Reports whether a field's typed input is invalid (a number out of
+  /// range). While one is, the caller must not save: the field shows the
+  /// typed text, which is not the value it last reported.
+  final void Function(String key, bool invalid)? onInvalidChanged;
 
   /// Distinguishes the widgets of different agents (`agent-field-<prefix>-<key>`).
   final String keyPrefix;
@@ -22,14 +31,19 @@ class AgentSchemaForm extends StatelessWidget {
   /// Read-only preview (the custom agent editor).
   final bool enabled;
 
+  /// Numbers must be whole: a built-in agent's numeric settings are integers.
+  final bool integerNumbers;
+
   const AgentSchemaForm({
     super.key,
     required this.fields,
     required this.valueOf,
     required this.onChanged,
     required this.keyPrefix,
+    this.onInvalidChanged,
     this.defaultEmptyLabel = 'CLI default',
     this.enabled = true,
+    this.integerNumbers = false,
   });
 
   @override
@@ -92,23 +106,25 @@ class AgentSchemaForm extends StatelessWidget {
           _NumberField(
             key: _key(f),
             field: f,
-            value: valueOf(f.key) as num?,
+            value: asSettingNum(valueOf(f.key)),
             decoration: _decoration(f, hint: _defaultHint(f)),
             enabled: enabled,
+            integer: integerNumbers,
             onChanged: (v) => onChanged(f.key, v),
+            onInvalidChanged: (invalid) =>
+                onInvalidChanged?.call(f.key, invalid),
           ),
         );
       default:
         // Text, and selects whose options are only suggestions.
-        final value = (valueOf(f.key) as String?) ?? '';
         final suggestions = f.options.isEmpty
             ? null
             : 'Suggestions: ${f.options.join(', ')}';
         return _withTooltip(
           f,
-          TextFormField(
+          _SyncedTextField(
             key: _key(f),
-            initialValue: value,
+            text: asSettingString(valueOf(f.key)) ?? '',
             enabled: enabled,
             decoration: _decoration(
               f,
@@ -130,7 +146,7 @@ class AgentSchemaForm extends StatelessWidget {
   }
 
   Widget _select(AgentSchemaField f) {
-    final raw = valueOf(f.key) as String?;
+    final raw = asSettingString(valueOf(f.key));
     final value = raw == null || raw.isEmpty ? null : raw;
     final unlisted = value != null && !f.options.contains(value) ? value : null;
     final empty = f.emptyLabel.isNotEmpty
@@ -157,7 +173,8 @@ class AgentSchemaForm extends StatelessWidget {
   }
 
   Widget _toggle(AgentSchemaField f) {
-    final value = (f.effective({f.key: valueOf(f.key)}) as bool?) ?? false;
+    final value =
+        asSettingBool(valueOf(f.key)) ?? asSettingBool(f.defaultValue) ?? false;
     // A dangerous toggle can only be turned off here: turning it on is a
     // config.toml decision, and the daemon refuses it over HTTP.
     final canChange = enabled && (!f.warning || value);
@@ -202,14 +219,102 @@ class AgentSchemaForm extends StatelessWidget {
   }
 }
 
-/// A number input that reports only values within the field's bounds; an
-/// empty input means "not set".
+/// A setting read as text: strings as they are, numbers and booleans as
+/// their text, anything else as not set.
+String? asSettingString(Object? v) => switch (v) {
+  final String s => s,
+  final num n => '$n',
+  final bool b => '$b',
+  _ => null,
+};
+
+/// A setting read as a number: numbers, and strings that parse as one.
+num? asSettingNum(Object? v) => switch (v) {
+  final num n => n,
+  final String s => num.tryParse(s.trim()),
+  _ => null,
+};
+
+/// A setting read as a toggle: booleans, and the strings "true"/"false".
+bool? asSettingBool(Object? v) => switch (v) {
+  final bool b => b,
+  'true' => true,
+  'false' => false,
+  _ => null,
+};
+
+/// A text field that follows [text] when it changes from outside (a reload,
+/// a discarded edit), except while the user is typing in it.
+class _SyncedTextField extends StatefulWidget {
+  final String text;
+  final bool enabled;
+  final InputDecoration decoration;
+  final TextInputType? keyboardType;
+  final List<TextInputFormatter>? inputFormatters;
+  final ValueChanged<String> onChanged;
+
+  const _SyncedTextField({
+    super.key,
+    required this.text,
+    required this.enabled,
+    required this.decoration,
+    required this.onChanged,
+    this.keyboardType,
+    this.inputFormatters,
+  });
+
+  @override
+  State<_SyncedTextField> createState() => _SyncedTextFieldState();
+}
+
+class _SyncedTextFieldState extends State<_SyncedTextField> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.text,
+  );
+  final FocusNode _focus = FocusNode();
+
+  @override
+  void didUpdateWidget(covariant _SyncedTextField old) {
+    super.didUpdateWidget(old);
+    if (widget.text != old.text &&
+        widget.text != _controller.text &&
+        !_focus.hasFocus) {
+      _controller.text = widget.text;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => TextField(
+    controller: _controller,
+    focusNode: _focus,
+    enabled: widget.enabled,
+    decoration: widget.decoration,
+    keyboardType: widget.keyboardType,
+    inputFormatters: widget.inputFormatters,
+    onChanged: widget.onChanged,
+  );
+}
+
+/// A number input. An empty input means "not set"; 0 shows as "0" unless 0
+/// is also the default ("not set" for the built-in agents' turn caps). Input
+/// out of the field's bounds is not reported as a value: the field reports
+/// itself invalid instead, so the caller cannot save the last partial value
+/// typed on the way (1, then 15, then 150 over a maximum of 100).
 class _NumberField extends StatefulWidget {
   final AgentSchemaField field;
   final num? value;
   final InputDecoration decoration;
   final bool enabled;
+  final bool integer;
   final ValueChanged<num?> onChanged;
+  final ValueChanged<bool> onInvalidChanged;
 
   const _NumberField({
     super.key,
@@ -217,7 +322,9 @@ class _NumberField extends StatefulWidget {
     required this.value,
     required this.decoration,
     required this.enabled,
+    required this.integer,
     required this.onChanged,
+    required this.onInvalidChanged,
   });
 
   @override
@@ -227,11 +334,19 @@ class _NumberField extends StatefulWidget {
 class _NumberFieldState extends State<_NumberField> {
   String? _error;
 
+  String _display(num? v) {
+    if (v == null) return '';
+    final d = asSettingNum(widget.field.defaultValue) ?? 0;
+    if (v == 0 && d == 0) return '';
+    return v == v.roundToDouble() ? '${v.toInt()}' : '$v';
+  }
+
   String? _check(String raw) {
     final f = widget.field;
     if (raw.trim().isEmpty) return null;
     final n = num.tryParse(raw.trim());
     if (n == null) return 'Not a number';
+    if (widget.integer && n != n.roundToDouble()) return 'Whole numbers only';
     if (n < 0) return 'Must not be negative';
     if (f.min != null && n < f.min!) return 'At least ${f.min}';
     if (f.max != null && n > f.max!) return 'At most ${f.max}';
@@ -240,18 +355,27 @@ class _NumberFieldState extends State<_NumberField> {
 
   @override
   Widget build(BuildContext context) {
-    final v = widget.value;
-    return TextFormField(
-      initialValue: v == null || v == 0 ? '' : '$v',
+    return _SyncedTextField(
+      text: _display(widget.value),
       enabled: widget.enabled,
       decoration: widget.decoration.copyWith(errorText: _error),
-      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+      keyboardType: TextInputType.numberWithOptions(decimal: !widget.integer),
+      inputFormatters: [
+        FilteringTextInputFormatter.allow(
+          RegExp(widget.integer ? r'[0-9]' : r'[0-9.]'),
+        ),
+      ],
       onChanged: (raw) {
         final error = _check(raw);
-        setState(() => _error = error);
+        if (error != _error) {
+          setState(() => _error = error);
+          widget.onInvalidChanged(error != null);
+        }
         if (error != null) return;
-        widget.onChanged(raw.trim().isEmpty ? null : num.parse(raw.trim()));
+        final n = raw.trim().isEmpty ? null : num.parse(raw.trim());
+        widget.onChanged(
+          n == null ? null : (n == n.roundToDouble() ? n.toInt() : n),
+        );
       },
     );
   }

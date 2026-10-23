@@ -544,8 +544,10 @@ class _FieldEditor extends StatelessWidget {
               ),
               DropdownButtonFormField<AgentFieldType>(
                 key: ValueKey(_k('type')),
+                // A type this app does not know (typed in the JSON tab)
+                // shows as unset until one is picked.
                 // ignore: deprecated_member_use
-                value: f.type,
+                value: f.type == AgentFieldType.unknown ? null : f.type,
                 decoration: _deco('Type'),
                 items: const [
                   DropdownMenuItem(
@@ -626,7 +628,9 @@ class _FieldEditor extends StatelessWidget {
           ),
           TextFormField(
             key: ValueKey(_k('default')),
-            initialValue: (f.defaultValue as String?) ?? '',
+            initialValue: f.defaultValue is String
+                ? f.defaultValue as String
+                : '',
             decoration: _deco('Default'),
             onChanged: (v) => onChanged(
               f.copyWith(defaultValue: v.trim().isEmpty ? null : v.trim()),
@@ -702,11 +706,15 @@ class _FieldEditor extends StatelessWidget {
             onChanged: (v) => onChanged(f.copyWith(defaultValue: parse(v))),
           ),
         ];
+      case AgentFieldType.unknown:
+        return const [];
       case AgentFieldType.text:
         return [
           TextFormField(
             key: ValueKey(_k('default')),
-            initialValue: (f.defaultValue as String?) ?? '',
+            initialValue: f.defaultValue is String
+                ? f.defaultValue as String
+                : '',
             decoration: _deco('Default'),
             onChanged: (v) => onChanged(
               f.copyWith(defaultValue: v.trim().isEmpty ? null : v.trim()),

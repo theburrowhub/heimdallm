@@ -6,13 +6,18 @@ enum AgentFieldType {
   select,
   bool,
   number,
-  text;
+  text,
+
+  /// A type this app does not know. The daemon never serves one; a schema
+  /// typed by hand can contain one, and validation reports it.
+  unknown;
 
   static AgentFieldType parse(String? raw) => switch (raw) {
     'select' => AgentFieldType.select,
     'bool' => AgentFieldType.bool,
     'number' => AgentFieldType.number,
-    _ => AgentFieldType.text,
+    'text' => AgentFieldType.text,
+    _ => AgentFieldType.unknown,
   };
 }
 
@@ -283,7 +288,135 @@ const reservedFieldKeys = {
   'review_limits',
 };
 
-/// Problems with a custom agent's schema, empty when it looks valid.
+// Limits and rules of the daemon's agentschema package. They are checked
+// against the same cases in both test suites
+// (daemon/internal/agentschema/testdata/custom_schema_cases.json).
+const maxSchemaFields = 64;
+const maxSchemaOptions = 200;
+const maxSchemaLabelLength = 128;
+const maxSchemaDescriptionLength = 1000;
+const maxSchemaOptionLength = 128;
+const maxSchemaTextValueLength = 512;
+final iconColorPattern = RegExp(r'^#[0-9A-Fa-f]{6}$');
+
+/// Shells, interpreters and launchers a custom agent may not run: they would
+/// execute the review prompt they read on stdin. Mirrors the daemon's list.
+const deniedAgentBinaries = {
+  'sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'mksh', 'csh', 'tcsh', 'ash', //
+  'busybox', 'nu', 'elvish', 'xonsh', 'pwsh', 'powershell', 'cmd', 'env', //
+  'sudo', 'doas', 'su', 'xargs', 'nohup', 'timeout', 'nice', 'exec', 'eval', //
+  'command', 'script', 'expect', 'watch', 'time', 'stdbuf', 'node', 'nodejs', //
+  'deno',
+  'bun',
+  'npx',
+  'bunx',
+  'ruby',
+  'irb',
+  'perl',
+  'php',
+  'lua',
+  'luajit', //
+  'tclsh', 'wish', 'osascript', 'awk', 'gawk', 'mawk', 'nawk', 'sed', //
+  'jshell', 'java', 'groovy', 'scala', 'R', 'Rscript', 'julia', 'swift', //
+  'dotnet', 'go', 'make', 'gdb', 'lldb', 'vim', 'vi', 'nvim', 'emacs', 'ed', //
+  'ex', 'docker', 'podman', 'kubectl', 'ssh', 'nc', 'ncat', 'socat', 'curl', //
+  'wget', 'git', 'find', 'heimdallm',
+};
+
+/// Whether [binary] is a shell or an interpreter, versioned ones included
+/// (python3, python3.12, perl5.36…).
+bool isDeniedAgentBinary(String binary) {
+  if (deniedAgentBinaries.contains(binary) ||
+      deniedAgentBinaries.contains(binary.toLowerCase())) {
+    return true;
+  }
+  final lower = binary.toLowerCase();
+  for (final prefix in const [
+    'python', 'pypy', 'perl', 'ruby', 'php', 'node', 'lua', 'bash', 'zsh', //
+  ]) {
+    if (lower.startsWith(prefix)) {
+      final rest = lower.substring(prefix.length);
+      if (rest.isEmpty || RegExp(r'^[0-9.\-]+$').hasMatch(rest)) return true;
+    }
+  }
+  return false;
+}
+
+bool _hasControl(String s, {bool allowNewline = false}) => s.runes.any(
+  (r) => (r < 0x20 || (r >= 0x7f && r < 0xa0)) && !(allowNewline && r == 0x0a),
+);
+
+/// Checks free text (labels, descriptions); null when it is fine.
+String? _textProblem(String what, String value, int max) {
+  if (value.runes.length > max) return '$what is longer than $max characters.';
+  if (_hasControl(value, allowNewline: true)) {
+    return '$what contains a control character.';
+  }
+  return null;
+}
+
+/// Checks a value that reaches the CLI as an argument; null when it is fine.
+String? _argProblem(String value, int max) {
+  if (value.runes.length > max) return 'is longer than $max characters';
+  if (value.trim().startsWith('-')) return 'must not begin with "-"';
+  if (_hasControl(value)) return 'contains a control character';
+  return null;
+}
+
+bool _isDangerousFlag(String flag) {
+  final lower = flag.toLowerCase();
+  return lower.startsWith('--danger') ||
+      lower.startsWith('--allow-dangerously');
+}
+
+/// Why [value] is not a valid value of [f], or null when it is. Mirrors the
+/// daemon's normalizeValue.
+String? fieldValueProblem(AgentSchemaField f, Object? value) {
+  switch (f.type) {
+    case AgentFieldType.bool:
+      return value is bool ? null : 'must be on or off';
+    case AgentFieldType.number:
+      if (value is! num || value.isNaN || value.isInfinite) {
+        return 'must be a number';
+      }
+      if (value < 0) return 'must not be negative';
+      if (f.min != null && value < f.min!) {
+        return 'is below the minimum ${f.min}';
+      }
+      if (f.max != null && value > f.max!) {
+        return 'is above the maximum ${f.max}';
+      }
+      return null;
+    case AgentFieldType.select:
+    case AgentFieldType.text:
+      if (value is! String) return 'must be text';
+      final v = value.trim();
+      final arg = _argProblem(
+        v,
+        f.type == AgentFieldType.select
+            ? maxSchemaOptionLength
+            : maxSchemaTextValueLength,
+      );
+      if (arg != null) return arg;
+      if (v.toLowerCase() == 'bypasspermissions') {
+        return 'is never passed to an agent';
+      }
+      if (f.type == AgentFieldType.select &&
+          v.isNotEmpty &&
+          !f.allowCustom &&
+          !f.options.contains(v)) {
+        return 'is not one of the options';
+      }
+      return null;
+    case AgentFieldType.unknown:
+      return 'has an unknown type';
+  }
+}
+
+/// Problems with a custom agent's schema, empty when it looks valid. It
+/// applies the daemon's rules (agentschema Validate, ValidateCustom and
+/// ValidateBinary), so a schema the editor accepts — saved through the API
+/// or pasted into config.toml — is one the daemon loads.
 /// [builtinNames] are names a custom agent may not take.
 List<String> validateCustomSchema(
   AgentSchema s, {
@@ -299,55 +432,119 @@ List<String> validateCustomSchema(
   }
   if (!binaryPattern.hasMatch(s.binary)) {
     errors.add('Binary: an executable name on PATH, without a path.');
+  } else if (isDeniedAgentBinary(s.binary)) {
+    errors.add(
+      'Binary: "${s.binary}" is a shell or an interpreter; it would run the '
+      'review prompt it reads.',
+    );
+  }
+  for (final p in [
+    _textProblem('Display name', s.displayName, maxSchemaLabelLength),
+    _textProblem('Description', s.description, maxSchemaDescriptionLength),
+  ]) {
+    if (p != null) errors.add(p);
+  }
+  if (s.iconColor.isNotEmpty && !iconColorPattern.hasMatch(s.iconColor)) {
+    errors.add('Icon colour: a #RRGGBB colour.');
+  }
+  if (s.fields.length > maxSchemaFields) {
+    errors.add('At most $maxSchemaFields options.');
   }
   final keys = <String>{};
   final flags = <String>{};
   for (final (i, f) in s.fields.indexed) {
-    final where = 'Field ${i + 1}${f.key.isEmpty ? '' : ' (${f.key})'}';
+    final where = 'Option ${i + 1}${f.key.isEmpty ? '' : ' (${f.key})'}';
+    void add(String problem) => errors.add('$where: $problem');
     if (!fieldKeyPattern.hasMatch(f.key)) {
-      errors.add('$where: key must be lowercase letters, digits or "_".');
+      add('key must be lowercase letters, digits or "_".');
     } else if (reservedFieldKeys.contains(f.key)) {
-      errors.add('$where: "${f.key}" is reserved.');
+      add('"${f.key}" is reserved.');
     } else if (!keys.add(f.key)) {
-      errors.add('$where: key is used twice.');
+      add('key is used twice.');
     }
-    if (f.label.trim().isEmpty) errors.add('$where: label is required.');
-    if (!flagPattern.hasMatch(f.flag)) {
-      errors.add('$where: flag must look like --name or -n.');
+    if (f.label.trim().isEmpty) add('label is required.');
+    for (final p in [
+      _textProblem('label', f.label, maxSchemaLabelLength),
+      _textProblem('help text', f.description, maxSchemaDescriptionLength),
+      _textProblem('empty choice', f.emptyLabel, maxSchemaLabelLength),
+    ]) {
+      if (p != null) add(p);
+    }
+    if (f.flag.isEmpty) {
+      add('a flag is required: options reach a custom agent only as flags.');
+    } else if (!flagPattern.hasMatch(f.flag)) {
+      add('flag must look like --name or -n.');
     } else if (!flags.add(f.flag)) {
-      errors.add('$where: flag ${f.flag} is used twice.');
+      add('flag ${f.flag} is used twice.');
     }
     if (f.falseFlag.isNotEmpty) {
       if (f.type != AgentFieldType.bool) {
-        errors.add('$where: a "flag when off" only applies to toggles.');
+        add('a "flag when off" only applies to toggles.');
       } else if (!flagPattern.hasMatch(f.falseFlag)) {
-        errors.add('$where: flag when off must look like --name or -n.');
+        add('flag when off must look like --name or -n.');
       } else if (!flags.add(f.falseFlag)) {
-        errors.add('$where: flag ${f.falseFlag} is used twice.');
+        add('flag ${f.falseFlag} is used twice.');
       }
     }
-    if (f.type == AgentFieldType.select &&
-        f.options.isEmpty &&
-        !f.allowCustom) {
-      errors.add('$where: a dropdown needs options (or allow any value).');
+    if ((_isDangerousFlag(f.flag) || _isDangerousFlag(f.falseFlag)) &&
+        (f.type != AgentFieldType.bool || !f.warning)) {
+      add(
+        'a --danger…/--allow-dangerously… flag must be a toggle marked dangerous.',
+      );
     }
-    if (f.options.any((o) => o.trim().startsWith('-'))) {
-      errors.add('$where: options must not begin with "-".');
+    switch (f.type) {
+      case AgentFieldType.select:
+        if (f.options.isEmpty && !f.allowCustom) {
+          add('a dropdown needs options (or allow any value).');
+        }
+        if (f.options.length > maxSchemaOptions) {
+          add('at most $maxSchemaOptions options.');
+        }
+        final seen = <String>{};
+        for (final o in f.options) {
+          final p = _argProblem(o, maxSchemaOptionLength);
+          if (p != null) {
+            add('option "$o" $p.');
+          } else if (o.isEmpty) {
+            add('options must not be empty; the empty choice is implicit.');
+          } else if (!seen.add(o)) {
+            add('option "$o" is listed twice.');
+          }
+        }
+      case AgentFieldType.number:
+        if ((f.min ?? 0) < 0 || (f.max ?? 0) < 0) {
+          add('min and max must not be negative.');
+        } else if (f.min != null && f.max != null && f.min! > f.max!) {
+          add('min is above max.');
+        }
+      case AgentFieldType.bool:
+      case AgentFieldType.text:
+        break;
+      case AgentFieldType.unknown:
+        add('type must be a dropdown, toggle, number or text.');
     }
-    if (f.type == AgentFieldType.number) {
-      if ((f.min ?? 0) < 0 || (f.max ?? 0) < 0) {
-        errors.add('$where: min and max must not be negative.');
-      } else if (f.min != null && f.max != null && f.min! > f.max!) {
-        errors.add('$where: min is above max.');
-      }
+    if (f.type != AgentFieldType.select &&
+        (f.options.isNotEmpty || f.allowCustom)) {
+      add('options only apply to dropdowns.');
     }
-    if (f.warning && f.defaultValue == true) {
-      errors.add('$where: a dangerous toggle must default to off.');
+    if (f.type != AgentFieldType.number && (f.min != null || f.max != null)) {
+      add('min and max only apply to numbers.');
+    }
+    if (f.warning && f.type != AgentFieldType.bool) {
+      add('only a toggle can be marked dangerous.');
     }
     if (f.key == 'model' &&
         f.type != AgentFieldType.select &&
         f.type != AgentFieldType.text) {
-      errors.add('$where: model must be a dropdown or text.');
+      add('model must be a dropdown or text.');
+    }
+    if (f.defaultValue != null && f.type != AgentFieldType.unknown) {
+      final p = fieldValueProblem(f, f.defaultValue);
+      if (p != null) {
+        add('the default $p.');
+      } else if (f.warning && f.defaultValue == true) {
+        add('a dangerous toggle must default to off.');
+      }
     }
   }
   return errors;

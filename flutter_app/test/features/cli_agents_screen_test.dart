@@ -86,9 +86,9 @@ void main() {
     final api = _MockApiClient();
     when(api.fetchConfig).thenAnswer((_) async => configJson);
     when(() => api.patchConfig(any())).thenAnswer((_) async => configJson);
-    when(() => api.fetchAgentSchemas()).thenAnswer(
-      (_) async => schemas ?? agentSchemaCatalog(),
-    );
+    when(
+      () => api.fetchAgentSchemas(),
+    ).thenAnswer((_) async => schemas ?? agentSchemaCatalog());
 
     await tester.pumpWidget(
       ProviderScope(
@@ -357,7 +357,10 @@ void main() {
       agentConfigs: const {'claude': CLIAgentConfig()},
     );
 
-    await tester.enterText(find.byType(TextFormField).first, '5');
+    await tester.enterText(
+      find.byKey(const ValueKey('agent-field-claude-max_turns')),
+      '5',
+    );
     await tester.pump();
 
     final effortDropdown = find.byWidgetPredicate(
@@ -500,6 +503,13 @@ void main() {
           'flag': '--edit-format',
           'options': ['whole', 'diff'],
         },
+        {
+          'key': 'depth',
+          'type': 'number',
+          'label': 'Depth',
+          'flag': '--depth',
+          'max': 10,
+        },
       ],
     });
     const aiderConfig = CLIAgentConfig(
@@ -541,9 +551,35 @@ void main() {
       expect(agent, {'auto_commits': false, 'edit_format': 'whole'});
     });
 
-    testWidgets('extra flags are read-only without the opt-in', (
+    testWidgets('an invalid field blocks saving until it is fixed', (
       tester,
     ) async {
+      final api = await pumpScreen(
+        tester,
+        agentIds: const ['aider'],
+        agentConfigs: const {'aider': aiderConfig},
+        schemas: agentSchemaCatalog(custom: [aider]),
+        size: const Size(1400, 1000),
+      );
+      final depth = find.byKey(const ValueKey('agent-field-aider-depth'));
+      await tester.enterText(depth, '50');
+      await tester.pump(const Duration(milliseconds: 801));
+      await tester.pumpAndSettle();
+      verifyNever(() => api.patchConfig(any()));
+      expect(find.text('Fix the highlighted field to save.'), findsOneWidget);
+      final save = find.widgetWithText(FilledButton, 'Save');
+      expect(tester.widget<FilledButton>(save).onPressed, isNull);
+
+      await tester.enterText(depth, '5');
+      await tester.pump(const Duration(milliseconds: 801));
+      await tester.pumpAndSettle();
+      final patch =
+          verify(() => api.patchConfig(captureAny())).captured.last
+              as Map<String, dynamic>;
+      expect(patch['ai']['agents']['aider'], {'depth': 5});
+    });
+
+    testWidgets('extra flags are read-only without the opt-in', (tester) async {
       await pumpScreen(
         tester,
         agentIds: const ['aider'],

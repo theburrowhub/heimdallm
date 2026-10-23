@@ -5,7 +5,7 @@ import 'package:heimdallm/core/models/agent_schema.dart';
 import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/features/cli_agents/agent_schemas_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart'
-    show computeGlobalDiffForTest;
+    show computeGlobalDiffForTest, configNotifierProvider;
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -76,4 +76,30 @@ void main() {
     await container.read(agentSchemasProvider.future);
     expect(sub.read(), [...reviewAgentIds, 'aider']);
   });
+
+  test(
+    'a configured custom agent stays selectable without its schema',
+    () async {
+      final api = _MockApiClient();
+      when(() => api.fetchAgentSchemas()).thenThrow(ApiException('404'));
+      when(api.fetchConfig).thenAnswer(
+        (_) async => {
+          'agent_configs': {
+            'claude': {'model': ''},
+            'tool': {'binary': 'tool-cli', 'options': <String, dynamic>{}},
+          },
+        },
+      );
+      final container = ProviderContainer(
+        overrides: [apiClientProvider.overrideWithValue(api)],
+      );
+      addTearDown(container.dispose);
+      final sub = container.listen(reviewAgentIdsProvider, (_, _) {});
+      addTearDown(sub.close);
+      await container.read(configNotifierProvider.future);
+      // The schemas never load (the daemon answers 404).
+      expect(container.read(agentSchemasProvider).hasValue, isFalse);
+      expect(sub.read(), [...reviewAgentIds, 'tool']);
+    },
+  );
 }
