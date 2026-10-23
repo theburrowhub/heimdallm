@@ -107,6 +107,11 @@ type ExecOptions struct {
 	// --output-format json). Execute unwraps the envelope and fills
 	// ReviewResult.Usage. Ignored when extra_flags picks an output format.
 	ReportUsage bool
+	// CustomValues are a custom agent's option values, keyed by its schema's
+	// field keys. The executor validates them against the schema and turns
+	// them into flags; built-in agents ignore them. A pointer keeps
+	// ExecOptions comparable.
+	CustomValues *CustomValues
 }
 
 func effectiveExecutionTimeout(override time.Duration) time.Duration {
@@ -137,6 +142,7 @@ func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptio
 	opts.Bare = false
 	opts.DangerouslySkipPerms = false
 	opts.NoSessionPersistence = false
+	opts.CustomValues = nil
 	return opts
 }
 
@@ -480,17 +486,24 @@ var cliBinaries = map[string][]string{
 
 // binariesFor returns the executable names to resolve for an agent id.
 func binariesFor(name string) []string {
+	if agent, ok := CustomAgentFor(name); ok {
+		return []string{agent.Binary}
+	}
 	if bins, ok := cliBinaries[name]; ok {
 		return bins
 	}
 	return []string{name}
 }
 
-// SupportedCLIs lists every executable agent id, sorted.
+// SupportedCLIs lists every agent id a review can run — the built-in agents
+// and the registered custom ones — sorted.
 func SupportedCLIs() []string {
 	out := make([]string, 0, len(allowedCLIs))
 	for name := range allowedCLIs {
 		out = append(out, name)
+	}
+	for _, a := range CustomAgents() {
+		out = append(out, a.Name)
 	}
 	sort.Strings(out)
 	return out
@@ -685,7 +698,7 @@ func normalizeGeminiApprovalMode(mode string) string {
 // names describe the aliases removed from ExtraFlags so callers can emit an
 // actionable migration warning.
 func MigrateLegacyTypedExtraFlagsForCLI(cli string, opts ExecOptions) (ExecOptions, []string) {
-	if err := ValidateCLIName(cli); err != nil || strings.TrimSpace(opts.ExtraFlags) == "" {
+	if err := ValidateCLIName(cli); err != nil || IsCustomAgent(cli) || strings.TrimSpace(opts.ExtraFlags) == "" {
 		return opts, nil
 	}
 
@@ -1069,6 +1082,9 @@ func ValidateExtraFlagsForCLI(cli, flags string) error {
 }
 
 func validateExtraFlags(cli, flags string) error {
+	if agent, ok := CustomAgentFor(cli); ok {
+		return validateCustomExtraFlags(agent, flags)
+	}
 	parts := strings.Fields(flags)
 	for i := 0; i < len(parts); i++ {
 		part := parts[i]
@@ -1308,13 +1324,15 @@ func forbiddenExtraFlagError(cli, flag, category string) error {
 	return err
 }
 
-// ValidateCLIName returns an error if name is not in the known-safe allowlist.
-// This is exported so that callers outside the package (e.g. HTTP handlers) can
-// validate user-supplied CLI names before persisting them.
+// ValidateCLIName returns an error if name is neither a built-in agent nor a
+// registered custom agent. This is exported so that callers outside the
+// package (e.g. HTTP handlers) can validate user-supplied CLI names before
+// persisting them.
 // This must be called before any function that interpolates the name into a
-// shell command (e.g. resolveCLIPath).
+// shell command (e.g. resolveCLIPath). A custom agent's binary passed the
+// same character allowlist when it was registered (SetCustomAgents).
 func ValidateCLIName(name string) error {
-	if _, ok := allowedCLIs[name]; !ok {
+	if _, ok := allowedCLIs[name]; !ok && !IsCustomAgent(name) {
 		return fmt.Errorf("executor: unknown CLI %q — must be one of: %s", name, strings.Join(SupportedCLIs(), ", "))
 	}
 	return nil
@@ -1680,6 +1698,17 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 
 	var workDirFlags []string
 	switch {
+	case IsCustomAgent(cli):
+		// Heimdallm cannot know what a custom CLI loads from its working
+		// directory (configuration, hooks, plugins), so it never sees the
+		// checkout: it reviews from the diff in the prompt, in an empty
+		// workspace the daemon owns.
+		ws, err := os.MkdirTemp("", "heimdallm-custom-ws-*")
+		if err != nil {
+			return nil, fmt.Errorf("executor: create %s workspace: %w", cli, err)
+		}
+		defer os.RemoveAll(ws)
+		opts.WorkDir = ws
 	case cli == "cursor_cli":
 		// The Cursor CLI refuses to run in an untrusted workspace, and trusting
 		// one loads its .cursor configuration — MCP servers, rules, hooks — from
@@ -1861,6 +1890,11 @@ func validateExecutionRequest(cli string, opts ExecOptions) error {
 	if err := ValidateCLIName(cli); err != nil {
 		return err
 	}
+	if agent, ok := CustomAgentFor(cli); ok {
+		if _, err := customArgs(agent, opts); err != nil {
+			return err
+		}
+	}
 	if err := ValidateModel(opts.Model); err != nil {
 		return err
 	}
@@ -1882,6 +1916,20 @@ func validateExecutionRequest(cli string, opts ExecOptions) error {
 // buildArgs constructs the CLI argument list based on the CLI name and options.
 func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 	var args []string
+
+	if agent, ok := CustomAgentFor(cli); ok {
+		// validateExecutionRequest already checked the values; a value that
+		// fails here is dropped rather than passed through.
+		custom, err := customArgs(agent, opts)
+		if err != nil {
+			slog.Warn("buildArgs: custom agent values rejected, ignoring", "cli", cli, "err", err)
+		}
+		args = append(args, custom...)
+		if opts.ExtraFlags != "" {
+			args = append(args, strings.Fields(opts.ExtraFlags)...)
+		}
+		return args
+	}
 
 	switch cli {
 	case "copilot":

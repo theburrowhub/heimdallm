@@ -1,0 +1,17 @@
+{
+  "name": "cursor_cli",
+  "display_name": "Cursor CLI",
+  "description": "Cursor reviews from the diff only, in an empty workspace: trusting the PR checkout would load its .cursor configuration.",
+  "icon_color": "#6E6E6E",
+  "fields": [
+    {
+      "key": "model",
+      "type": "select",
+      "label": "Model",
+      "description": "Tuning goes in the model string, e.g. model[effort=high].",
+      "flag": "--model",
+      "allow_custom": true,
+      "empty_label": "CLI default"
+    }
+  ]
+}

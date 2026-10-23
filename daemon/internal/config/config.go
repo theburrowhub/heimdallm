@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/heimdallm/daemon/internal/agentschema"
 	"github.com/heimdallm/daemon/internal/executor"
 )
 
@@ -208,6 +209,17 @@ type CLIAgentConfig struct {
 	// agent is out of budget the review falls back to the next agent with
 	// room, or is deferred. nil = unlimited.
 	ReviewLimits *ReviewLimitsConfig `toml:"review_limits,omitempty" json:"review_limits,omitempty"`
+
+	// Custom agents (see custom_agents.go). Binary makes the table a custom
+	// agent; its schema comes inline (Schema) or from a file next to
+	// config.toml (SchemaPath), and its option values sit in Options. None of
+	// these has a JSON tag: the HTTP/store layer can never define an agent or
+	// smuggle in an option value that skipped schema validation.
+	Binary         string              `toml:"binary,omitempty" json:"-"`
+	SchemaPath     string              `toml:"schema_path,omitempty" json:"-"`
+	Schema         *AgentSchemaValue   `toml:"schema,omitempty" json:"-"`
+	Options        AgentOptions        `toml:"options,omitempty" json:"-"`
+	ResolvedSchema *agentschema.Schema `toml:"-" json:"-"` // loaded from SchemaPath
 }
 
 // DefaultAIExecutionTimeout is the user-facing representation of the
@@ -221,8 +233,15 @@ type AIConfig struct {
 	ReviewMode       string                    `toml:"review_mode"`       // "single" | "multi"
 	ExecutionTimeout string                    `toml:"execution_timeout"` // e.g. "20m", "1h"
 	Agents           map[string]CLIAgentConfig `toml:"agents"`            // keyed by CLI name
-	Repos            map[string]RepoAI         `toml:"repos"`
-	Orgs             map[string]OrgAI          `toml:"orgs"` // per-org review overrides
+
+	// AllowCustomAgentsAPI lets the HTTP API create, change and delete custom
+	// agent definitions (/agent-schemas). Off by default: a custom agent runs
+	// an executable of the operator's choosing, so defining one is a
+	// config.toml decision unless the operator opts in here. The API itself
+	// can never change this flag.
+	AllowCustomAgentsAPI bool              `toml:"allow_custom_agents_api"`
+	Repos                map[string]RepoAI `toml:"repos"`
+	Orgs                 map[string]OrgAI  `toml:"orgs"` // per-org review overrides
 
 	// InstructionAuthors are GitHub logins permitted to set persistent,
 	// per-repo review instructions via PR comment directives (#383). Resolved
@@ -781,6 +800,15 @@ func (c *Config) Validate() error {
 	// This catches legacy TOML/store rows during reload; ExecuteRaw repeats the
 	// same checks at the subprocess boundary as defense in depth.
 	for name, a := range c.AI.Agents {
+		if a.IsCustom() {
+			if err := c.validateCustomAgent(name, a); err != nil {
+				return err
+			}
+			continue
+		}
+		if a.SchemaPath != "" || a.Schema != nil || len(a.Options) > 0 {
+			return fmt.Errorf("config: agents[%s]: schema, schema_path and options only apply to custom agents (set binary)", name)
+		}
 		// Preserve unknown legacy profiles as inert configuration. They cannot
 		// be selected by Detect/ExecuteRaw, and every HTTP write still rejects
 		// unknown CLI names, but an unused historical section must not prevent
@@ -854,6 +882,11 @@ func (c *Config) Validate() error {
 // a user's dormant configuration during an upgrade.
 func (c *Config) sanitizeLegacyAgentExecutionPolicy(source string) {
 	for name, agent := range c.AI.Agents {
+		if agent.IsCustom() {
+			// Custom agents have no legacy settings; Validate checks them
+			// against their schema.
+			continue
+		}
 		if err := executor.ValidateCLIName(name); err != nil {
 			slog.Warn("config: preserving inert legacy agent profile for unknown CLI",
 				"source", source, "agent", name, "err", err)
@@ -955,6 +988,11 @@ func SanitizeLegacyAgentExecutionPolicyMap(m map[string]any, source string) erro
 		return err
 	}
 	for name, rawAgent := range agents {
+		if agentMap, ok := rawAgent.(map[string]any); ok && tableIsCustomAgent(agentMap) {
+			// A custom agent's keys are its schema's options, not the
+			// built-in typed settings this migration knows.
+			continue
+		}
 		if err := executor.ValidateCLIName(name); err != nil {
 			// Unknown profiles are intentionally inert and preserved exactly.
 			// Do not let newly introduced validation for supported providers
@@ -1349,6 +1387,9 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 	if err := toml.Unmarshal([]byte(canonical.String()), &cfg); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+	}
+	if err := cfg.resolveCustomAgentSchemas(filepath.Dir(path)); err != nil {
+		return nil, err
 	}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()

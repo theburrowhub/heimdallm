@@ -103,6 +103,16 @@ func walkKnownTOMLValue(raw any, schema reflect.Type, path string) (any, error) 
 }
 
 func walkKnownTOMLStruct(table map[string]any, schema reflect.Type, path string) (map[string]any, error) {
+	// A custom agent's table carries its schema's option values next to the
+	// shared keys; they are gathered into options instead of being dropped
+	// as unknown keys.
+	if schema == cliAgentSchemaType && tableIsCustomAgent(table) {
+		return projectCustomAgentTable(table, path)
+	}
+	return walkKnownTOMLStructFields(table, schema, path)
+}
+
+func walkKnownTOMLStructFields(table map[string]any, schema reflect.Type, path string) (map[string]any, error) {
 	projected := make(map[string]any)
 	for i := 0; i < schema.NumField(); i++ {
 		field := schema.Field(i)

@@ -1,0 +1,24 @@
+{
+  "name": "copilot",
+  "display_name": "GitHub Copilot CLI",
+  "icon_color": "#8957E5",
+  "fields": [
+    {
+      "key": "model",
+      "type": "select",
+      "label": "Model",
+      "flag": "--model",
+      "allow_custom": true,
+      "empty_label": "CLI default"
+    },
+    {
+      "key": "effort",
+      "type": "select",
+      "label": "--reasoning-effort",
+      "description": "How hard Copilot reasons before answering. Higher effort improves quality but uses more premium requests and time.",
+      "flag": "--reasoning-effort",
+      "options": ["low", "medium", "high", "max"],
+      "empty_label": "CLI default"
+    }
+  ]
+}

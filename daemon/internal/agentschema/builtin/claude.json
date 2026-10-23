@@ -1,0 +1,67 @@
+{
+  "name": "claude",
+  "display_name": "Claude Code",
+  "icon_color": "#D97757",
+  "fields": [
+    {
+      "key": "model",
+      "type": "select",
+      "label": "Model",
+      "flag": "--model",
+      "options": ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+      "allow_custom": true,
+      "empty_label": "CLI default"
+    },
+    {
+      "key": "max_turns",
+      "type": "number",
+      "label": "--max-turns",
+      "description": "Caps the agentic turns of a review. Empty or 0 leaves the CLI default.",
+      "flag": "--max-turns",
+      "min": 0
+    },
+    {
+      "key": "effort",
+      "type": "select",
+      "label": "--effort",
+      "description": "How much compute Claude uses.\nlow = quick scan · medium = balanced · high = thorough · max = exhaustive.\nHigher effort improves quality but increases cost and latency.",
+      "flag": "--effort",
+      "options": ["low", "medium", "high", "max"],
+      "empty_label": "Not set (CLI default)"
+    },
+    {
+      "key": "permission_mode",
+      "type": "select",
+      "label": "--permission-mode",
+      "description": "Controls how Claude handles tool permissions.\ndefault: standard prompts · auto: minimal prompts · acceptEdits: auto-accept file edits · dontAsk: never ask.",
+      "flag": "--permission-mode",
+      "options": ["default", "auto", "acceptEdits", "dontAsk"],
+      "empty_label": "Not set (CLI default)"
+    },
+    {
+      "key": "bare",
+      "type": "bool",
+      "label": "--bare",
+      "description": "Minimal mode: disables auto-memory, hooks, LSP, plugins and CLAUDE.md discovery.\nFaster and more predictable for automated reviews.",
+      "flag": "--bare",
+      "default": false
+    },
+    {
+      "key": "no_session_persistence",
+      "type": "bool",
+      "label": "--no-session-persistence",
+      "description": "Disables saving sessions to disk.\nKeeps automated reviews clean and isolated — prevents session accumulation over time.",
+      "flag": "--no-session-persistence",
+      "default": false
+    },
+    {
+      "key": "dangerously_skip_perms",
+      "type": "bool",
+      "label": "--dangerously-skip-permissions",
+      "description": "⚠️ Bypasses ALL permission checks.\nThis screen can only disable it. To enable it, edit config.toml directly in a sandboxed or trusted environment.",
+      "flag": "--dangerously-skip-permissions",
+      "default": false,
+      "warning": true
+    }
+  ]
+}

@@ -65,7 +65,22 @@ func agentExecOptions(cli string, agentCfg config.CLIAgentConfig, globalTimeout,
 		DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 		NoSessionPersistence: agentCfg.NoSessionPersistence,
 		Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
+		CustomValues:         customAgentValues(cli, agentCfg),
 	}
+}
+
+// customAgentValues returns a custom agent's option values for the executor,
+// which validates them against the agent's schema and turns them into flags.
+// Built-in agents have none.
+func customAgentValues(cli string, agentCfg config.CLIAgentConfig) *executor.CustomValues {
+	if !agentCfg.IsCustom() || !executor.IsCustomAgent(cli) {
+		return nil
+	}
+	values := make(map[string]any, len(agentCfg.Options))
+	for k, v := range agentCfg.Options {
+		values[k] = v
+	}
+	return executor.NewCustomValues(values)
 }
 
 // flowAgents lists the distinct agents a flow can pick.
@@ -203,7 +218,7 @@ func flowListing(c *config.Config, installed map[string]bool) map[string]any {
 		agents = append(agents, FlowAgent{
 			ID:           id,
 			Installed:    installed[id],
-			ReviewOnly:   executor.IsHTTPOnly(id),
+			ReviewOnly:   executor.IsHTTPOnly(id) || executor.IsCustomAgent(id), // custom agents only review too
 			WriteCapable: executor.WriteCapable(id),
 			CanDraft:     flows.CanDraft(id),
 		})

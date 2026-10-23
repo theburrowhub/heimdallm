@@ -58,6 +58,7 @@ func IsQuotaError(err error) bool {
 var readOnlyAgents = map[string]bool{"copilot": true, "cursor_cli": true, "openrouter": true}
 
 // WriteCapable reports whether cli can edit files (merge conflict resolution).
+// Custom agents only review: they run outside the checkout.
 func WriteCapable(cli string) bool {
-	return ValidateCLIName(cli) == nil && !readOnlyAgents[cli]
+	return ValidateCLIName(cli) == nil && !readOnlyAgents[cli] && !IsCustomAgent(cli)
 }

@@ -174,7 +174,10 @@ func mergeStoredAgentConfig(cli string, base CLIAgentConfig, payload json.RawMes
 	if fields == nil {
 		return base, false, fmt.Errorf("agent config must be an object")
 	}
-	if err := executor.ValidateCLIName(cli); err != nil {
+	// A custom agent declared in this config counts as known even before the
+	// reload that registers it with the executor: the store layer is merged
+	// first, and its overrides must not depend on the previous registry.
+	if err := executor.ValidateCLIName(cli); err != nil && !base.IsCustom() {
 		slog.Warn("config: ignoring store override for unknown CLI",
 			"agent", cli, "err", err)
 		return base, false, nil
@@ -253,7 +256,12 @@ func mergeStoredAgentConfig(cli string, base CLIAgentConfig, payload json.RawMes
 			candidate.ApprovalMode = normalized
 		}
 	}
-	if storeAgentFieldPresent(fields, "extra_flags") {
+	if storeAgentFieldPresent(fields, "extra_flags") && base.IsCustom() {
+		// A custom agent's extra_flags are a config.toml decision (PUT
+		// /config refuses them); never take them from the store.
+		warnIgnoredStoreAgentField(cli, "extra_flags", fmt.Errorf("custom agents take extra_flags from config.toml only"))
+		candidate.ExtraFlags = base.ExtraFlags
+	} else if storeAgentFieldPresent(fields, "extra_flags") {
 		modelPresent := storeAgentFieldPresent(fields, "model")
 		maxTurnsPresent := storeAgentFieldPresent(fields, "max_turns")
 		effortPresent := storeAgentFieldPresent(fields, "effort")
