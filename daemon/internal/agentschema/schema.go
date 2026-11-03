@@ -392,17 +392,19 @@ var deniedBinaries = map[string]bool{
 	"docker": true, "podman": true, "kubectl": true, "ssh": true, "nc": true,
 	"ncat": true, "socat": true, "curl": true, "wget": true, "git": true, "find": true,
 	"heimdallm": true, "ipython": true, "bpython": true, "php-win": true,
-	"python-dbg": true,
+	"python-dbg": true, "python_d": true, "pythonw_d": true,
 }
 
 // interpreterFamilies match versioned or variant names of the denied
 // programs: python3, python3.12, python3.7m, ksh93, tclsh8.6, ipython3,
 // perl5.36, luajit-2.1.0-beta3… The windowless Windows launchers (pythonw,
-// pypyw, javaw, rubyw, wperl) run code the same way as their interpreter.
+// pypyw, javaw, rubyw, wperl), PHP's other runners (php-cgi, phpdbg, also
+// versioned as php-cgi8.2) and Java Web Start (javaws) run code the same way
+// as their interpreter.
 var interpreterFamilies = []string{
 	"python", "pythonw", "pypy", "pypyw", "ipython", "bpython", "perl", "wperl",
-	"ruby", "rubyw", "irb", "php", "node", "lua", "luajit", "deno", "bun",
-	"julia", "rscript", "java", "javaw",
+	"ruby", "rubyw", "irb", "php", "php-cgi", "phpdbg", "node", "lua", "luajit",
+	"deno", "bun", "julia", "rscript", "java", "javaw", "javaws",
 	"tclsh", "wish", "awk", "gawk", "sh", "ash", "dash", "bash", "zsh",
 	"ksh", "mksh", "csh", "tcsh", "fish", "pwsh", "powershell",
 }

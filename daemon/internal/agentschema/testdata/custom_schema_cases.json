@@ -2110,5 +2110,117 @@
     }
    ]
   }
+ },
+ {
+  "case": "php cgi launcher",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "php-cgi",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "versioned php cgi launcher",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "php-cgi8.2",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "php debugger",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "phpdbg",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "versioned php debugger",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "phpdbg8.2",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "java web start",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "javaws",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windows debug python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python_d.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windows debug windowless python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "pythonw_d.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
  }
 ]
