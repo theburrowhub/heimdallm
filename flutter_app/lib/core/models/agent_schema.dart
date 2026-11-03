@@ -322,7 +322,7 @@ const deniedAgentBinaries = {
   'dotnet', 'go', 'make', 'gdb', 'lldb', 'vim', 'vi', 'nvim', 'emacs', 'ed', //
   'ex', 'docker', 'podman', 'kubectl', 'ssh', 'nc', 'ncat', 'socat', 'curl', //
   'wget', 'git', 'find', 'heimdallm', 'ipython', 'bpython', 'php-win', //
-  'python-dbg', 'python_d', 'pythonw_d', //
+  'python-dbg', 'python_d', 'pythonw_d', 'jrunscript', 'jjs', //
 };
 
 /// Versioned or variant names of the denied programs: python3, python3.12,

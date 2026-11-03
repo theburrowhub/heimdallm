@@ -392,7 +392,8 @@ var deniedBinaries = map[string]bool{
 	"docker": true, "podman": true, "kubectl": true, "ssh": true, "nc": true,
 	"ncat": true, "socat": true, "curl": true, "wget": true, "git": true, "find": true,
 	"heimdallm": true, "ipython": true, "bpython": true, "php-win": true,
-	"python-dbg": true, "python_d": true, "pythonw_d": true,
+	"python-dbg": true, "python_d": true, "pythonw_d": true, "jrunscript": true,
+	"jjs": true,
 }
 
 // interpreterFamilies match versioned or variant names of the denied

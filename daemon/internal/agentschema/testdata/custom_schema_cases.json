@@ -2222,5 +2222,37 @@
     }
    ]
   }
+ },
+ {
+  "case": "jdk script runner",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "jrunscript",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "nashorn shell",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "jjs.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
  }
 ]
