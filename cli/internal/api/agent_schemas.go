@@ -269,7 +269,7 @@ func (s AgentSchema) ValidateCustom(reserved map[string]bool) []string {
 		errs = append(errs, "icon color: a #RRGGBB colour")
 	}
 	if len(s.Fields) > MaxSchemaFields {
-		errs = append(errs, fmt.Sprintf("%d options, at most %d", len(s.Fields), MaxSchemaFields))
+		errs = append(errs, fmt.Sprintf("fields: %d fields, at most %d", len(s.Fields), MaxSchemaFields))
 	}
 	keys, flags := map[string]bool{}, map[string]bool{}
 	for i, f := range s.Fields {
@@ -483,7 +483,8 @@ func isDangerousFlag(flag string) bool {
 
 // deniedBinaries are shells, interpreters and launchers that run their input
 // or another program: the review prompt reaches a custom agent on stdin, where
-// they would execute it. Mirrors the daemon's list; entries are lowercase.
+// they would execute it. Mirrors the daemon's list (TestDenylistMatchesDaemon
+// compares them); entries are lowercase.
 var deniedBinaries = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "ksh": true,
 	"mksh": true, "csh": true, "tcsh": true, "ash": true, "busybox": true, "nu": true,

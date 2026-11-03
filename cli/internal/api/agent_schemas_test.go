@@ -3,11 +3,16 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -170,14 +175,27 @@ func TestValidateCustom(t *testing.T) {
 	}
 }
 
+// daemonSchemaDir is the daemon's agentschema package. The CLI is a separate
+// Go module but lives in the same repository, and its tests need the whole
+// checkout: the daemon's rules are the reference these tests compare to.
+// They fail rather than skip without it, so a broken path cannot turn the
+// drift checks into silent passes.
+const daemonSchemaDir = "../../../daemon/internal/agentschema"
+
+func readDaemonFile(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(daemonSchemaDir, name))
+	if err != nil {
+		t.Fatalf("reading the daemon's %s (the CLI tests need the full repository checkout): %v", name, err)
+	}
+	return data
+}
+
 // The daemon (TestSharedCustomSchemaCases) and the app run the same cases, so
 // the wizard and `agents add` accept exactly the schemas the daemon loads.
 // Each schema is decoded the way readSchemaFile decodes `agents add -f`.
 func TestSharedCustomSchemaCases(t *testing.T) {
-	data, err := os.ReadFile("../../../daemon/internal/agentschema/testdata/custom_schema_cases.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := readDaemonFile(t, "testdata/custom_schema_cases.json")
 	var cases []struct {
 		Case   string          `json:"case"`
 		Valid  bool            `json:"valid"`
@@ -200,6 +218,65 @@ func TestSharedCustomSchemaCases(t *testing.T) {
 				t.Fatalf("valid = %v, want %v (errors: %v)", len(errs) == 0, c.Valid, errs)
 			}
 		})
+	}
+}
+
+// The shared cases only exercise some of the denied binaries, so the tables
+// themselves are compared with the daemon's: an entry added to or removed
+// from one list fails here instead of drifting.
+func TestDenylistMatchesDaemon(t *testing.T) {
+	src := readDaemonFile(t, "schema.go")
+	file, err := parser.ParseFile(token.NewFileSet(), "schema.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lit := func(e ast.Expr) string {
+		b, ok := e.(*ast.BasicLit)
+		if !ok || b.Kind != token.STRING {
+			t.Fatalf("unexpected expression %T in the daemon's lists", e)
+		}
+		v, err := strconv.Unquote(b.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	found := map[string]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		spec, ok := n.(*ast.ValueSpec)
+		if !ok || len(spec.Names) != 1 || len(spec.Values) != 1 {
+			return true
+		}
+		name := spec.Names[0].Name
+		switch name {
+		case "deniedBinaries":
+			got := map[string]bool{}
+			for _, e := range spec.Values[0].(*ast.CompositeLit).Elts {
+				got[lit(e.(*ast.KeyValueExpr).Key)] = true
+			}
+			if !reflect.DeepEqual(got, deniedBinaries) {
+				t.Errorf("deniedBinaries differs from the daemon's:\ndaemon %v\ncli    %v", got, deniedBinaries)
+			}
+		case "interpreterFamilies":
+			var got []string
+			for _, e := range spec.Values[0].(*ast.CompositeLit).Elts {
+				got = append(got, lit(e))
+			}
+			if !reflect.DeepEqual(got, interpreterFamilies) {
+				t.Errorf("interpreterFamilies differs from the daemon's:\ndaemon %v\ncli    %v", got, interpreterFamilies)
+			}
+		case "interpreterVersionRe":
+			if got := lit(spec.Values[0].(*ast.CallExpr).Args[0]); got != interpreterVersionRe.String() {
+				t.Errorf("interpreterVersionRe = %q, the daemon's is %q", interpreterVersionRe.String(), got)
+			}
+		default:
+			return true
+		}
+		found[name] = true
+		return true
+	})
+	if len(found) != 3 {
+		t.Fatalf("found %v in the daemon's schema.go; want deniedBinaries, interpreterFamilies and interpreterVersionRe", found)
 	}
 }
 
