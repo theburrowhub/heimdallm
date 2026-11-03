@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -166,6 +167,75 @@ func TestValidateCustom(t *testing.T) {
 	}
 	if !ValidAgentName("aider") || ValidAgentName("Aider") || !ValidBinary("aider") || ValidBinary("a/b") || !ValidFlag("-x") || ValidFlag("x") {
 		t.Fatal("validators")
+	}
+}
+
+// The daemon (TestSharedCustomSchemaCases) and the app run the same cases, so
+// the wizard and `agents add` accept exactly the schemas the daemon loads.
+// Each schema is decoded the way readSchemaFile decodes `agents add -f`.
+func TestSharedCustomSchemaCases(t *testing.T) {
+	data, err := os.ReadFile("../../../daemon/internal/agentschema/testdata/custom_schema_cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Case   string          `json:"case"`
+		Valid  bool            `json:"valid"`
+		Schema json.RawMessage `json:"schema"`
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) == 0 {
+		t.Fatal("no shared cases")
+	}
+	for _, c := range cases {
+		t.Run(c.Case, func(t *testing.T) {
+			var s AgentSchema
+			if err := json.Unmarshal(c.Schema, &s); err != nil {
+				t.Fatal(err)
+			}
+			errs := s.ValidateCustom(map[string]bool{"claude": true})
+			if (len(errs) == 0) != c.Valid {
+				t.Fatalf("valid = %v, want %v (errors: %v)", len(errs) == 0, c.Valid, errs)
+			}
+		})
+	}
+}
+
+// The wizard stores a whole number default as int64 (ParseValue), not as the
+// float64 a JSON file decodes to; both must be checked against the bounds.
+func TestValidateCustomNumberDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		def   any
+		valid bool
+	}{
+		{int64(5), true}, {float64(5), true}, {json.Number("5"), true}, {5, true},
+		{int64(50), false}, {int64(0), false}, {float64(-1), false}, {"5", false}, {true, false},
+		{json.Number("five"), false},
+	} {
+		s := AgentSchema{Name: "aider", Binary: "aider", Fields: []AgentSchemaField{
+			{Key: "n", Type: FieldNumber, Label: "N", Flag: "--n", Min: ptr(1), Max: ptr(10), Default: tc.def},
+		}}
+		if errs := s.ValidateCustom(nil); (len(errs) == 0) != tc.valid {
+			t.Errorf("default %#v: errors = %v, want valid %v", tc.def, errs, tc.valid)
+		}
+	}
+}
+
+func TestValidateCustomTextDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		def   string
+		valid bool
+	}{
+		{"fine", true}, {"bad\x01", false}, {strings.Repeat("a", MaxTextValueLen+1), false},
+	} {
+		s := AgentSchema{Name: "aider", Binary: "aider", Fields: []AgentSchemaField{
+			{Key: "t", Type: FieldText, Label: "T", Flag: "--t", Default: tc.def},
+		}}
+		if errs := s.ValidateCustom(nil); (len(errs) == 0) != tc.valid {
+			t.Errorf("default %q: errors = %v, want valid %v", tc.def, errs, tc.valid)
+		}
 	}
 }
 

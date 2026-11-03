@@ -350,8 +350,9 @@ func TestBuiltins(t *testing.T) {
 }
 
 // testdata/custom_schema_cases.json is shared with the app's tests
-// (flutter_app/test/core/models/agent_schema_test.dart), so the app's
-// client-side checks cannot drift from these rules.
+// (flutter_app/test/core/models/agent_schema_test.dart) and the CLI's
+// (cli/internal/api/agent_schemas_test.go), so their client-side checks
+// cannot drift from these rules.
 func TestSharedCustomSchemaCases(t *testing.T) {
 	data, err := os.ReadFile("testdata/custom_schema_cases.json")
 	if err != nil {

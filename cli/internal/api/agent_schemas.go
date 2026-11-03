@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Field types of an agent schema. Mirrors the daemon's agentschema package.
@@ -203,13 +204,27 @@ func containsString(list []string, v string) bool {
 	return false
 }
 
-// Client-side checks that mirror the daemon's custom schema rules, so the
-// wizard can point at a problem before sending. The daemon validates again.
+// Client-side checks that mirror the daemon's custom schema rules
+// (daemon/internal/agentschema), so the wizard and `agents add` point at a
+// problem before sending. The daemon validates again. The daemon, the app and
+// this package all run daemon/internal/agentschema/testdata/
+// custom_schema_cases.json, so the three cannot drift apart.
 var (
 	agentNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 	fieldKeyRe  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 	flagRe      = regexp.MustCompile(`^--?[A-Za-z0-9][A-Za-z0-9-]*$`)
 	binaryRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	iconColorRe = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
+)
+
+// Limits of the daemon's agentschema package.
+const (
+	MaxSchemaFields   = 64
+	MaxSchemaOptions  = 200
+	MaxLabelLen       = 128
+	MaxDescriptionLen = 1000
+	MaxOptionLen      = 128
+	MaxTextValueLen   = 512
 )
 
 // ReservedFieldKeys are settings every agent shares; a field may not use them.
@@ -217,6 +232,9 @@ var ReservedFieldKeys = map[string]bool{
 	"binary": true, "schema": true, "schema_path": true, "options": true,
 	"prompt": true, "extra_flags": true, "execution_timeout": true, "review_limits": true,
 }
+
+// modelKey is the shared model setting a schema may declare.
+const modelKey = "model"
 
 // ValidAgentName reports whether name can name a custom agent.
 func ValidAgentName(name string) bool { return agentNameRe.MatchString(name) }
@@ -238,6 +256,20 @@ func (s AgentSchema) ValidateCustom(reserved map[string]bool) []string {
 	}
 	if !ValidBinary(s.Binary) {
 		errs = append(errs, "binary: an executable name on PATH, without a path")
+	} else if isDeniedBinary(s.Binary) {
+		errs = append(errs, fmt.Sprintf("binary: %q is a shell or an interpreter; it would execute the review prompt it reads on stdin", s.Binary))
+	}
+	if p := textProblem(s.DisplayName, MaxLabelLen); p != "" {
+		errs = append(errs, "display name: "+p)
+	}
+	if p := textProblem(s.Description, MaxDescriptionLen); p != "" {
+		errs = append(errs, "description: "+p)
+	}
+	if s.IconColor != "" && !iconColorRe.MatchString(s.IconColor) {
+		errs = append(errs, "icon color: a #RRGGBB colour")
+	}
+	if len(s.Fields) > MaxSchemaFields {
+		errs = append(errs, fmt.Sprintf("%d options, at most %d", len(s.Fields), MaxSchemaFields))
 	}
 	keys, flags := map[string]bool{}, map[string]bool{}
 	for i, f := range s.Fields {
@@ -254,14 +286,6 @@ func (s AgentSchema) ValidateCustom(reserved map[string]bool) []string {
 			errs = append(errs, where+": key is used twice")
 		}
 		keys[f.Key] = true
-		switch f.Type {
-		case FieldSelect, FieldBool, FieldNumber, FieldText:
-		default:
-			errs = append(errs, where+": type must be select, bool, number or text")
-		}
-		if strings.TrimSpace(f.Label) == "" {
-			errs = append(errs, where+": label is required")
-		}
 		checkFlags := []string{f.Flag}
 		if f.FalseFlag != "" {
 			checkFlags = append(checkFlags, f.FalseFlag)
@@ -274,17 +298,248 @@ func (s AgentSchema) ValidateCustom(reserved map[string]bool) []string {
 			}
 			flags[flag] = true
 		}
-		if f.Type == FieldSelect && len(f.Options) == 0 && !f.AllowCustom {
-			errs = append(errs, where+": a dropdown needs options")
-		}
-		for _, o := range f.Options {
-			if strings.HasPrefix(strings.TrimSpace(o), "-") {
-				errs = append(errs, where+": options must not begin with '-'")
-				break
-			}
+		for _, p := range f.problems() {
+			errs = append(errs, where+": "+p)
 		}
 	}
 	return errs
+}
+
+// problems lists what the daemon's agentschema refuses in one field, besides
+// its key and flags (ValidateCustom checks those across fields).
+func (f AgentSchemaField) problems() []string {
+	var errs []string
+	if strings.TrimSpace(f.Label) == "" {
+		errs = append(errs, "label is required")
+	} else if p := textProblem(f.Label, MaxLabelLen); p != "" {
+		errs = append(errs, "label "+p)
+	}
+	if p := textProblem(f.Description, MaxDescriptionLen); p != "" {
+		errs = append(errs, "description "+p)
+	}
+	if p := textProblem(f.EmptyLabel, MaxLabelLen); p != "" {
+		errs = append(errs, "empty label "+p)
+	}
+	if f.FalseFlag != "" && f.Type != FieldBool {
+		errs = append(errs, "a false flag only applies to a toggle (bool)")
+	}
+	if (isDangerousFlag(f.Flag) || isDangerousFlag(f.FalseFlag)) && (f.Type != FieldBool || !f.Warning) {
+		errs = append(errs, "a --danger*/--allow-dangerously* flag must be a toggle (bool) marked warning")
+	}
+	switch f.Type {
+	case FieldSelect:
+		if len(f.Options) == 0 && !f.AllowCustom {
+			errs = append(errs, "a dropdown needs options")
+		}
+		if len(f.Options) > MaxSchemaOptions {
+			errs = append(errs, fmt.Sprintf("%d choices, at most %d", len(f.Options), MaxSchemaOptions))
+		}
+		seen := map[string]bool{}
+		for _, o := range f.Options {
+			switch {
+			case o == "":
+				errs = append(errs, "choices must not be empty; the empty choice is implicit")
+			case argValueProblem(o, MaxOptionLen) != "":
+				errs = append(errs, fmt.Sprintf("choice %q %s", o, argValueProblem(o, MaxOptionLen)))
+			case seen[o]:
+				errs = append(errs, fmt.Sprintf("choice %q is listed twice", o))
+			}
+			seen[o] = true
+		}
+	case FieldBool, FieldText:
+	case FieldNumber:
+		if f.Min != nil && f.Max != nil && *f.Min > *f.Max {
+			errs = append(errs, fmt.Sprintf("min %v is above max %v", *f.Min, *f.Max))
+		}
+		for _, b := range []*float64{f.Min, f.Max} {
+			if b != nil && (math.IsNaN(*b) || math.IsInf(*b, 0) || *b < 0) {
+				errs = append(errs, "min and max must be finite and not negative: a negative value would reach the CLI as an option")
+				break
+			}
+		}
+	default:
+		errs = append(errs, "type must be select, bool, number or text")
+	}
+	if f.Type != FieldSelect && (len(f.Options) > 0 || f.AllowCustom) {
+		errs = append(errs, "choices and allow_custom only apply to a dropdown (select)")
+	}
+	if f.Type != FieldNumber && (f.Min != nil || f.Max != nil) {
+		errs = append(errs, "min and max only apply to a number")
+	}
+	if f.Warning && f.Type != FieldBool {
+		errs = append(errs, "warning only applies to a toggle (bool)")
+	}
+	if f.Key == modelKey && f.Type != FieldSelect && f.Type != FieldText {
+		errs = append(errs, "model must be a dropdown (select) or text")
+	}
+	if f.Default != nil {
+		if p := f.defaultProblem(); p != "" {
+			errs = append(errs, "default: "+p)
+		} else if f.Warning && f.Default == true {
+			errs = append(errs, "a warning toggle must default to off")
+		}
+	}
+	return errs
+}
+
+// defaultProblem checks the field's default the way the daemon's
+// normalizeValue does. Empty when it is fine.
+func (f AgentSchemaField) defaultProblem() string {
+	switch f.Type {
+	case FieldBool:
+		if _, ok := f.Default.(bool); !ok {
+			return fmt.Sprintf("must be true or false, got %T", f.Default)
+		}
+	case FieldNumber:
+		n, ok := toFloat(f.Default)
+		switch {
+		case !ok:
+			return fmt.Sprintf("must be a number, got %T", f.Default)
+		case math.IsNaN(n) || math.IsInf(n, 0):
+			return "must be a finite number"
+		case n < 0:
+			return fmt.Sprintf("%v must not be negative", n)
+		case f.Min != nil && n < *f.Min:
+			return fmt.Sprintf("%v is below the minimum %v", n, *f.Min)
+		case f.Max != nil && n > *f.Max:
+			return fmt.Sprintf("%v is above the maximum %v", n, *f.Max)
+		}
+	case FieldSelect, FieldText:
+		v, ok := f.Default.(string)
+		if !ok {
+			return fmt.Sprintf("must be a string, got %T", f.Default)
+		}
+		v = strings.TrimSpace(v)
+		max := MaxTextValueLen
+		if f.Type == FieldSelect {
+			max = MaxOptionLen
+		}
+		if p := argValueProblem(v, max); p != "" {
+			return p
+		}
+		if strings.EqualFold(v, "bypassPermissions") {
+			return fmt.Sprintf("%q is never passed to an agent: it removes every permission check", v)
+		}
+		if f.Type == FieldSelect && v != "" && !f.AllowCustom && !containsString(f.Options, v) {
+			return fmt.Sprintf("%q is not one of: %s", v, strings.Join(f.Options, ", "))
+		}
+	}
+	return ""
+}
+
+// toFloat accepts the numbers a default can hold: float64 from a JSON file,
+// int64 from the wizard (ParseValue), json.Number from a UseNumber decoder.
+func toFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// textProblem checks a label or description: its length and no control
+// characters other than a newline. Empty when it is fine.
+func textProblem(v string, max int) string {
+	if len([]rune(v)) > max {
+		return fmt.Sprintf("is longer than %d characters", max)
+	}
+	for _, r := range v {
+		if r != '\n' && unicode.IsControl(r) {
+			return "contains a control character"
+		}
+	}
+	return ""
+}
+
+// argValueProblem checks a value that reaches the CLI as a flag's value.
+// Empty when it is fine.
+func argValueProblem(v string, max int) string {
+	if len([]rune(v)) > max {
+		return fmt.Sprintf("is longer than %d characters", max)
+	}
+	if strings.HasPrefix(strings.TrimSpace(v), "-") {
+		return "must not begin with '-': the CLI would read it as another option"
+	}
+	for _, r := range v {
+		if unicode.IsControl(r) {
+			return "contains a control character"
+		}
+	}
+	return ""
+}
+
+func isDangerousFlag(flag string) bool {
+	lower := strings.ToLower(flag)
+	return strings.HasPrefix(lower, "--danger") || strings.HasPrefix(lower, "--allow-dangerously")
+}
+
+// deniedBinaries are shells, interpreters and launchers that run their input
+// or another program: the review prompt reaches a custom agent on stdin, where
+// they would execute it. Mirrors the daemon's list; entries are lowercase.
+var deniedBinaries = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "ksh": true,
+	"mksh": true, "csh": true, "tcsh": true, "ash": true, "busybox": true, "nu": true,
+	"elvish": true, "xonsh": true, "pwsh": true, "powershell": true, "cmd": true,
+	"env": true, "sudo": true, "doas": true, "su": true, "xargs": true, "nohup": true,
+	"timeout": true, "nice": true, "exec": true, "eval": true, "command": true,
+	"script": true, "expect": true, "watch": true, "time": true, "stdbuf": true,
+	"node": true, "nodejs": true, "deno": true, "bun": true, "npx": true, "bunx": true,
+	"ruby": true, "irb": true, "perl": true, "php": true, "lua": true, "luajit": true,
+	"tclsh": true, "wish": true, "osascript": true, "awk": true, "gawk": true,
+	"mawk": true, "nawk": true, "sed": true, "jshell": true, "java": true,
+	"groovy": true, "scala": true, "r": true, "rscript": true, "julia": true,
+	"swift": true, "dotnet": true, "go": true, "make": true, "gdb": true, "lldb": true,
+	"vim": true, "vi": true, "nvim": true, "emacs": true, "ed": true, "ex": true,
+	"docker": true, "podman": true, "kubectl": true, "ssh": true, "nc": true,
+	"ncat": true, "socat": true, "curl": true, "wget": true, "git": true, "find": true,
+	"heimdallm": true, "ipython": true, "bpython": true, "php-win": true,
+	"python-dbg": true, "python_d": true, "pythonw_d": true, "jrunscript": true,
+	"jjs": true,
+}
+
+// interpreterFamilies match versioned or variant names of the denied
+// programs (python3.12, ksh93, luajit-2.1.0-beta3, php-cgi8.2…).
+var interpreterFamilies = []string{
+	"python", "pythonw", "pypy", "pypyw", "ipython", "bpython", "perl", "wperl",
+	"ruby", "rubyw", "irb", "php", "php-cgi", "phpdbg", "node", "lua", "luajit",
+	"deno", "bun", "julia", "rscript", "java", "javaw", "javaws",
+	"tclsh", "wish", "awk", "gawk", "sh", "ash", "dash", "bash", "zsh",
+	"ksh", "mksh", "csh", "tcsh", "fish", "pwsh", "powershell",
+}
+
+// interpreterVersionRe matches what may follow a family's name in a versioned
+// build: separators, then a version that starts with a digit. Letters count
+// only after a digit, which keeps javac, shellcheck and pythonic allowed.
+var interpreterVersionRe = regexp.MustCompile(`^[.-]*([0-9][0-9a-z._-]*)?$`)
+
+// isDeniedBinary compares case-insensitively and without a Windows executable
+// suffix or trailing dots and spaces, like the daemon.
+func isDeniedBinary(binary string) bool {
+	name := strings.TrimRight(strings.ToLower(binary), ". ")
+	for _, ext := range []string{".exe", ".com", ".cmd", ".bat"} {
+		if strings.HasSuffix(name, ext) {
+			name = strings.TrimRight(strings.TrimSuffix(name, ext), ". ")
+			break
+		}
+	}
+	if deniedBinaries[name] {
+		return true
+	}
+	for _, prefix := range interpreterFamilies {
+		if rest, ok := strings.CutPrefix(name, prefix); ok &&
+			(rest == "" || interpreterVersionRe.MatchString(rest)) {
+			return true
+		}
+	}
+	return false
 }
 
 // TOMLSnippet is the config.toml section that declares the agent with its
