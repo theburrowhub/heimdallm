@@ -318,6 +318,166 @@
   }
  },
  {
+  "case": "windowless java",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "javaw.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless ruby",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "rubyw",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless perl",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "wperl",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless pypy",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "pypyw",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless php",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "php-win.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "debug python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python-dbg",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "node under its debian name",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "nodejs",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "platform-tagged python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3-x86_64",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "debug-tagged python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3.12_d",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "tool named after a versioned interpreter",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "php8.2-fpm",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
   "case": "shellcheck is fine",
   "valid": true,
   "schema": {

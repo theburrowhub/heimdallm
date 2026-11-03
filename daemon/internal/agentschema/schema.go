@@ -391,25 +391,30 @@ var deniedBinaries = map[string]bool{
 	"vim": true, "vi": true, "nvim": true, "emacs": true, "ed": true, "ex": true,
 	"docker": true, "podman": true, "kubectl": true, "ssh": true, "nc": true,
 	"ncat": true, "socat": true, "curl": true, "wget": true, "git": true, "find": true,
-	"heimdallm": true, "ipython": true, "bpython": true,
+	"heimdallm": true, "ipython": true, "bpython": true, "php-win": true,
+	"python-dbg": true,
 }
 
 // interpreterFamilies match versioned or variant names of the denied
-// programs: python3, python3.12, python3.7m, pythonw, ksh93, tclsh8.6,
-// ipython3, perl5.36, luajit-2.1.0-beta3…
+// programs: python3, python3.12, python3.7m, ksh93, tclsh8.6, ipython3,
+// perl5.36, luajit-2.1.0-beta3… The windowless Windows launchers (pythonw,
+// pypyw, javaw, rubyw, wperl) run code the same way as their interpreter.
 var interpreterFamilies = []string{
-	"python", "pythonw", "pypy", "ipython", "bpython", "perl", "ruby", "irb", "php",
-	"node", "lua", "luajit", "deno", "bun", "julia", "rscript", "java",
+	"python", "pythonw", "pypy", "pypyw", "ipython", "bpython", "perl", "wperl",
+	"ruby", "rubyw", "irb", "php", "node", "lua", "luajit", "deno", "bun",
+	"julia", "rscript", "java", "javaw",
 	"tclsh", "wish", "awk", "gawk", "sh", "ash", "dash", "bash", "zsh",
 	"ksh", "mksh", "csh", "tcsh", "fish", "pwsh", "powershell",
 }
 
 // interpreterVersionRe matches what may follow an interpreter family's name
 // in a versioned build: separators, then a version that starts with a digit
-// and may carry letters after it (3.7m, -2.1.0-beta3). Letters count only
-// after a digit, which keeps other programs allowed: javac, shellcheck,
-// pythonic.
-var interpreterVersionRe = regexp.MustCompile(`^[.-]*([0-9][0-9a-z.-]*)?$`)
+// and may carry letters and underscores after it (3.7m, -2.1.0-beta3,
+// 3-x86_64). Letters count only after a digit, which keeps other programs
+// allowed: javac, shellcheck, pythonic. It also denies tools that put a
+// version right after a family name, such as php8.2-fpm: on a denylist,
+// a false positive is the safe side.
+var interpreterVersionRe = regexp.MustCompile(`^[.-]*([0-9][0-9a-z._-]*)?$`)
 
 // isDeniedBinary compares case-insensitively and without a Windows
 // executable suffix or trailing dots and spaces: on a case-insensitive
