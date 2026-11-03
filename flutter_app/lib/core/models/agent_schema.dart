@@ -325,22 +325,35 @@ const deniedAgentBinaries = {
 };
 
 /// Versioned or variant names of the denied programs: python3, python3.12,
-/// ksh93, tclsh8.6, ipython3, perl5.36… Mirrors the daemon's list.
+/// python3.7m, pythonw, ksh93, tclsh8.6, ipython3, perl5.36,
+/// luajit-2.1.0-beta3… Mirrors the daemon's list.
 const _interpreterFamilies = [
-  'python', 'pypy', 'ipython', 'bpython', 'perl', 'ruby', 'irb', 'php', //
-  'node', 'lua', 'luajit', 'deno', 'bun', 'julia', 'rscript', 'java', //
+  'python', 'pythonw', 'pypy', 'ipython', 'bpython', 'perl', 'ruby', 'irb', //
+  'php', 'node', 'lua', 'luajit', 'deno', 'bun', 'julia', 'rscript', 'java', //
   'tclsh', 'wish', 'awk', 'gawk', 'sh', 'ash', 'dash', 'bash', 'zsh', //
   'ksh', 'mksh', 'csh', 'tcsh', 'fish', 'pwsh', 'powershell', //
 ];
 
+/// What may follow an interpreter family's name in a versioned build:
+/// separators, then a version that starts with a digit and may carry letters
+/// after it (3.7m, -2.1.0-beta3). Letters count only after a digit, which
+/// keeps other programs allowed: javac, shellcheck, pythonic. Mirrors the
+/// daemon.
+final _interpreterVersionPattern = RegExp(r'^[.\-]*([0-9][0-9a-z.\-]*)?$');
+final _trailingDotsAndSpaces = RegExp(r'[. ]+$');
+
 /// Whether [binary] is a shell or an interpreter. It compares
-/// case-insensitively and without a Windows executable suffix: on a
-/// case-insensitive filesystem RSCRIPT runs Rscript, and bash.exe is bash.
+/// case-insensitively and without a Windows executable suffix or trailing
+/// dots and spaces: on a case-insensitive filesystem RSCRIPT runs Rscript,
+/// bash.exe is bash, and Windows drops the trailing dot of cmd. when it
+/// resolves the name.
 bool isDeniedAgentBinary(String binary) {
-  var name = binary.toLowerCase();
+  var name = binary.toLowerCase().replaceFirst(_trailingDotsAndSpaces, '');
   for (final ext in const ['.exe', '.com', '.cmd', '.bat']) {
     if (name.endsWith(ext)) {
-      name = name.substring(0, name.length - ext.length);
+      name = name
+          .substring(0, name.length - ext.length)
+          .replaceFirst(_trailingDotsAndSpaces, '');
       break;
     }
   }
@@ -348,7 +361,9 @@ bool isDeniedAgentBinary(String binary) {
   for (final prefix in _interpreterFamilies) {
     if (name.startsWith(prefix)) {
       final rest = name.substring(prefix.length);
-      if (rest.isEmpty || RegExp(r'^[0-9.\-]+$').hasMatch(rest)) return true;
+      if (rest.isEmpty || _interpreterVersionPattern.hasMatch(rest)) {
+        return true;
+      }
     }
   }
   return false;

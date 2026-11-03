@@ -206,6 +206,182 @@
   }
  },
  {
+  "case": "windowless python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "pythonw",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "abi-tagged python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3m",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "versioned abi-tagged python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3.7m",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "pre-release luajit",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "luajit-2.1.0-beta3",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "trailing dot shell",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "cmd.",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "space before exe suffix",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bash .exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "separator-only suffix",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bash-",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "shellcheck is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "shellcheck",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "javac is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "javac",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "aider is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "aider",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "exe suffix is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "tool.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
   "case": "long display name",
   "valid": false,
   "schema": {
