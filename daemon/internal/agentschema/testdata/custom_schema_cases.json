@@ -206,6 +206,342 @@
   }
  },
  {
+  "case": "windowless python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "pythonw",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "abi-tagged python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3m",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "versioned abi-tagged python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3.7m",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "pre-release luajit",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "luajit-2.1.0-beta3",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "trailing dot shell",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "cmd.",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "space before exe suffix",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bash .exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "separator-only suffix",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "bash-",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless java",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "javaw.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless ruby",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "rubyw",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless perl",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "wperl",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless pypy",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "pypyw",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windowless php",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "php-win.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "debug python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python-dbg",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "node under its debian name",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "nodejs",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "platform-tagged python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3-x86_64",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "debug-tagged python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python3.12_d",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "tool named after a versioned interpreter",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "php8.2-fpm",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "shellcheck is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "shellcheck",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "javac is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "javac",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "aider is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "aider",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "exe suffix is fine",
+  "valid": true,
+  "schema": {
+   "name": "tool",
+   "binary": "tool.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
   "case": "long display name",
   "valid": false,
   "schema": {
@@ -1765,6 +2101,150 @@
   "schema": {
    "name": "tool",
    "binary": "aider",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "php cgi launcher",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "php-cgi",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "versioned php cgi launcher",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "php-cgi8.2",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "php debugger",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "phpdbg",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "versioned php debugger",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "phpdbg8.2",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "java web start",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "javaws",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windows debug python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "python_d.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "windows debug windowless python",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "pythonw_d.exe",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "jdk script runner",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "jrunscript",
+   "fields": [
+    {
+     "key": "opt",
+     "type": "text",
+     "label": "Opt",
+     "flag": "--opt"
+    }
+   ]
+  }
+ },
+ {
+  "case": "nashorn shell",
+  "valid": false,
+  "schema": {
+   "name": "tool",
+   "binary": "jjs.exe",
    "fields": [
     {
      "key": "opt",

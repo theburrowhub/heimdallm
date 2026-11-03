@@ -321,26 +321,47 @@ const deniedAgentBinaries = {
   'jshell', 'java', 'groovy', 'scala', 'r', 'rscript', 'julia', 'swift', //
   'dotnet', 'go', 'make', 'gdb', 'lldb', 'vim', 'vi', 'nvim', 'emacs', 'ed', //
   'ex', 'docker', 'podman', 'kubectl', 'ssh', 'nc', 'ncat', 'socat', 'curl', //
-  'wget', 'git', 'find', 'heimdallm', 'ipython', 'bpython',
+  'wget', 'git', 'find', 'heimdallm', 'ipython', 'bpython', 'php-win', //
+  'python-dbg', 'python_d', 'pythonw_d', 'jrunscript', 'jjs', //
 };
 
 /// Versioned or variant names of the denied programs: python3, python3.12,
-/// ksh93, tclsh8.6, ipython3, perl5.36… Mirrors the daemon's list.
+/// python3.7m, ksh93, tclsh8.6, ipython3, perl5.36, luajit-2.1.0-beta3… The
+/// windowless Windows launchers (pythonw, pypyw, javaw, rubyw, wperl), PHP's
+/// other runners (php-cgi, phpdbg, also versioned as php-cgi8.2) and Java Web
+/// Start (javaws) run code the same way as their interpreter. Mirrors the
+/// daemon's list.
 const _interpreterFamilies = [
-  'python', 'pypy', 'ipython', 'bpython', 'perl', 'ruby', 'irb', 'php', //
-  'node', 'lua', 'luajit', 'deno', 'bun', 'julia', 'rscript', 'java', //
+  'python', 'pythonw', 'pypy', 'pypyw', 'ipython', 'bpython', 'perl', //
+  'wperl', 'ruby', 'rubyw', 'irb', 'php', 'php-cgi', 'phpdbg', 'node', //
+  'lua', 'luajit', 'deno', 'bun', 'julia', 'rscript', 'java', 'javaw', //
+  'javaws', //
   'tclsh', 'wish', 'awk', 'gawk', 'sh', 'ash', 'dash', 'bash', 'zsh', //
   'ksh', 'mksh', 'csh', 'tcsh', 'fish', 'pwsh', 'powershell', //
 ];
 
+/// What may follow an interpreter family's name in a versioned build:
+/// separators, then a version that starts with a digit and may carry letters
+/// and underscores after it (3.7m, -2.1.0-beta3, 3-x86_64). Letters count
+/// only after a digit, which keeps other programs allowed: javac, shellcheck,
+/// pythonic. It also denies tools that put a version right after a family
+/// name, such as php8.2-fpm: on a denylist, a false positive is the safe
+/// side. Mirrors the daemon.
+final _interpreterVersionPattern = RegExp(r'^[.\-]*([0-9][0-9a-z._\-]*)?$');
+final _trailingDotsAndSpaces = RegExp(r'[. ]+$');
+
 /// Whether [binary] is a shell or an interpreter. It compares
-/// case-insensitively and without a Windows executable suffix: on a
-/// case-insensitive filesystem RSCRIPT runs Rscript, and bash.exe is bash.
+/// case-insensitively and without a Windows executable suffix or trailing
+/// dots and spaces: on a case-insensitive filesystem RSCRIPT runs Rscript,
+/// bash.exe is bash, and Windows drops the trailing dot of cmd. when it
+/// resolves the name.
 bool isDeniedAgentBinary(String binary) {
-  var name = binary.toLowerCase();
+  var name = binary.toLowerCase().replaceFirst(_trailingDotsAndSpaces, '');
   for (final ext in const ['.exe', '.com', '.cmd', '.bat']) {
     if (name.endsWith(ext)) {
-      name = name.substring(0, name.length - ext.length);
+      name = name
+          .substring(0, name.length - ext.length)
+          .replaceFirst(_trailingDotsAndSpaces, '');
       break;
     }
   }
@@ -348,7 +369,9 @@ bool isDeniedAgentBinary(String binary) {
   for (final prefix in _interpreterFamilies) {
     if (name.startsWith(prefix)) {
       final rest = name.substring(prefix.length);
-      if (rest.isEmpty || RegExp(r'^[0-9.\-]+$').hasMatch(rest)) return true;
+      if (rest.isEmpty || _interpreterVersionPattern.hasMatch(rest)) {
+        return true;
+      }
     }
   }
   return false;
