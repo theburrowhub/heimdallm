@@ -289,7 +289,7 @@ const reservedFieldKeys = {
 };
 
 // Limits and rules of the daemon's agentschema package. They are checked
-// against the same cases in both test suites
+// against the same cases in the daemon's, the app's and the CLI's tests
 // (daemon/internal/agentschema/testdata/custom_schema_cases.json).
 const maxSchemaFields = 64;
 const maxSchemaOptions = 200;
