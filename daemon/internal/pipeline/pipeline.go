@@ -189,6 +189,11 @@ type GitHubReviewer interface {
 	PostComment(repo string, number int, body string) (time.Time, error)
 }
 
+// TeamMemberChecker reports whether a login is an active member of an org team.
+type TeamMemberChecker interface {
+	IsTeamMember(org, team, login string) (bool, error)
+}
+
 // CommentFetcher retrieves PR comments for context injection into the AI prompt.
 type CommentFetcher interface {
 	FetchComments(repo string, number int) ([]github.Comment, error)
@@ -282,6 +287,9 @@ type Pipeline struct {
 	// and the bot is a current requested reviewer, even with no
 	// review_requested timeline event. Nil disables that bypass.
 	reviewers ReviewerFetcher
+	// teams resolves "org/team" entries of never_approve_exempt_authors. Nil
+	// makes team entries never match.
+	teams TeamMemberChecker
 	// publisher emits lifecycle SSE events (pr_detected, review_started,
 	// review_completed, review_skipped) at the same semantic point Run
 	// makes the actual decision. Nil disables emission (legacy contract).
@@ -363,6 +371,12 @@ func (p *Pipeline) SetTimelineFetcher(t TimelineFetcher) {
 // timeline-only detection. Production wires the *github.Client here.
 func (p *Pipeline) SetReviewerFetcher(r ReviewerFetcher) {
 	p.reviewers = r
+}
+
+// SetTeamMemberChecker resolves "org/team" entries of
+// never_approve_exempt_authors. Production wires the *github.Client here.
+func (p *Pipeline) SetTeamMemberChecker(t TeamMemberChecker) {
+	p.teams = t
 }
 
 // SetPublisher wires the SSE broker so Run can emit lifecycle events
@@ -1591,9 +1605,14 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	signalComments := filterBotComments(prComments, p.botLogin)
 	commentSignals := ExtractCommentSignals(signalComments, pr.User.Login)
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
-	neverApprove := opts.NeverApproveWithIssues && !authorAllowed(opts.NeverApproveExemptAuthors, pr.User.Login)
 	reviewEvent := ReviewEvent(finalSeverity, MaxIssueSeverity(result.Issues),
-		neverApprove, opts.NeverApproveMinSeverity)
+		opts.NeverApproveWithIssues, opts.NeverApproveMinSeverity)
+	// An exempt author is decided as if the gate were off. Consulted only when
+	// the gate changed the outcome, so team entries cost no lookup otherwise.
+	if reviewEvent != SeverityToEvent(finalSeverity) &&
+		p.neverApproveExempt(opts.NeverApproveExemptAuthors, pr.User.Login) {
+		reviewEvent = SeverityToEvent(finalSeverity)
+	}
 	// The published body must quote the severity that was actually decided and
 	// stored (reconciled + signal-escalated), not the agent's raw field: the
 	// footer badge would otherwise contradict the review event. The retry
