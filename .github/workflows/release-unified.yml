@@ -58,6 +58,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.ref }}
+          # The step below resolves the release tag locally; a shallow,
+          # tagless checkout leaves it unknown.
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
