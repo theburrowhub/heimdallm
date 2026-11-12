@@ -60,7 +60,7 @@ for that exception is preferable to bypassing the rule.
 
 On personal machines, CI runners, or Docker-in-Docker sandboxes, `go test`
 directly is fine. The CI workflow (`.github/workflows/tests.yml`) runs on
-`macos-14` GitHub Actions runners and uses `setup-go` natively — that
+`macos-15` GitHub Actions runners and uses `setup-go` natively — that
 environment has no EDR.
 
 ## Flutter tests

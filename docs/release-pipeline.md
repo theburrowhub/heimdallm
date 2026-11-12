@@ -216,7 +216,7 @@ GoReleaser does not support DMG creation. The macOS build requires:
 - **`create-dmg`** for the installer image with custom window layout
 
 None of these steps have GoReleaser equivalents. The `build-macos` job is
-self-contained on a `macos-14` runner and would not benefit from GoReleaser
+self-contained on a `macos-15` runner and would not benefit from GoReleaser
 integration.
 
 ## macOS updater
