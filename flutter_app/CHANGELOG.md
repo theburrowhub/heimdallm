@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.6](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.5...gui/v0.10.6) (2026-11-12)
+
+
+### Features
+
+* exempt GitHub teams from the never-approve gate and autocomplete the exempt list ([#888](https://github.com/theburrowhub/heimdallm/issues/888)) ([143c840](https://github.com/theburrowhub/heimdallm/commit/143c840b80e76c66f835f7afcc996c497b1b556a))
+
 ## [0.10.5](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.4...gui/v0.10.5) (2026-11-12)
 
 
