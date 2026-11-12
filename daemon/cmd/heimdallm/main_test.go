@@ -1151,3 +1151,27 @@ func TestLoadOrCreateAPIToken_ShortFileIsRegenerated(t *testing.T) {
 		t.Errorf("regenerated token perm = %o, want 0644", got)
 	}
 }
+
+func TestSuggestionOrgsAndCollectPrincipals(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.DiscoveryOrgs = []string{"acme", " "}
+	cfg.GitHub.Repositories = []string{"Acme/api", "beta/web"}
+	cfg.AI.Orgs = map[string]config.OrgAI{"gamma": {}}
+	if got := strings.Join(suggestionOrgs(cfg), ","); got != "acme,beta,gamma" {
+		t.Fatalf("suggestionOrgs = %q, want acme,beta,gamma (deduped case-insensitively)", got)
+	}
+
+	out := collectPrincipals([]string{"acme", "beta", "broken"}, func(org string) ([]gh.Principal, error) {
+		switch org {
+		case "acme":
+			return []gh.Principal{{Value: "acme/core", Kind: "team"}, {Value: "alice", Kind: "user"}}, nil
+		case "beta":
+			return []gh.Principal{{Value: "Alice", Kind: "user"}, {Value: "bob", Kind: "user"}}, nil
+		}
+		return nil, errors.New("boom")
+	})
+	got := out["principals"].([]gh.Principal)
+	if len(got) != 3 || got[2].Value != "bob" {
+		t.Errorf("principals = %v, want acme/core, alice, bob (duplicate login and failing org skipped)", got)
+	}
+}

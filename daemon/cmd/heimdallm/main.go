@@ -2047,6 +2047,14 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	srv.SetRateLimitFn(func() (any, error) {
 		return buildRateLimitView(time.Now(), limiter.Snapshots(), ghClient.RateLimit)
 	})
+	// Autocomplete for never_approve_exempt_authors. GitHub is called outside
+	// cfgMu; the listings are cached in the client.
+	srv.SetGitHubPrincipalsFn(func() (any, error) {
+		cfgMu.Lock()
+		orgs := suggestionOrgs(cfg)
+		cfgMu.Unlock()
+		return collectPrincipals(orgs, ghClient.OrgPrincipals), nil
+	})
 
 	srv.SetConfigFn(func() map[string]any {
 		// Snapshot the mutable slice fields under cfgMu. The poll-cycle
@@ -5030,6 +5038,58 @@ func managedCloneDirs(cfg *config.Config) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// suggestionOrgs lists the orgs whose members and teams the exempt-authors
+// autocomplete offers: discovery orgs, org overrides and monitored repos' owners.
+func suggestionOrgs(cfg *config.Config) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(org string) {
+		org = strings.TrimSpace(org)
+		key := strings.ToLower(org)
+		if _, dup := seen[key]; dup || org == "" {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, org)
+	}
+	for _, org := range cfg.GitHub.DiscoveryOrgs {
+		add(org)
+	}
+	for org := range cfg.AI.Orgs {
+		add(org)
+	}
+	for repo := range monitoredRepoSet(cfg, nil) {
+		if owner, _, ok := strings.Cut(repo, "/"); ok {
+			add(owner)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// collectPrincipals merges the orgs' listings without duplicates. An org that
+// fails is logged and skipped so it cannot empty everyone's suggestions.
+func collectPrincipals(orgs []string, list func(org string) ([]gh.Principal, error)) map[string]any {
+	out := []gh.Principal{}
+	seen := map[string]struct{}{}
+	for _, org := range orgs {
+		ps, err := list(org)
+		if err != nil {
+			slog.Warn("github principals: org listing failed", "org", org, "err", err)
+			continue
+		}
+		for _, p := range ps {
+			key := strings.ToLower(p.Value)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	return map[string]any{"principals": out}
 }
 
 func monitoredRepoSet(cfg *config.Config, discovered []string) map[string]struct{} {

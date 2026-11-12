@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -3380,5 +3381,29 @@ func TestHandlePatchConfig_PollingIntAndBoolFields(t *testing.T) {
 	}
 	if polling["use_etag"] != false {
 		t.Errorf("use_etag = %v, want false", polling["use_etag"])
+	}
+}
+
+func TestHandleGitHubPrincipals(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	get := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/github/principals", nil)
+		req.Header.Set("X-Heimdallm-Token", "test-token")
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		return w
+	}
+	if w := get(); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("unwired: got %d, want 503", w.Code)
+	}
+	srv.SetGitHubPrincipalsFn(func() (any, error) {
+		return map[string]any{"principals": []map[string]string{{"value": "acme/core", "kind": "team"}}}, nil
+	})
+	if w := get(); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"acme/core"`) {
+		t.Errorf("wired: got %d %s", w.Code, w.Body.String())
+	}
+	srv.SetGitHubPrincipalsFn(func() (any, error) { return nil, errors.New("boom") })
+	if w := get(); w.Code != http.StatusBadGateway {
+		t.Errorf("failing: got %d, want 502", w.Code)
 	}
 }
