@@ -1119,7 +1119,7 @@ suited for it:
 
 ### macOS DMG
 
-The macOS `.dmg` is built in its own CI job (`build-macos`) on a `macos-14`
+The macOS `.dmg` is built in its own CI job (`build-macos`) on a `macos-15`
 runner, separate from GoReleaser. GoReleaser cannot handle this artifact
 because the build requires:
 
