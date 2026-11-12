@@ -1161,17 +1161,26 @@ func TestSuggestionOrgsAndCollectPrincipals(t *testing.T) {
 		t.Fatalf("suggestionOrgs = %q, want acme,beta,gamma (deduped case-insensitively)", got)
 	}
 
-	out := collectPrincipals([]string{"acme", "beta", "broken"}, func(org string) ([]gh.Principal, error) {
+	release := make(chan struct{})
+	defer close(release)
+	out := collectPrincipals([]string{"beta", "acme", "broken", "slow"}, func(org string) ([]gh.Principal, error) {
 		switch org {
 		case "acme":
-			return []gh.Principal{{Value: "acme/core", Kind: "team"}, {Value: "alice", Kind: "user"}}, nil
+			return []gh.Principal{{Value: "acme/core", Kind: "team"}, {Value: "Zed", Kind: "user"}}, nil
 		case "beta":
-			return []gh.Principal{{Value: "Alice", Kind: "user"}, {Value: "bob", Kind: "user"}}, nil
+			return []gh.Principal{{Value: "alice", Kind: "user"}, {Value: "zed", Kind: "user"}}, nil
+		case "slow":
+			<-release // still loading when the wait runs out
+			return []gh.Principal{{Value: "late", Kind: "user"}}, nil
 		}
 		return nil, errors.New("boom")
-	})
-	got := out["principals"].([]gh.Principal)
-	if len(got) != 3 || got[2].Value != "bob" {
-		t.Errorf("principals = %v, want acme/core, alice, bob (duplicate login and failing org skipped)", got)
+	}, 200*time.Millisecond)
+	var values []string
+	for _, p := range out["principals"].([]gh.Principal) {
+		values = append(values, p.Value)
+	}
+	// Merged across orgs and sorted; duplicate login, failing and slow orgs left out.
+	if got := strings.Join(values, ","); got != "acme/core,alice,zed" && got != "acme/core,alice,Zed" {
+		t.Errorf("principals = %s, want acme/core,alice,zed", got)
 	}
 }

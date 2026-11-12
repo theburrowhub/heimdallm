@@ -55,7 +55,15 @@ type principalsEntry struct {
 
 type principalsCache struct {
 	mu   sync.Mutex
-	orgs map[string]principalsEntry // key: lowercased org
+	orgs map[string]*principalsSlot // key: lowercased org
+}
+
+// principalsSlot serializes one org's fetch: concurrent cold callers for the
+// same org make one round of requests, and other orgs never wait on it.
+type principalsSlot struct {
+	mu    sync.Mutex
+	entry principalsEntry
+	set   bool
 }
 
 // IsTeamMember reports whether login is an active member of org/team (a
@@ -76,11 +84,19 @@ func (c *Client) IsTeamMember(org, team, login string) (bool, error) {
 	c.members.mu.Unlock()
 
 	member, err := c.fetchTeamMembership(org, team, login)
+	now := time.Now()
 	c.members.mu.Lock()
 	if c.members.m == nil {
 		c.members.m = make(map[string]memberEntry)
 	}
-	c.members.m[key] = memberEntry{member: member, err: err, fetchedAt: time.Now()}
+	// Drop expired answers so the map tracks recent authors, not every author
+	// the daemon has ever seen. Writes happen at most hourly per key.
+	for k, e := range c.members.m {
+		if now.Sub(e.fetchedAt) >= memberCacheTTL {
+			delete(c.members.m, k)
+		}
+	}
+	c.members.m[key] = memberEntry{member: member, err: err, fetchedAt: now}
 	c.members.mu.Unlock()
 	return member, err
 }
@@ -126,6 +142,9 @@ func (c *Client) teamVisible(org, team string) bool {
 		return true // unknown: do not claim the team is missing
 	}
 	resp.Body.Close()
+	if _, limited := rateLimitDelay(resp); limited {
+		return true
+	}
 	return resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusForbidden
 }
 
@@ -134,25 +153,31 @@ func (c *Client) teamVisible(org, team string) bool {
 // read:org) yields an empty list, not an error.
 func (c *Client) OrgPrincipals(org string) ([]Principal, error) {
 	key := strings.ToLower(org)
-	// Held across the fetch so concurrent cold callers make one round of
-	// requests; only the GUI's autocomplete calls this.
 	c.principals.mu.Lock()
-	defer c.principals.mu.Unlock()
-	if e, ok := c.principals.orgs[key]; ok {
+	if c.principals.orgs == nil {
+		c.principals.orgs = make(map[string]*principalsSlot)
+	}
+	slot, ok := c.principals.orgs[key]
+	if !ok {
+		slot = &principalsSlot{}
+		c.principals.orgs[key] = slot
+	}
+	c.principals.mu.Unlock()
+
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if slot.set {
 		ttl := principalsCacheTTL
-		if e.err != nil {
+		if slot.entry.err != nil {
 			ttl = memberCacheFailTTL
 		}
-		if time.Since(e.fetchedAt) < ttl {
-			return e.list, e.err
+		if time.Since(slot.entry.fetchedAt) < ttl {
+			return slot.entry.list, slot.entry.err
 		}
 	}
-
 	list, err := c.fetchOrgPrincipals(org)
-	if c.principals.orgs == nil {
-		c.principals.orgs = make(map[string]principalsEntry)
-	}
-	c.principals.orgs[key] = principalsEntry{list: list, err: err, fetchedAt: time.Now()}
+	slot.entry = principalsEntry{list: list, err: err, fetchedAt: time.Now()}
+	slot.set = true
 	return list, err
 }
 
@@ -183,7 +208,9 @@ type orgListItem struct {
 }
 
 // listOrgNames pages through an org listing (100 per page, at most
-// maxPrincipalPages). 404/403 mean the org is not listable: empty, no error.
+// maxPrincipalPages). 404, or a 403 that is not a rate limit, means the org is
+// not listable: empty, no error. A rate-limited 403 is an error, so it gets
+// the short failure TTL instead of an hour of empty suggestions.
 func (c *Client) listOrgNames(path string, name func(orgListItem) string) ([]string, error) {
 	var out []string
 	for page := 1; page <= maxPrincipalPages; page++ {
@@ -193,7 +220,8 @@ func (c *Client) listOrgNames(path string, name func(orgListItem) string) ([]str
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusForbidden {
+		_, limited := rateLimitDelay(resp)
+		if resp.StatusCode == http.StatusNotFound || (resp.StatusCode == http.StatusForbidden && !limited) {
 			return nil, nil
 		}
 		if resp.StatusCode != http.StatusOK {

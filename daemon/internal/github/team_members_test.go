@@ -89,6 +89,8 @@ func TestOrgPrincipals(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"login":"Zed"}]`))
 		case "/orgs/someone/teams", "/orgs/someone/members":
 			w.WriteHeader(http.StatusNotFound) // personal account
+		case "/orgs/private/teams", "/orgs/private/members":
+			w.WriteHeader(http.StatusForbidden) // token without read:org, not a rate limit
 		case "/orgs/down/teams":
 			w.WriteHeader(http.StatusBadGateway)
 		default:
@@ -114,8 +116,10 @@ func TestOrgPrincipals(t *testing.T) {
 		t.Errorf("second call: err=%v, calls %d -> %d, want cached", err, before, calls.Load())
 	}
 
-	if got, err := c.OrgPrincipals("someone"); err != nil || len(got) != 0 {
-		t.Errorf("personal account = %v, %v; want empty, nil", got, err)
+	for _, org := range []string{"someone", "private"} {
+		if got, err := c.OrgPrincipals(org); err != nil || len(got) != 0 {
+			t.Errorf("%s = %v, %v; want empty, nil", org, got, err)
+		}
 	}
 
 	// A failing org returns the error, and the failure is cached too.
@@ -125,5 +129,19 @@ func TestOrgPrincipals(t *testing.T) {
 	before = calls.Load()
 	if _, err := c.OrgPrincipals("down"); err == nil || calls.Load() != before {
 		t.Errorf("repeat after failure: err=%v, calls %d -> %d; want the cached error", err, before, calls.Load())
+	}
+}
+
+// A rate-limited 403 is a failure (short retry), not "org not listable" (an
+// hour of empty suggestions).
+func TestOrgPrincipals_RateLimited403IsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	if got, err := c.OrgPrincipals("acme"); err == nil {
+		t.Errorf("rate-limited listing = %v, nil; want an error", got)
 	}
 }

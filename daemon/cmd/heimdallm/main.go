@@ -2053,7 +2053,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		cfgMu.Lock()
 		orgs := suggestionOrgs(cfg)
 		cfgMu.Unlock()
-		return collectPrincipals(orgs, ghClient.OrgPrincipals), nil
+		return collectPrincipals(orgs, ghClient.OrgPrincipals, principalsWait), nil
 	})
 
 	srv.SetConfigFn(func() map[string]any {
@@ -5069,26 +5069,51 @@ func suggestionOrgs(cfg *config.Config) []string {
 	return out
 }
 
-// collectPrincipals merges the orgs' listings without duplicates. An org that
-// fails is logged and skipped so it cannot empty everyone's suggestions.
-func collectPrincipals(orgs []string, list func(org string) ([]gh.Principal, error)) map[string]any {
+// principalsWait bounds GET /github/principals on a cold cache.
+const principalsWait = 8 * time.Second
+
+// collectPrincipals merges the orgs' listings, fetched in parallel, without
+// duplicates and sorted case-insensitively. An org that fails is logged and
+// skipped so it cannot empty everyone's suggestions; one still loading after
+// wait is left out of this answer (its listing still lands in the cache).
+func collectPrincipals(orgs []string, list func(org string) ([]gh.Principal, error), wait time.Duration) map[string]any {
+	type result struct {
+		org string
+		ps  []gh.Principal
+		err error
+	}
+	results := make(chan result, len(orgs))
+	for _, org := range orgs {
+		go func(org string) {
+			ps, err := list(org)
+			results <- result{org, ps, err}
+		}(org)
+	}
+	deadline := time.After(wait)
 	out := []gh.Principal{}
 	seen := map[string]struct{}{}
-	for _, org := range orgs {
-		ps, err := list(org)
-		if err != nil {
-			slog.Warn("github principals: org listing failed", "org", org, "err", err)
-			continue
-		}
-		for _, p := range ps {
-			key := strings.ToLower(p.Value)
-			if _, dup := seen[key]; dup {
+collect:
+	for range orgs {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				slog.Warn("github principals: org listing failed", "org", r.org, "err", r.err)
 				continue
 			}
-			seen[key] = struct{}{}
-			out = append(out, p)
+			for _, p := range r.ps {
+				key := strings.ToLower(p.Value)
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, p)
+			}
+		case <-deadline:
+			slog.Warn("github principals: answering without org listings still loading")
+			break collect
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Value) < strings.ToLower(out[j].Value) })
 	return map[string]any{"principals": out}
 }
 
