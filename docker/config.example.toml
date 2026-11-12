@@ -43,11 +43,15 @@ review_mode = "single"   # "single" or "multi"
 # request changes on any finding at all. Overridable per org and per repo.
 # never_approve_min_severity = "medium"
 
-# PR authors (GitHub logins) exempt from the never_approve_with_issues gate:
-# their PRs approve or request changes on the final severity alone (high still
-# requests changes). Empty = nobody exempt. A repo or org list replaces the
-# inherited one; an explicit [] exempts nobody in that scope.
-# never_approve_exempt_authors = ["alice", "bob"]
+# PR authors exempt from the never_approve_with_issues gate: their PRs approve
+# or request changes on the final severity alone (high still requests
+# changes). Entries are GitHub logins or org teams written "org/team" (or
+# "@org/team", as in CODEOWNERS); a team exempts its active members. Team
+# membership is looked up only when the gate would change the outcome, cached
+# for an hour, and needs a token with read:org; a failed lookup exempts nobody.
+# Empty = nobody exempt. A repo or org list replaces the inherited one; an
+# explicit [] exempts nobody in that scope.
+# never_approve_exempt_authors = ["alice", "my-org/maintainers"]
 
 # Per-CLI settings (optional)
 # [ai.agents.claude]

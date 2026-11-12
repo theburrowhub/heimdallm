@@ -1151,3 +1151,36 @@ func TestLoadOrCreateAPIToken_ShortFileIsRegenerated(t *testing.T) {
 		t.Errorf("regenerated token perm = %o, want 0644", got)
 	}
 }
+
+func TestSuggestionOrgsAndCollectPrincipals(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.DiscoveryOrgs = []string{"acme", " "}
+	cfg.GitHub.Repositories = []string{"Acme/api", "beta/web"}
+	cfg.AI.Orgs = map[string]config.OrgAI{"gamma": {}}
+	if got := strings.Join(suggestionOrgs(cfg), ","); got != "acme,beta,gamma" {
+		t.Fatalf("suggestionOrgs = %q, want acme,beta,gamma (deduped case-insensitively)", got)
+	}
+
+	release := make(chan struct{})
+	defer close(release)
+	out := collectPrincipals([]string{"beta", "acme", "broken", "slow"}, func(org string) ([]gh.Principal, error) {
+		switch org {
+		case "acme":
+			return []gh.Principal{{Value: "acme/core", Kind: "team"}, {Value: "Zed", Kind: "user"}}, nil
+		case "beta":
+			return []gh.Principal{{Value: "alice", Kind: "user"}, {Value: "zed", Kind: "user"}}, nil
+		case "slow":
+			<-release // still loading when the wait runs out
+			return []gh.Principal{{Value: "late", Kind: "user"}}, nil
+		}
+		return nil, errors.New("boom")
+	}, 200*time.Millisecond)
+	var values []string
+	for _, p := range out["principals"].([]gh.Principal) {
+		values = append(values, p.Value)
+	}
+	// Merged across orgs and sorted; duplicate login, failing and slow orgs left out.
+	if got := strings.Join(values, ","); got != "acme/core,alice,zed" && got != "acme/core,alice,Zed" {
+		t.Errorf("principals = %s, want acme/core,alice,zed", got)
+	}
+}

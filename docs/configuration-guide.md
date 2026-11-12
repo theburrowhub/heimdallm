@@ -2009,11 +2009,15 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # ([ai.repos.*]).
 # never_approve_min_severity = "medium"
 
-# PR authors (GitHub logins) exempt from the never_approve_with_issues gate:
-# their PRs approve or request changes on the final severity alone (high still
-# requests changes). Empty = nobody exempt. A repo or org list replaces the
-# inherited one; an explicit [] exempts nobody in that scope.
-# never_approve_exempt_authors = ["alice", "bob"]
+# PR authors exempt from the never_approve_with_issues gate: their PRs approve
+# or request changes on the final severity alone (high still requests
+# changes). Entries are GitHub logins or org teams written "org/team" (or
+# "@org/team", as in CODEOWNERS); a team exempts its active members. Team
+# membership is looked up only when the gate would change the outcome, cached
+# for an hour, and needs a token with read:org; a failed lookup exempts nobody.
+# Empty = nobody exempt. A repo or org list replaces the inherited one; an
+# explicit [] exempts nobody in that scope.
+# never_approve_exempt_authors = ["alice", "my-org/maintainers"]
 
 # When local_dir is unset, Heimdallm prepares a managed shallow clone for agent
 # context under clone_dir. If clone_dir is also unset, the default is
@@ -2064,7 +2068,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # clone_dir = "/home/heimdallm/repos/myorg-worktrees"
 # never_approve_with_issues = false
 # never_approve_min_severity = "medium"
-# never_approve_exempt_authors = ["alice", "bob"]
+# never_approve_exempt_authors = ["alice", "my-org/maintainers"]
 #
 # # Per-org circuit breaker override (optional, fields overlay the global baseline)
 # [ai.orgs."myorg".circuit_breaker]

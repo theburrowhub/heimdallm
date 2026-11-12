@@ -111,6 +111,9 @@ type Server struct {
 	// daemon's token. Wired by main; nil disables the /github/rate_limit
 	// endpoint (returns 503).
 	rateLimitFn func() (any, error)
+	// principalsFn lists the GitHub logins and org teams offered as
+	// never_approve_exempt_authors suggestions.
+	principalsFn func() (any, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
 	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
@@ -422,6 +425,9 @@ func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
 // SetRateLimitFn wires the live GitHub rate-limit lookup for GET /github/rate_limit.
 func (srv *Server) SetRateLimitFn(fn func() (any, error)) { srv.rateLimitFn = fn }
 
+// SetGitHubPrincipalsFn wires GET /github/principals.
+func (srv *Server) SetGitHubPrincipalsFn(fn func() (any, error)) { srv.principalsFn = fn }
+
 // APIKeyProvider manages the API key of an in-process agent (OpenRouter).
 // Implementations must never return or log the key.
 type APIKeyProvider interface {
@@ -713,6 +719,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/activity", srv.handleActivity)
 	r.Get("/stats", srv.handleStats)
 	r.Get("/github/rate_limit", srv.handleGitHubRateLimit)
+	r.Get("/github/principals", srv.handleGitHubPrincipals)
 	r.Get("/review-limits", srv.handleReviewLimits)
 	r.Get("/cli-agents", srv.handleListCLIAgents)
 	r.Post("/cli-agents/rescan", srv.handleRescanCLIAgents)
@@ -819,7 +826,7 @@ const HeaderDaemon = "X-Heimdallm-Daemon"
 // client depends on, together with "daemon_api" in the repository's
 // compat.json (a test keeps them equal). Daemons built before the field
 // existed omit it; clients read that as revision 1, the API at the time.
-const APIVersion = 2
+const APIVersion = 3
 
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
@@ -2379,6 +2386,23 @@ func (srv *Server) handleGitHubRateLimit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, rl)
+}
+
+// handleGitHubPrincipals returns the logins and "org/team" slugs of the orgs
+// the daemon watches, for the exempt-authors autocomplete. The app filters the
+// list itself, so this is one cached listing rather than a query per keystroke.
+func (srv *Server) handleGitHubPrincipals(w http.ResponseWriter, r *http.Request) {
+	if srv.principalsFn == nil {
+		http.Error(w, `{"error":"principal lookup not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	out, err := srv.principalsFn()
+	if err != nil {
+		slog.Error("handleGitHubPrincipals: fetch failed", "err", err)
+		http.Error(w, `{"error":"failed to list GitHub users and teams"}`, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // cliAgentsResponse is the GET /cli-agents body.

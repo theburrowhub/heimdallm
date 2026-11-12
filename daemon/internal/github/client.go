@@ -102,6 +102,10 @@ type Client struct {
 	teams teamCache
 	// repoMeta holds batched repository lookups (canonical name, archived).
 	repoMeta repoMetaCache
+	// members caches arbitrary logins' team memberships; principals the org
+	// listings behind the exempt-authors autocomplete (team_members.go).
+	members    memberCache
+	principals principalsCache
 
 	// The authenticated login is immutable for the lifetime of a client (the
 	// token is immutable too). Cache it after the first successful lookup so

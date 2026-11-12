@@ -5,6 +5,7 @@ import '../models/activity.dart';
 import '../models/agent_schema.dart';
 import '../models/cli_agent.dart';
 import '../models/flow.dart';
+import '../models/github_principal.dart';
 import '../models/merge_tracking.dart';
 import '../models/pr.dart';
 import '../models/review.dart';
@@ -684,6 +685,25 @@ class ApiClient {
       throw ApiException('GET /github/rate_limit failed: ${resp.statusCode}');
     }
     return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Logins and org teams of the orgs the daemon watches, for the
+  /// never-approve exempt-authors autocomplete.
+  Future<List<GitHubPrincipal>> fetchGitHubPrincipals() async {
+    final resp = await _client.get(
+      _uri('/github/principals'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /github/principals failed: ${resp.statusCode}');
+    }
+    final list =
+        (jsonDecode(resp.body) as Map<String, dynamic>)['principals']
+            as List<dynamic>? ??
+        const [];
+    return [
+      for (final p in list) GitHubPrincipal.fromJson(p as Map<String, dynamic>),
+    ];
   }
 
   /// Installed-agent catalog: which agents exist on the daemon's machine.

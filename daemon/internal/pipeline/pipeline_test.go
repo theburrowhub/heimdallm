@@ -2753,6 +2753,59 @@ func TestPipeline_Run_NeverApproveExemptAuthors(t *testing.T) {
 	}
 }
 
+type countingTeams struct{ calls int }
+
+func (c *countingTeams) IsTeamMember(org, team, login string) (bool, error) {
+	c.calls++
+	return org == "acme" && team == "core" && login == "carol", nil
+}
+
+// TestPipeline_Run_NeverApproveExemptTeam: a member of a listed team is
+// exempt, and the team is looked up only when the gate changes the outcome.
+func TestPipeline_Run_NeverApproveExemptTeam(t *testing.T) {
+	for i, tc := range []struct {
+		issueSeverity, want string
+		wantLookups         int
+	}{
+		{"medium", "APPROVE", 1}, // gate would request changes: look up, exempt
+		{"low", "APPROVE", 0},    // below the threshold: gate idle, no lookup
+	} {
+		s, err := store.Open(":memory:")
+		if err != nil {
+			t.Fatalf("open store: %v", err)
+		}
+		gh := &fakeGH{diff: "+new line"}
+		exec := &fakeExecCapture{result: &executor.ReviewResult{
+			Summary:  "One finding.",
+			Severity: "low",
+			Issues:   []executor.Issue{{File: "main.go", Line: 1, Description: "finding", Severity: tc.issueSeverity}},
+		}}
+		p := pipeline.New(s, gh, exec, &fakeNotify{})
+		teams := &countingTeams{}
+		p.SetTeamMemberChecker(teams)
+		n := 890 + i
+		pr := &github.PullRequest{
+			ID: int64(n), Number: n, Title: "t", Repo: "acme/repo",
+			User: github.User{Login: "carol"}, State: "open",
+			UpdatedAt: time.Now(), HTMLURL: fmt.Sprintf("https://github.com/acme/repo/pull/%d", n),
+			Head: github.Branch{SHA: fmt.Sprintf("sha%d", n)},
+		}
+		if _, err := p.Run(pr, pipeline.RunOptions{
+			Primary:                   "claude",
+			ReviewMode:                "single",
+			NeverApproveWithIssues:    true,
+			NeverApproveExemptAuthors: []string{"@acme/core"},
+		}); err != nil {
+			t.Fatalf("pipeline run: %v", err)
+		}
+		s.Close()
+		if gh.submittedEvent != tc.want || teams.calls != tc.wantLookups {
+			t.Errorf("%s finding: event %q with %d lookups, want %q with %d",
+				tc.issueSeverity, gh.submittedEvent, teams.calls, tc.want, tc.wantLookups)
+		}
+	}
+}
+
 // TestPipeline_Run_MultiModePostsCommentsAndRequestsChanges: multi mode
 // still posts one plain comment per issue, and the summary review carries
 // the same REQUEST_CHANGES verdict single mode would produce — the gate's

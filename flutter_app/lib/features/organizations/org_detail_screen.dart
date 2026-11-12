@@ -12,6 +12,7 @@ import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
+import '../../shared/widgets/principal_chips_field.dart';
 import '../../shared/widgets/review_limits_editor.dart';
 import '../../shared/widgets/token_saving_editor.dart';
 import '../../shared/widgets/toast.dart';
@@ -405,26 +406,32 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                       onReset: () => _resetField('never_approve_min_severity'),
                     ),
                     const SizedBox(height: 10),
-                    OverrideTextField(
+                    OverrideFrame(
                       label: 'Never approve — exempt authors',
-                      helper:
-                          'GitHub logins, comma separated. Their PRs skip the '
-                          'never-approve gate; high severity still requests '
-                          'changes.',
-                      globalValue: appConfig.globalNeverApproveExemptAuthors
+                      overridden: _config.neverApproveExemptAuthors != null,
+                      inheritedValue: appConfig.globalNeverApproveExemptAuthors
                           .join(', '),
-                      overrideValue: _config.neverApproveExemptAuthors?.join(
-                        ', ',
-                      ),
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          neverApproveExemptAuthors: v == null
-                              ? null
-                              : parseLoginList(v),
-                        ),
-                      ),
                       onReset: () =>
                           _resetField('never_approve_exempt_authors'),
+                      child: PrincipalChipsField(
+                        helper:
+                            'GitHub logins or org teams (org/team). Their PRs '
+                            'skip the never-approve gate; high severity still '
+                            'requests changes.',
+                        value:
+                            _config.neverApproveExemptAuthors ??
+                            appConfig.globalNeverApproveExemptAuthors,
+                        muted: _config.neverApproveExemptAuthors == null,
+                        suggestions:
+                            ref.watch(githubPrincipalsProvider).value ??
+                            const [],
+                        // Removing every chip goes back to inheriting.
+                        onChanged: (v) => _update(
+                          _config.copyWith(
+                            neverApproveExemptAuthors: v.isEmpty ? null : v,
+                          ),
+                        ),
+                      ),
                     ),
                   ], accent: FeaturePalette.prReview),
                   _sectionCard('Merge Tracking', [

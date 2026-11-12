@@ -685,6 +685,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// requested reviewer but GitHub emitted no review_requested timeline
 	// event (theburrowhub/heimdallm#1532). No-ops if the bot login is unset.
 	p.SetReviewerFetcher(ghClient)
+	p.SetTeamMemberChecker(ghClient)
 
 	// Wire the SSE broker as the lifecycle publisher so Run emits
 	// pr_detected / review_started / review_completed / review_skipped
@@ -2045,6 +2046,14 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// why the tracker — not GitHub's own endpoint — must be the primary source.
 	srv.SetRateLimitFn(func() (any, error) {
 		return buildRateLimitView(time.Now(), limiter.Snapshots(), ghClient.RateLimit)
+	})
+	// Autocomplete for never_approve_exempt_authors. GitHub is called outside
+	// cfgMu; the listings are cached in the client.
+	srv.SetGitHubPrincipalsFn(func() (any, error) {
+		cfgMu.Lock()
+		orgs := suggestionOrgs(cfg)
+		cfgMu.Unlock()
+		return collectPrincipals(orgs, ghClient.OrgPrincipals, principalsWait), nil
 	})
 
 	srv.SetConfigFn(func() map[string]any {
@@ -5029,6 +5038,83 @@ func managedCloneDirs(cfg *config.Config) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// suggestionOrgs lists the orgs whose members and teams the exempt-authors
+// autocomplete offers: discovery orgs, org overrides and monitored repos' owners.
+func suggestionOrgs(cfg *config.Config) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(org string) {
+		org = strings.TrimSpace(org)
+		key := strings.ToLower(org)
+		if _, dup := seen[key]; dup || org == "" {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, org)
+	}
+	for _, org := range cfg.GitHub.DiscoveryOrgs {
+		add(org)
+	}
+	for org := range cfg.AI.Orgs {
+		add(org)
+	}
+	for repo := range monitoredRepoSet(cfg, nil) {
+		if owner, _, ok := strings.Cut(repo, "/"); ok {
+			add(owner)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// principalsWait bounds GET /github/principals on a cold cache.
+const principalsWait = 8 * time.Second
+
+// collectPrincipals merges the orgs' listings, fetched in parallel, without
+// duplicates and sorted case-insensitively. An org that fails is logged and
+// skipped so it cannot empty everyone's suggestions; one still loading after
+// wait is left out of this answer (its listing still lands in the cache).
+func collectPrincipals(orgs []string, list func(org string) ([]gh.Principal, error), wait time.Duration) map[string]any {
+	type result struct {
+		org string
+		ps  []gh.Principal
+		err error
+	}
+	results := make(chan result, len(orgs))
+	for _, org := range orgs {
+		go func(org string) {
+			ps, err := list(org)
+			results <- result{org, ps, err}
+		}(org)
+	}
+	deadline := time.After(wait)
+	out := []gh.Principal{}
+	seen := map[string]struct{}{}
+collect:
+	for range orgs {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				slog.Warn("github principals: org listing failed", "org", r.org, "err", r.err)
+				continue
+			}
+			for _, p := range r.ps {
+				key := strings.ToLower(p.Value)
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, p)
+			}
+		case <-deadline:
+			slog.Warn("github principals: answering without org listings still loading")
+			break collect
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Value) < strings.ToLower(out[j].Value) })
+	return map[string]any{"principals": out}
 }
 
 func monitoredRepoSet(cfg *config.Config, discovered []string) map[string]struct{} {

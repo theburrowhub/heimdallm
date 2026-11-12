@@ -490,13 +490,11 @@ void main() {
 
   group('never-approve exempt authors override', () {
     Finder exemptOverride() => find.widgetWithText(
-      OverrideTextField,
+      OverrideFrame,
       'Never approve — exempt authors',
     );
-    Finder exemptField() => find.descendant(
-      of: exemptOverride(),
-      matching: find.byType(TextFormField),
-    );
+    Finder exemptField() =>
+        find.descendant(of: exemptOverride(), matching: find.byType(TextField));
 
     Future<MockApiClient> mount(WidgetTester tester) async {
       final mockApi = MockApiClient();
@@ -532,12 +530,16 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      await tester.ensureVisible(exemptOverride());
+      await tester.pumpAndSettle();
       return mockApi;
     }
 
-    testWidgets('an edit is autosaved as a list', (tester) async {
+    testWidgets('an added entry is autosaved with the existing ones', (
+      tester,
+    ) async {
       final mockApi = await mount(tester);
-      await tester.enterText(exemptField(), 'alice bob');
+      await tester.enterText(exemptField(), 'acme/core ');
       await tester.pump(const Duration(milliseconds: 801));
       await tester.pumpAndSettle();
 
@@ -545,13 +547,22 @@ void main() {
         () => mockApi.patchRepoConfig(_repoName, captureAny()),
       ).captured;
       expect(captured.single, {
-        'never_approve_exempt_authors': ['alice', 'bob'],
+        'never_approve_exempt_authors': ['alice', 'acme/core'],
       });
     });
 
-    testWidgets('clearing the field deletes the override', (tester) async {
+    testWidgets('half-typed text is not autosaved', (tester) async {
       final mockApi = await mount(tester);
-      await tester.enterText(exemptField(), '');
+      await tester.enterText(exemptField(), 'bo');
+      await tester.pump(const Duration(milliseconds: 801));
+      await tester.pumpAndSettle();
+
+      verifyNever(() => mockApi.patchRepoConfig(_repoName, any()));
+    });
+
+    testWidgets('removing every chip deletes the override', (tester) async {
+      final mockApi = await mount(tester);
+      await tester.tap(find.byTooltip('Remove alice'));
       await tester.pump(const Duration(milliseconds: 801));
       await tester.pumpAndSettle();
 
@@ -564,13 +575,12 @@ void main() {
 
     testWidgets('reset deletes the override', (tester) async {
       final mockApi = await mount(tester);
-      final reset = find.descendant(
-        of: exemptOverride(),
-        matching: find.text('\u00d7 reset'),
+      await tester.tap(
+        find.descendant(
+          of: exemptOverride(),
+          matching: find.text('\u00d7 reset'),
+        ),
       );
-      await tester.ensureVisible(reset);
-      await tester.pumpAndSettle();
-      await tester.tap(reset);
       await tester.pumpAndSettle();
 
       verify(
