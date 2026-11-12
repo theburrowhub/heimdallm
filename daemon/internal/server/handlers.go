@@ -819,7 +819,7 @@ const HeaderDaemon = "X-Heimdallm-Daemon"
 // client depends on, together with "daemon_api" in the repository's
 // compat.json (a test keeps them equal). Daemons built before the field
 // existed omit it; clients read that as revision 1, the API at the time.
-const APIVersion = 1
+const APIVersion = 2
 
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()

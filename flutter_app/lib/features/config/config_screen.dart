@@ -1017,12 +1017,14 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       const SizedBox(height: 12),
       TextFormField(
         controller: _exemptAuthorsController,
-        enabled: _globalNeverApproveWithIssues,
+        // Not gated on the switch above: orgs and repos that turn the gate on
+        // in their own override inherit this list.
         decoration: const InputDecoration(
           labelText: 'Never approve — exempt authors',
           helperText:
               'GitHub logins, comma separated. Their PRs skip the '
-              'never-approve gate; high severity still requests changes.',
+              'never-approve gate wherever it is on (here or in an org/repo '
+              'override); high severity still requests changes.',
           border: OutlineInputBorder(),
           isDense: true,
         ),

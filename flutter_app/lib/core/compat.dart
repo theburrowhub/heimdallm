@@ -7,7 +7,7 @@ import 'dart:convert';
 /// equal). The release pipeline publishes that file in `versions.json`, and
 /// the update banner warns before installing an app that is ahead of the
 /// connected daemon.
-const int minDaemonApiVersion = 1;
+const int minDaemonApiVersion = 2;
 
 /// Revision assumed for a daemon that reports no `api_version`: daemons built
 /// before the field existed served revision 1.
