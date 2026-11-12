@@ -2327,3 +2327,35 @@ func TestValidateAgentExecutionPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestAIForRepo_NeverApproveExemptAuthorsResolution(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[ai]
+primary = "claude"
+never_approve_exempt_authors = ["global-dev"]
+
+[ai.orgs."acme"]
+never_approve_exempt_authors = ["acme-dev"]
+
+[ai.repos."acme/strict"]
+never_approve_exempt_authors = []
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for repo, want := range map[string][]string{
+		"other/repo":  {"global-dev"},
+		"acme/loose":  {"acme-dev"},
+		"acme/strict": {}, // explicit [] replaces the org list
+	} {
+		got := cfg.AIForRepo(repo).NeverApproveExemptAuthors
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s: NeverApproveExemptAuthors = %v, want %v", repo, got, want)
+		}
+	}
+}

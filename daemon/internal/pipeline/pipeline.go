@@ -881,6 +881,9 @@ type RunOptions struct {
 	// Empty resolves to DefaultNeverApproveMinSeverity ("medium"), not "low"
 	// (see ReviewEvent).
 	NeverApproveMinSeverity string
+	// NeverApproveExemptAuthors are PR-author logins that skip the
+	// NeverApproveWithIssues gate (high severity still requests changes).
+	NeverApproveExemptAuthors []string
 	// ReviewFailureRepoHourlyLimit bounds failed/in-flight review executions
 	// across this repository in a rolling hour. It is resolved independently
 	// from completed-review breaker limits. Zero uses the pipeline default.
@@ -1588,8 +1591,9 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	signalComments := filterBotComments(prComments, p.botLogin)
 	commentSignals := ExtractCommentSignals(signalComments, pr.User.Login)
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
+	neverApprove := opts.NeverApproveWithIssues && !authorAllowed(opts.NeverApproveExemptAuthors, pr.User.Login)
 	reviewEvent := ReviewEvent(finalSeverity, MaxIssueSeverity(result.Issues),
-		opts.NeverApproveWithIssues, opts.NeverApproveMinSeverity)
+		neverApprove, opts.NeverApproveMinSeverity)
 	// The published body must quote the severity that was actually decided and
 	// stored (reconciled + signal-escalated), not the agent's raw field: the
 	// footer badge would otherwise contradict the review event. The retry

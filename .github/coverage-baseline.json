@@ -4,16 +4,16 @@
   "diff_percent": 90,
   "modules": {
     "daemon": {
-      "covered": 16381,
-      "total": 18705
+      "covered": 16388,
+      "total": 18712
     },
     "cli": {
       "covered": 3254,
       "total": 4264
     },
     "flutter": {
-      "covered": 15309,
-      "total": 16839
+      "covered": 15383,
+      "total": 16913
     }
   },
   "ignore": [

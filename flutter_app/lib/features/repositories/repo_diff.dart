@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show listEquals;
 import '../../core/models/config_model.dart';
 
 /// Computes the PATCH body diff between the previously-saved [old] repo
@@ -38,6 +39,14 @@ Map<String, dynamic> computeRepoDiff(RepoConfig old, RepoConfig updated) {
   }
   if (old.neverApproveMinSeverity != updated.neverApproveMinSeverity) {
     diff['never_approve_min_severity'] = updated.neverApproveMinSeverity ?? '';
+  }
+  // Clearing the list (back to inherit) is a DELETE, see _autoSave.
+  if (updated.neverApproveExemptAuthors != null &&
+      !listEquals(
+        old.neverApproveExemptAuthors,
+        updated.neverApproveExemptAuthors,
+      )) {
+    diff['never_approve_exempt_authors'] = updated.neverApproveExemptAuthors;
   }
   // Removing a budget goes through DELETE (review_limits); only a present
   // budget is patched.

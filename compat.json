@@ -1,7 +1,7 @@
 {
-  "daemon_api": 1,
+  "daemon_api": 2,
   "min_daemon_api": {
-    "gui": 1,
+    "gui": 2,
     "cli": 1
   }
 }

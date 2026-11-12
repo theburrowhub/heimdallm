@@ -68,6 +68,14 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
         lastResponse = await api.patchRepoConfig(widget.repoName, repoDiff);
         didSave = true;
       }
+      if (previous.neverApproveExemptAuthors != null &&
+          target.neverApproveExemptAuthors == null) {
+        lastResponse = await api.deleteRepoField(
+          widget.repoName,
+          'never_approve_exempt_authors',
+        );
+        didSave = true;
+      }
 
       final mergeTrackingDiff = diffMergeTrackingOverrides(
         previous.mergeTracking,
@@ -409,6 +417,32 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onChanged: (v) =>
                         _update(_config.copyWith(neverApproveMinSeverity: v)),
                     onReset: () => _resetField('never_approve_min_severity'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideTextField(
+                    label: 'Never approve — exempt authors',
+                    helper:
+                        'GitHub logins, comma separated. Their PRs skip the '
+                        'never-approve gate; high severity still requests '
+                        'changes.',
+                    globalValue:
+                        (orgConfig?.neverApproveExemptAuthors ??
+                                appConfig.globalNeverApproveExemptAuthors)
+                            .join(', '),
+                    inheritedLabel: source(
+                      orgConfig?.neverApproveExemptAuthors != null,
+                    ),
+                    overrideValue: _config.neverApproveExemptAuthors?.join(
+                      ', ',
+                    ),
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        neverApproveExemptAuthors: v == null
+                            ? null
+                            : parseLoginList(v),
+                      ),
+                    ),
+                    onReset: () => _resetField('never_approve_exempt_authors'),
                   ),
                 ], accent: FeaturePalette.prReview),
 

@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show listEquals, visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
@@ -387,6 +387,13 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
       updated.globalNeverApproveMinSeverity) {
     aiDiff['never_approve_min_severity'] =
         updated.globalNeverApproveMinSeverity;
+  }
+  if (!listEquals(
+    old.globalNeverApproveExemptAuthors,
+    updated.globalNeverApproveExemptAuthors,
+  )) {
+    aiDiff['never_approve_exempt_authors'] =
+        updated.globalNeverApproveExemptAuthors;
   }
 
   // Agent configs — diff each CLI agent's settings individually.

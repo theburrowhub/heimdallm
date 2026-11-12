@@ -472,6 +472,10 @@ void main() {
     await tester.ensureVisible(neverApprove);
     await tester.tap(neverApprove);
     await tester.pumpAndSettle();
+    await tester.enterText(
+      field('Never approve — exempt authors'),
+      'alice, bob',
+    );
 
     final save = find.widgetWithText(ElevatedButton, 'Save');
     await tester.ensureVisible(save);
@@ -486,6 +490,7 @@ void main() {
       'tier3_interval': '45s',
     });
     expect(patch['ai']['never_approve_with_issues'], isTrue);
+    expect(patch['ai']['never_approve_exempt_authors'], ['alice', 'bob']);
   });
 
   test('CircuitBreakerConfig.copyWith replaces only the given fields', () {
@@ -1275,6 +1280,40 @@ void main() {
     // String overrides emit '' to clear (same contract as review_mode).
     final cleared = set.copyWith(neverApproveMinSeverity: null);
     expect(computeRepoDiff(set, cleared)['never_approve_min_severity'], '');
+  });
+
+  test('never_approve_exempt_authors parses, round-trips and diffs', () {
+    expect(parseLoginList('alice, @bob  carol,,'), ['alice', '@bob', 'carol']);
+
+    final cfg = AppConfig.fromJson({
+      'never_approve_exempt_authors': ['alice'],
+      'repositories': <String>[],
+      'repo_overrides': {
+        'org/strict': {'never_approve_exempt_authors': <String>[]},
+        'org/other': {'primary': 'claude'},
+      },
+      'org_overrides': {
+        'org': {
+          'never_approve_exempt_authors': ['bob'],
+        },
+      },
+    });
+    expect(cfg.globalNeverApproveExemptAuthors, ['alice']);
+    expect(cfg.orgConfigs['org']!.neverApproveExemptAuthors, ['bob']);
+    expect(cfg.repoConfigs['org/strict']!.neverApproveExemptAuthors, isEmpty);
+    expect(cfg.repoConfigs['org/other']!.neverApproveExemptAuthors, isNull);
+
+    const oldCfg = RepoConfig();
+    final set = oldCfg.copyWith(neverApproveExemptAuthors: ['alice']);
+    expect(computeRepoDiff(oldCfg, set)['never_approve_exempt_authors'], [
+      'alice',
+    ]);
+    // Same contents in a new list is not a change.
+    final same = set.copyWith(neverApproveExemptAuthors: ['alice']);
+    expect(computeRepoDiff(set, same), isNot(contains('never_approve_exempt_authors')));
+    // Back to inherit is a DELETE from the screen, never a patched null.
+    final cleared = set.copyWith(neverApproveExemptAuthors: null);
+    expect(computeRepoDiff(set, cleared), isNot(contains('never_approve_exempt_authors')));
   });
 
   test('repo diff includes the clone directory when set', () {

@@ -273,6 +273,74 @@ void main() {
     expect(captured.single, {'clone_dir': '/work/custom-acme'});
   });
 
+  group('never-approve exempt authors', () {
+    Finder exemptOverride() => find.widgetWithText(
+      OverrideTextField,
+      'Never approve — exempt authors',
+    );
+    Finder exemptField() => find.descendant(
+      of: exemptOverride(),
+      matching: find.byType(TextFormField),
+    );
+
+    Future<MockApiClient> pumpWithList(WidgetTester tester) async {
+      final mockApi = await _pumpOrgDetail(
+        tester,
+        orgExtra: const {
+          'never_approve_exempt_authors': ['alice'],
+        },
+      );
+      when(
+        () => mockApi.deleteOrgField('acme', any()),
+      ).thenAnswer((_) async => _configJson());
+      return mockApi;
+    }
+
+    testWidgets('an edited list is patched', (tester) async {
+      final mockApi = await pumpWithList(tester);
+      await tester.enterText(exemptField(), 'alice, @bob');
+      await tester.pump();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      final captured = verify(
+        () => mockApi.patchOrgConfig('acme', captureAny()),
+      ).captured;
+      expect(captured.single, {
+        'never_approve_exempt_authors': ['alice', '@bob'],
+      });
+    });
+
+    testWidgets('clearing the list deletes the override', (tester) async {
+      final mockApi = await pumpWithList(tester);
+      await tester.enterText(exemptField(), '');
+      await tester.pump();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      verify(
+        () => mockApi.deleteOrgField('acme', 'never_approve_exempt_authors'),
+      ).called(1);
+      verifyNever(() => mockApi.patchOrgConfig('acme', any()));
+    });
+
+    testWidgets('reset deletes the override', (tester) async {
+      final mockApi = await pumpWithList(tester);
+      final reset = find.descendant(
+        of: exemptOverride(),
+        matching: find.text('\u00d7 reset'),
+      );
+      await tester.ensureVisible(reset);
+      await tester.pumpAndSettle();
+      await tester.tap(reset);
+      await tester.pumpAndSettle();
+
+      verify(
+        () => mockApi.deleteOrgField('acme', 'never_approve_exempt_authors'),
+      ).called(1);
+    });
+  });
+
   testWidgets('reset deletes the org clone_dir override', (tester) async {
     final mockApi = await _pumpOrgDetail(tester);
     when(
