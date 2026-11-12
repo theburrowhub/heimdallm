@@ -3396,6 +3396,12 @@ func TestHandleGitHubPrincipals(t *testing.T) {
 	if w := get(); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("unwired: got %d, want 503", w.Code)
 	}
+	// Org member and team names: never without the API token.
+	anon := httptest.NewRecorder()
+	srv.Router().ServeHTTP(anon, httptest.NewRequest("GET", "/github/principals", nil))
+	if anon.Code != http.StatusUnauthorized {
+		t.Errorf("no token: got %d, want 401", anon.Code)
+	}
 	srv.SetGitHubPrincipalsFn(func() (any, error) {
 		return map[string]any{"principals": []map[string]string{{"value": "acme/core", "kind": "team"}}}, nil
 	})

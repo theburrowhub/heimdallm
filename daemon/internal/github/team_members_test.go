@@ -89,6 +89,8 @@ func TestOrgPrincipals(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"login":"Zed"}]`))
 		case "/orgs/someone/teams", "/orgs/someone/members":
 			w.WriteHeader(http.StatusNotFound) // personal account
+		case "/orgs/down/teams":
+			w.WriteHeader(http.StatusBadGateway)
 		default:
 			t.Errorf("unexpected request %s", r.URL.Path)
 		}
@@ -114,5 +116,14 @@ func TestOrgPrincipals(t *testing.T) {
 
 	if got, err := c.OrgPrincipals("someone"); err != nil || len(got) != 0 {
 		t.Errorf("personal account = %v, %v; want empty, nil", got, err)
+	}
+
+	// A failing org returns the error, and the failure is cached too.
+	if _, err := c.OrgPrincipals("down"); err == nil {
+		t.Error("502 listing: want an error")
+	}
+	before = calls.Load()
+	if _, err := c.OrgPrincipals("down"); err == nil || calls.Load() != before {
+		t.Errorf("repeat after failure: err=%v, calls %d -> %d; want the cached error", err, before, calls.Load())
 	}
 }
