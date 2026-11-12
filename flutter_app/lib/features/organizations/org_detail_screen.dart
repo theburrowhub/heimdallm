@@ -55,7 +55,13 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     _saved = _config;
   }
 
+  // Clearing the exempt-authors list cannot be patched as null; it is a DELETE.
+  bool get _clearExempt =>
+      _saved.neverApproveExemptAuthors != null &&
+      _config.neverApproveExemptAuthors == null;
+
   bool get _dirty =>
+      _clearExempt ||
       _computeOrgDiff(_saved, _config).isNotEmpty ||
       diffMergeTrackingOverrides(
         _saved.mergeTracking,
@@ -78,9 +84,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
       _saved.mergeTracking,
       _config.mergeTracking,
     );
-    final clearExempt =
-        _saved.neverApproveExemptAuthors != null &&
-        _config.neverApproveExemptAuthors == null;
+    final clearExempt = _clearExempt;
     if (diff.isEmpty && mergeTrackingDiff.isEmpty && !clearExempt) return;
     final target = _config;
     if (mounted) setState(() => _saving = true);
@@ -90,7 +94,6 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
       if (diff.isNotEmpty) {
         freshJson = await api.patchOrgConfig(widget.orgName, diff);
       }
-      // Clearing the list (back to inherit) cannot be patched as null.
       if (clearExempt) {
         freshJson = await api.deleteOrgField(
           widget.orgName,

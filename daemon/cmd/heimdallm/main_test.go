@@ -1030,6 +1030,24 @@ func TestAIOverrideMaps_ExposeNeverApproveMinSeverity(t *testing.T) {
 	}
 }
 
+// TestAIOverrideMaps_ExposeNeverApproveExemptAuthors: GET /config carries the
+// list when set (an explicit [] included, so the UI sees "nobody exempt" rather
+// than "inherit") and omits it when nil.
+func TestAIOverrideMaps_ExposeNeverApproveExemptAuthors(t *testing.T) {
+	out := repoAIOverrideMap(config.RepoAI{NeverApproveExemptAuthors: []string{"alice"}})
+	if v, ok := out["never_approve_exempt_authors"].([]string); !ok || len(v) != 1 || v[0] != "alice" {
+		t.Errorf("repo never_approve_exempt_authors = %v (present=%v), want [alice]", out["never_approve_exempt_authors"], ok)
+	}
+	out = orgAIOverrideMap(config.OrgAI{NeverApproveExemptAuthors: []string{}})
+	if v, ok := out["never_approve_exempt_authors"].([]string); !ok || len(v) != 0 {
+		t.Errorf("org explicit [] = %v (present=%v), want present and empty", out["never_approve_exempt_authors"], ok)
+	}
+	out = orgAIOverrideMap(config.OrgAI{})
+	if _, present := out["never_approve_exempt_authors"]; present {
+		t.Errorf("nil override should omit never_approve_exempt_authors, got %v", out["never_approve_exempt_authors"])
+	}
+}
+
 // ── loadOrCreateAPIToken ─────────────────────────────────────────────────
 //
 // Regression coverage for #71: the token file must be readable across

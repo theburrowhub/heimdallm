@@ -472,6 +472,10 @@ void main() {
     await tester.ensureVisible(neverApprove);
     await tester.tap(neverApprove);
     await tester.pumpAndSettle();
+    await tester.enterText(
+      field('Never approve — exempt authors'),
+      'alice, bob',
+    );
 
     final save = find.widgetWithText(ElevatedButton, 'Save');
     await tester.ensureVisible(save);
@@ -486,6 +490,7 @@ void main() {
       'tier3_interval': '45s',
     });
     expect(patch['ai']['never_approve_with_issues'], isTrue);
+    expect(patch['ai']['never_approve_exempt_authors'], ['alice', 'bob']);
   });
 
   test('CircuitBreakerConfig.copyWith replaces only the given fields', () {

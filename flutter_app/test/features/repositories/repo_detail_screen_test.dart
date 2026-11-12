@@ -488,6 +488,98 @@ void main() {
     });
   });
 
+  group('never-approve exempt authors override', () {
+    Finder exemptOverride() => find.widgetWithText(
+      OverrideTextField,
+      'Never approve — exempt authors',
+    );
+    Finder exemptField() => find.descendant(
+      of: exemptOverride(),
+      matching: find.byType(TextFormField),
+    );
+
+    Future<MockApiClient> mount(WidgetTester tester) async {
+      final mockApi = MockApiClient();
+      final json = {
+        ..._configJson(),
+        'repo_overrides': {
+          _repoName: {
+            'never_approve_exempt_authors': ['alice'],
+          },
+        },
+      };
+      when(() => mockApi.fetchConfig()).thenAnswer((_) async => json);
+      when(
+        () => mockApi.patchRepoConfig(_repoName, any()),
+      ).thenAnswer((_) async => json);
+      when(
+        () => mockApi.deleteRepoField(_repoName, any()),
+      ).thenAnswer((_) async => _configJson());
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            apiClientProvider.overrideWithValue(mockApi),
+            configNotifierProvider.overrideWith(ConfigNotifier.new),
+            agentsProvider.overrideWith((_) async => <ReviewPrompt>[]),
+          ],
+          child: MaterialApp(
+            theme: HeimdallmTheme.light(),
+            builder: (context, navigatorChild) => HeimdallmTheme.scope(
+              child: navigatorChild ?? const SizedBox.shrink(),
+            ),
+            home: const RepoDetailScreen(repoName: _repoName),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return mockApi;
+    }
+
+    testWidgets('an edit is autosaved as a list', (tester) async {
+      final mockApi = await mount(tester);
+      await tester.enterText(exemptField(), 'alice bob');
+      await tester.pump(const Duration(milliseconds: 801));
+      await tester.pumpAndSettle();
+
+      final captured = verify(
+        () => mockApi.patchRepoConfig(_repoName, captureAny()),
+      ).captured;
+      expect(captured.single, {
+        'never_approve_exempt_authors': ['alice', 'bob'],
+      });
+    });
+
+    testWidgets('clearing the field deletes the override', (tester) async {
+      final mockApi = await mount(tester);
+      await tester.enterText(exemptField(), '');
+      await tester.pump(const Duration(milliseconds: 801));
+      await tester.pumpAndSettle();
+
+      verify(
+        () =>
+            mockApi.deleteRepoField(_repoName, 'never_approve_exempt_authors'),
+      ).called(1);
+      verifyNever(() => mockApi.patchRepoConfig(_repoName, any()));
+    });
+
+    testWidgets('reset deletes the override', (tester) async {
+      final mockApi = await mount(tester);
+      final reset = find.descendant(
+        of: exemptOverride(),
+        matching: find.text('\u00d7 reset'),
+      );
+      await tester.ensureVisible(reset);
+      await tester.pumpAndSettle();
+      await tester.tap(reset);
+      await tester.pumpAndSettle();
+
+      verify(
+        () =>
+            mockApi.deleteRepoField(_repoName, 'never_approve_exempt_authors'),
+      ).called(1);
+    });
+  });
+
   testWidgets('token saving and review limits are saved for the repo', (
     tester,
   ) async {
