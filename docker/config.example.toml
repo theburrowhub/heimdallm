@@ -43,6 +43,12 @@ review_mode = "single"   # "single" or "multi"
 # request changes on any finding at all. Overridable per org and per repo.
 # never_approve_min_severity = "medium"
 
+# PR authors (GitHub logins) exempt from the never_approve_with_issues gate:
+# their PRs approve or request changes on the final severity alone (high still
+# requests changes). Empty = nobody exempt. A repo or org list replaces the
+# inherited one; an explicit [] exempts nobody in that scope.
+# never_approve_exempt_authors = ["alice", "bob"]
+
 # Per-CLI settings (optional)
 # [ai.agents.claude]
 # model = "claude-sonnet-4-20250514"

@@ -234,6 +234,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   final _tokenController = TextEditingController();
   final _pollController = TextEditingController();
   final _cloneDirController = TextEditingController();
+  final _exemptAuthorsController = TextEditingController();
   final _formScrollController = ScrollController();
   final _pollFieldKey = GlobalKey<FormFieldState<String>>();
   final Map<_ConfigSectionId, GlobalKey> _sectionKeys = {
@@ -284,6 +285,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _tokenController.dispose();
     _pollController.dispose();
     _cloneDirController.dispose();
+    _exemptAuthorsController.dispose();
     _formScrollController.dispose();
     _mtPollIntervalController.dispose();
     _mtResolveTimeoutController.dispose();
@@ -901,6 +903,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   bool _globalNeverApproveWithIssues = false;
   String _globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity;
+  List<String> _globalNeverApproveExemptAuthors = const [];
   String _globalCloneDir = '';
 
   String _aiFlow = '';
@@ -914,6 +917,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _reviewMode = config.reviewMode.isEmpty ? 'single' : config.reviewMode;
     _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
     _globalNeverApproveMinSeverity = config.globalNeverApproveMinSeverity;
+    _globalNeverApproveExemptAuthors = config.globalNeverApproveExemptAuthors;
+    _exemptAuthorsController.text = config.globalNeverApproveExemptAuthors
+        .join(', ');
     _globalCloneDir = config.globalCloneDir;
     _cloneDirController.text = config.globalCloneDir;
   }
@@ -1007,6 +1013,20 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                     v ?? defaultNeverApproveMinSeverity,
               )
             : null,
+      ),
+      const SizedBox(height: 12),
+      TextFormField(
+        controller: _exemptAuthorsController,
+        enabled: _globalNeverApproveWithIssues,
+        decoration: const InputDecoration(
+          labelText: 'Never approve — exempt authors',
+          helperText:
+              'GitHub logins, comma separated. Their PRs skip the '
+              'never-approve gate; high severity still requests changes.',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        onChanged: (v) => _globalNeverApproveExemptAuthors = parseLoginList(v),
       ),
       const SizedBox(height: 12),
       TextFormField(
@@ -1809,6 +1829,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     polling: _polling,
     globalNeverApproveWithIssues: _globalNeverApproveWithIssues,
     globalNeverApproveMinSeverity: _globalNeverApproveMinSeverity,
+    globalNeverApproveExemptAuthors: _globalNeverApproveExemptAuthors,
     globalCloneDir: _globalCloneDir,
     mergeTracking: _mergeTracking,
     myPrs: _myPrs,

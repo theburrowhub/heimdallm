@@ -2009,6 +2009,12 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # ([ai.repos.*]).
 # never_approve_min_severity = "medium"
 
+# PR authors (GitHub logins) exempt from the never_approve_with_issues gate:
+# their PRs approve or request changes on the final severity alone (high still
+# requests changes). Empty = nobody exempt. A repo or org list replaces the
+# inherited one; an explicit [] exempts nobody in that scope.
+# never_approve_exempt_authors = ["alice", "bob"]
+
 # When local_dir is unset, Heimdallm prepares a managed shallow clone for agent
 # context under clone_dir. If clone_dir is also unset, the default is
 # os.TempDir()/heimdallm/<org>/<repo>. Existing directories are mutated only
@@ -2058,6 +2064,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # clone_dir = "/home/heimdallm/repos/myorg-worktrees"
 # never_approve_with_issues = false
 # never_approve_min_severity = "medium"
+# never_approve_exempt_authors = ["alice", "bob"]
 #
 # # Per-org circuit breaker override (optional, fields overlay the global baseline)
 # [ai.orgs."myorg".circuit_breaker]

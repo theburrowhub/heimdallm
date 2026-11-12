@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -77,7 +78,10 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
       _saved.mergeTracking,
       _config.mergeTracking,
     );
-    if (diff.isEmpty && mergeTrackingDiff.isEmpty) return;
+    final clearExempt =
+        _saved.neverApproveExemptAuthors != null &&
+        _config.neverApproveExemptAuthors == null;
+    if (diff.isEmpty && mergeTrackingDiff.isEmpty && !clearExempt) return;
     final target = _config;
     if (mounted) setState(() => _saving = true);
     try {
@@ -85,6 +89,13 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
       Map<String, dynamic>? freshJson;
       if (diff.isNotEmpty) {
         freshJson = await api.patchOrgConfig(widget.orgName, diff);
+      }
+      // Clearing the list (back to inherit) cannot be patched as null.
+      if (clearExempt) {
+        freshJson = await api.deleteOrgField(
+          widget.orgName,
+          'never_approve_exempt_authors',
+        );
       }
       if (mergeTrackingDiff.isNotEmpty) {
         freshJson = await api.patchMergeTrackingOrgConfig(
@@ -188,6 +199,13 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     if (old.neverApproveMinSeverity != updated.neverApproveMinSeverity) {
       diff['never_approve_min_severity'] =
           updated.neverApproveMinSeverity ?? '';
+    }
+    if (updated.neverApproveExemptAuthors != null &&
+        !listEquals(
+          old.neverApproveExemptAuthors,
+          updated.neverApproveExemptAuthors,
+        )) {
+      diff['never_approve_exempt_authors'] = updated.neverApproveExemptAuthors;
     }
     if (old.reviewLimits != updated.reviewLimits &&
         updated.reviewLimits != null) {
@@ -382,6 +400,28 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                       onChanged: (v) =>
                           _update(_config.copyWith(neverApproveMinSeverity: v)),
                       onReset: () => _resetField('never_approve_min_severity'),
+                    ),
+                    const SizedBox(height: 10),
+                    OverrideTextField(
+                      label: 'Never approve — exempt authors',
+                      helper:
+                          'GitHub logins, comma separated. Their PRs skip the '
+                          'never-approve gate; high severity still requests '
+                          'changes.',
+                      globalValue: appConfig.globalNeverApproveExemptAuthors
+                          .join(', '),
+                      overrideValue: _config.neverApproveExemptAuthors?.join(
+                        ', ',
+                      ),
+                      onChanged: (v) => _update(
+                        _config.copyWith(
+                          neverApproveExemptAuthors: v == null
+                              ? null
+                              : parseLoginList(v),
+                        ),
+                      ),
+                      onReset: () =>
+                          _resetField('never_approve_exempt_authors'),
                     ),
                   ], accent: FeaturePalette.prReview),
                   _sectionCard('Merge Tracking', [

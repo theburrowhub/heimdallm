@@ -286,6 +286,12 @@ type AIConfig struct {
 	// per-org and per-repo.
 	NeverApproveMinSeverity string `toml:"never_approve_min_severity"`
 
+	// NeverApproveExemptAuthors are GitHub logins whose PRs skip the
+	// NeverApproveWithIssues gate: they approve or request changes on the
+	// final severity alone, as if the gate were off. Empty exempts nobody.
+	// Resolved repo > org > global; a scope's list replaces the inherited one.
+	NeverApproveExemptAuthors []string `toml:"never_approve_exempt_authors"`
+
 	// TokenSaving switches the measures that reduce what a review costs.
 	// Overridable per org and per repo; see TokenSavingForRepo.
 	TokenSaving TokenSavingConfig `toml:"token_saving"`
@@ -317,6 +323,10 @@ type RepoAI struct {
 	// this repo. Empty = inherit from org/global.
 	NeverApproveMinSeverity string `toml:"never_approve_min_severity,omitempty"`
 
+	// NeverApproveExemptAuthors overrides ai.never_approve_exempt_authors
+	// for this repo. nil = inherit; an explicit empty list exempts nobody.
+	NeverApproveExemptAuthors []string `toml:"never_approve_exempt_authors,omitempty"`
+
 	// CircuitBreaker overrides circuit-breaker caps for this repo.
 	// nil = inherit from org/global. Present fields overlay the inherited baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
@@ -347,6 +357,8 @@ type OrgAI struct {
 
 	NeverApproveWithIssues  *bool  `toml:"never_approve_with_issues,omitempty"`
 	NeverApproveMinSeverity string `toml:"never_approve_min_severity,omitempty"`
+	// NeverApproveExemptAuthors: see RepoAI.NeverApproveExemptAuthors.
+	NeverApproveExemptAuthors []string `toml:"never_approve_exempt_authors,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for all repos in this org.
 	// nil = inherit from global. Present fields overlay the global baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
@@ -474,6 +486,8 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 		NeverApproveMinSeverity: c.AI.NeverApproveMinSeverity,
 		CloneDir:                c.AI.CloneDir,
 		InstructionAuthors:      c.AI.InstructionAuthors,
+
+		NeverApproveExemptAuthors: c.AI.NeverApproveExemptAuthors,
 	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
@@ -499,6 +513,8 @@ func applyOrgAI(out *RepoAI, o OrgAI) {
 		NeverApproveWithIssues:  o.NeverApproveWithIssues,
 		NeverApproveMinSeverity: o.NeverApproveMinSeverity,
 		InstructionAuthors:      o.InstructionAuthors,
+
+		NeverApproveExemptAuthors: o.NeverApproveExemptAuthors,
 	})
 }
 
@@ -513,6 +529,8 @@ func applyRepoAI(out *RepoAI, r RepoAI) {
 		NeverApproveWithIssues:  r.NeverApproveWithIssues,
 		NeverApproveMinSeverity: r.NeverApproveMinSeverity,
 		InstructionAuthors:      r.InstructionAuthors,
+
+		NeverApproveExemptAuthors: r.NeverApproveExemptAuthors,
 	})
 }
 
@@ -526,6 +544,8 @@ type scopedAIFields struct {
 	NeverApproveWithIssues  *bool
 	NeverApproveMinSeverity string
 	InstructionAuthors      []string
+
+	NeverApproveExemptAuthors []string
 }
 
 func applyScopedAI(out *RepoAI, fields scopedAIFields) {
@@ -555,6 +575,9 @@ func applyScopedAI(out *RepoAI, fields scopedAIFields) {
 	}
 	if fields.InstructionAuthors != nil {
 		out.InstructionAuthors = fields.InstructionAuthors
+	}
+	if fields.NeverApproveExemptAuthors != nil {
+		out.NeverApproveExemptAuthors = fields.NeverApproveExemptAuthors
 	}
 }
 

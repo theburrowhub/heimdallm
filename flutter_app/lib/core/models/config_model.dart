@@ -4,6 +4,11 @@ import '../instances/models.dart' show ClusterRole;
 /// Mirrors the daemon's validator (config.validateNeverApproveMinSeverity).
 const neverApproveMinSeverityOptions = ['low', 'medium', 'high'];
 
+/// Parses the comma/space separated GitHub logins typed into the
+/// never-approve exempt-authors fields.
+List<String> parseLoginList(String text) =>
+    text.split(RegExp(r'[,\s]+')).where((s) => s.isNotEmpty).toList();
+
 /// Threshold the daemon applies when `never_approve_min_severity` is unset at
 /// every scope. Mirrors pipeline.DefaultNeverApproveMinSeverity — keep both in
 /// sync, otherwise the dropdown shows a value the daemon is not using.
@@ -419,6 +424,10 @@ class RepoConfig {
   final bool? neverApproveWithIssues;
   final String? neverApproveMinSeverity;
 
+  /// PR authors exempt from the never-approve gate (null = inherit; an
+  /// empty list exempts nobody).
+  final List<String>? neverApproveExemptAuthors;
+
   /// This repo's own review budget (null = none), counted over this repo's
   /// reviews only. Removing it is a DELETE, never a diffed null.
   final ReviewLimits? reviewLimits;
@@ -449,6 +458,7 @@ class RepoConfig {
     this.reviewMode,
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
+    this.neverApproveExemptAuthors,
     this.reviewLimits,
     this.tokenSaving,
     this.flow,
@@ -486,6 +496,7 @@ class RepoConfig {
       cloneDir != null ||
       neverApproveWithIssues != null ||
       neverApproveMinSeverity != null ||
+      neverApproveExemptAuthors != null ||
       flow != null;
 
   /// LED status for each feature: 'off', 'global', 'repo'
@@ -507,6 +518,7 @@ class RepoConfig {
     Object? reviewMode = _sentinel,
     Object? neverApproveWithIssues = _sentinel,
     Object? neverApproveMinSeverity = _sentinel,
+    Object? neverApproveExemptAuthors = _sentinel,
     Object? reviewLimits = _sentinel,
     Object? tokenSaving = _sentinel,
     Object? flow = _sentinel,
@@ -539,6 +551,9 @@ class RepoConfig {
       neverApproveMinSeverity: neverApproveMinSeverity == _sentinel
           ? this.neverApproveMinSeverity
           : neverApproveMinSeverity as String?,
+      neverApproveExemptAuthors: neverApproveExemptAuthors == _sentinel
+          ? this.neverApproveExemptAuthors
+          : neverApproveExemptAuthors as List<String>?,
       reviewLimits: reviewLimits == _sentinel
           ? this.reviewLimits
           : reviewLimits as ReviewLimits?,
@@ -580,6 +595,10 @@ class OrgConfig {
   final bool? neverApproveWithIssues;
   final String? neverApproveMinSeverity;
 
+  /// PR authors exempt from the never-approve gate (null = inherit; an
+  /// empty list exempts nobody).
+  final List<String>? neverApproveExemptAuthors;
+
   /// Review budget for every repo in this org (null = none).
   final ReviewLimits? reviewLimits;
 
@@ -600,6 +619,7 @@ class OrgConfig {
     MergeTrackingOverride mergeTracking = const MergeTrackingOverride(),
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
+    this.neverApproveExemptAuthors,
     this.reviewLimits,
     this.tokenSaving,
     this.flow,
@@ -615,6 +635,7 @@ class OrgConfig {
       cloneDir != null ||
       neverApproveWithIssues != null ||
       neverApproveMinSeverity != null ||
+      neverApproveExemptAuthors != null ||
       reviewLimits != null ||
       tokenSaving != null ||
       flow != null ||
@@ -631,6 +652,7 @@ class OrgConfig {
     Object? mergeTracking = _sentinel,
     Object? neverApproveWithIssues = _sentinel,
     Object? neverApproveMinSeverity = _sentinel,
+    Object? neverApproveExemptAuthors = _sentinel,
     Object? reviewLimits = _sentinel,
     Object? tokenSaving = _sentinel,
     Object? flow = _sentinel,
@@ -660,6 +682,9 @@ class OrgConfig {
       neverApproveMinSeverity: neverApproveMinSeverity == _sentinel
           ? this.neverApproveMinSeverity
           : neverApproveMinSeverity as String?,
+      neverApproveExemptAuthors: neverApproveExemptAuthors == _sentinel
+          ? this.neverApproveExemptAuthors
+          : neverApproveExemptAuthors as List<String>?,
       reviewLimits: reviewLimits == _sentinel
           ? this.reviewLimits
           : reviewLimits as ReviewLimits?,
@@ -680,6 +705,9 @@ class OrgConfig {
       cloneDir: _nonEmpty(json['clone_dir']),
       neverApproveWithIssues: json['never_approve_with_issues'] as bool?,
       neverApproveMinSeverity: _nonEmpty(json['never_approve_min_severity']),
+      neverApproveExemptAuthors: _stringListOrNull(
+        json['never_approve_exempt_authors'],
+      ),
       reviewLimits: ReviewLimits.maybeFromJson(json['review_limits']),
       tokenSaving: TokenSavingOverride.maybeFromJson(json['token_saving']),
       flow: _nonEmpty(json['flow']),
@@ -688,6 +716,10 @@ class OrgConfig {
 }
 
 const _sentinel = Object();
+
+/// Null when the key is absent (inherit), otherwise the list, possibly empty.
+List<String>? _stringListOrNull(dynamic v) =>
+    v is List ? v.cast<String>() : null;
 
 /// Returns null for empty or null strings — prevents DropdownButtonFormField
 /// assertion errors when Go zero-value strings ("") arrive from the daemon.
@@ -1282,6 +1314,9 @@ class AppConfig {
   /// dropdown with that same default rather than showing a blank selection.
   final String globalNeverApproveMinSeverity;
 
+  /// PR authors exempt from the never-approve gate. Empty exempts nobody.
+  final List<String> globalNeverApproveExemptAuthors;
+
   final MergeTrackingConfig mergeTracking;
   final MyPrsConfig myPrs;
   final CircuitBreakerConfig circuitBreaker;
@@ -1337,6 +1372,7 @@ class AppConfig {
     this.aiFlow = '',
     this.globalNeverApproveWithIssues = false,
     this.globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity,
+    this.globalNeverApproveExemptAuthors = const [],
     this.polling = const PollingConfig(),
     this.localDirBase = const [],
     this.localDirsDetected = const {},
@@ -1404,6 +1440,7 @@ class AppConfig {
     String? aiFlow,
     bool? globalNeverApproveWithIssues,
     String? globalNeverApproveMinSeverity,
+    List<String>? globalNeverApproveExemptAuthors,
     PollingConfig? polling,
     List<String>? localDirBase,
     Map<String, String>? localDirsDetected,
@@ -1432,6 +1469,9 @@ class AppConfig {
           globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
       globalNeverApproveMinSeverity:
           globalNeverApproveMinSeverity ?? this.globalNeverApproveMinSeverity,
+      globalNeverApproveExemptAuthors:
+          globalNeverApproveExemptAuthors ??
+          this.globalNeverApproveExemptAuthors,
       polling: polling ?? this.polling,
       localDirBase: localDirBase ?? this.localDirBase,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
@@ -1453,6 +1493,7 @@ class AppConfig {
     'clone_dir': globalCloneDir,
     'never_approve_with_issues': globalNeverApproveWithIssues,
     'never_approve_min_severity': globalNeverApproveMinSeverity,
+    'never_approve_exempt_authors': globalNeverApproveExemptAuthors,
   };
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
@@ -1495,6 +1536,9 @@ class AppConfig {
           promptId: _nonEmpty(ov['prompt']),
           neverApproveWithIssues: ov['never_approve_with_issues'] as bool?,
           neverApproveMinSeverity: _nonEmpty(ov['never_approve_min_severity']),
+          neverApproveExemptAuthors: _stringListOrNull(
+            ov['never_approve_exempt_authors'],
+          ),
           reviewLimits: ReviewLimits.maybeFromJson(ov['review_limits']),
           tokenSaving: TokenSavingOverride.maybeFromJson(ov['token_saving']),
           flow: _nonEmpty(ov['flow']),
@@ -1589,6 +1633,9 @@ class AppConfig {
       globalNeverApproveMinSeverity:
           _nonEmpty(json['never_approve_min_severity']) ??
           defaultNeverApproveMinSeverity,
+      globalNeverApproveExemptAuthors: _parseStringList(
+        json['never_approve_exempt_authors'],
+      ),
       polling: json['polling'] != null
           ? PollingConfig.fromJson(json['polling'] as Map<String, dynamic>)
           : const PollingConfig(),

@@ -2702,6 +2702,57 @@ func TestPipeline_Run_NeverApproveKeepsApprovalBelowThreshold(t *testing.T) {
 	}
 }
 
+// TestPipeline_Run_NeverApproveExemptAuthors: a PR author on the exempt list
+// skips the never-approve gate (a medium finding approves), but a high
+// finding still requests changes; authors off the list keep the gate.
+func TestPipeline_Run_NeverApproveExemptAuthors(t *testing.T) {
+	cases := []struct {
+		name, author, issueSeverity, want string
+	}{
+		{"exempt medium approves", "Alice", "medium", "APPROVE"},
+		{"exempt high still requests changes", "alice", "high", "REQUEST_CHANGES"},
+		{"non-exempt medium requests changes", "mallory", "medium", "REQUEST_CHANGES"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := store.Open(":memory:")
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer s.Close()
+
+			gh := &fakeGH{diff: "+new line"}
+			exec := &fakeExecCapture{result: &executor.ReviewResult{
+				Summary:  "One finding.",
+				Severity: "low",
+				Issues: []executor.Issue{
+					{File: "main.go", Line: 1, Description: "finding", Severity: tc.issueSeverity},
+				},
+			}}
+			p := pipeline.New(s, gh, exec, &fakeNotify{})
+			n := 880 + i
+			pr := &github.PullRequest{
+				ID: int64(n), Number: n, Title: "t", Repo: "org/repo",
+				User: github.User{Login: tc.author}, State: "open",
+				UpdatedAt: time.Now(), HTMLURL: fmt.Sprintf("https://github.com/org/repo/pull/%d", n),
+				Head: github.Branch{SHA: fmt.Sprintf("sha%d", n)},
+			}
+			if _, err := p.Run(pr, pipeline.RunOptions{
+				Primary:                   "claude",
+				ReviewMode:                "single",
+				NeverApproveWithIssues:    true,
+				NeverApproveMinSeverity:   "medium",
+				NeverApproveExemptAuthors: []string{"@alice", "bob"},
+			}); err != nil {
+				t.Fatalf("pipeline run: %v", err)
+			}
+			if gh.submittedEvent != tc.want {
+				t.Fatalf("submitted event = %q, want %q", gh.submittedEvent, tc.want)
+			}
+		})
+	}
+}
+
 // TestPipeline_Run_MultiModePostsCommentsAndRequestsChanges: multi mode
 // still posts one plain comment per issue, and the summary review carries
 // the same REQUEST_CHANGES verdict single mode would produce — the gate's

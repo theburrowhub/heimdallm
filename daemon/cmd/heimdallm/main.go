@@ -869,6 +869,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			InstructionAuthors:           aiCfg.InstructionAuthors,
 			NeverApproveWithIssues:       aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
 			NeverApproveMinSeverity:      aiCfg.NeverApproveMinSeverity,
+			NeverApproveExemptAuthors:    aiCfg.NeverApproveExemptAuthors,
 			ReviewFailureRepoHourlyLimit: reviewFailureRepoHourlyLimit,
 			ExecOpts:                     primaryOpts,
 			Guards:                       guards,
@@ -2138,6 +2139,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"never_approve_with_issues":   c.AI.NeverApproveWithIssues,
 			"never_approve_min_severity":  c.AI.NeverApproveMinSeverity,
 		}
+		result["never_approve_exempt_authors"] = c.AI.NeverApproveExemptAuthors
 		// Merge tracking. Without this projection the app PATCHes the section
 		// successfully, the daemon honours it, and the settings screen still
 		// reads it back as defaults on the next load — the toggle silently
@@ -2832,6 +2834,7 @@ func configReloadRestartSnapshot(c *config.Config) config.Config {
 	snap.AI.CloneDir = ""
 	snap.AI.NeverApproveWithIssues = false
 	snap.AI.NeverApproveMinSeverity = ""
+	snap.AI.NeverApproveExemptAuthors = nil
 
 	snap.Retention = config.RetentionConfig{}
 	snap.ActivityLog = config.ActivityLogConfig{}
@@ -4874,6 +4877,8 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 		CloneDir:                ai.CloneDir,
 		NeverApproveWithIssues:  ai.NeverApproveWithIssues,
 		NeverApproveMinSeverity: ai.NeverApproveMinSeverity,
+
+		NeverApproveExemptAuthors: ai.NeverApproveExemptAuthors,
 	})
 	if ai.ReviewLimits != nil {
 		out["review_limits"] = reviewLimitsMap(*ai.ReviewLimits)
@@ -4906,6 +4911,8 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 		CloneDir:                ai.CloneDir,
 		NeverApproveWithIssues:  ai.NeverApproveWithIssues,
 		NeverApproveMinSeverity: ai.NeverApproveMinSeverity,
+
+		NeverApproveExemptAuthors: ai.NeverApproveExemptAuthors,
 	})
 	if ai.ReviewLimits != nil {
 		out["review_limits"] = reviewLimitsMap(*ai.ReviewLimits)
@@ -4924,6 +4931,8 @@ type aiOverrideFields struct {
 	CloneDir                string
 	NeverApproveWithIssues  *bool
 	NeverApproveMinSeverity string
+
+	NeverApproveExemptAuthors []string
 }
 
 func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
@@ -4938,6 +4947,10 @@ func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
 	}
 	if fields.NeverApproveMinSeverity != "" {
 		out["never_approve_min_severity"] = fields.NeverApproveMinSeverity
+	}
+	// nil inherits and is omitted; an explicit [] override is kept.
+	if fields.NeverApproveExemptAuthors != nil {
+		out["never_approve_exempt_authors"] = fields.NeverApproveExemptAuthors
 	}
 }
 

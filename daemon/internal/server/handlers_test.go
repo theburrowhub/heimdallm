@@ -2698,6 +2698,47 @@ func TestHandlePatchRepoConfig(t *testing.T) {
 	}
 }
 
+// An explicit empty never_approve_exempt_authors must survive the TOML write
+// and beat the org list; DELETE then restores inheritance.
+func TestHandlePatchRepoConfig_NeverApproveExemptAuthors(t *testing.T) {
+	tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n\n[ai.orgs.org]\nnever_approve_exempt_authors = [\"bob\"]\n")
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+	do := func(method, path, body string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Heimdallm-Token", "test-token")
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s %s: got %d (%s)", method, path, w.Code, w.Body.String())
+		}
+	}
+	exempt := func() []string {
+		t.Helper()
+		cfg, err := config.Load(tomlPath)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return cfg.AIForRepo("org/repo1").NeverApproveExemptAuthors
+	}
+	repoPath := "/config/repos/" + url.PathEscape("org/repo1")
+
+	do("PATCH", repoPath, `{"never_approve_exempt_authors":["alice","carol"]}`)
+	if got := exempt(); strings.Join(got, ",") != "alice,carol" {
+		t.Fatalf("after PATCH list: %v", got)
+	}
+	do("PATCH", repoPath, `{"never_approve_exempt_authors":[]}`)
+	if got := exempt(); got == nil || len(got) != 0 {
+		t.Fatalf("after PATCH []: %v, want explicit empty (not the org list)", got)
+	}
+	do("DELETE", repoPath+"/never_approve_exempt_authors", "")
+	if got := exempt(); strings.Join(got, ",") != "bob" {
+		t.Fatalf("after DELETE: %v, want inherited [bob]", got)
+	}
+}
+
 func TestHandlePatchRepoConfig_CreatesNewSection(t *testing.T) {
 	// TOML with only a global primary — no repo overrides yet.
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
