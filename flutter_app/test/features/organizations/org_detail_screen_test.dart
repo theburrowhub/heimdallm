@@ -275,13 +275,11 @@ void main() {
 
   group('never-approve exempt authors', () {
     Finder exemptOverride() => find.widgetWithText(
-      OverrideTextField,
+      OverrideFrame,
       'Never approve — exempt authors',
     );
-    Finder exemptField() => find.descendant(
-      of: exemptOverride(),
-      matching: find.byType(TextFormField),
-    );
+    Finder exemptField() =>
+        find.descendant(of: exemptOverride(), matching: find.byType(TextField));
 
     Future<MockApiClient> pumpWithList(WidgetTester tester) async {
       final mockApi = await _pumpOrgDetail(
@@ -293,12 +291,16 @@ void main() {
       when(
         () => mockApi.deleteOrgField('acme', any()),
       ).thenAnswer((_) async => _configJson());
+      await tester.ensureVisible(exemptOverride());
+      await tester.pumpAndSettle();
       return mockApi;
     }
 
-    testWidgets('an edited list is patched', (tester) async {
+    testWidgets('an added entry is patched with the existing ones', (
+      tester,
+    ) async {
       final mockApi = await pumpWithList(tester);
-      await tester.enterText(exemptField(), 'alice, @bob');
+      await tester.enterText(exemptField(), '@bob,');
       await tester.pump();
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
@@ -311,9 +313,9 @@ void main() {
       });
     });
 
-    testWidgets('clearing the list deletes the override', (tester) async {
+    testWidgets('removing every chip deletes the override', (tester) async {
       final mockApi = await pumpWithList(tester);
-      await tester.enterText(exemptField(), '');
+      await tester.tap(find.byTooltip('Remove alice'));
       await tester.pump();
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
@@ -326,13 +328,12 @@ void main() {
 
     testWidgets('reset deletes the override', (tester) async {
       final mockApi = await pumpWithList(tester);
-      final reset = find.descendant(
-        of: exemptOverride(),
-        matching: find.text('\u00d7 reset'),
+      await tester.tap(
+        find.descendant(
+          of: exemptOverride(),
+          matching: find.text('\u00d7 reset'),
+        ),
       );
-      await tester.ensureVisible(reset);
-      await tester.pumpAndSettle();
-      await tester.tap(reset);
       await tester.pumpAndSettle();
 
       verify(

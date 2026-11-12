@@ -11,6 +11,7 @@ import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
+import '../../shared/widgets/principal_chips_field.dart';
 import '../../shared/widgets/review_limits_editor.dart';
 import '../../shared/widgets/token_saving_editor.dart';
 import '../../shared/widgets/toast.dart';
@@ -221,6 +222,9 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
           );
           String source(bool hasOrgValue) =>
               hasOrgValue ? 'org: $orgName' : 'global';
+          final inheritedExempt =
+              orgConfig?.neverApproveExemptAuthors ??
+              appConfig.globalNeverApproveExemptAuthors;
 
           final warning = AppColors.warning.resolve(context);
 
@@ -419,30 +423,30 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onReset: () => _resetField('never_approve_min_severity'),
                   ),
                   const SizedBox(height: 10),
-                  OverrideTextField(
+                  OverrideFrame(
                     label: 'Never approve — exempt authors',
-                    helper:
-                        'GitHub logins, comma separated. Their PRs skip the '
-                        'never-approve gate; high severity still requests '
-                        'changes.',
-                    globalValue:
-                        (orgConfig?.neverApproveExemptAuthors ??
-                                appConfig.globalNeverApproveExemptAuthors)
-                            .join(', '),
+                    overridden: _config.neverApproveExemptAuthors != null,
                     inheritedLabel: source(
                       orgConfig?.neverApproveExemptAuthors != null,
                     ),
-                    overrideValue: _config.neverApproveExemptAuthors?.join(
-                      ', ',
-                    ),
-                    onChanged: (v) => _update(
-                      _config.copyWith(
-                        neverApproveExemptAuthors: v == null
-                            ? null
-                            : parseLoginList(v),
+                    inheritedValue: inheritedExempt.join(', '),
+                    onReset: () => _resetField('never_approve_exempt_authors'),
+                    child: PrincipalChipsField(
+                      helper:
+                          'GitHub logins or org teams (org/team). Their PRs '
+                          'skip the never-approve gate; high severity still '
+                          'requests changes.',
+                      value: _config.neverApproveExemptAuthors ?? inheritedExempt,
+                      muted: _config.neverApproveExemptAuthors == null,
+                      suggestions:
+                          ref.watch(githubPrincipalsProvider).value ?? const [],
+                      // Removing every chip goes back to inheriting.
+                      onChanged: (v) => _update(
+                        _config.copyWith(
+                          neverApproveExemptAuthors: v.isEmpty ? null : v,
+                        ),
                       ),
                     ),
-                    onReset: () => _resetField('never_approve_exempt_authors'),
                   ),
                 ], accent: FeaturePalette.prReview),
 

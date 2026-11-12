@@ -103,78 +103,13 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Theme.of(
-          context,
-        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-        borderRadius: BorderRadius.circular(6),
-        border: Border(
-          left: BorderSide(
-            width: 3,
-            color: _isOverridden ? Colors.green.shade600 : Colors.transparent,
-          ),
-        ),
-      ),
-      padding: const EdgeInsets.all(10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                widget.label,
-                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-              ),
-              const Spacer(),
-              if (_isOverridden) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 1,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.green.shade900.withValues(alpha: 0.4),
-                    borderRadius: BorderRadius.circular(3),
-                  ),
-                  child: Text(
-                    'overridden',
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: Colors.green.shade400,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                GestureDetector(
-                  onTap: _reset,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 1,
-                    ),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.shade700),
-                      borderRadius: BorderRadius.circular(3),
-                    ),
-                    child: Text(
-                      '\u00d7 reset',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: Colors.grey.shade500,
-                      ),
-                    ),
-                  ),
-                ),
-              ] else
-                Text(
-                  widget.inheritedLabel,
-                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-                ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          TextFormField(
+    return OverrideFrame(
+      label: widget.label,
+      overridden: _isOverridden,
+      inheritedLabel: widget.inheritedLabel,
+      inheritedValue: widget.globalValue,
+      onReset: _reset,
+      child: TextFormField(
             controller: _ctrl,
             style: TextStyle(
               fontSize: 12,
@@ -199,11 +134,110 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
             ),
             onChanged: _handleChange,
           ),
-          if (_isOverridden)
+    );
+  }
+}
+
+/// The chrome every override field shares: label, "overridden" badge with a
+/// reset control (or the [inheritedLabel] when not overridden), the [child]
+/// editor, and the inherited value under an override.
+class OverrideFrame extends StatelessWidget {
+  final String label;
+  final bool overridden;
+  final String inheritedLabel;
+  final String inheritedValue;
+  final VoidCallback onReset;
+  final Widget child;
+
+  const OverrideFrame({
+    super.key,
+    required this.label,
+    required this.overridden,
+    this.inheritedLabel = 'global',
+    required this.inheritedValue,
+    required this.onReset,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(6),
+        border: Border(
+          left: BorderSide(
+            width: 3,
+            color: overridden ? Colors.green.shade600 : Colors.transparent,
+          ),
+        ),
+      ),
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                label,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+              ),
+              const Spacer(),
+              if (overridden) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 1,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.green.shade900.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: Text(
+                    'overridden',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.green.shade400,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: onReset,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade700),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text(
+                      '\u00d7 reset',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Colors.grey.shade500,
+                      ),
+                    ),
+                  ),
+                ),
+              ] else
+                Text(
+                  inheritedLabel,
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          child,
+          if (overridden)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                '${widget.inheritedLabel}: ${widget.globalValue}',
+                '$inheritedLabel: $inheritedValue',
                 style: TextStyle(fontSize: 10, color: Colors.grey.shade700),
               ),
             ),
@@ -212,6 +246,7 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
     );
   }
 }
+
 
 /// Dropdown variant of the override field.
 class OverrideDropdown extends StatelessWidget {

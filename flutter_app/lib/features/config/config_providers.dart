@@ -6,6 +6,7 @@ import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
 import '../../core/daemon/daemon_startup.dart';
 import '../../core/models/config_model.dart';
+import '../../core/models/github_principal.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../dashboard/dashboard_providers.dart';
 
@@ -623,3 +624,15 @@ Map<String, dynamic> computeGlobalDiffForTest(
   AppConfig old,
   AppConfig updated,
 ) => _computeGlobalDiff(old, updated);
+
+/// Logins and org teams for the never-approve exempt-authors autocomplete.
+/// Empty on any failure (older daemon, token without read:org, proxied
+/// instance): the fields still take free text.
+final githubPrincipalsProvider =
+    FutureProvider.autoDispose<List<GitHubPrincipal>>((ref) async {
+      try {
+        return await ref.read(apiClientProvider).fetchGitHubPrincipals();
+      } catch (_) {
+        return const [];
+      }
+    });

@@ -13,6 +13,7 @@ import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
+import '../../shared/widgets/principal_chips_field.dart';
 import '../../shared/widgets/restart_required_banner.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -234,7 +235,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   final _tokenController = TextEditingController();
   final _pollController = TextEditingController();
   final _cloneDirController = TextEditingController();
-  final _exemptAuthorsController = TextEditingController();
   final _formScrollController = ScrollController();
   final _pollFieldKey = GlobalKey<FormFieldState<String>>();
   final Map<_ConfigSectionId, GlobalKey> _sectionKeys = {
@@ -285,7 +285,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _tokenController.dispose();
     _pollController.dispose();
     _cloneDirController.dispose();
-    _exemptAuthorsController.dispose();
     _formScrollController.dispose();
     _mtPollIntervalController.dispose();
     _mtResolveTimeoutController.dispose();
@@ -918,8 +917,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
     _globalNeverApproveMinSeverity = config.globalNeverApproveMinSeverity;
     _globalNeverApproveExemptAuthors = config.globalNeverApproveExemptAuthors;
-    _exemptAuthorsController.text = config.globalNeverApproveExemptAuthors
-        .join(', ');
     _globalCloneDir = config.globalCloneDir;
     _cloneDirController.text = config.globalCloneDir;
   }
@@ -1015,20 +1012,17 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             : null,
       ),
       const SizedBox(height: 12),
-      TextFormField(
-        controller: _exemptAuthorsController,
-        // Not gated on the switch above: orgs and repos that turn the gate on
-        // in their own override inherit this list.
-        decoration: const InputDecoration(
-          labelText: 'Never approve — exempt authors',
-          helperText:
-              'GitHub logins, comma separated. Their PRs skip the '
-              'never-approve gate wherever it is on (here or in an org/repo '
-              'override); high severity still requests changes.',
-          border: OutlineInputBorder(),
-          isDense: true,
-        ),
-        onChanged: (v) => _globalNeverApproveExemptAuthors = parseLoginList(v),
+      // Not gated on the switch above: orgs and repos that turn the gate on
+      // in their own override inherit this list.
+      PrincipalChipsField(
+        label: 'Never approve — exempt authors',
+        helper:
+            'GitHub logins or org teams (org/team). Their PRs skip the '
+            'never-approve gate wherever it is on (here or in an org/repo '
+            'override); high severity still requests changes.',
+        value: _globalNeverApproveExemptAuthors,
+        suggestions: ref.watch(githubPrincipalsProvider).value ?? const [],
+        onChanged: (v) => setState(() => _globalNeverApproveExemptAuthors = v),
       ),
       const SizedBox(height: 12),
       TextFormField(
