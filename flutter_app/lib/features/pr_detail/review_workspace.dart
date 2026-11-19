@@ -70,7 +70,12 @@ class ReviewWorkspace extends StatelessWidget {
         FindingsSection(pr: pr, review: sorted.first, onOpen: onOpen),
         if (sorted.length > 1) ...[
           const SizedBox(height: 24),
-          ReviewHistory(pr: pr, reviews: sorted.skip(1).toList(), now: at),
+          ReviewHistory(
+            pr: pr,
+            reviews: sorted.skip(1).toList(),
+            now: at,
+            onOpen: onOpen,
+          ),
         ],
       ],
     ];
@@ -635,10 +640,15 @@ class _FindingRow extends StatelessWidget {
   final Uri? link;
   final void Function(Uri uri) onOpen;
 
+  /// Whether the row names its file: off under a file group's header, on in
+  /// the history, where findings are not grouped.
+  final bool showFile;
+
   const _FindingRow({
     required this.issue,
     required this.link,
     required this.onOpen,
+    this.showFile = false,
   });
 
   @override
@@ -650,20 +660,25 @@ class _FindingRow extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 52,
-            child: Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: AppText.mono(
-                issue.line > 0 ? 'L${issue.line}' : '',
-                color: muted,
+          if (!showFile)
+            SizedBox(
+              width: 52,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: AppText.mono(
+                  issue.line > 0 ? 'L${issue.line}' : '',
+                  color: muted,
+                ),
               ),
             ),
-          ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (showFile) ...[
+                  AppText.mono(where, color: muted),
+                  const SizedBox(height: 6),
+                ],
                 SeverityBadge(severity: issue.severity),
                 const SizedBox(height: 6),
                 SelectableText(
@@ -701,17 +716,21 @@ class _FindingRow extends StatelessWidget {
   }
 }
 
-/// The reviews before the latest one, collapsed into a timeline.
+/// The reviews before the latest one, collapsed into a timeline. Each one
+/// opens in place to its full summary, tokens and findings, so nothing an
+/// earlier review said is out of reach.
 class ReviewHistory extends StatefulWidget {
   final PR pr;
   final List<Review> reviews;
   final DateTime now;
+  final void Function(Uri uri) onOpen;
 
   const ReviewHistory({
     super.key,
     required this.pr,
     required this.reviews,
     required this.now,
+    required this.onOpen,
   });
 
   @override
@@ -720,12 +739,12 @@ class ReviewHistory extends StatefulWidget {
 
 class _ReviewHistoryState extends State<ReviewHistory> {
   bool _open = false;
+  final Set<int> _expanded = {};
 
   @override
   Widget build(BuildContext context) {
     final muted = resolveAppColor(context, AppColors.textMuted);
     final border = resolveAppColor(context, AppColors.border);
-    final theme = Theme.of(context);
     final n = widget.reviews.length;
     return AppSurface(
       elevation: AppSurfaceElevation.raised,
@@ -770,44 +789,128 @@ class _ReviewHistoryState extends State<ReviewHistory> {
                 decoration: BoxDecoration(
                   border: Border(top: BorderSide(color: border)),
                 ),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    spacing: 6,
-                    children: [
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 6,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          ReviewPublicationBadge(
-                            review: r,
-                            prUrl: widget.pr.url,
-                          ),
-                          SeverityBadge(severity: r.severity),
-                          Text(
-                            '${r.isPeer ? 'Peer instance' : r.cliUsed} · '
-                            '${relativeTime(r.createdAt, widget.now)}'
-                            '${r.issues.isEmpty ? '' : ' · ${r.issues.length} finding${r.issues.length == 1 ? '' : 's'}'}',
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: muted,
-                            ),
-                          ),
-                        ],
-                      ),
-                      Text(
-                        r.summary,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodyMedium,
-                      ),
-                    ],
-                  ),
+                child: _HistoryEntry(
+                  pr: widget.pr,
+                  review: r,
+                  now: widget.now,
+                  expanded: _expanded.contains(r.id),
+                  onToggle: () => setState(() {
+                    if (!_expanded.remove(r.id)) _expanded.add(r.id);
+                  }),
+                  onOpen: widget.onOpen,
                 ),
               ),
         ],
       ),
+    );
+  }
+}
+
+/// One earlier review: its state and summary, opening to the full summary,
+/// tokens and findings.
+class _HistoryEntry extends StatelessWidget {
+  final PR pr;
+  final Review review;
+  final DateTime now;
+  final bool expanded;
+  final VoidCallback onToggle;
+  final void Function(Uri uri) onOpen;
+
+  const _HistoryEntry({
+    required this.pr,
+    required this.review,
+    required this.now,
+    required this.expanded,
+    required this.onToggle,
+    required this.onOpen,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = resolveAppColor(context, AppColors.textMuted);
+    final border = resolveAppColor(context, AppColors.border);
+    final theme = Theme.of(context);
+    final r = review;
+    final findings = r.issues.length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        InkWell(
+          onTap: onToggle,
+          child: Semantics(
+            button: true,
+            expanded: expanded,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      spacing: 6,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            ReviewPublicationBadge(review: r, prUrl: pr.url),
+                            SeverityBadge(severity: r.severity),
+                            Text(
+                              '${r.isPeer ? 'Peer instance' : r.cliUsed} · '
+                              '${relativeTime(r.createdAt, now)}'
+                              '${findings == 0 ? '' : ' · $findings finding${findings == 1 ? '' : 's'}'}',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: muted,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          r.summary,
+                          maxLines: expanded ? null : 3,
+                          overflow: expanded ? null : TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyMedium,
+                        ),
+                        if (expanded && r.hasTokenUsage)
+                          Text(
+                            r.tokenUsageLabel,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: muted,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Tooltip(
+                    message: expanded ? 'Show less' : 'Show the whole review',
+                    child: AnimatedRotation(
+                      turns: expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 150),
+                      child: Icon(Icons.expand_more, size: 20, color: muted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        if (expanded)
+          for (final issue in r.issues)
+            DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: border)),
+              ),
+              child: _FindingRow(
+                issue: issue,
+                link: findingUri(pr, r, issue),
+                onOpen: onOpen,
+                showFile: true,
+              ),
+            ),
+      ],
     );
   }
 }

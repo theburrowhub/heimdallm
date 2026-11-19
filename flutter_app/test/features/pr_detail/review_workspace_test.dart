@@ -521,4 +521,64 @@ void main() {
       );
     }
   });
+
+  // Nothing an earlier review said is out of reach: each one opens to its full
+  // summary, tokens and findings, with each finding naming its file.
+  testWidgets('an earlier review opens to its whole content', (tester) async {
+    final opened = <Uri>[];
+    final longSummary = List.filled(
+      12,
+      'An older look at the retry loop.',
+    ).join(' ');
+    final earlier = _review(
+      id: 2,
+      githubId: 4100,
+      state: 'APPROVED',
+      sha: '9ab31d2aa0',
+      age: const Duration(days: 1),
+      summary: longSummary,
+      inputTokens: 9000,
+      issues: const [
+        Issue(
+          file: 'internal/webhooks/backoff.go',
+          line: 12,
+          description: 'No cap on the delay.',
+          severity: 'medium',
+        ),
+      ],
+    );
+    await _pumpAt(
+      tester,
+      ReviewWorkspace(
+        pr: _pr(),
+        reviews: [earlier, _review()],
+        now: () => _now,
+        onOpen: opened.add,
+      ),
+    );
+    await tester.ensureVisible(find.text('Earlier reviews'));
+    await tester.tap(find.text('Earlier reviews'));
+    await tester.pumpAndSettle();
+    expect(find.text('No cap on the delay.'), findsNothing);
+    expect(tester.widget<Text>(find.text(longSummary)).maxLines, 3);
+
+    await tester.ensureVisible(find.byTooltip('Show the whole review'));
+    await tester.tap(find.byTooltip('Show the whole review'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Text>(find.text(longSummary)).maxLines, isNull);
+    expect(find.textContaining('9.0k in'), findsOneWidget);
+    expect(find.text('No cap on the delay.'), findsOneWidget);
+    expect(find.text('internal/webhooks/backoff.go:12'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('No cap on the delay.'));
+    await tester.tap(find.byTooltip('Open this line on GitHub').last);
+    expect(
+      opened.single.toString(),
+      endsWith('/blob/9ab31d2aa0/internal/webhooks/backoff.go#L12'),
+    );
+
+    await tester.tap(find.byTooltip('Show less'));
+    await tester.pumpAndSettle();
+    expect(find.text('No cap on the delay.'), findsNothing);
+  });
 }
