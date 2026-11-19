@@ -17,6 +17,7 @@ import 'package:heimdallm/features/activity/activity_providers.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
+import 'package:heimdallm/shared/design_system/components/app_source_list.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/layout/app_shell.dart';
 import 'package:mocktail/mocktail.dart';
@@ -321,7 +322,7 @@ void main() {
       overrides: _baseOverrides(platform: platform, api: api, mergeCount: 3),
     );
 
-    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byKey(const Key('app-sidebar')), findsOneWidget);
     expect(find.text('Dashboard content'), findsOneWidget);
     expect(find.text('3'), findsOneWidget);
 
@@ -331,10 +332,10 @@ void main() {
     expect(find.text('Merge content'), findsOneWidget);
   });
 
-  // The rail lists destinations in display order, which is not branch order
-  // (Flows is shown before Stats but is the last branch), so a rail position
+  // The sidebar lists destinations in display order, which is not branch
+  // order (Flows is shown before Stats but is the last branch), so a position
   // must never be used as a branch index.
-  testWidgets('every rail destination opens and highlights its own branch', (
+  testWidgets('every sidebar destination opens and highlights its own branch', (
     tester,
   ) async {
     final platform = FakePlatformServices();
@@ -362,10 +363,10 @@ void main() {
       unorderedEquals(contentByLabel.keys),
     );
 
-    for (final (position, destination) in appDestinations.indexed) {
+    for (final destination in appDestinations) {
       await tester.tap(
         find.descendant(
-          of: find.byType(NavigationRail),
+          of: find.byKey(const Key('app-sidebar')),
           matching: find.text(destination.label),
         ),
       );
@@ -376,12 +377,19 @@ void main() {
         findsOneWidget,
         reason: '${destination.label} must open its own screen',
       );
+      final highlighted = [
+        for (final d in appDestinations)
+          if (tester
+              .widget<AppSourceListItem>(
+                find.byKey(Key('nav-${d.branchIndex}')),
+              )
+              .selected)
+            d.label,
+      ];
       expect(
-        tester
-            .widget<NavigationRail>(find.byType(NavigationRail))
-            .selectedIndex,
-        position,
-        reason: '${destination.label} must be the highlighted rail entry',
+        highlighted,
+        [destination.label],
+        reason: '${destination.label} must be the only highlighted entry',
       );
     }
   });
@@ -580,33 +588,48 @@ void main() {
 
         // auto at 1400px starts extended, matching the shell's pre-toggle
         // width-derived behavior.
-        final rail = find.byType(NavigationRail);
-        expect(rail, findsOneWidget);
+        final sidebar = find.byKey(const Key('app-sidebar'));
+        bool extended() =>
+            tester.widget<AppSidebar>(find.byType(AppSidebar)).extended;
+        expect(sidebar, findsOneWidget);
+        expect(extended(), isTrue);
         expect(find.text('Dashboard content'), findsOneWidget);
         expect(find.byTooltip('Collapse sidebar'), findsOneWidget);
+        // Extended, the sections are labelled.
+        expect(find.text('SETUP'), findsOneWidget);
 
-        // The toggle lives inside the rail, pinned to its bottom, and no
+        // The toggle lives inside the sidebar, below its entries, and no
         // longer in the app bar.
         final toggle = find.byKey(const Key('sidebar-toggle'));
-        expect(find.descendant(of: rail, matching: toggle), findsOneWidget);
+        expect(find.descendant(of: sidebar, matching: toggle), findsOneWidget);
         expect(
           find.descendant(of: find.byType(AppBar), matching: toggle),
           findsNothing,
         );
-        expect(tester.widget<NavigationRail>(rail).trailingAtBottom, isTrue);
+        expect(
+          tester.getTopLeft(toggle).dy,
+          greaterThan(tester.getTopLeft(find.byKey(const Key('nav-8'))).dy),
+        );
 
         await tester.tap(toggle);
         await tester.pumpAndSettle();
 
-        // Collapsing never hides the rail: icons only, toggle still there.
-        expect(rail, findsOneWidget);
-        expect(tester.widget<NavigationRail>(rail).extended, isFalse);
+        // Collapsing never hides the sidebar: icons only, toggle still there,
+        // labels in the tooltips.
+        expect(sidebar, findsOneWidget);
+        expect(extended(), isFalse);
+        expect(find.text('SETUP'), findsNothing);
+        expect(find.byTooltip('Instances'), findsOneWidget);
         expect(find.byTooltip('Expand sidebar'), findsOneWidget);
 
+        await tester.tap(find.byTooltip('Instances'));
+        await tester.pumpAndSettle();
+        expect(find.text('Instances content'), findsOneWidget);
+
         await tester.tap(toggle);
         await tester.pumpAndSettle();
 
-        expect(tester.widget<NavigationRail>(rail).extended, isTrue);
+        expect(extended(), isTrue);
         expect(find.byTooltip('Collapse sidebar'), findsOneWidget);
       },
     );
@@ -623,9 +646,11 @@ void main() {
         overrides: _baseOverrides(platform: platform, api: api),
       );
 
-      final rail = find.byType(NavigationRail);
-      expect(rail, findsOneWidget);
-      expect(tester.widget<NavigationRail>(rail).extended, isFalse);
+      expect(find.byKey(const Key('app-sidebar')), findsOneWidget);
+      expect(
+        tester.widget<AppSidebar>(find.byType(AppSidebar)).extended,
+        isFalse,
+      );
       expect(find.byKey(const Key('sidebar-toggle')), findsOneWidget);
       expect(find.text('Dashboard content'), findsOneWidget);
     });
@@ -637,7 +662,7 @@ void main() {
       await _pumpShell(
         tester,
         size: const Size(600, 1000),
-        overrides: _baseOverrides(platform: platform, api: api),
+        overrides: _baseOverrides(platform: platform, api: api, mergeCount: 2),
       );
 
       expect(find.byKey(const Key('sidebar-toggle')), findsNothing);
@@ -646,10 +671,39 @@ void main() {
       scaffold.openDrawer();
       await tester.pumpAndSettle();
       expect(find.text('Instances'), findsOneWidget);
+      // The My PRs count rides on the drawer icon.
+      expect(
+        find.descendant(
+          of: find.byType(Drawer),
+          matching: find.widgetWithText(Badge, '2'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('collapsed, the My PRs count sits over its icon', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({'sidebar_mode': 'icons'});
+      final platform = FakePlatformServices();
+      final api = _MockApiClient();
+
+      await _pumpShell(
+        tester,
+        overrides: _baseOverrides(platform: platform, api: api, mergeCount: 4),
+      );
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('nav-2')),
+          matching: find.widgetWithText(Badge, '4'),
+        ),
+        findsOneWidget,
+      );
     });
   });
 
-  test('every router branch has exactly one rail destination', () {
+  test('every router branch has exactly one sidebar destination', () {
     final shell =
         createRouter().configuration.routes.first as StatefulShellRoute;
     final indexes = appDestinations.map((d) => d.branchIndex).toList();

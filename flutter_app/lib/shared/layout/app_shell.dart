@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mix/mix.dart' show ColorToken;
 
 import '../../core/instances/instances_providers.dart';
 import '../../core/state/sidebar_preferences.dart';
@@ -12,10 +13,12 @@ import '../../features/instances/widgets/instance_selector.dart';
 import '../../features/merge_tracking/merge_tracking_providers.dart';
 import '../../features/server/server_actions.dart' as server_actions;
 import '../../features/updates/check_for_updates_button.dart';
+import '../design_system/color_resolver.dart';
 import '../design_system/components/app_icon_button.dart';
+import '../design_system/components/app_source_list.dart';
 import '../design_system/tokens.dart';
 
-/// One destination in the primary navigation (sidebar/rail/drawer).
+/// One destination in the primary navigation (sidebar/drawer).
 ///
 /// [branchIndex] must match the corresponding [StatefulShellBranch]'s
 /// position in `router.dart`'s `branches` list.
@@ -23,14 +26,31 @@ class AppDestination {
   final int branchIndex;
   final String label;
   final IconData icon;
-  final Widget Function(BuildContext context, WidgetRef ref)? badgedIcon;
+
+  /// The sidebar section the destination is listed under (#917).
+  final String section;
+
+  /// A count to show with the destination and its colour, or null for none.
+  final ({int count, ColorToken color})? Function(WidgetRef ref)? badge;
 
   const AppDestination({
     required this.branchIndex,
     required this.label,
     required this.icon,
-    this.badgedIcon,
+    required this.section,
+    this.badge,
   });
+
+  /// [icon] with [badge] over it, for the drawer.
+  Widget badgedIcon(BuildContext context, WidgetRef ref) {
+    final b = badge?.call(ref);
+    if (b == null) return Icon(icon);
+    return Badge.count(
+      count: b.count,
+      backgroundColor: resolveAppColor(context, b.color),
+      child: Icon(icon),
+    );
+  }
 }
 
 final appDestinations = <AppDestination>[
@@ -38,26 +58,27 @@ final appDestinations = <AppDestination>[
     branchIndex: 0,
     label: 'Activity',
     icon: Icons.dashboard,
+    section: 'Review',
   ),
   const AppDestination(
     branchIndex: 1,
     label: 'Activity log',
     icon: Icons.timeline,
+    section: 'Review',
   ),
   AppDestination(
     branchIndex: 2,
     label: 'My PRs',
     icon: Icons.merge_type,
-    badgedIcon: (context, ref) {
+    section: 'Review',
+    badge: (ref) {
       final summary = ref.watch(myPrsSummaryProvider);
-      if (summary.isEmpty) return const Icon(Icons.merge_type);
-      final scheme = Theme.of(context).colorScheme;
+      if (summary.isEmpty) return null;
       // Red only when something is broken on the operator's side; a PR that
       // is ready to merge or has merely gone quiet is a nudge, not an alarm.
-      return Badge.count(
+      return (
         count: summary.total,
-        backgroundColor: summary.needAction > 0 ? scheme.error : scheme.primary,
-        child: const Icon(Icons.merge_type),
+        color: summary.needAction > 0 ? AppColors.danger : AppColors.accent,
       );
     },
   ),
@@ -65,24 +86,43 @@ final appDestinations = <AppDestination>[
     branchIndex: 3,
     label: 'Repositories',
     icon: Icons.folder_outlined,
+    section: 'Setup',
   ),
   const AppDestination(
     branchIndex: 4,
     label: 'Organizations',
     icon: Icons.business_outlined,
+    section: 'Setup',
   ),
   const AppDestination(
     branchIndex: 5,
     label: 'Prompts',
     icon: Icons.auto_awesome,
+    section: 'Setup',
   ),
-  const AppDestination(branchIndex: 6, label: 'Agents', icon: Icons.smart_toy),
-  const AppDestination(branchIndex: 9, label: 'Flows', icon: Icons.alt_route),
-  const AppDestination(branchIndex: 7, label: 'Stats', icon: Icons.bar_chart),
+  const AppDestination(
+    branchIndex: 6,
+    label: 'Agents',
+    icon: Icons.smart_toy,
+    section: 'Setup',
+  ),
+  const AppDestination(
+    branchIndex: 9,
+    label: 'Flows',
+    icon: Icons.alt_route,
+    section: 'Setup',
+  ),
+  const AppDestination(
+    branchIndex: 7,
+    label: 'Stats',
+    icon: Icons.bar_chart,
+    section: 'System',
+  ),
   const AppDestination(
     branchIndex: 8,
     label: 'Instances',
     icon: Icons.dns_outlined,
+    section: 'System',
   ),
 ];
 
@@ -91,11 +131,11 @@ final appDestinations = <AppDestination>[
 /// Replaces the previous 9-tab [DefaultTabController]/`TabBar` with a
 /// destination list that adapts to width:
 /// - `< AppBreakpoints.compact`: a [Drawer] opened from the app bar.
-/// - `< AppBreakpoints.medium`: a collapsed [NavigationRail].
-/// - `>= AppBreakpoints.medium`: an extended (labeled) [NavigationRail].
+/// - `< AppBreakpoints.medium`: an [AppSidebar] collapsed to icons.
+/// - `>= AppBreakpoints.medium`: an extended (labeled) [AppSidebar].
 ///
-/// A toggle at the foot of the rail switches between the two rail modes and
-/// the choice is remembered (see `sidebar_preferences.dart`).
+/// A toggle at the foot of the sidebar switches between the two modes and the
+/// choice is remembered (see `sidebar_preferences.dart`).
 ///
 /// Each destination is a [StatefulShellBranch] (see `shared/router.dart`),
 /// so switching sections preserves that branch's navigation stack and
@@ -105,14 +145,6 @@ class AppShell extends ConsumerWidget {
   final StatefulNavigationShell navigationShell;
 
   const AppShell({super.key, required this.navigationShell});
-
-  /// The rail position of [branchIndex], or null when no destination shows it.
-  static int? _railIndexOf(int branchIndex) {
-    final position = appDestinations.indexWhere(
-      (d) => d.branchIndex == branchIndex,
-    );
-    return position < 0 ? null : position;
-  }
 
   void _onDestinationSelected(int branchIndex) {
     navigationShell.goBranch(
@@ -220,42 +252,97 @@ class AppShell extends ConsumerWidget {
           ? body
           : Row(
               children: [
-                NavigationRail(
+                AppSidebar(
+                  currentBranch: navigationShell.currentIndex,
                   extended: isRailExtended,
-                  // The rail speaks in display positions, the shell in branch
-                  // indices; the two orders differ, so always translate.
-                  selectedIndex: _railIndexOf(navigationShell.currentIndex),
-                  onDestinationSelected: (position) => _onDestinationSelected(
-                    appDestinations[position].branchIndex,
-                  ),
-                  destinations: [
-                    for (final d in appDestinations)
-                      NavigationRailDestination(
-                        icon: d.badgedIcon?.call(context, ref) ?? Icon(d.icon),
-                        label: Text(d.label),
-                      ),
-                  ],
-                  // The toggle sits at the foot of the rail it controls, not
-                  // in the app bar at the far end of the window.
-                  trailingAtBottom: true,
-                  trailing: Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: AppIconButton(
-                      key: const Key('sidebar-toggle'),
-                      icon: isRailExtended ? Icons.menu_open : Icons.menu,
-                      tooltip: isRailExtended
-                          ? 'Collapse sidebar'
-                          : 'Expand sidebar',
-                      onPressed: () => ref
-                          .read(sidebarModeProvider.notifier)
-                          .cycleFrom(effectiveSidebar),
-                    ),
-                  ),
+                  onSelect: _onDestinationSelected,
+                  onToggle: () => ref
+                      .read(sidebarModeProvider.notifier)
+                      .cycleFrom(effectiveSidebar),
                 ),
                 const VerticalDivider(width: 1),
                 Expanded(child: body),
               ],
             ),
+    );
+  }
+}
+
+/// The app navigation as a source list (#917): sections, the shared
+/// [AppSourceListItem] and the expand/collapse toggle at its foot. Collapsed,
+/// it shows icons only, with section breaks as dividers.
+class AppSidebar extends ConsumerWidget {
+  final int currentBranch;
+  final bool extended;
+  final ValueChanged<int> onSelect;
+  final VoidCallback onToggle;
+
+  static const double extendedWidth = 220;
+  static const double compactWidth = 68;
+
+  const AppSidebar({
+    super.key,
+    required this.currentBranch,
+    required this.extended,
+    required this.onSelect,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final items = <Widget>[];
+    String? section;
+    for (final d in appDestinations) {
+      if (d.section != section) {
+        if (extended) {
+          if (section != null) items.add(const SizedBox(height: 14));
+          items.add(AppSourceListSection(d.section));
+        } else if (section != null) {
+          items.add(const Divider(height: 14, indent: 12, endIndent: 12));
+        }
+        section = d.section;
+      }
+      final badge = d.badge?.call(ref);
+      items.add(
+        AppSourceListItem(
+          key: Key('nav-${d.branchIndex}'),
+          icon: d.icon,
+          label: d.label,
+          count: badge?.count,
+          badge: badge?.color,
+          selected: d.branchIndex == currentBranch,
+          compact: !extended,
+          onTap: () => onSelect(d.branchIndex),
+        ),
+      );
+    }
+    return SizedBox(
+      key: const Key('app-sidebar'),
+      width: extended ? extendedWidth : compactWidth,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(10, 14, 10, 12),
+              children: items,
+            ),
+          ),
+          // The toggle sits at the foot of the sidebar it controls, not in
+          // the app bar at the far end of the window.
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Center(
+              child: AppIconButton(
+                key: const Key('sidebar-toggle'),
+                icon: extended ? Icons.menu_open : Icons.menu,
+                tooltip: extended ? 'Collapse sidebar' : 'Expand sidebar',
+                onPressed: onToggle,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -275,7 +362,7 @@ class _NavDrawer extends ConsumerWidget {
             const DrawerHeader(child: Text('Heimdallm')),
             for (final d in appDestinations)
               ListTile(
-                leading: d.badgedIcon?.call(context, ref) ?? Icon(d.icon),
+                leading: d.badgedIcon(context, ref),
                 title: Text(d.label),
                 selected: d.branchIndex == navigationShell.currentIndex,
                 onTap: () {
