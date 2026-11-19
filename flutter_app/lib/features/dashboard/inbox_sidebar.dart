@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mix/mix.dart' show ColorToken;
 
 import '../../core/instances/aggregation.dart';
 import '../../core/instances/instances_providers.dart';
@@ -21,6 +22,21 @@ final inboxDaemonHealthProvider = FutureProvider<Map<String, dynamic>?>(
     return ref.watch(apiClientProvider).fetchHealth();
   },
 );
+
+/// What the card says about the daemon from its `/health` answer: `ok`,
+/// `degraded` (a check failing), `starting` or `stopping`, or no answer.
+({String label, ColorToken color}) daemonStatusOf(Map<String, dynamic>? raw) {
+  if (raw == null) {
+    return (label: 'Daemon not reachable', color: AppColors.danger);
+  }
+  return switch (raw['status']) {
+    'ok' || null => (label: 'Daemon running', color: AppColors.success),
+    'degraded' => (label: 'Daemon degraded', color: AppColors.warning),
+    'starting' => (label: 'Daemon starting', color: AppColors.warning),
+    'stopping' => (label: 'Daemon stopping', color: AppColors.warning),
+    final other => (label: 'Daemon $other', color: AppColors.warning),
+  };
+}
 
 /// Reviews made in the last 7 days, summed over every instance the list shows
 /// (#913). Unfiltered on purpose: the Stats screen's repo/org filter belongs to
@@ -153,11 +169,11 @@ class _DaemonCard extends ConsumerWidget {
     final muted = resolveAppColor(context, AppColors.textMuted);
     final small = theme.textTheme.bodySmall?.copyWith(color: muted);
     final raw = health.value;
-    final (dot, label) = health.isLoading && !health.hasValue
-        ? (muted, 'Checking daemon…')
-        : raw != null
-        ? (resolveAppColor(context, AppColors.success), 'Daemon running')
-        : (resolveAppColor(context, AppColors.danger), 'Daemon not reachable');
+    final status = health.isLoading && !health.hasValue
+        ? (label: 'Checking daemon…', color: AppColors.textMuted)
+        : daemonStatusOf(raw);
+    final dot = resolveAppColor(context, status.color);
+    final label = status.label;
     final version = (raw?['version'] as String?) ?? '';
     final windows = [
       for (final q in quotas)

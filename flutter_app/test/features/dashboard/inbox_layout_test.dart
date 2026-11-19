@@ -611,4 +611,88 @@ void main() {
       expect(find.text('Daemon not reachable'), findsOneWidget);
     });
   });
+
+  testWidgets('keys do nothing while another shell destination shows', (
+    tester,
+  ) async {
+    // The shell keeps Activity mounted offstage while another branch shows.
+    SharedPreferences.setMockInitialValues({});
+    tester.view.physicalSize = const Size(1600, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(_MockApiClient()),
+        prsByInstanceProvider.overrideWith(
+          (ref) async => singleInstanceResult(_prs),
+        ),
+        sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          routerConfig: GoRouter(
+            routes: [
+              StatefulShellRoute.indexedStack(
+                builder: (context, state, shell) => Column(
+                  children: [
+                    TextButton(
+                      onPressed: () => shell.goBranch(1),
+                      child: const Text('Go to other'),
+                    ),
+                    Expanded(child: shell),
+                  ],
+                ),
+                branches: [
+                  StatefulShellBranch(
+                    routes: [
+                      GoRoute(
+                        path: '/',
+                        builder: (_, _) => const DashboardScreen(),
+                      ),
+                    ],
+                  ),
+                  StatefulShellBranch(
+                    routes: [
+                      GoRoute(
+                        path: '/other',
+                        builder: (_, _) =>
+                            const Scaffold(body: Text('Other screen')),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              GoRoute(
+                path: '/prs/:id',
+                builder: (_, state) => Scaffold(
+                  body: Text('PR detail ${state.pathParameters['id']}'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await _settle(tester);
+    await tester.tap(_inList('Done PR'));
+    await _settle(tester);
+
+    await tester.tap(find.text('Go to other'));
+    await _settle(tester);
+    expect(find.text('Other screen'), findsOneWidget);
+    // Switching branches hands focus to the new branch's route.
+    expect(FocusManager.instance.primaryFocus?.debugLabel, isNot('inbox-list'));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await _settle(tester);
+    expect(find.textContaining('PR detail'), findsNothing);
+  });
 }

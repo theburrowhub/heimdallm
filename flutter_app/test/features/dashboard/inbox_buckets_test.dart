@@ -266,4 +266,18 @@ void main() {
       6,
     );
   });
+
+  test('daemonStatusOf reads the /health status', () {
+    expect(daemonStatusOf(null).label, 'Daemon not reachable');
+    expect(daemonStatusOf(null).color, AppColors.danger);
+    expect(daemonStatusOf({'status': 'ok'}).label, 'Daemon running');
+    expect(daemonStatusOf({'status': 'ok'}).color, AppColors.success);
+    // A daemon that predates the field answered only when healthy.
+    expect(daemonStatusOf(<String, dynamic>{}).label, 'Daemon running');
+    for (final s in ['degraded', 'starting', 'stopping']) {
+      expect(daemonStatusOf({'status': s}).label, 'Daemon $s');
+      expect(daemonStatusOf({'status': s}).color, AppColors.warning);
+    }
+    expect(daemonStatusOf({'status': 'odd'}).label, 'Daemon odd');
+  });
 }
