@@ -9,6 +9,7 @@ import '../merge_tracking/merge_tracking_providers.dart';
 import '../merge_tracking/widgets/check_visuals.dart';
 import '../merge_tracking/widgets/checks_table.dart';
 import '../merge_tracking/widgets/merge_phase_badge.dart';
+import '../../core/models/merge_tracking.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review.dart';
 import '../../core/models/review_status.dart';
@@ -208,6 +209,12 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     // Combine local trigger state with shared provider
     final reviewing =
         _reviewing || isReviewingShared || (status?.active ?? false);
+    // The merge panel only for a PR merge tracking has decided on: an
+    // untracked PR answers 404, and an empty panel would still take its gap in
+    // the workspace's layout. A failed refresh hides it, as before.
+    final mergeAsync = ref.watch(mergeTrackingDetailProvider(widget.prId));
+    final merge = mergeAsync.hasError ? null : mergeAsync.value;
+    final mergeDecision = merge?.decision;
 
     return Scaffold(
       appBar: AppBar(
@@ -322,7 +329,9 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
                   onReview: pr.repo.isEmpty || reviewing ? null : _trigger,
                   // Merge state comes first in the inspector: a red required
                   // check is the thing the author has to act on.
-                  inspectorTop: _MergeChecksPanel(prId: widget.prId),
+                  inspectorTop: merge != null && mergeDecision != null
+                      ? _MergeChecksPanel(entry: merge, decision: mergeDecision)
+                      : null,
                 );
               },
             ),
@@ -373,55 +382,46 @@ class _LoadError extends StatelessWidget {
 /// The merge-readiness panel on the PR detail view: what is stopping this PR
 /// from merging, and the full per-check breakdown.
 ///
-/// Absent entirely for a PR merge tracking does not know about, so a PR someone
-/// else owns does not grow an empty section.
-class _MergeChecksPanel extends ConsumerWidget {
-  final int prId;
+/// The screen builds it only for a PR merge tracking has a decision on, so a PR
+/// someone else owns does not grow an empty section.
+class _MergeChecksPanel extends StatelessWidget {
+  final MergeTrackingEntry entry;
+  final MergeDecision decision;
 
-  const _MergeChecksPanel({required this.prId});
+  const _MergeChecksPanel({required this.entry, required this.decision});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(mergeTrackingDetailProvider(prId));
-    return async.when(
-      // A PR that is not tracked answers 404; showing nothing is right.
-      loading: () => const SizedBox.shrink(),
-      error: (_, _) => const SizedBox.shrink(),
-      data: (entry) {
-        final decision = entry.decision;
-        if (decision == null) return const SizedBox.shrink();
-        return AppSurface(
-          elevation: AppSurfaceElevation.raised,
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) {
+    return AppSurface(
+      elevation: AppSurfaceElevation.raised,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Row(
-                children: [
-                  Text(
-                    'Merge status',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                  const SizedBox(width: 8),
-                  MergePhaseBadge(phase: entry.phase),
-                ],
+              Text(
+                'Merge status',
+                style: Theme.of(context).textTheme.titleSmall,
               ),
-              const SizedBox(height: 12),
-              if (entry.blockedByChecks)
-                ChecksWarningBanner(entry: entry)
-              else if (entry.blockReason.isNotEmpty && !entry.isMerged)
-                Text(
-                  entry.blockDetail.isNotEmpty
-                      ? entry.blockDetail
-                      : humanBlockReason(entry.blockReason),
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              const SizedBox(height: 12),
-              ChecksTable(decision: decision, onOpenUrl: _openCheckLog),
+              const SizedBox(width: 8),
+              MergePhaseBadge(phase: entry.phase),
             ],
           ),
-        );
-      },
+          const SizedBox(height: 12),
+          if (entry.blockedByChecks)
+            ChecksWarningBanner(entry: entry)
+          else if (entry.blockReason.isNotEmpty && !entry.isMerged)
+            Text(
+              entry.blockDetail.isNotEmpty
+                  ? entry.blockDetail
+                  : humanBlockReason(entry.blockReason),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          const SizedBox(height: 12),
+          ChecksTable(decision: decision, onOpenUrl: _openCheckLog),
+        ],
+      ),
     );
   }
 

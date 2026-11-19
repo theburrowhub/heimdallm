@@ -10,6 +10,7 @@ import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_providers.dart';
 import 'package:heimdallm/features/pr_detail/pr_detail_screen.dart';
+import 'package:heimdallm/features/pr_detail/review_workspace.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 
 final _pr = PR(
@@ -173,6 +174,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Merge status'), findsNothing);
+    // No empty panel either: it would still take its gap in the layout.
+    expect(
+      tester.widget<ReviewWorkspace>(find.byType(ReviewWorkspace)).inspectorTop,
+      isNull,
+    );
     // The rest of the screen is unaffected.
     expect(find.text('Overall looks good'), findsOneWidget);
   });
@@ -185,6 +191,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Merge status'), findsNothing);
+    expect(
+      tester.widget<ReviewWorkspace>(find.byType(ReviewWorkspace)).inspectorTop,
+      isNull,
+    );
   });
 
   // Each review card says whether it reached GitHub (#899): the verdict and
