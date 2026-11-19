@@ -19,6 +19,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/platform/fake_platform_services.dart';
 
+class _Connected extends DaemonConnectionNotifier {
+  @override
+  DaemonConnectionStatus build() =>
+      const DaemonConnectionStatus(phase: DaemonConnectionPhase.connected);
+}
+
 Review _review(String severity) => Review(
   id: 1,
   prId: 1,
@@ -62,6 +68,8 @@ Future<ProviderContainer> _pump(
       // The wide layout's daemon card wakes the refresh notifier, whose SSE
       // handler raises desktop notifications.
       platformServicesProvider.overrideWithValue(FakePlatformServices()),
+      // The card watches the stream's connection; this one has no watchdog.
+      daemonConnectionProvider.overrideWith(_Connected.new),
       prsByInstanceProvider.overrideWith((ref) => load()),
       sseStreamProvider.overrideWith((ref) => sse),
     ],

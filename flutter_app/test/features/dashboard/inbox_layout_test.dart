@@ -20,6 +20,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
 
+/// The event stream's connection without its watchdog timer; tests flip it.
+class _Connection extends DaemonConnectionNotifier {
+  @override
+  DaemonConnectionStatus build() =>
+      const DaemonConnectionStatus(phase: DaemonConnectionPhase.connected);
+
+  void set(DaemonConnectionPhase phase) =>
+      state = DaemonConnectionStatus(phase: phase);
+}
+
 final _now = DateTime.now();
 
 PR _pr(
@@ -95,6 +105,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
         (ref) async => singleInstanceResult(load?.call() ?? prs ?? _prs),
       ),
       sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+      daemonConnectionProvider.overrideWith(_Connection.new),
     ],
   );
   addTearDown(container.dispose);
@@ -517,6 +528,31 @@ void main() {
     });
 
     testWidgets(
+      'the hint shows only while the keys work; a click restores them',
+      (tester) async {
+        await _pump(tester);
+        final hint = find.textContaining(
+          'to move · Enter to open',
+          findRichText: true,
+        );
+        expect(hint, findsOneWidget);
+
+        await tester.tap(find.byType(TextField));
+        await _settle(tester);
+        expect(hint, findsNothing);
+        await press(tester, LogicalKeyboardKey.arrowDown);
+        expect(previewed(tester), isNull);
+
+        // Any click in the preview hands the keys back to the list.
+        await tester.tap(find.text('Select a PR to read its review'));
+        await _settle(tester);
+        expect(hint, findsOneWidget);
+        await press(tester, LogicalKeyboardKey.arrowDown);
+        expect(previewed(tester), 'failed');
+      },
+    );
+
+    testWidgets(
       'a clicked row takes the keys; the search field keeps its own',
       (tester) async {
         await _pump(tester);
@@ -602,6 +638,33 @@ void main() {
       expect(find.text('Server screen'), findsOneWidget);
     });
 
+    testWidgets('checks the daemon again when the event stream drops', (
+      tester,
+    ) async {
+      Map<String, dynamic>? health = {'status': 'ok'};
+      final (container, _) = await _pump(
+        tester,
+        stub: (api) =>
+            when(() => api.fetchHealth()).thenAnswer((_) async => health),
+      );
+      expect(find.text('Daemon running'), findsOneWidget);
+
+      // The daemon dies: no review completes, but the stream notices.
+      health = null;
+      (container.read(daemonConnectionProvider.notifier) as _Connection).set(
+        DaemonConnectionPhase.offline,
+      );
+      await _settle(tester);
+      expect(find.text('Daemon not reachable'), findsOneWidget);
+
+      health = {'status': 'ok'};
+      (container.read(daemonConnectionProvider.notifier) as _Connection).set(
+        DaemonConnectionPhase.connected,
+      );
+      await _settle(tester);
+      expect(find.text('Daemon running'), findsOneWidget);
+    });
+
     testWidgets('says when the daemon does not answer', (tester) async {
       await _pump(
         tester,
@@ -628,6 +691,7 @@ void main() {
           (ref) async => singleInstanceResult(_prs),
         ),
         sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+        daemonConnectionProvider.overrideWith(_Connection.new),
       ],
     );
     addTearDown(container.dispose);

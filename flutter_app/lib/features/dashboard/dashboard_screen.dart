@@ -484,45 +484,51 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
             autofocus: true,
             onKeyEvent: (node, event) =>
                 _onListKey(node, event, visible, selected),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                SizedBox(
-                  width: inboxListWidth,
-                  child: emptyMessage != null
-                      ? Center(child: emptyMessage)
-                      : ListView.builder(
-                          key: const Key('inbox-list'),
-                          itemCount: visible.length,
-                          itemBuilder: (context, i) {
-                            final g = visible[i];
-                            final id = _prIdentityKey(g.value);
-                            return _InboxRow(
-                              key: _rowKeys.putIfAbsent(id, GlobalKey.new),
-                              group: g,
-                              reviewing: reviewingKeys.containsKey(
-                                _reviewKeyOf(g),
-                              ),
-                              selected: g == selected,
-                              now: now,
-                              onTap: () {
-                                _listFocus.requestFocus();
-                                setState(() => _selected = id);
-                              },
-                            );
-                          },
-                        ),
-                ),
-                const VerticalDivider(width: 1),
-                Expanded(
-                  child: selected == null
-                      ? _EmptyPreview(counts: counts)
-                      : _PrPreview(
-                          key: ValueKey(_prIdentityKey(selected.value)),
-                          group: selected,
-                        ),
-                ),
-              ],
+            // A click anywhere in the list or the preview hands the keys back
+            // to the list; a field or text that takes focus on the tap gets it
+            // after this.
+            child: Listener(
+              onPointerDown: (_) => _listFocus.requestFocus(),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SizedBox(
+                    width: inboxListWidth,
+                    child: emptyMessage != null
+                        ? Center(child: emptyMessage)
+                        : ListView.builder(
+                            key: const Key('inbox-list'),
+                            itemCount: visible.length,
+                            itemBuilder: (context, i) {
+                              final g = visible[i];
+                              final id = _prIdentityKey(g.value);
+                              return _InboxRow(
+                                key: _rowKeys.putIfAbsent(id, GlobalKey.new),
+                                group: g,
+                                reviewing: reviewingKeys.containsKey(
+                                  _reviewKeyOf(g),
+                                ),
+                                selected: g == selected,
+                                now: now,
+                                onTap: () {
+                                  _listFocus.requestFocus();
+                                  setState(() => _selected = id);
+                                },
+                              );
+                            },
+                          ),
+                  ),
+                  const VerticalDivider(width: 1),
+                  Expanded(
+                    child: selected == null
+                        ? _EmptyPreview(counts: counts, keys: _listFocus)
+                        : _PrPreview(
+                            key: ValueKey(_prIdentityKey(selected.value)),
+                            group: selected,
+                          ),
+                  ),
+                ],
+              ),
             ),
           );
         }
@@ -1193,7 +1199,10 @@ class _PrPreviewState extends ConsumerState<_PrPreview>
 /// The preview before a row is picked: what the buckets hold.
 class _EmptyPreview extends StatelessWidget {
   final Map<InboxBucket, int> counts;
-  const _EmptyPreview({required this.counts});
+
+  /// The list's focus: the keyboard hint shows only while the keys work.
+  final FocusNode keys;
+  const _EmptyPreview({required this.counts, required this.keys});
 
   @override
   Widget build(BuildContext context) {
@@ -1220,22 +1229,29 @@ class _EmptyPreview extends StatelessWidget {
           const SizedBox(height: 18),
           // Icons, not ↑↓ glyphs: not every bundled font has the arrows. Inline
           // spans, so the hint wraps in a narrow preview.
-          Text.rich(
-            TextSpan(
-              children: [
-                for (final icon in const [
-                  Icons.arrow_upward,
-                  Icons.arrow_downward,
-                ])
-                  WidgetSpan(
-                    alignment: PlaceholderAlignment.middle,
-                    child: Icon(icon, size: 13, color: muted),
-                  ),
-                const TextSpan(text: ' to move · Enter to open · Esc to clear'),
-              ],
-            ),
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall?.copyWith(color: muted),
+          ListenableBuilder(
+            listenable: keys,
+            builder: (context, _) => keys.hasPrimaryFocus
+                ? Text.rich(
+                    TextSpan(
+                      children: [
+                        for (final icon in const [
+                          Icons.arrow_upward,
+                          Icons.arrow_downward,
+                        ])
+                          WidgetSpan(
+                            alignment: PlaceholderAlignment.middle,
+                            child: Icon(icon, size: 13, color: muted),
+                          ),
+                        const TextSpan(
+                          text: ' to move · Enter to open · Esc to clear',
+                        ),
+                      ],
+                    ),
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(color: muted),
+                  )
+                : const SizedBox.shrink(),
           ),
         ],
       ),

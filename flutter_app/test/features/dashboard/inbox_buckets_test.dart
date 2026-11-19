@@ -245,25 +245,16 @@ void main() {
     );
   });
 
-  test('weekReviews sums the daily counts of every instance', () {
-    expect(weekReviews(const []), 0);
+  test('weekReviews sums the daily counts', () {
+    expect(weekReviews(<String, dynamic>{}), 0, reason: 'older daemons');
     expect(
-      weekReviews([
-        {
-          'reviews_last_7_days': [
-            {'day': '2026-11-18', 'count': 3},
-            {'day': '2026-11-19', 'count': 1},
-          ],
-        },
-        {
-          'reviews_last_7_days': [
-            {'day': '2026-11-19', 'count': 2},
-          ],
-        },
-        // An older daemon without the field counts as none.
-        <String, dynamic>{},
-      ]),
-      6,
+      weekReviews({
+        'reviews_last_7_days': [
+          {'day': '2026-11-18', 'count': 3},
+          {'day': '2026-11-19', 'count': 1},
+        ],
+      }),
+      4,
     );
   });
 

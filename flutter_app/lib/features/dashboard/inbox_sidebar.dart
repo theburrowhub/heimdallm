@@ -3,8 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mix/mix.dart' show ColorToken;
 
-import '../../core/instances/aggregation.dart';
-import '../../core/instances/instances_providers.dart';
 import '../../core/models/flow.dart';
 import '../../shared/design_system/color_resolver.dart';
 import '../../shared/design_system/tokens.dart';
@@ -12,13 +10,16 @@ import 'dashboard_providers.dart';
 import 'inbox_buckets.dart';
 
 /// The `/health` answer of the daemon the UI is scoped to, null when it does
-/// not answer. Fetched again when a review completes, never polled.
+/// not answer. Checked again when a review completes and whenever the event
+/// stream's connection changes state, so a daemon that stops or comes back
+/// shows on the card without polling.
 final inboxDaemonHealthProvider = FutureProvider<Map<String, dynamic>?>(
-  // No automatic retry: the card is read again when a review completes, and
-  // a daemon that is down or too old for an endpoint must not be polled.
+  // No automatic retry: the triggers above re-read it, and a daemon that is
+  // down must not be hammered.
   retry: (_, _) => null,
   (ref) async {
     ref.watch(prListRefreshProvider);
+    ref.watch(daemonConnectionProvider.select((s) => s.phase));
     return ref.watch(apiClientProvider).fetchHealth();
   },
 );
@@ -38,29 +39,21 @@ final inboxDaemonHealthProvider = FutureProvider<Map<String, dynamic>?>(
   };
 }
 
-/// Reviews made in the last 7 days, summed over every instance the list shows
-/// (#913). Unfiltered on purpose: the Stats screen's repo/org filter belongs to
-/// that screen.
+/// Reviews the card's daemon made in the last 7 days: the same daemon as its
+/// status and quotas, not the whole fleet. Unfiltered on purpose: the Stats
+/// screen's repo/org filter belongs to that screen.
 final inboxWeekReviewsProvider = FutureProvider<int>(retry: (_, _) => null, (
   ref,
 ) async {
   ref.watch(prListRefreshProvider);
-  final result = await aggregateOne<Map<String, dynamic>>(
-    targets: ref.watch(targetInstancesProvider),
-    clientFor: (id) => clientForInstance(ref, id),
-    fetch: (client) => client.fetchStats(),
-  );
-  return weekReviews(result.values);
+  return weekReviews(await ref.watch(apiClientProvider).fetchStats());
 });
 
-/// Sums each instance's `reviews_last_7_days`. The generic stats merge keeps
-/// lists from the first instance only, which would undercount a fleet.
-int weekReviews(List<Map<String, dynamic>> stats) {
+/// Sums the daily counts in a `/stats` answer's `reviews_last_7_days`.
+int weekReviews(Map<String, dynamic> stats) {
   var reviews = 0;
-  for (final s in stats) {
-    for (final day in (s['reviews_last_7_days'] as List?) ?? const []) {
-      reviews += ((day as Map)['count'] as num?)?.toInt() ?? 0;
-    }
+  for (final day in (stats['reviews_last_7_days'] as List?) ?? const []) {
+    reviews += ((day as Map)['count'] as num?)?.toInt() ?? 0;
   }
   return reviews;
 }
