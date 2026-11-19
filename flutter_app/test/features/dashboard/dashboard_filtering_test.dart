@@ -9,12 +9,21 @@ import 'package:heimdallm/core/api/sse_client.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
+import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/dashboard/activity_filters.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:heimdallm/shared/widgets/severity_badge.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../core/platform/fake_platform_services.dart';
+
+class _Connected extends DaemonConnectionNotifier {
+  @override
+  DaemonConnectionStatus build() =>
+      const DaemonConnectionStatus(phase: DaemonConnectionPhase.connected);
+}
 
 Review _review(String severity) => Review(
   id: 1,
@@ -56,6 +65,11 @@ Future<ProviderContainer> _pump(
   addTearDown(() => tester.binding.setSurfaceSize(null));
   final container = ProviderContainer(
     overrides: [
+      // The wide layout's daemon card wakes the refresh notifier, whose SSE
+      // handler raises desktop notifications.
+      platformServicesProvider.overrideWithValue(FakePlatformServices()),
+      // The card watches the stream's connection; this one has no watchdog.
+      daemonConnectionProvider.overrideWith(_Connected.new),
       prsByInstanceProvider.overrideWith((ref) => load()),
       sseStreamProvider.overrideWith((ref) => sse),
     ],

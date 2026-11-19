@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
+import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/core/models/issue.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
@@ -17,6 +19,16 @@ import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
+
+/// The event stream's connection without its watchdog timer; tests flip it.
+class _Connection extends DaemonConnectionNotifier {
+  @override
+  DaemonConnectionStatus build() =>
+      const DaemonConnectionStatus(phase: DaemonConnectionPhase.connected);
+
+  void set(DaemonConnectionPhase phase) =>
+      state = DaemonConnectionStatus(phase: phase);
+}
 
 final _now = DateTime.now();
 
@@ -77,6 +89,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
   Size size = const Size(1600, 1000),
   List<PR>? prs,
   List<PR> Function()? load,
+  void Function(_MockApiClient api)? stub,
 }) async {
   SharedPreferences.setMockInitialValues({});
   tester.view.physicalSize = size;
@@ -84,6 +97,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   final api = _MockApiClient();
+  stub?.call(api);
   final container = ProviderContainer(
     overrides: [
       apiClientProvider.overrideWithValue(api),
@@ -91,6 +105,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
         (ref) async => singleInstanceResult(load?.call() ?? prs ?? _prs),
       ),
       sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+      daemonConnectionProvider.overrideWith(_Connection.new),
     ],
   );
   addTearDown(container.dispose);
@@ -103,6 +118,10 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
         routerConfig: GoRouter(
           routes: [
             GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            GoRoute(
+              path: '/server',
+              builder: (_, _) => const Scaffold(body: Text('Server screen')),
+            ),
             GoRoute(
               path: '/prs/:id',
               builder: (_, state) => Scaffold(
@@ -447,5 +466,297 @@ void main() {
     );
 
     expect(find.text('No open PRs.'), findsOneWidget);
+  });
+
+  group('keyboard (#913)', () {
+    String? previewed(WidgetTester tester) {
+      for (final t in ['Summary of review 3', 'Summary of review 4']) {
+        if (find.text(t).evaluate().isNotEmpty) return t;
+      }
+      if (find
+          .byKey(const Key('inbox-preview-failure'))
+          .evaluate()
+          .isNotEmpty) {
+        return 'failed';
+      }
+      if (find.text('Select a PR to read its review').evaluate().isNotEmpty) {
+        return null;
+      }
+      return 'other';
+    }
+
+    Future<void> press(WidgetTester tester, LogicalKeyboardKey key) async {
+      await tester.sendKeyEvent(key);
+      await _settle(tester);
+    }
+
+    testWidgets('arrows move through the list, Esc clears, Enter opens', (
+      tester,
+    ) async {
+      await _pump(tester);
+      // Order: Failed, Running (unreviewed first), then Done, Waiting.
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(previewed(tester), 'failed');
+
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(previewed(tester), 'Summary of review 3');
+
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(
+        previewed(tester),
+        'Summary of review 4',
+        reason: 'stops at the end',
+      );
+
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      expect(previewed(tester), 'Summary of review 3');
+
+      await press(tester, LogicalKeyboardKey.escape);
+      expect(previewed(tester), isNull);
+
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      expect(
+        previewed(tester),
+        'Summary of review 4',
+        reason: 'up starts at the end',
+      );
+
+      await press(tester, LogicalKeyboardKey.enter);
+      expect(find.text('PR detail 4'), findsOneWidget);
+    });
+
+    testWidgets(
+      'the hint shows only while the keys work; a click restores them',
+      (tester) async {
+        await _pump(tester);
+        final hint = find.textContaining(
+          'to move · Enter to open',
+          findRichText: true,
+        );
+        expect(hint, findsOneWidget);
+
+        await tester.tap(find.byType(TextField));
+        await _settle(tester);
+        expect(hint, findsNothing);
+        await press(tester, LogicalKeyboardKey.arrowDown);
+        expect(previewed(tester), isNull);
+
+        // Any click in the preview hands the keys back to the list.
+        await tester.tap(find.text('Select a PR to read its review'));
+        await _settle(tester);
+        expect(hint, findsOneWidget);
+        await press(tester, LogicalKeyboardKey.arrowDown);
+        expect(previewed(tester), 'failed');
+      },
+    );
+
+    testWidgets(
+      'a clicked row takes the keys; the search field keeps its own',
+      (tester) async {
+        await _pump(tester);
+        await tester.tap(_inList('Done PR'));
+        await _settle(tester);
+        await press(tester, LogicalKeyboardKey.arrowDown);
+        expect(previewed(tester), 'Summary of review 4');
+
+        await tester.tap(find.byType(TextField));
+        await _settle(tester);
+        await press(tester, LogicalKeyboardKey.arrowUp);
+        await press(tester, LogicalKeyboardKey.enter);
+        expect(previewed(tester), 'Summary of review 4');
+        expect(find.text('PR detail 4'), findsNothing);
+      },
+    );
+  });
+
+  group('daemon card (#913)', () {
+    testWidgets('shows the daemon, its subscription windows and the week', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        stub: (api) {
+          when(
+            () => api.fetchHealth(),
+          ).thenAnswer((_) async => {'status': 'ok', 'version': '0.10.7'});
+          when(() => api.fetchQuotas()).thenAnswer(
+            (_) async => [
+              AgentQuota(
+                agent: 'claude',
+                available: true,
+                windows: [
+                  QuotaWindow(
+                    kind: 'session',
+                    usedPercent: 42,
+                    resetsAt: DateTime(2026, 11, 19, 14, 30),
+                  ),
+                  const QuotaWindow(kind: 'weekly', usedPercent: 91),
+                  const QuotaWindow(
+                    kind: 'model',
+                    label: 'opus',
+                    usedPercent: 75,
+                  ),
+                ],
+              ),
+              const AgentQuota(agent: 'codex', error: 'not_configured'),
+            ],
+          );
+          when(() => api.fetchStats()).thenAnswer(
+            (_) async => {
+              'reviews_last_7_days': [
+                {'day': '2026-11-18', 'count': 3},
+                {'day': '2026-11-19', 'count': 2},
+              ],
+              'tokens_last_7_days': {'cost_usd': 18.4},
+            },
+          );
+        },
+      );
+
+      final card = find.byKey(const Key('inbox-daemon-card'));
+      Finder inCard(String text) =>
+          find.descendant(of: card, matching: find.text(text));
+      expect(inCard('Daemon running'), findsOneWidget);
+      expect(inCard('v0.10.7'), findsOneWidget);
+      expect(inCard('claude 5h'), findsOneWidget);
+      expect(inCard('42%'), findsOneWidget);
+      expect(inCard('claude 7d'), findsOneWidget);
+      expect(inCard('91%'), findsOneWidget);
+      // Only the plan windows, and no dollar figure: a subscription's cost is
+      // its usage window, not the API price.
+      expect(inCard('claude opus'), findsNothing);
+      expect(
+        find.descendant(of: card, matching: find.textContaining(r'$')),
+        findsNothing,
+      );
+      expect(inCard('Last 7 days · 5 reviews'), findsOneWidget);
+
+      await tester.tap(card);
+      await _settle(tester);
+      expect(find.text('Server screen'), findsOneWidget);
+    });
+
+    testWidgets('checks the daemon again when the event stream drops', (
+      tester,
+    ) async {
+      Map<String, dynamic>? health = {'status': 'ok'};
+      final (container, _) = await _pump(
+        tester,
+        stub: (api) =>
+            when(() => api.fetchHealth()).thenAnswer((_) async => health),
+      );
+      expect(find.text('Daemon running'), findsOneWidget);
+
+      // The daemon dies: no review completes, but the stream notices.
+      health = null;
+      (container.read(daemonConnectionProvider.notifier) as _Connection).set(
+        DaemonConnectionPhase.offline,
+      );
+      await _settle(tester);
+      expect(find.text('Daemon not reachable'), findsOneWidget);
+
+      health = {'status': 'ok'};
+      (container.read(daemonConnectionProvider.notifier) as _Connection).set(
+        DaemonConnectionPhase.connected,
+      );
+      await _settle(tester);
+      expect(find.text('Daemon running'), findsOneWidget);
+    });
+
+    testWidgets('says when the daemon does not answer', (tester) async {
+      await _pump(
+        tester,
+        stub: (api) =>
+            when(() => api.fetchHealth()).thenAnswer((_) async => null),
+      );
+      expect(find.text('Daemon not reachable'), findsOneWidget);
+    });
+  });
+
+  testWidgets('keys do nothing while another shell destination shows', (
+    tester,
+  ) async {
+    // The shell keeps Activity mounted offstage while another branch shows.
+    SharedPreferences.setMockInitialValues({});
+    tester.view.physicalSize = const Size(1600, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(_MockApiClient()),
+        prsByInstanceProvider.overrideWith(
+          (ref) async => singleInstanceResult(_prs),
+        ),
+        sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+        daemonConnectionProvider.overrideWith(_Connection.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          routerConfig: GoRouter(
+            routes: [
+              StatefulShellRoute.indexedStack(
+                builder: (context, state, shell) => Column(
+                  children: [
+                    TextButton(
+                      onPressed: () => shell.goBranch(1),
+                      child: const Text('Go to other'),
+                    ),
+                    Expanded(child: shell),
+                  ],
+                ),
+                branches: [
+                  StatefulShellBranch(
+                    routes: [
+                      GoRoute(
+                        path: '/',
+                        builder: (_, _) => const DashboardScreen(),
+                      ),
+                    ],
+                  ),
+                  StatefulShellBranch(
+                    routes: [
+                      GoRoute(
+                        path: '/other',
+                        builder: (_, _) =>
+                            const Scaffold(body: Text('Other screen')),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              GoRoute(
+                path: '/prs/:id',
+                builder: (_, state) => Scaffold(
+                  body: Text('PR detail ${state.pathParameters['id']}'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await _settle(tester);
+    await tester.tap(_inList('Done PR'));
+    await _settle(tester);
+
+    await tester.tap(find.text('Go to other'));
+    await _settle(tester);
+    expect(find.text('Other screen'), findsOneWidget);
+    // Switching branches hands focus to the new branch's route.
+    expect(FocusManager.instance.primaryFocus?.debugLabel, isNot('inbox-list'));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await _settle(tester);
+    expect(find.textContaining('PR detail'), findsNothing);
   });
 }

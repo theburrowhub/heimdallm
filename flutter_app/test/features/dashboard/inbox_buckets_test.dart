@@ -4,6 +4,7 @@ import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
 import 'package:heimdallm/core/models/review_status.dart';
 import 'package:heimdallm/features/dashboard/inbox_buckets.dart';
+import 'package:heimdallm/features/dashboard/inbox_sidebar.dart';
 import 'package:heimdallm/shared/design_system/tokens.dart';
 
 final _now = DateTime(2026, 11, 19, 23, 50);
@@ -242,5 +243,32 @@ void main() {
       ),
       '2 high · 1 low',
     );
+  });
+
+  test('weekReviews sums the daily counts', () {
+    expect(weekReviews(<String, dynamic>{}), 0, reason: 'older daemons');
+    expect(
+      weekReviews({
+        'reviews_last_7_days': [
+          {'day': '2026-11-18', 'count': 3},
+          {'day': '2026-11-19', 'count': 1},
+        ],
+      }),
+      4,
+    );
+  });
+
+  test('daemonStatusOf reads the /health status', () {
+    expect(daemonStatusOf(null).label, 'Daemon not reachable');
+    expect(daemonStatusOf(null).color, AppColors.danger);
+    expect(daemonStatusOf({'status': 'ok'}).label, 'Daemon running');
+    expect(daemonStatusOf({'status': 'ok'}).color, AppColors.success);
+    // A daemon that predates the field answered only when healthy.
+    expect(daemonStatusOf(<String, dynamic>{}).label, 'Daemon running');
+    for (final s in ['degraded', 'starting', 'stopping']) {
+      expect(daemonStatusOf({'status': s}).label, 'Daemon $s');
+      expect(daemonStatusOf({'status': s}).color, AppColors.warning);
+    }
+    expect(daemonStatusOf({'status': 'odd'}).label, 'Daemon odd');
   });
 }
