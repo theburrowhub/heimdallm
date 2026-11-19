@@ -9,14 +9,18 @@ import '../merge_tracking/merge_tracking_providers.dart';
 import '../merge_tracking/widgets/check_visuals.dart';
 import '../merge_tracking/widgets/checks_table.dart';
 import '../merge_tracking/widgets/merge_phase_badge.dart';
+import '../../core/models/merge_tracking.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review.dart';
 import '../../core/models/review_status.dart';
-import '../../shared/widgets/review_publication_badge.dart';
-import '../../shared/widgets/severity_badge.dart';
+import '../../shared/design_system/color_resolver.dart';
+import '../../shared/design_system/components/app_surface.dart';
+import '../../shared/design_system/components/app_text.dart';
+import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
 import 'pr_detail_providers.dart';
+import 'review_workspace.dart';
 
 class PRDetailScreen extends ConsumerStatefulWidget {
   final int prId;
@@ -205,6 +209,12 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     // Combine local trigger state with shared provider
     final reviewing =
         _reviewing || isReviewingShared || (status?.active ?? false);
+    // The merge panel only for a PR merge tracking has decided on: an
+    // untracked PR answers 404, and an empty panel would still take its gap in
+    // the workspace's layout. A failed refresh hides it, as before.
+    final mergeAsync = ref.watch(mergeTrackingDetailProvider(widget.prId));
+    final merge = mergeAsync.hasError ? null : mergeAsync.value;
+    final mergeDecision = merge?.decision;
 
     return Scaffold(
       appBar: AppBar(
@@ -304,38 +314,24 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
           Expanded(
             child: detailAsync.when(
               loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, _) => Center(child: Text('Error: $e')),
+              error: (e, _) => _LoadError(
+                error: e,
+                onRetry: () => ref.invalidate(prDetailProvider(_ref)),
+              ),
               data: (data) {
                 final pr = data['pr'] as PR;
                 final reviews = data['reviews'] as List<Review>;
-                return Row(
-                  children: [
-                    Expanded(
-                      flex: 2,
-                      child: ListView(
-                        padding: EdgeInsets.zero,
-                        children: [
-                          // Merge state comes before the review: a red required check
-                          // is more urgent than review feedback, and it is the thing
-                          // the author has to act on.
-                          _MergeChecksPanel(prId: widget.prId),
-                          _ReviewPanel(
-                            pr: pr,
-                            reviews: reviews,
-                            embedded: true,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const VerticalDivider(width: 1),
-                    Expanded(
-                      flex: 1,
-                      child: _PRMetaPanel(
-                        pr: pr,
-                        onReview: pr.repo.isEmpty ? null : _trigger,
-                      ),
-                    ),
-                  ],
+                return ReviewWorkspace(
+                  pr: pr,
+                  reviews: reviews,
+                  // Off while a review runs: the daemon refuses a second one
+                  // and the refusal reads as a failed review.
+                  onReview: pr.repo.isEmpty || reviewing ? null : _trigger,
+                  // Merge state comes first in the inspector: a red required
+                  // check is the thing the author has to act on.
+                  inspectorTop: merge != null && mergeDecision != null
+                      ? _MergeChecksPanel(entry: merge, decision: mergeDecision)
+                      : null,
                 );
               },
             ),
@@ -346,99 +342,86 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
   }
 }
 
-class _ReviewPanel extends StatelessWidget {
-  final PR pr;
-  final List<Review> reviews;
+/// A detail that failed to load says so and offers to try again.
+class _LoadError extends StatelessWidget {
+  final Object error;
+  final VoidCallback onRetry;
 
-  /// When true the panel is a child of an outer scroll view, so it must not
-  /// bring its own — a SingleChildScrollView inside a ListView has unbounded
-  /// height and throws.
-  final bool embedded;
-
-  const _ReviewPanel({
-    required this.pr,
-    required this.reviews,
-    this.embedded = false,
-  });
+  const _LoadError({required this.error, required this.onRetry});
 
   @override
   Widget build(BuildContext context) {
-    final body = Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(pr.title, style: Theme.of(context).textTheme.headlineSmall),
-          Text(
-            '${pr.repo} #${pr.number} by ${pr.author}',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 16),
-          if (reviews.isEmpty)
-            const Text('No reviews yet.')
-          else
-            ...reviews.map((rev) => _ReviewCard(review: rev, prUrl: pr.url)),
-        ],
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.cloud_off_outlined,
+              size: 32,
+              color: resolveAppColor(context, AppColors.textMuted),
+            ),
+            const SizedBox(height: 12),
+            const AppText.sectionTitle('Could not load this PR'),
+            const SizedBox(height: 6),
+            AppText.muted('$error'),
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('Try again'),
+              onPressed: onRetry,
+            ),
+          ],
+        ),
       ),
     );
-    return embedded ? body : SingleChildScrollView(child: body);
   }
 }
 
 /// The merge-readiness panel on the PR detail view: what is stopping this PR
 /// from merging, and the full per-check breakdown.
 ///
-/// Absent entirely for a PR merge tracking does not know about, so a PR someone
-/// else owns does not grow an empty section.
-class _MergeChecksPanel extends ConsumerWidget {
-  final int prId;
+/// The screen builds it only for a PR merge tracking has a decision on, so a PR
+/// someone else owns does not grow an empty section.
+class _MergeChecksPanel extends StatelessWidget {
+  final MergeTrackingEntry entry;
+  final MergeDecision decision;
 
-  const _MergeChecksPanel({required this.prId});
+  const _MergeChecksPanel({required this.entry, required this.decision});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(mergeTrackingDetailProvider(prId));
-    return async.when(
-      // A PR that is not tracked answers 404; showing nothing is right.
-      loading: () => const SizedBox.shrink(),
-      error: (_, _) => const SizedBox.shrink(),
-      data: (entry) {
-        final decision = entry.decision;
-        if (decision == null) return const SizedBox.shrink();
-        return Card(
-          margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Text(
-                      'Merge status',
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                    const SizedBox(width: 8),
-                    MergePhaseBadge(phase: entry.phase),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                if (entry.blockedByChecks)
-                  ChecksWarningBanner(entry: entry)
-                else if (entry.blockReason.isNotEmpty && !entry.isMerged)
-                  Text(
-                    entry.blockDetail.isNotEmpty
-                        ? entry.blockDetail
-                        : humanBlockReason(entry.blockReason),
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                const SizedBox(height: 12),
-                ChecksTable(decision: decision, onOpenUrl: _openCheckLog),
-              ],
-            ),
+  Widget build(BuildContext context) {
+    return AppSurface(
+      elevation: AppSurfaceElevation.raised,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                'Merge status',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(width: 8),
+              MergePhaseBadge(phase: entry.phase),
+            ],
           ),
-        );
-      },
+          const SizedBox(height: 12),
+          if (entry.blockedByChecks)
+            ChecksWarningBanner(entry: entry)
+          else if (entry.blockReason.isNotEmpty && !entry.isMerged)
+            Text(
+              entry.blockDetail.isNotEmpty
+                  ? entry.blockDetail
+                  : humanBlockReason(entry.blockReason),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          const SizedBox(height: 12),
+          ChecksTable(decision: decision, onOpenUrl: _openCheckLog),
+        ],
+      ),
     );
   }
 
@@ -449,165 +432,5 @@ class _MergeChecksPanel extends ConsumerWidget {
     if (uri != null && uri.scheme == 'https') {
       launchUrl(uri);
     }
-  }
-}
-
-class _ReviewCard extends StatelessWidget {
-  final Review review;
-  final String prUrl;
-  const _ReviewCard({required this.review, required this.prUrl});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Flexible(
-                  child: Text(
-                    'Reviewed by ${review.cliUsed}',
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                ),
-                if (review.hasTokenUsage) ...[
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      review.tokenUsageLabel,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 6),
-            // The badges get a line of their own and wrap there, so a long
-            // label never clips in a narrow (web) window.
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                ReviewPublicationBadge(review: review, prUrl: prUrl),
-                SeverityBadge(severity: review.severity),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(review.summary),
-            if (review.issues.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text('Issues', style: Theme.of(context).textTheme.labelMedium),
-              ...review.issues.map(
-                (issue) => Padding(
-                  padding: const EdgeInsets.only(top: 4, left: 8),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Icon(Icons.warning_amber, size: 14),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: Text(
-                          '${issue.file}:${issue.line} — ${issue.description}',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PRMetaPanel extends StatelessWidget {
-  final PR pr;
-  final VoidCallback? onReview;
-  const _PRMetaPanel({required this.pr, this.onReview});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Details', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
-          if (pr.repo.isEmpty)
-            Container(
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.orange.withValues(alpha: 0.1),
-                border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.warning_amber, size: 16, color: Colors.orange),
-                  SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      'Repo unknown. Re-discover repos in Settings to enable auto-review.',
-                      style: TextStyle(fontSize: 12, color: Colors.orange),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          _row(context, 'Repo', pr.repo.isEmpty ? '(unknown)' : pr.repo),
-          _row(context, 'Number', '#${pr.number}'),
-          _row(context, 'Author', pr.author),
-          _row(context, 'State', pr.state),
-          _row(
-            context,
-            'Updated',
-            pr.updatedAt.toLocal().toString().substring(0, 16),
-          ),
-          const SizedBox(height: 12),
-          OutlinedButton.icon(
-            icon: const Icon(Icons.open_in_browser),
-            label: const Text('Open on GitHub'),
-            onPressed: () {
-              final uri = Uri.tryParse(pr.url);
-              if (uri != null &&
-                  uri.scheme == 'https' &&
-                  uri.host == 'github.com') {
-                launchUrl(uri);
-              }
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _row(BuildContext context, String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 72,
-            child: Text(
-              '$label:',
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
-          ),
-          Expanded(child: Text(value)),
-        ],
-      ),
-    );
   }
 }

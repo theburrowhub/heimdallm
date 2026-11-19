@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:heimdallm/core/api/api_client.dart';
@@ -15,25 +16,53 @@ class MockDetailApiClient extends Mock implements ApiClient {}
 
 void main() {
   testWidgets('PRDetailScreen shows review summary', (tester) async {
-    final pr = PR(id: 1, githubId: 101, repo: 'org/repo', number: 42,
-      title: 'Fix bug', author: 'alice', url: 'https://github.com',
-      state: 'open', updatedAt: DateTime.now());
-    final review = Review(id: 1, prId: 1, cliUsed: 'claude',
-      summary: 'Overall looks good', issues: [],
-      severity: 'low', createdAt: DateTime.now());
+    final pr = PR(
+      id: 1,
+      githubId: 101,
+      repo: 'org/repo',
+      number: 42,
+      title: 'Fix bug',
+      author: 'alice',
+      url: 'https://github.com',
+      state: 'open',
+      updatedAt: DateTime.now(),
+    );
+    final review = Review(
+      id: 1,
+      prId: 1,
+      cliUsed: 'claude',
+      summary: 'Overall looks good',
+      issues: [],
+      severity: 'low',
+      createdAt: DateTime.now(),
+    );
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          prDetailProvider((instanceId: '', prId: 1)).overrideWith((_) => Future.value({'pr': pr, 'reviews': [review]})),
+          prDetailProvider((instanceId: '', prId: 1)).overrideWith(
+            (_) => Future.value({
+              'pr': pr,
+              'reviews': [review],
+            }),
+          ),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
-          routerConfig: GoRouter(routes: [
-            GoRoute(path: '/', builder: (_, _) => const SizedBox()),
-            GoRoute(path: '/prs/:id', builder: (ctx, state) =>
-                PRDetailScreen(prId: int.parse(state.pathParameters['id']!))),
-          ], initialLocation: '/prs/1'),
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const SizedBox()),
+              GoRoute(
+                path: '/prs/:id',
+                builder: (ctx, state) => PRDetailScreen(
+                  prId: int.parse(state.pathParameters['id']!),
+                ),
+              ),
+            ],
+            initialLocation: '/prs/1',
+          ),
         ),
       ),
     );
@@ -44,26 +73,56 @@ void main() {
   });
 
   testWidgets('PRDetailScreen shows the review token usage', (tester) async {
-    final pr = PR(id: 1, githubId: 101, repo: 'org/repo', number: 42,
-      title: 'Fix bug', author: 'alice', url: 'https://github.com',
-      state: 'open', updatedAt: DateTime.now());
-    final review = Review(id: 1, prId: 1, cliUsed: 'claude',
-      summary: 'Overall looks good', issues: [],
-      severity: 'low', createdAt: DateTime.now(),
-      inputTokens: 12000, outputTokens: 300, tokensEstimated: true);
+    final pr = PR(
+      id: 1,
+      githubId: 101,
+      repo: 'org/repo',
+      number: 42,
+      title: 'Fix bug',
+      author: 'alice',
+      url: 'https://github.com',
+      state: 'open',
+      updatedAt: DateTime.now(),
+    );
+    final review = Review(
+      id: 1,
+      prId: 1,
+      cliUsed: 'claude',
+      summary: 'Overall looks good',
+      issues: [],
+      severity: 'low',
+      createdAt: DateTime.now(),
+      inputTokens: 12000,
+      outputTokens: 300,
+      tokensEstimated: true,
+    );
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          prDetailProvider((instanceId: '', prId: 1)).overrideWith((_) => Future.value({'pr': pr, 'reviews': [review]})),
+          prDetailProvider((instanceId: '', prId: 1)).overrideWith(
+            (_) => Future.value({
+              'pr': pr,
+              'reviews': [review],
+            }),
+          ),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
-          routerConfig: GoRouter(routes: [
-            GoRoute(path: '/', builder: (_, _) => const SizedBox()),
-            GoRoute(path: '/prs/:id', builder: (ctx, state) =>
-                PRDetailScreen(prId: int.parse(state.pathParameters['id']!))),
-          ], initialLocation: '/prs/1'),
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const SizedBox()),
+              GoRoute(
+                path: '/prs/:id',
+                builder: (ctx, state) => PRDetailScreen(
+                  prId: int.parse(state.pathParameters['id']!),
+                ),
+              ),
+            ],
+            initialLocation: '/prs/1',
+          ),
         ),
       ),
     );
@@ -106,6 +165,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(
             routes: [
               GoRoute(path: '/', builder: (_, _) => const SizedBox()),
@@ -125,6 +186,17 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('Cancel'), findsOneWidget);
+    // A second review would be refused and read as a failure, so the empty
+    // state's button is off while this one runs.
+    final reviewNow = tester.widget<ButtonStyleButton>(
+      find
+          .ancestor(
+            of: find.text('Review now'),
+            matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
+          )
+          .first,
+    );
+    expect(reviewNow.onPressed, isNull);
     await tester.tap(find.text('Cancel'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
@@ -167,6 +239,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(
             routes: [
               GoRoute(path: '/', builder: (_, _) => const SizedBox()),

@@ -22,10 +22,15 @@ class SeverityBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final color = _color(context);
+    // Dark mode's status colours are light, so white text on them is hard to
+    // read; there the badge is tinted (coloured text on a translucent fill).
+    final dark = Theme.of(context).brightness == Brightness.dark;
     return AppBadge(
       label: severity.toUpperCase(),
-      foreground: Colors.white,
-      background: _color(context),
+      foreground: dark ? color : Colors.white,
+      background: dark ? color.withValues(alpha: 0.16) : color,
+      border: dark ? color.withValues(alpha: 0.4) : null,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       radius: 4,
     );
