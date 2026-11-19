@@ -1,3 +1,5 @@
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -71,4 +73,51 @@ void main() {
     await tester.pumpAndSettle();
     expect(platform.toggleWindowZoomCalls, 1);
   });
+
+  // The strip moves the root overlay 28 px down; a text's right-click menu
+  // must still open where it would without it, at the pointer (#902 review).
+  testWidgets(
+    'a right-click menu opens where it would without the strip',
+    (tester) async {
+      Future<double> menuOffset(double stripHeight) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              platformServicesProvider.overrideWithValue(
+                FakePlatformServices()..titleBarHeight = stripHeight,
+              ),
+            ],
+            child: MaterialApp(
+              builder: (context, child) =>
+                  TitleBarStrip(child: child ?? const SizedBox.shrink()),
+              home: const Scaffold(
+                body: Center(child: SelectableText('Right-click me')),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final at = tester.getCenter(find.text('Right-click me'));
+        final gesture = await tester.startGesture(
+          at,
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        await gesture.up();
+        await tester.pumpAndSettle();
+        final button = find.byType(CupertinoDesktopTextSelectionToolbarButton);
+        expect(button, findsWidgets);
+        final top = tester.getTopLeft(button.first).dy;
+        // Close the menu before the next pump.
+        await tester.tapAt(Offset.zero);
+        await tester.pumpAndSettle();
+        return top - at.dy;
+      }
+
+      final without = await menuOffset(0);
+      final withStrip = await menuOffset(28);
+      expect(withStrip, closeTo(without, 0.5));
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
 }
