@@ -85,7 +85,8 @@ _Look _look(Review review) {
     case ReviewPublication.pending:
       return const _Look(
         'Not posted yet',
-        'Heimdallm will publish this review on its next publish attempt.',
+        'Waiting to be published: Heimdallm retries pending reviews on every '
+            'poll while the repository is enabled.',
         Icons.schedule,
         AppColors.warning,
       );
