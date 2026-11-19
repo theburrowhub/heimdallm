@@ -58,9 +58,8 @@ void main() {
     }
   });
 
-  testWidgets('dragging the strip moves the window, double-click zooms', (
-    tester,
-  ) async {
+  testWidgets('dragging the strip moves the window, double-click acts as a '
+      'title bar', (tester) async {
     final platform = FakePlatformServices()..titleBarHeight = 28;
     await tester.pumpWidget(_host(platform));
 
@@ -71,7 +70,54 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
     await tester.tap(_strip);
     await tester.pumpAndSettle();
-    expect(platform.toggleWindowZoomCalls, 1);
+    expect(platform.titleBarDoubleClickCalls, 1);
+  });
+
+  // The app below the strip is told its real height, so sizes taken from
+  // MediaQuery (dialogs, sheets) fit (#902 review).
+  testWidgets('the app sees the window minus the strip', (tester) async {
+    tester.view.physicalSize = const Size(800, 600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(_host(FakePlatformServices()..titleBarHeight = 28));
+    final appSize = MediaQuery.sizeOf(tester.element(find.text('content')));
+    expect(appSize, const Size(800, 572));
+  });
+
+  // In native full screen macOS hides its title bar, so the strip collapses;
+  // the app keeps its state across the switch (#902 review).
+  testWidgets('full screen collapses the strip and keeps the app state', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final platform = FakePlatformServices()..titleBarHeight = 28;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [platformServicesProvider.overrideWithValue(platform)],
+        child: MaterialApp(
+          builder: (context, child) =>
+              TitleBarStrip(child: child ?? const SizedBox.shrink()),
+          home: const Scaffold(body: TextField()),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), 'draft');
+
+    platform.fullScreen.value = true;
+    await tester.pump();
+    expect(tester.getSize(_strip).height, 0);
+    expect(
+      MediaQuery.sizeOf(tester.element(find.byType(TextField))).height,
+      600,
+    );
+    expect(find.text('draft'), findsOneWidget);
+
+    platform.fullScreen.value = false;
+    await tester.pump();
+    expect(tester.getSize(_strip).height, 28);
+    expect(find.text('draft'), findsOneWidget);
   });
 
   // The strip moves the root overlay 28 px down; a text's right-click menu

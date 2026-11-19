@@ -1,5 +1,6 @@
 import 'dart:async' show Stream;
 import 'dart:ui' show VoidCallback;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
 import '../models/config_model.dart';
@@ -274,11 +275,16 @@ abstract interface class WindowChromePlatformCapability {
   /// its own title bar.
   double get titleBarHeight;
 
+  /// Whether the window is in native full screen, where the system hides its
+  /// title bar and the strip must take no space.
+  ValueListenable<bool> get fullScreen;
+
   /// Moves the window with the pointer, as dragging a title bar does.
   Future<void> startWindowDrag();
 
-  /// Zooms or restores the window, as double-clicking a title bar does.
-  Future<void> toggleWindowZoom();
+  /// Does what double-clicking a title bar does: zoom or restore the window,
+  /// or what the user chose instead in the system settings.
+  Future<void> titleBarDoubleClick();
 }
 
 /// Optional termination path for a process that has already disproved desktop

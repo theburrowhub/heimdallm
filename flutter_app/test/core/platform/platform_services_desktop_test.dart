@@ -1205,16 +1205,62 @@ else:
       expect(methods(), contains('startDragging'));
     });
 
+    // AppleActionOnDoubleClick as `defaults read -g` prints it; exit 1 when
+    // the user never changed it.
+    DesktopPlatformServices withDoubleClick(int exitCode, String stdout) =>
+        DesktopPlatformServices(
+          isMacOS: true,
+          processRunner: (executable, arguments) async {
+            expect(executable, 'defaults');
+            expect(arguments, ['read', '-g', 'AppleActionOnDoubleClick']);
+            return ProcessResult(0, exitCode, stdout, '');
+          },
+        );
+
     test('double-clicking the strip zooms, and again restores', () async {
-      final services = DesktopPlatformServices(isMacOS: true);
-      await services.toggleWindowZoom();
-      expect(methods(), contains('maximize'));
+      for (final services in [
+        withDoubleClick(0, 'Maximize\n'),
+        withDoubleClick(1, ''), // unset: the system default, zoom
+      ]) {
+        windowCalls.clear();
+        maximized = false;
+        await services.titleBarDoubleClick();
+        expect(methods(), contains('maximize'));
+
+        windowCalls.clear();
+        maximized = true;
+        await services.titleBarDoubleClick();
+        expect(methods(), contains('unmaximize'));
+        expect(methods(), isNot(contains('maximize')));
+      }
+    });
+
+    test('double-click follows the macOS title bar setting', () async {
+      await withDoubleClick(0, 'Minimize\n').titleBarDoubleClick();
+      expect(methods(), contains('minimize'));
+      expect(methods(), isNot(contains('maximize')));
 
       windowCalls.clear();
-      maximized = true;
-      await services.toggleWindowZoom();
-      expect(methods(), contains('unmaximize'));
-      expect(methods(), isNot(contains('maximize')));
+      await withDoubleClick(0, 'None\n').titleBarDoubleClick();
+      expect(windowCalls, isEmpty);
+    });
+
+    test('an unreadable setting zooms', () async {
+      await DesktopPlatformServices(
+        isMacOS: true,
+        processRunner: (_, _) async =>
+            throw const ProcessException('defaults', []),
+      ).titleBarDoubleClick();
+      expect(methods(), contains('maximize'));
+    });
+
+    test('native full screen collapses the strip', () {
+      final services = DesktopPlatformServices(isMacOS: true);
+      expect(services.fullScreen.value, isFalse);
+      services.onWindowEnterFullScreen();
+      expect(services.fullScreen.value, isTrue);
+      services.onWindowLeaveFullScreen();
+      expect(services.fullScreen.value, isFalse);
     });
 
     test('only macOS hides the system title bar', () async {
