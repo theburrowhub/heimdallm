@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -27,14 +28,20 @@ const maxLineSnap = 4 * 1024
 // DiffSectionPath extracts the post-image path ("b/...") of a file section of
 // a unified git diff, given the text after its "diff --git " header prefix. It
 // falls back to the pre-image path for deletions. A path git quotes (non-ASCII
-// or special characters, core.quotePath) is unquoted.
+// or special characters, core.quotePath) is unquoted when it decodes to
+// printable UTF-8, and kept quoted otherwise.
 func DiffSectionPath(section string) string {
 	firstLine, _, _ := strings.Cut(section, "\n")
 	// Git's C-style quoting (\", \\, \t, octal bytes) is a subset of Go's.
 	if i := strings.LastIndex(firstLine, ` "b/`); i >= 0 && strings.HasSuffix(firstLine, `"`) {
-		if p, err := strconv.Unquote(firstLine[i+1:]); err == nil {
+		quoted := firstLine[i+1:]
+		// An escaped newline or control character, or a non-UTF-8 byte, stays
+		// escaped: the name is PR-author input, and decoded it could add lines
+		// to the truncation note.
+		if p, err := strconv.Unquote(quoted); err == nil && utf8.ValidString(p) && !strings.ContainsFunc(p, unicode.IsControl) {
 			return strings.TrimPrefix(p, "b/")
 		}
+		return quoted
 	}
 	// "a/old b/new"; paths with spaces are rare enough that splitting on the
 	// last " b/" is the pragmatic choice git's own porcelain makes.
