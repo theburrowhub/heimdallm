@@ -88,6 +88,28 @@ func (p *Pipeline) reviewDiff(pr *github.PullRequest, prevReview *store.Review, 
 	return diff, incrementalFrom, nil
 }
 
+// checkoutNote warns an agent that explores a repository checkout that the
+// checkout is not the PR head: it is the operator's local_dir as it happens to
+// be, or the tip of the default branch (#894). Without it an agent reports what
+// the PR adds as missing, or reviews the old version of a changed file.
+const checkoutNote = "The repository checkout in your working directory is context only and may not contain this PR's changes " +
+	"(it can be the default branch or an unrelated local branch). The diff is the authoritative version of the changed code: " +
+	"do not report a file, function or import as missing because the checkout lacks it.\n"
+
+// reviewHasCheckout reports whether any agent of this review runs with a
+// repository checkout as its working directory.
+func reviewHasCheckout(opts RunOptions) bool {
+	if opts.ExecOpts.WorkDir != "" {
+		return true
+	}
+	for _, o := range opts.AgentExecOpts {
+		if o.WorkDir != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // incrementalNote tells the model the diff is partial, so it neither flags
 // "missing" code from earlier commits nor drops still-valid findings.
 func incrementalNote(fromSHA string) string {

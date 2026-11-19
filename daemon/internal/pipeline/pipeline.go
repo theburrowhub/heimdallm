@@ -1314,6 +1314,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 			reviewCtx = truncateText(reviewCtx, compactReviewContextBytes)
 		}
 	}
+	if reviewHasCheckout(opts) {
+		// Added after the compact cap so it is never trimmed, and through the
+		// review-context slot so it sits outside <user_content> and reaches
+		// custom templates too (prepended when they lack the placeholder).
+		reviewCtx = checkoutNote + reviewCtx
+	}
 
 	// 3. Build prompt:
 	//    Priority: repo override > agent-level prompt > globally active default > built-in default
