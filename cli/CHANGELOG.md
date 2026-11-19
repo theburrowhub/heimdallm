@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.6](https://github.com/theburrowhub/heimdallm/compare/cli/v0.10.5...cli/v0.10.6) (2026-11-19)
+
+
+### Bug Fixes
+
+* report failing GitHub polls in /health and heimdallm-cli status ([#898](https://github.com/theburrowhub/heimdallm/issues/898)) ([11ae297](https://github.com/theburrowhub/heimdallm/commit/11ae297882b1032f8ad6b5e4546c844268a566de))
+
 ## [0.10.5](https://github.com/theburrowhub/heimdallm/compare/cli/v0.10.4...cli/v0.10.5) (2026-11-12)
 
 
