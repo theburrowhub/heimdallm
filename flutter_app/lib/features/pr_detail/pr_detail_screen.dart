@@ -468,39 +468,35 @@ class _ReviewCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                // The badges keep their natural size on the right edge; the
-                // agent and token line gives way (ellipsis) in a narrow window.
-                Expanded(
-                  child: Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          'Reviewed by ${review.cliUsed}',
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.labelSmall,
-                        ),
-                      ),
-                      if (review.hasTokenUsage) ...[
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Text(
-                            review.tokenUsageLabel,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.labelSmall
-                                ?.copyWith(
-                                  color: Theme.of(
-                                    context,
-                                  ).colorScheme.onSurfaceVariant,
-                                ),
-                          ),
-                        ),
-                      ],
-                    ],
+                Flexible(
+                  child: Text(
+                    'Reviewed by ${review.cliUsed}',
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall,
                   ),
                 ),
-                const SizedBox(width: 8),
+                if (review.hasTokenUsage) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      review.tokenUsageLabel,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 6),
+            // The badges get a line of their own and wrap there, so a long
+            // label never clips in a narrow (web) window.
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
                 ReviewPublicationBadge(review: review, prUrl: prUrl),
-                const SizedBox(width: 8),
                 SeverityBadge(severity: review.severity),
               ],
             ),

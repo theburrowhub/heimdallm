@@ -76,7 +76,7 @@ class Review {
     if (githubReviewId > 0) return ReviewPublication.posted;
     if (githubReviewId == 0) return ReviewPublication.pending;
     if (githubReviewId == -2) return ReviewPublication.superseded;
-    return ReviewPublication.refused;
+    return ReviewPublication.abandoned;
   }
 
   /// A row recording that a peer Heimdallm instance reviewed this commit.
@@ -123,9 +123,10 @@ class Review {
 
 /// Whether a stored review reached GitHub. The daemon encodes it in
 /// `github_review_id`: a positive id once posted, 0 while a publish retry is
-/// still due, -1 when GitHub refused it for good (PR closed, locked or
-/// archived) and -2 when a newer commit superseded it before it was posted.
-enum ReviewPublication { posted, pending, refused, superseded }
+/// still due, -2 when a newer commit superseded it before it was posted, and
+/// -1 (or any other negative value) when it will never be posted: the PR was
+/// closed or merged first, or GitHub rejected the publish for good.
+enum ReviewPublication { posted, pending, abandoned, superseded }
 
 /// The review event as GitHub shows it.
 enum ReviewVerdict { approved, changesRequested, commented, dismissed }

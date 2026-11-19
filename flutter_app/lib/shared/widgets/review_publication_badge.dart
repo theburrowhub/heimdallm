@@ -89,13 +89,13 @@ _Look _look(Review review) {
         Icons.schedule,
         AppColors.warning,
       );
-    case ReviewPublication.refused:
+    case ReviewPublication.abandoned:
       return const _Look(
-        'Not posted: GitHub refused it',
-        'GitHub refused this review for good (the PR was closed, locked or '
-            'archived), so it will not be posted.',
+        'Not posted',
+        'Heimdallm will not retry this review: the PR was closed or merged '
+            'first, or GitHub rejected it for good.',
         Icons.block,
-        AppColors.danger,
+        AppColors.textMuted,
       );
     case ReviewPublication.superseded:
       return const _Look(

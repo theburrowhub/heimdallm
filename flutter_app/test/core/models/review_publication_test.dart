@@ -60,10 +60,10 @@ void main() {
   test('publication follows the daemon review id sentinels', () {
     expect(_review(id: 7).publication, ReviewPublication.posted);
     expect(_review(id: 0).publication, ReviewPublication.pending);
-    expect(_review(id: -1).publication, ReviewPublication.refused);
+    expect(_review(id: -1).publication, ReviewPublication.abandoned);
     expect(_review(id: -2).publication, ReviewPublication.superseded);
     // An unknown negative sentinel is terminal too: never "pending".
-    expect(_review(id: -9).publication, ReviewPublication.refused);
+    expect(_review(id: -9).publication, ReviewPublication.abandoned);
   });
 
   test('verdict prefers GitHub state and falls back to the decided event', () {

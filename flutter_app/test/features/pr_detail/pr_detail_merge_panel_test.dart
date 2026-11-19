@@ -212,4 +212,29 @@ void main() {
     expect(find.text('Changes requested · c0ffee1'), findsOneWidget);
     expect(find.text('Not posted yet'), findsOneWidget);
   });
+
+  // A narrow web window must not clip the badges: they wrap on their own line.
+  testWidgets('review card badges fit a narrow window', (tester) async {
+    tester.view.physicalSize = const Size(420, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final peer = Review(
+      id: 3,
+      prId: 1,
+      cliUsed: 'peer',
+      summary: 'Covered by a peer.',
+      issues: const [],
+      severity: 'peer',
+      createdAt: DateTime.utc(2026, 8, 30),
+      githubReviewId: 7,
+      githubReviewState: 'CHANGES_REQUESTED',
+      headSha: 'abc1234def',
+    );
+    await tester.pumpWidget(
+      _host(detailError: Exception('not tracked'), reviews: [peer, _review]),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Peer · Changes requested · abc1234'), findsOneWidget);
+  });
 }

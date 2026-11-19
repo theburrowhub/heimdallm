@@ -97,7 +97,7 @@ void main() {
   ) async {
     final cases = {
       0: ('Not posted yet', AppColors.warning),
-      -1: ('Not posted: GitHub refused it', AppColors.danger),
+      -1: ('Not posted', AppColors.textMuted),
       -2: ('Not posted: superseded', AppColors.textMuted),
     };
     for (final entry in cases.entries) {
@@ -161,9 +161,7 @@ void main() {
       _host(ReviewPublicationBadge(review: _review(id: -1), prUrl: _prUrl)),
     );
     expect(
-      find.bySemanticsLabel(
-        RegExp(r'^Not posted: GitHub refused it\. GitHub refused'),
-      ),
+      find.bySemanticsLabel(RegExp(r'^Not posted\. Heimdallm will not retry')),
       findsOneWidget,
     );
     handle.dispose();
