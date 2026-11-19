@@ -48,6 +48,10 @@ var ErrExecutionCancelled = errors.New("executor: execution cancelled manually")
 // terminated", which is not enough for a durable user-facing diagnosis.
 var ErrExecutionTimedOut = errors.New("executor: execution timed out")
 
+// ErrNotAReview marks an answer that decoded as JSON but is not a review: it
+// has neither a summary nor an issues list. See ParseReview.
+var ErrNotAReview = errors.New("executor: agent answer is not a review (no summary and no issues list)")
+
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
 	Summary  string  `json:"summary"`
@@ -237,7 +241,7 @@ func (e *Executor) executeHTTP(agent HTTPAgent, cli, prompt string, opts ExecOpt
 		}
 		return nil, fmt.Errorf("executor: %s: %w", cli, err)
 	}
-	result, err := parseResult([]byte(answer))
+	result, err := ParseReview([]byte(answer))
 	if err != nil {
 		return nil, err
 	}
@@ -1663,7 +1667,7 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 			return nil, envErr
 		}
 	}
-	result, err := parseResult(raw)
+	result, err := ParseReview(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -2319,11 +2323,30 @@ func escapeControlCharsInStrings(s string) string {
 	return b.String()
 }
 
-func parseResult(data []byte) (*ReviewResult, error) {
+// ParseReview decodes an agent's answer into a ReviewResult. Every agent's
+// answer goes through it, so it is where an answer that is not a review must be
+// refused: a JSON object with neither a summary nor an issues list (an empty
+// object, a CLI's error object, a JSON envelope from an output-format flag, or
+// the first finding StripToJSON salvages from a truncated answer) would
+// otherwise read as a clean review and be approved.
+//
+// Either field is enough: a custom prompt may ask only for "issues", so an
+// empty list is a clean review, and a clean review may omit "issues". An
+// "issues": null counts as absent. A missing severity defaults to "low".
+func ParseReview(data []byte) (*ReviewResult, error) {
 	clean := StripToJSON(data)
 	var result ReviewResult
 	if err := json.Unmarshal(clean, &result); err != nil {
 		return nil, fmt.Errorf("executor: parse JSON result: %w (raw: %.200s)", err, clean)
+	}
+	// Issues is nil only when the key is absent or null; "issues": [] is a
+	// clean answer to a prompt that asks for findings only.
+	if strings.TrimSpace(result.Summary) == "" && result.Issues == nil {
+		// The answer stays out of the error: failure classification matches
+		// quota phrases such as "429" in the error text, and model output can
+		// contain them anywhere.
+		slog.Warn("executor: agent answer is not a review", "answer", fmt.Sprintf("%.200s", clean))
+		return nil, ErrNotAReview
 	}
 	if result.Severity == "" {
 		result.Severity = "low"

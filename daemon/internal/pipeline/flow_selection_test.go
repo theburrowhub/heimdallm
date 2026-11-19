@@ -115,6 +115,53 @@ func TestRun_FlowFallsBackOnAgentFailure(t *testing.T) {
 	}
 }
 
+// An answer that is not a review (#890) is an agent failure like any other:
+// the next agent in the flow reviews, and with no agent left nothing reaches
+// GitHub. Before, such an answer parsed as a clean review and approved.
+func TestRun_AnswerThatIsNotAReviewIsNeverPublished(t *testing.T) {
+	_, notAReview := executor.ParseReview([]byte(`{}`))
+	if notAReview == nil {
+		t.Fatal("ParseReview({}) must fail")
+	}
+
+	t.Run("the next agent reviews", func(t *testing.T) {
+		exec := &scriptedExec{
+			installed: map[string]bool{"copilot": true, "claude": true},
+			failWith:  map[string]error{"copilot": notAReview},
+		}
+		p, _ := flowPipeline(t, exec)
+		rev, err := p.Run(budgetPR(53), pipeline.RunOptions{Primary: "copilot", Candidates: func() []string { return []string{"copilot", "claude"} }})
+		if err != nil || rev == nil || rev.CLIUsed != "claude" {
+			t.Fatalf("rev=%v err=%v ran=%v, want claude to review after copilot's non-review answer", rev, err, exec.ran)
+		}
+	})
+
+	t.Run("a single agent publishes nothing", func(t *testing.T) {
+		s, err := store.Open(":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		gh := &fakeGHCounter{diff: "+line"}
+		exec := &scriptedExec{
+			installed: map[string]bool{"claude": true},
+			failWith:  map[string]error{"claude": notAReview},
+		}
+		p := pipeline.New(s, gh, exec, &fakeNotify{})
+		p.SetPublisher(&fakePublisher{})
+		rev, err := p.Run(budgetPR(54), pipeline.RunOptions{Primary: "claude", Candidates: func() []string { return []string{"claude"} }})
+		if err == nil || rev != nil {
+			t.Fatalf("Run = %v, %v; want the non-review answer to fail the run", rev, err)
+		}
+		if !errors.Is(err, executor.ErrNotAReview) {
+			t.Errorf("err = %v, want it to wrap ErrNotAReview", err)
+		}
+		if gh.submits != 0 {
+			t.Errorf("submits = %d, want nothing published", gh.submits)
+		}
+	})
+}
+
 func TestRun_FlowFailsAfterEveryAgentFailed(t *testing.T) {
 	exec := &scriptedExec{
 		installed: map[string]bool{"claude": true, "codex": true},
