@@ -363,7 +363,7 @@ func TestReconcileSeverity_CaseInsensitiveCanonicalNotEscalated(t *testing.T) {
 }
 
 func TestReconcileSeverity_EmptyTopLevelStaysLow(t *testing.T) {
-	// Empty top-level severity is the documented no-issues default (parseResult
+	// Empty top-level severity is the documented no-issues default (ParseReview
 	// coerces a missing severity to "low" upstream). It must NOT fail-safe to
 	// high — that would over-block legitimately clean reviews.
 	if got := ReconcileSeverity(makeResult("", nil)); got != "low" {

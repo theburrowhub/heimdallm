@@ -48,6 +48,10 @@ var ErrExecutionCancelled = errors.New("executor: execution cancelled manually")
 // terminated", which is not enough for a durable user-facing diagnosis.
 var ErrExecutionTimedOut = errors.New("executor: execution timed out")
 
+// ErrNotAReview marks an answer that decoded as JSON but is not a review: it
+// has no summary. See ParseReview.
+var ErrNotAReview = errors.New("executor: agent answer is not a review (no summary)")
+
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
 	Summary  string  `json:"summary"`
@@ -237,7 +241,7 @@ func (e *Executor) executeHTTP(agent HTTPAgent, cli, prompt string, opts ExecOpt
 		}
 		return nil, fmt.Errorf("executor: %s: %w", cli, err)
 	}
-	result, err := parseResult([]byte(answer))
+	result, err := ParseReview([]byte(answer))
 	if err != nil {
 		return nil, err
 	}
@@ -1663,7 +1667,7 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 			return nil, envErr
 		}
 	}
-	result, err := parseResult(raw)
+	result, err := ParseReview(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -2319,11 +2323,22 @@ func escapeControlCharsInStrings(s string) string {
 	return b.String()
 }
 
-func parseResult(data []byte) (*ReviewResult, error) {
+// ParseReview decodes an agent's answer into a ReviewResult. Every agent's
+// answer goes through it, so it is where an answer that is not a review must be
+// refused: a JSON object without a non-empty "summary" (an empty object, an
+// error object, or the first finding StripToJSON salvages from a truncated
+// answer) would otherwise read as a clean review and be approved.
+//
+// A missing "issues" key is accepted as no findings, and a missing severity
+// defaults to "low"; the summary is the one field every answer must carry.
+func ParseReview(data []byte) (*ReviewResult, error) {
 	clean := StripToJSON(data)
 	var result ReviewResult
 	if err := json.Unmarshal(clean, &result); err != nil {
 		return nil, fmt.Errorf("executor: parse JSON result: %w (raw: %.200s)", err, clean)
+	}
+	if strings.TrimSpace(result.Summary) == "" {
+		return nil, fmt.Errorf("%w (raw: %.200s)", ErrNotAReview, clean)
 	}
 	if result.Severity == "" {
 		result.Severity = "low"

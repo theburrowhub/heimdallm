@@ -2,7 +2,6 @@ package openrouter
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -159,17 +158,11 @@ func (r *Runner) Review(ctx context.Context, prompt string, opts executor.ExecOp
 	return *msg.Content, usage, nil
 }
 
-// validReview reports whether answer contains a review JSON object.
+// validReview reports whether answer is a review the executor will accept, so
+// the corrective turn fires on exactly the answers executor.ParseReview refuses.
 func validReview(answer string) bool {
-	var probe struct {
-		Summary  *string         `json:"summary"`
-		Issues   json.RawMessage `json:"issues"`
-		Severity string          `json:"severity"`
-	}
-	if err := json.Unmarshal(executor.StripToJSON([]byte(answer)), &probe); err != nil {
-		return false
-	}
-	return probe.Summary != nil
+	_, err := executor.ParseReview([]byte(answer))
+	return err == nil
 }
 
 // Admin is the daemon-side handle the HTTP API uses to manage the key and

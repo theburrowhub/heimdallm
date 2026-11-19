@@ -311,6 +311,7 @@ func TestValidReview(t *testing.T) {
 		reviewJSON:                         true,
 		"```json\n" + reviewJSON + "\n```": true,
 		`{"issues":[],"severity":"low"}`:   false,
+		`{"summary":"  ","issues":[]}`:     false,
 		"plain text":                       false,
 	} {
 		if got := validReview(in); got != want {
