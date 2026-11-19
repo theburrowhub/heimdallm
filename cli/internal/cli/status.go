@@ -45,6 +45,9 @@ func newStatusCmd() *cobra.Command {
 			if v := health.DisplayVersion(); v != "" {
 				fmt.Printf("  Version:      %s\n", v)
 			}
+			if line := pollingLine(health); line != "" {
+				fmt.Printf("  GitHub polls: %s\n", line)
+			}
 
 			if repos, ok := cfg["repositories"]; ok {
 				if arr, ok := repos.([]any); ok {
@@ -120,6 +123,31 @@ func printReviewLimits(w io.Writer, limits []api.ReviewLimitStatus, now time.Tim
 		}
 		fmt.Fprintf(w, "    • %s: %s\n", s.Label(), strings.Join(parts, ", "))
 	}
+}
+
+// pollingLine describes failing GitHub polls for the status command, or ""
+// while they succeed or when the daemon predates the report. The daemon's own
+// status stays "online" through such failures, because its poll loop is alive,
+// so without this line a revoked token looks healthy.
+func pollingLine(h *api.Health) string {
+	if h == nil || h.Checks.LastPoll.ConsecutiveFailures <= 0 {
+		return ""
+	}
+	p := h.Checks.LastPoll
+	line := fmt.Sprintf("failing (%d in a row", p.ConsecutiveFailures)
+	if p.LastSuccessAt != nil {
+		line += ", last success " + p.LastSuccessAt.Local().Format("2006-01-02 15:04")
+	} else {
+		line += ", none since the daemon started"
+	}
+	line += ")"
+	switch p.LastErrorKind {
+	case "auth":
+		line += ": GitHub rejected the token, so renew it"
+	case "rate_limited":
+		line += ": GitHub rate limit, so polling resumes when it resets"
+	}
+	return line
 }
 
 // statusLine renders the daemon's state for the status command. "ok" is spelled

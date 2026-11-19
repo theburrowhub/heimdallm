@@ -68,6 +68,13 @@ bind_addr = "0.0.0.0"   # every interface; the default is 127.0.0.1
 
 The daemon exposes a health endpoint at `GET /health` — returns `{"status":"ok"}` when running. Docker Compose uses this for its `healthcheck`.
 
+`checks.last_poll` says whether the poll loop is alive, and its `ok` drives that status. Alongside it, the check reports whether the polls actually reach GitHub, without affecting `ok`:
+- `last_success_at` is when a poll last reached GitHub.
+- `consecutive_failures` counts the failed polls in a row.
+- While polls are failing, `last_error_kind` is `auth` (GitHub rejected the token), `rate_limited` or `error`, with `last_error_at`.
+
+The error text itself only goes to the daemon log, because `/health` needs no token. `heimdallm-cli status` prints a `GitHub polls` line when polls are failing.
+
 ---
 
 ## 3. Repository Monitoring

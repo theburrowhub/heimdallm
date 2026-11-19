@@ -724,8 +724,10 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		atomic.StoreInt64(&pollIntervalNano, int64(interval))
 	}
 	storePollInterval(cfg.ResolvedPollInterval())
-	recordPollCompleted := func(_ string, at time.Time) {
+	var pollOutcome pollHealth
+	recordPollCompleted := func(_ string, at time.Time, err error) {
 		atomic.StoreInt64(&lastPollUnixNano, at.UTC().UnixNano())
+		pollOutcome.record(at, err)
 	}
 
 	// Publish the dependencies before lifting the startup gate. The atomic
@@ -743,10 +745,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		if n := atomic.LoadInt64(&lastPollUnixNano); n > 0 {
 			lastPoll = time.Unix(0, n).UTC()
 		}
-		return server.HealthSnapshot{
+		snap := server.HealthSnapshot{
 			LastPollAt:   lastPoll,
 			PollInterval: interval,
 		}
+		pollOutcome.fill(&snap)
+		return snap
 	})
 	shutdownReq := make(chan struct{}, 1)
 
@@ -3100,7 +3104,7 @@ func runTier2(
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
-	pollCompletedFn func(kind string, at time.Time),
+	pollCompletedFn func(kind string, at time.Time, err error),
 ) {
 	var (
 		mu                sync.Mutex
@@ -3153,10 +3157,11 @@ func runTier2(
 		sse.EmitPollingStarted(ssePub, "prs", currentRepos)
 		prStart := time.Now()
 		prCount := 0
+		var pollErr error
 		defer func() {
 			completedAt := time.Now()
 			if pollCompletedFn != nil {
-				pollCompletedFn("prs", completedAt)
+				pollCompletedFn("prs", completedAt, pollErr)
 			}
 			sse.EmitPollingCompleted(ssePub, "prs", prCount, completedAt.Sub(prStart))
 		}()
@@ -3166,6 +3171,7 @@ func runTier2(
 		// core threshold.
 		prs, err := adapter.FetchPRsToReview()
 		if err != nil {
+			pollErr = err
 			slog.Error("tier2: fetch PRs", "err", err)
 			return
 		}

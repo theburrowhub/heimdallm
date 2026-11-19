@@ -189,8 +189,18 @@ const heartbeatInterval = 20 * time.Second
 
 // HealthSnapshot is supplied by the daemon to enrich /health and SSE heartbeats.
 type HealthSnapshot struct {
+	// LastPollAt is when the poll loop last completed a cycle, successful or
+	// not: a liveness signal (#504).
 	LastPollAt   time.Time
 	PollInterval time.Duration
+	// LastPollSuccessAt is when a poll last reached GitHub. The fields below
+	// it describe the current run of failed polls and are zero while polls
+	// succeed. The error kind is one of the github.PollError* constants;
+	// the error text is never exposed here (#897).
+	LastPollSuccessAt       time.Time
+	ConsecutivePollFailures int
+	LastPollErrorKind       string
+	LastPollErrorAt         time.Time
 }
 
 // UpdatePreparationStatus is returned to the native desktop updater. Active
@@ -826,7 +836,7 @@ const HeaderDaemon = "X-Heimdallm-Daemon"
 // client depends on, together with "daemon_api" in the repository's
 // compat.json (a test keeps them equal). Daemons built before the field
 // existed omit it; clients read that as revision 1, the API at the time.
-const APIVersion = 3
+const APIVersion = 4
 
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
@@ -940,6 +950,18 @@ func (srv *Server) lastPollHealthCheck(now time.Time) map[string]any {
 	snap := srv.healthSnapshot()
 	out := map[string]any{
 		"ok": false,
+	}
+	// The GitHub outcome is reported alongside the liveness verdict, never in
+	// it: ok keeps meaning "the poll loop is running" (#504, #897).
+	if !snap.LastPollSuccessAt.IsZero() {
+		out["last_success_at"] = snap.LastPollSuccessAt.UTC().Format(time.RFC3339)
+	}
+	out["consecutive_failures"] = snap.ConsecutivePollFailures
+	if snap.ConsecutivePollFailures > 0 {
+		out["last_error_kind"] = snap.LastPollErrorKind
+		if !snap.LastPollErrorAt.IsZero() {
+			out["last_error_at"] = snap.LastPollErrorAt.UTC().Format(time.RFC3339)
+		}
 	}
 	if snap.LastPollAt.IsZero() {
 		out["ok"] = true
