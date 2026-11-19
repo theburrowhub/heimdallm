@@ -10,10 +10,10 @@ import (
 	"github.com/heimdallm/daemon/internal/executor"
 )
 
-// An answer that decodes as JSON but carries no summary is not a review.
-// Accepting it turned an empty object, a CLI's error object, or the first
-// finding salvaged from a truncated answer into a clean review that approved
-// the PR (#890).
+// An answer that decodes as JSON but carries neither a summary nor a finding
+// is not a review. Accepting it turned an empty object, a CLI's error object,
+// or the first finding salvaged from a truncated answer into a clean review
+// that approved the PR (#890).
 func TestParseReview_RejectsAnswersThatAreNotAReview(t *testing.T) {
 	cases := map[string]string{
 		"empty object":         `{}`,
@@ -28,6 +28,7 @@ func TestParseReview_RejectsAnswersThatAreNotAReview(t *testing.T) {
 		// The outer object never closes, so StripToJSON falls back to the
 		// first complete nested object: the finding, not the review.
 		"truncated answer": `{"summary":"Two problems","issues":[{"file":"a.go","line":1,"description":"d","severity":"low"},{"file":"b.go"`,
+		"error with a 429": `{"error":{"code":429,"message":"quota exceeded"}}`,
 	}
 	for name, answer := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -38,10 +39,10 @@ func TestParseReview_RejectsAnswersThatAreNotAReview(t *testing.T) {
 			if !errors.Is(err, executor.ErrNotAReview) {
 				t.Fatalf("ParseReview(%q) error = %v, want ErrNotAReview", answer, err)
 			}
-			// The raw marker lets UserFacingReviewError strip the model
-			// output from what the UI shows.
-			if !strings.Contains(err.Error(), " (raw: ") {
-				t.Errorf("error %q lacks the raw marker", err)
+			// The answer stays out of the error, so a "429" inside it cannot
+			// make failure classification read the review as out of quota.
+			if executor.IsQuotaError(err) {
+				t.Errorf("error %q classifies as a quota error", err)
 			}
 		})
 	}
@@ -68,6 +69,8 @@ func TestParseReview_AcceptsReviews(t *testing.T) {
 		{"with findings", `{"summary":"One problem","issues":[{"file":"a.go","line":1,"description":"d","severity":"high"}],"severity":"high"}`, 1, "high"},
 		{"fenced", "```json\n{\"summary\":\"ok\",\"issues\":[],\"severity\":\"low\"}\n```", 0, "low"},
 		{"wrapped in prose", "Review follows.\n{\"summary\":\"ok\",\"issues\":[],\"severity\":\"medium\"}\nDone.", 0, "medium"},
+		// A custom prompt may ask only for findings and a severity.
+		{"findings without a summary", `{"issues":[{"file":"a.go","line":1,"description":"d","severity":"high"}],"severity":"high"}`, 1, "high"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,8 +78,8 @@ func TestParseReview_AcceptsReviews(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseReview(%q): %v", tc.answer, err)
 			}
-			if strings.TrimSpace(result.Summary) == "" {
-				t.Error("summary is empty")
+			if strings.TrimSpace(result.Summary) == "" && len(result.Issues) == 0 {
+				t.Error("neither a summary nor a finding")
 			}
 			if len(result.Issues) != tc.wantIssues {
 				t.Errorf("issues = %d, want %d", len(result.Issues), tc.wantIssues)
