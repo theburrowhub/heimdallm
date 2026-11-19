@@ -3,6 +3,7 @@ package executor_test
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -212,5 +213,68 @@ func TestEstimateUsage(t *testing.T) {
 	}
 	if u := executor.EstimateUsage("", nil); u.InputTokens != 0 || u.OutputTokens != 0 {
 		t.Errorf("empty estimate = %+v", u)
+	}
+}
+
+// Claude Code exits 1 when a run ends with error_max_turns and writes the
+// result envelope to stdout (#908). The token-saving cap must still be
+// retried without it, with both runs counted; an operator's cap still fails.
+func TestExecute_MaxTurnsWithExitStatus1(t *testing.T) {
+	binDir := t.TempDir()
+	calls := filepath.Join(t.TempDir(), "calls.txt")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then printf 'Usage: claude\\n'; exit 0; fi\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(calls) + "\n" +
+		"case \"$*\" in *--max-turns*) printf '%s' '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"stop_reason\":\"tool_use\",\"total_cost_usd\":0.5,\"usage\":{\"input_tokens\":1000,\"output_tokens\":100}}'; exit 1;; esac\n" +
+		"printf '%s' " + shellQuote(`{"type":"result","subtype":"success","is_error":false,"result":"{\"summary\":\"ok\",\"issues\":[],\"severity\":\"low\"}","total_cost_usd":0.25,"usage":{"input_tokens":500,"output_tokens":50}}`) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	res, err := executor.New().Execute("claude", "prompt", executor.ExecOptions{ReportUsage: true, MaxTurns: 20, SoftMaxTurns: true})
+	if err != nil || res.Summary != "ok" {
+		t.Fatalf("soft cap: res=%+v err=%v", res, err)
+	}
+	lines := strings.Split(strings.TrimSpace(readArgs(t, calls)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "--max-turns 20") || strings.Contains(lines[1], "--max-turns") {
+		t.Fatalf("runs = %q, want a capped run then an uncapped retry", lines)
+	}
+	if u := res.Usage; u == nil || u.InputTokens != 1500 || u.OutputTokens != 150 || u.CostUSD != 0.75 || u.TurnCapRetries != 1 || u.Estimated {
+		t.Fatalf("usage = %+v, want both runs and one retry", u)
+	}
+
+	if err := os.Remove(calls); err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.New().Execute("claude", "prompt", executor.ExecOptions{ReportUsage: true, MaxTurns: 20})
+	if !errors.Is(err, executor.ErrClaudeMaxTurns) {
+		t.Fatalf("operator cap: err = %v, want ErrClaudeMaxTurns", err)
+	}
+	if runs := strings.Split(strings.TrimSpace(readArgs(t, calls)), "\n"); len(runs) != 1 {
+		t.Fatalf("runs = %q, want no retry under an operator cap", runs)
+	}
+}
+
+// Any other non-zero exit keeps the error it always had, message included,
+// and still unwraps to the process's exit error.
+func TestExecute_NonZeroExitKeepsItsError(t *testing.T) {
+	binDir := t.TempDir()
+	envelope := `{"type":"result","subtype":"error_during_execution","is_error":true}`
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then printf 'Usage: claude\\n'; exit 0; fi\n" +
+		"printf '%s' " + shellQuote(envelope) + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	_, err := executor.New().Execute("claude", "prompt", executor.ExecOptions{ReportUsage: true, MaxTurns: 20, SoftMaxTurns: true})
+	if want := "executor: run claude: exit status 1 (output: " + envelope + ")"; err == nil || err.Error() != want {
+		t.Fatalf("err = %v\nwant %s", err, want)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("err = %v, want it to unwrap to the exit status", err)
 	}
 }
