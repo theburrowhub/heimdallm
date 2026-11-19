@@ -162,9 +162,7 @@ func BuildPrompt(title, author, diff string) string {
 //	B) If the template does NOT contain {comments} and Comments is non-empty: the comments
 //	   block is appended at the very end of the rendered prompt.
 func BuildPromptFromTemplate(tmpl string, ctx PRContext) string {
-	if len(ctx.Diff) > maxDiffBytes {
-		ctx.Diff = ctx.Diff[:maxDiffBytes] + "\n... (diff truncated)"
-	}
+	ctx.Diff = truncateDiff(ctx.Diff, maxDiffBytes)
 
 	hasPlaceholder := strings.Contains(tmpl, "{comments}")
 	hasReviewCtx := strings.Contains(tmpl, "{review_context}")

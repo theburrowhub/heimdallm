@@ -1,6 +1,7 @@
 package executor_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -111,5 +112,28 @@ func TestBuildPromptFromTemplate_StandingInstructions(t *testing.T) {
 	out = executor.BuildPromptFromTemplate(executor.DefaultTemplate(), executor.PRContext{Diff: "diff"})
 	if strings.Contains(out, "PROJECT STANDING INSTRUCTIONS") {
 		t.Fatalf("did not expect standing-instructions header:\n%s", out)
+	}
+}
+
+// The cap applies to every template, and the note naming what was cut stays
+// inside the diff placeholder, within <user_content>: file names are PR-author
+// input (#892).
+func TestBuildPromptFromTemplate_TruncatesAnOversizedDiffAndNamesWhatIsMissing(t *testing.T) {
+	var diff strings.Builder
+	for i := 0; diff.Len() < 40*1024; i++ {
+		fmt.Fprintf(&diff, "diff --git a/f%03d.go b/f%03d.go\n@@ -0,0 +1,40 @@\n%s", i, i, strings.Repeat("+package main // padding line\n", 40))
+	}
+	prompt := executor.BuildPromptFromTemplate(executor.DefaultTemplate(), executor.PRContext{Title: "t", Diff: diff.String()})
+	start := strings.Index(prompt, "<user_content>")
+	end := strings.Index(prompt, "</user_content>")
+	note := strings.Index(prompt, "... (diff truncated: ")
+	if start < 0 || end < 0 || note < start || note > end {
+		t.Fatalf("truncation note at %d, want it inside <user_content> [%d, %d]", note, start, end)
+	}
+	if !strings.Contains(prompt[note:end], "is shown only in part; ") || !strings.Contains(prompt[note:end], "file(s) not shown: ") {
+		t.Errorf("note = %q, want the partial file and the files not shown", prompt[note:end])
+	}
+	if !strings.Contains(prompt, "f000.go b/f000.go") {
+		t.Error("the leading files must still be in the prompt")
 	}
 }
