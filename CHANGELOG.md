@@ -10,6 +10,15 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.10.8](https://github.com/theburrowhub/heimdallm/compare/v0.10.7...v0.10.8) (2026-11-19)
+
+
+### Features
+
+* **gui:** Activity as an inbox with buckets, compact list and review preview ([#912](https://github.com/theburrowhub/heimdallm/issues/912)) ([299a304](https://github.com/theburrowhub/heimdallm/commit/299a304e65523dc9f461c1a41970a616d59dfe8c))
+* **gui:** keyboard navigation and a daemon card in the Activity inbox ([#914](https://github.com/theburrowhub/heimdallm/issues/914)) ([84d548c](https://github.com/theburrowhub/heimdallm/commit/84d548c9709b728c118a7a1b87b2a2d8f613a377))
+* **gui:** Your PRs row in the inbox and the app navigation as a source list ([#916](https://github.com/theburrowhub/heimdallm/issues/916)) ([9c3a8ac](https://github.com/theburrowhub/heimdallm/commit/9c3a8acaefbb3930175cedc8287b5a9f5da5ccf6))
+
 ## [0.10.7](https://github.com/theburrowhub/heimdallm/compare/v0.10.6...v0.10.7) (2026-11-19)
 
 

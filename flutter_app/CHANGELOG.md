@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.8](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.7...gui/v0.10.8) (2026-11-19)
+
+
+### Features
+
+* **gui:** Activity as an inbox with buckets, compact list and review preview ([#912](https://github.com/theburrowhub/heimdallm/issues/912)) ([299a304](https://github.com/theburrowhub/heimdallm/commit/299a304e65523dc9f461c1a41970a616d59dfe8c))
+* **gui:** keyboard navigation and a daemon card in the Activity inbox ([#914](https://github.com/theburrowhub/heimdallm/issues/914)) ([84d548c](https://github.com/theburrowhub/heimdallm/commit/84d548c9709b728c118a7a1b87b2a2d8f613a377))
+* **gui:** Your PRs row in the inbox and the app navigation as a source list ([#916](https://github.com/theburrowhub/heimdallm/issues/916)) ([9c3a8ac](https://github.com/theburrowhub/heimdallm/commit/9c3a8acaefbb3930175cedc8287b5a9f5da5ccf6))
+
 ## [0.10.7](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.6...gui/v0.10.7) (2026-11-19)
 
 
