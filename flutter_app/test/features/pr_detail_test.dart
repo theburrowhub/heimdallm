@@ -5,6 +5,7 @@ import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
 import 'package:heimdallm/core/models/review_status.dart';
@@ -261,5 +262,77 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
     expect(find.textContaining('cancelled 2026-08-24 10:30'), findsOneWidget);
     expect(find.textContaining('failed 2026-08-24'), findsNothing);
+  });
+
+  testWidgets('Undo after dismissing from the detail refreshes the list', (
+    tester,
+  ) async {
+    final api = MockDetailApiClient();
+    when(() => api.dismissPR(1)).thenAnswer((_) async {});
+    when(() => api.undismissPR(1)).thenAnswer((_) async {});
+    final pr = PR(
+      id: 1,
+      githubId: 101,
+      repo: 'org/repo',
+      number: 42,
+      title: 'Fix bug',
+      author: 'alice',
+      url: 'https://github.com',
+      state: 'open',
+      updatedAt: DateTime.now(),
+    );
+    var listLoads = 0;
+    final container = ProviderContainer(
+      overrides: [
+        apiClientProvider.overrideWithValue(api),
+        prDetailProvider((
+          instanceId: '',
+          prId: 1,
+        )).overrideWith((_) => Future.value({'pr': pr, 'reviews': <Review>[]})),
+        prsByInstanceProvider.overrideWith((ref) async {
+          listLoads++;
+          return singleInstanceResult<PR>(const []);
+        }),
+        sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+      ],
+    );
+    addTearDown(container.dispose);
+    // Stands in for the dashboard, which keeps the list alive.
+    container.listen(prsByInstanceProvider, (_, _) {});
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const SizedBox()),
+              GoRoute(
+                path: '/prs/:id',
+                builder: (_, state) => PRDetailScreen(
+                  prId: int.parse(state.pathParameters['id']!),
+                ),
+              ),
+            ],
+            initialLocation: '/prs/1',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('Dismiss'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PRDetailScreen), findsNothing);
+    final before = listLoads;
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    verify(() => api.undismissPR(1)).called(1);
+    expect(listLoads, greaterThan(before));
+    await tester.pump(const Duration(seconds: 6));
   });
 }

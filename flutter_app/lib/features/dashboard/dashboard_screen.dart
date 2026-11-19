@@ -596,6 +596,12 @@ mixin _PrActions<W extends ConsumerStatefulWidget> on ConsumerState<W> {
   /// (now with one fewer badge) on the next refresh.
   Future<void> _dismiss() async {
     final members = group.members;
+    // Undo runs after the reload has dropped the dismissed row, when this
+    // widget's ref can no longer be used (#911): resolve what it needs now.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final clients = {
+      for (final m in members) m: clientForInstanceOf(ref, m.instanceId),
+    };
     final errors = <Object>[];
     await Future.wait(
       members.map((m) async {
@@ -616,12 +622,9 @@ mixin _PrActions<W extends ConsumerStatefulWidget> on ConsumerState<W> {
         actionLabel: 'Undo',
         onAction: () async {
           await Future.wait(
-            members.map((m) async {
+            clients.entries.map((e) async {
               try {
-                await clientForInstanceOf(
-                  ref,
-                  m.instanceId,
-                ).undismissPR(m.value.id);
+                await e.value.undismissPR(e.key.value.id);
               } catch (_) {
                 // Best-effort undo: a member that fails to un-dismiss stays
                 // dismissed there, which is recoverable from the Dismissed
@@ -629,7 +632,7 @@ mixin _PrActions<W extends ConsumerStatefulWidget> on ConsumerState<W> {
               }
             }),
           );
-          ref.invalidate(prsByInstanceProvider);
+          container.invalidate(prsByInstanceProvider);
         },
       );
     } else {

@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
+import 'package:heimdallm/core/models/issue.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
 import 'package:heimdallm/core/models/review_status.dart';
@@ -44,7 +45,9 @@ Review _review(int prId, {int githubReviewId = 55}) => Review(
   prId: prId,
   cliUsed: 'claude',
   summary: 'Summary of review $prId',
-  issues: const [],
+  issues: const [
+    Issue(file: 'a.go', line: 3, description: 'Nit', severity: 'low'),
+  ],
   severity: 'low',
   // Exactly now, so "done today" holds even when the suite runs at midnight.
   createdAt: _now,
@@ -73,6 +76,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
   WidgetTester tester, {
   Size size = const Size(1600, 1000),
   List<PR>? prs,
+  List<PR> Function()? load,
 }) async {
   SharedPreferences.setMockInitialValues({});
   tester.view.physicalSize = size;
@@ -84,7 +88,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
     overrides: [
       apiClientProvider.overrideWithValue(api),
       prsByInstanceProvider.overrideWith(
-        (ref) async => singleInstanceResult(prs ?? _prs),
+        (ref) async => singleInstanceResult(load?.call() ?? prs ?? _prs),
       ),
       sseStreamProvider.overrideWith((ref) => const Stream.empty()),
     ],
@@ -147,6 +151,7 @@ void main() {
     expect(countOf('all'), '4');
     // The rows are compact: their actions are in the preview.
     expect(find.byType(AppListRow), findsNothing);
+    expect(_inList('Approved · 1 low'), findsOneWidget);
     expect(find.text('Select a PR to read its review'), findsOneWidget);
     expect(
       find.text('1 need you · 2 in progress · 1 done today'),
@@ -350,4 +355,44 @@ void main() {
     expect(find.text('Running PR'), findsOneWidget);
     expect(find.text('Done PR'), findsNothing);
   });
+
+  // The daemon leaves dismissed PRs out of /prs, so the reload after a
+  // dismiss unmounts the row (or preview) that showed the toast (#911).
+  for (final (layout, size) in [
+    ('full-width row', const Size(1000, 1000)),
+    ('preview', const Size(1600, 1000)),
+  ]) {
+    testWidgets('Undo from the $layout brings the PR back once it left', (
+      tester,
+    ) async {
+      var dismissed = false;
+      final done = _pr(3, 'Done PR', review: _review(3));
+      final (_, api) = await _pump(
+        tester,
+        size: size,
+        load: () => dismissed ? const [] : [done],
+      );
+      when(
+        () => api.dismissPR(any()),
+      ).thenAnswer((_) async => dismissed = true);
+      when(
+        () => api.undismissPR(any()),
+      ).thenAnswer((_) async => dismissed = false);
+
+      if (size.width >= 1600) {
+        await tester.tap(_inList('Done PR'));
+        await _settle(tester);
+      }
+      await tester.tap(find.byTooltip('Dismiss PR'));
+      await _settle(tester);
+      expect(find.text('Done PR'), findsNothing);
+
+      await tester.tap(find.text('Undo'));
+      await _settle(tester);
+      verify(() => api.undismissPR(3)).called(1);
+      // Back in the list, and in the preview too when it was selected there.
+      expect(find.text('Done PR'), findsWidgets);
+      await tester.pump(const Duration(seconds: 6));
+    });
+  }
 }

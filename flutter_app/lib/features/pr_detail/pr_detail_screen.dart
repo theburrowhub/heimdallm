@@ -74,6 +74,10 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
 
   Future<void> _dismiss(BuildContext context) async {
     final api = _api;
+    final prId = widget.prId;
+    // Undo runs after this screen has been popped, when its ref can no longer
+    // be used (#911).
+    final container = ProviderScope.containerOf(context, listen: false);
     try {
       await api.dismissPR(widget.prId);
       ref.invalidate(prsByInstanceProvider);
@@ -85,8 +89,8 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
           duration: const Duration(seconds: 5),
           actionLabel: 'Undo',
           onAction: () async {
-            await api.undismissPR(widget.prId);
-            ref.invalidate(prsByInstanceProvider);
+            await api.undismissPR(prId);
+            container.invalidate(prsByInstanceProvider);
           },
         );
       }
