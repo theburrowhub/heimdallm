@@ -85,6 +85,29 @@ var errNotEnvelope = errors.New("executor: output is not a claude result envelop
 // answer.
 var ErrClaudeMaxTurns = errors.New("executor: claude run ended with error_max_turns")
 
+// endedWithMaxTurns reports whether out is a Claude result envelope for a run
+// that ran out of turns.
+func endedWithMaxTurns(out []byte) bool {
+	_, _, err := unwrapClaudeEnvelope(out)
+	return errors.Is(err, ErrClaudeMaxTurns)
+}
+
+// runExitError is an agent CLI that exited non-zero. It reads exactly as the
+// plain error did, and keeps stdout for Execute: Claude writes its result
+// envelope there even when the run fails.
+type runExitError struct {
+	cli    string
+	err    error
+	detail string
+	stdout []byte
+}
+
+func (e *runExitError) Error() string {
+	return fmt.Sprintf("executor: run %s: %v (output: %s)", e.cli, e.err, e.detail)
+}
+
+func (e *runExitError) Unwrap() error { return e.err }
+
 // unwrapClaudeEnvelope extracts the answer and usage from Claude's JSON
 // envelope. An envelope that reports an error (e.g. error_max_turns) is
 // returned as an error so the review fails instead of parsing a non-answer.

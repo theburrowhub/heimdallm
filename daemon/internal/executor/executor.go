@@ -1629,7 +1629,15 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 	start := time.Now()
 	raw, err := e.ExecuteRaw(cli, prompt, opts)
 	if err != nil {
-		return nil, err
+		// Claude Code exits 1 when a run ends with error_max_turns, with its
+		// result envelope on stdout (#908). Read that envelope as for a run
+		// that exited 0, so a token-saving cap is retried without it and the
+		// billed turns are counted; any other failure keeps its error.
+		var exitErr *runExitError
+		if !errors.As(err, &exitErr) || !reportsUsage(cli, opts) || !endedWithMaxTurns(exitErr.stdout) {
+			return nil, err
+		}
+		raw = exitErr.stdout
 	}
 	var usage *Usage
 	if reportsUsage(cli, opts) {
@@ -1856,7 +1864,7 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		if errDetail == "" {
 			errDetail = strings.TrimSpace(stdout.String())
 		}
-		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, runErr, errDetail)
+		return nil, &runExitError{cli: cli, err: runErr, detail: errDetail, stdout: stdout.Bytes()}
 	}
 
 	return stdout.Bytes(), nil
