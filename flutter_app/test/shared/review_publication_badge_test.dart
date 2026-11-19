@@ -246,4 +246,43 @@ void main() {
       await tester.pumpAndSettle();
     }
   });
+
+  // Beside a verdict already on screen, the badge says only that it posted.
+  testWidgets('without the verdict a posted review reads Posted', (
+    tester,
+  ) async {
+    for (final (review, label) in [
+      (
+        _review(id: 7, state: 'APPROVED', sha: 'c0ffee1234'),
+        'Posted · c0ffee1',
+      ),
+      (
+        _review(id: 8, state: 'APPROVED', sha: 'feedbeef00', cli: 'peer'),
+        'Posted by a peer · feedbee',
+      ),
+    ]) {
+      await tester.pumpWidget(
+        _host(
+          ReviewPublicationBadge(
+            review: review,
+            prUrl: _prUrl,
+            showVerdict: false,
+          ),
+        ),
+      );
+      expect(find.text(label), findsOneWidget);
+      expect(_badge(tester).foreground, _token(tester, AppColors.info));
+    }
+    // Reviews that were not posted still say why.
+    await tester.pumpWidget(
+      _host(
+        ReviewPublicationBadge(
+          review: _review(id: 0),
+          prUrl: _prUrl,
+          showVerdict: false,
+        ),
+      ),
+    );
+    expect(find.text('Not posted yet'), findsOneWidget);
+  });
 }

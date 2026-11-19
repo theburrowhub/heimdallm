@@ -209,7 +209,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Changes requested · c0ffee1'), findsOneWidget);
+    // The latest review leads the workspace; the earlier one is in the
+    // collapsed history (#900).
+    expect(find.text('Posted · c0ffee1'), findsOneWidget);
+    expect(find.text('Not posted yet'), findsNothing);
+    await tester.ensureVisible(find.text('Earlier reviews'));
+    await tester.tap(find.text('Earlier reviews'));
+    await tester.pumpAndSettle();
     expect(find.text('Not posted yet'), findsOneWidget);
   });
 
@@ -235,6 +241,6 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.text('Peer · Changes requested · abc1234'), findsOneWidget);
+    expect(find.text('Posted by a peer · abc1234'), findsOneWidget);
   });
 }

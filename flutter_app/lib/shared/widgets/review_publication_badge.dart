@@ -21,11 +21,16 @@ class ReviewPublicationBadge extends StatelessWidget {
   /// defaults to the platform browser.
   final Future<bool> Function(Uri uri) onOpen;
 
+  /// Whether a posted review's label names its verdict. Off where the verdict
+  /// is already on screen beside the badge, as in the PR detail's verdict hero.
+  final bool showVerdict;
+
   const ReviewPublicationBadge({
     super.key,
     required this.review,
     required this.prUrl,
     this.onOpen = launchUrl,
+    this.showVerdict = true,
   });
 
   /// Opens [uri], with a toast when it cannot: no browser, or a refused launch.
@@ -54,7 +59,7 @@ class ReviewPublicationBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final look = _look(review);
+    final look = _look(review, showVerdict: showVerdict);
     final color = resolveAppColor(context, look.color);
     final uri = reviewUri;
     final badge = AppBadge(
@@ -98,7 +103,7 @@ class _Look {
   const _Look(this.label, this.tooltip, this.icon, this.color);
 }
 
-_Look _look(Review review) {
+_Look _look(Review review, {required bool showVerdict}) {
   switch (review.publication) {
     case ReviewPublication.pending:
       return const _Look(
@@ -148,14 +153,22 @@ _Look _look(Review review) {
         ),
         null => ('Posted', Icons.cloud_done_outlined, AppColors.info),
       };
-      final who = review.isPeer ? 'Peer · ' : '';
       final sha = review.shortSha.isEmpty ? '' : ' · ${review.shortSha}';
-      final commit = review.headSha.isEmpty
-          ? ''
-          : ' for commit ${review.headSha}';
       final by = review.isPeer
           ? 'A peer Heimdallm instance posted this review on GitHub'
           : 'Posted on GitHub';
+      final commit = review.headSha.isEmpty
+          ? ''
+          : ' for commit ${review.headSha}';
+      if (!showVerdict) {
+        return _Look(
+          review.isPeer ? 'Posted by a peer$sha' : 'Posted$sha',
+          '$by$commit.',
+          Icons.cloud_done_outlined,
+          AppColors.info,
+        );
+      }
+      final who = review.isPeer ? 'Peer · ' : '';
       return _Look('$who$verdict$sha', '$by$commit.', icon, color);
   }
 }

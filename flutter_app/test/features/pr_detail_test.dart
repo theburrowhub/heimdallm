@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:heimdallm/core/api/api_client.dart';
@@ -29,6 +30,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(routes: [
             GoRoute(path: '/', builder: (_, _) => const SizedBox()),
             GoRoute(path: '/prs/:id', builder: (ctx, state) =>
@@ -59,6 +62,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(routes: [
             GoRoute(path: '/', builder: (_, _) => const SizedBox()),
             GoRoute(path: '/prs/:id', builder: (ctx, state) =>
@@ -106,6 +111,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(
             routes: [
               GoRoute(path: '/', builder: (_, _) => const SizedBox()),
@@ -167,6 +174,8 @@ void main() {
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
           routerConfig: GoRouter(
             routes: [
               GoRoute(path: '/', builder: (_, _) => const SizedBox()),
