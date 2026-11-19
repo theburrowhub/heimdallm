@@ -251,7 +251,7 @@ func (c *Client) AuthenticatedUser() (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return "", fmt.Errorf("github: get user: status %d: %s", resp.StatusCode, errBody)
+		return "", &StatusError{Op: "github: get user", StatusCode: resp.StatusCode, Body: errBody}
 	}
 	var u struct {
 		Login string `json:"login"`
@@ -569,7 +569,7 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 
 	if resp.StatusCode != http.StatusOK {
 		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return nil, fmt.Errorf("github: search PRs (%s): status %d: %s", qualifier, resp.StatusCode, errBody)
+		return nil, &StatusError{Op: fmt.Sprintf("github: search PRs (%s)", qualifier), StatusCode: resp.StatusCode, Body: errBody}
 	}
 	var result struct {
 		Items []*PullRequest `json:"items"`
@@ -589,6 +589,42 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("github: API error (status %d): %s", e.StatusCode, e.Body)
+}
+
+// StatusError is a non-2xx GitHub response on the poll path. Its message keeps
+// the historical "<op>: status <code>: <body>" shape byte for byte, because
+// callers match on that text; the typed StatusCode is for new callers.
+type StatusError struct {
+	Op         string
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s: status %d: %s", e.Op, e.StatusCode, e.Body)
+}
+
+// Poll error kinds reported by ClassifyPollError.
+const (
+	PollErrorAuth        = "auth"
+	PollErrorRateLimited = "rate_limited"
+	PollErrorOther       = "error"
+)
+
+// ClassifyPollError reduces a failed poll to a fixed kind that is safe to show
+// on an unauthenticated endpoint: GitHub rejected the token, the client is in
+// its rate-limit cooldown, or anything else. The error text itself can name
+// repositories, so it stays in the log.
+func ClassifyPollError(err error) string {
+	var rateLimited *RateLimitError
+	if errors.As(err, &rateLimited) {
+		return PollErrorRateLimited
+	}
+	var status *StatusError
+	if errors.As(err, &status) && status.StatusCode == http.StatusUnauthorized {
+		return PollErrorAuth
+	}
+	return PollErrorOther
 }
 
 // PermanentSubmitError signals that SubmitReview hit a state from

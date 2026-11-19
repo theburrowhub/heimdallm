@@ -141,10 +141,25 @@ func (c *Client) Health() error {
 // as unknown rather than an error. APIVersion is likewise 0 for daemons that
 // predate it; compat.EffectiveDaemonAPI maps that to the baseline revision.
 type Health struct {
-	Status     string    `json:"status"`
-	Version    string    `json:"version"`
-	StartedAt  time.Time `json:"started_at"`
-	APIVersion int       `json:"api_version"`
+	Status     string       `json:"status"`
+	Version    string       `json:"version"`
+	StartedAt  time.Time    `json:"started_at"`
+	APIVersion int          `json:"api_version"`
+	Checks     HealthChecks `json:"checks"`
+}
+
+// HealthChecks is the subset of /health's deep checks the CLI reads.
+type HealthChecks struct {
+	LastPoll PollCheck `json:"last_poll"`
+}
+
+// PollCheck is whether the daemon's PR poll reaches GitHub (API revision 4).
+// Older daemons omit these fields, which then read as zero: no failures.
+// LastErrorKind is one of "auth", "rate_limited" or "error".
+type PollCheck struct {
+	LastSuccessAt       *time.Time `json:"last_success_at"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	LastErrorKind       string     `json:"last_error_kind"`
 }
 
 // Caps for the rendered fields, in runes. Both sit comfortably above what the

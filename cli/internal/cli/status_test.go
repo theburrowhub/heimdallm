@@ -75,3 +75,33 @@ func TestPrintReviewLimits(t *testing.T) {
 		t.Errorf("no budgets must print nothing, got %q", buf.String())
 	}
 }
+
+// A revoked token leaves the daemon "online" (its poll loop is alive), so the
+// status command must say that polls are failing (#897).
+func TestPollingLine(t *testing.T) {
+	success := time.Date(2026, 11, 19, 9, 30, 0, 0, time.Local)
+	cases := []struct {
+		name string
+		h    *api.Health
+		want string
+	}{
+		{"nil payload", nil, ""},
+		{"older daemon or healthy polls", &api.Health{Status: "ok"}, ""},
+		{"revoked token", &api.Health{Checks: api.HealthChecks{LastPoll: api.PollCheck{
+			ConsecutiveFailures: 3, LastErrorKind: "auth", LastSuccessAt: &success,
+		}}}, "failing (3 in a row, last success 2026-11-19 09:30): GitHub rejected the token, so renew it"},
+		{"rate limited since start", &api.Health{Checks: api.HealthChecks{LastPoll: api.PollCheck{
+			ConsecutiveFailures: 1, LastErrorKind: "rate_limited",
+		}}}, "failing (1 in a row, none since the daemon started): GitHub rate limit, so polling resumes when it resets"},
+		{"other error", &api.Health{Checks: api.HealthChecks{LastPoll: api.PollCheck{
+			ConsecutiveFailures: 2, LastErrorKind: "error", LastSuccessAt: &success,
+		}}}, "failing (2 in a row, last success 2026-11-19 09:30)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pollingLine(tc.h); got != tc.want {
+				t.Errorf("pollingLine() = %q\nwant              %q", got, tc.want)
+			}
+		})
+	}
+}

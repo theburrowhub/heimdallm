@@ -365,6 +365,26 @@ func TestGetHealthParsesDaemonVersion(t *testing.T) {
 	}
 }
 
+// API revision 4 reports whether the poll reaches GitHub next to the liveness
+// fields of checks.last_poll (#897).
+func TestGetHealthParsesThePollOutcome(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":"ok","api_version":4,"checks":{"last_poll":{"ok":true,"at":"2026-11-19T10:00:00Z","age_seconds":5,`+
+			`"last_success_at":"2026-11-19T09:00:00Z","consecutive_failures":3,"last_error_kind":"auth","last_error_at":"2026-11-19T10:00:00Z"}}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	h, err := New(srv.URL, "").GetHealth()
+	if err != nil {
+		t.Fatalf("GetHealth: %v", err)
+	}
+	p := h.Checks.LastPoll
+	if p.ConsecutiveFailures != 3 || p.LastErrorKind != "auth" || p.LastSuccessAt == nil ||
+		!p.LastSuccessAt.Equal(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)) {
+		t.Errorf("LastPoll = %+v, want 3 auth failures since 09:00Z", p)
+	}
+}
+
 // A daemon built before version stamping omits the field entirely; GetHealth
 // must succeed with an empty Version rather than failing the whole fetch.
 func TestGetHealthToleratesMissingVersion(t *testing.T) {
