@@ -3,6 +3,7 @@ package executor
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -18,11 +19,23 @@ const (
 	maxTruncatedNameBytes  = 256
 )
 
+// maxLineSnap bounds how far a cut goes back to end on a whole line. A longer
+// last line (minified code, a lockfile, generated JSON) is cut on a rune
+// boundary instead, so it still fills the budget.
+const maxLineSnap = 4 * 1024
+
 // DiffSectionPath extracts the post-image path ("b/...") of a file section of
 // a unified git diff, given the text after its "diff --git " header prefix. It
-// falls back to the pre-image path for deletions.
+// falls back to the pre-image path for deletions. A path git quotes (non-ASCII
+// or special characters, core.quotePath) is unquoted.
 func DiffSectionPath(section string) string {
 	firstLine, _, _ := strings.Cut(section, "\n")
+	// Git's C-style quoting (\", \\, \t, octal bytes) is a subset of Go's.
+	if i := strings.LastIndex(firstLine, ` "b/`); i >= 0 && strings.HasSuffix(firstLine, `"`) {
+		if p, err := strconv.Unquote(firstLine[i+1:]); err == nil {
+			return strings.TrimPrefix(p, "b/")
+		}
+	}
 	// "a/old b/new"; paths with spaces are rare enough that splitting on the
 	// last " b/" is the pragmatic choice git's own porcelain makes.
 	if i := strings.LastIndex(firstLine, " b/"); i >= 0 {
@@ -35,18 +48,20 @@ func DiffSectionPath(section string) string {
 	return strings.TrimPrefix(fields[0], "a/")
 }
 
-// truncateDiff caps diff at limit bytes. It keeps the same leading content a
-// plain byte cut would, so no review sees less code, but it cuts on a line
-// boundary (a rune boundary for a single over-long line) and ends with a note
-// naming the file shown only in part and the files not shown at all. Without
-// those names the model cannot tell a symbol it never saw from one that does
-// not exist. A diff that is not in git's format keeps the generic marker.
+// truncateDiff caps the diff's content at limit bytes. It cuts on a line
+// boundary when one lies within maxLineSnap of the limit, and on a rune
+// boundary otherwise, so it keeps at most maxLineSnap bytes less than a plain
+// byte cut would. It ends with a note naming the file shown only in part and
+// the files not shown at all: without those names the model cannot tell a
+// symbol it never saw from one that does not exist. The note comes on top of
+// limit; its names are capped at about 1 KB. A diff that is not in git's
+// format keeps the generic marker.
 func truncateDiff(diff string, limit int) string {
 	if len(diff) <= limit {
 		return diff
 	}
 	cut := strings.LastIndexByte(diff[:limit], '\n') + 1
-	if cut == 0 {
+	if cut == 0 || limit-cut > maxLineSnap {
 		cut = limit
 		for cut > 0 && !utf8.RuneStart(diff[cut]) {
 			cut--
@@ -102,12 +117,14 @@ func listNames(names []string) string {
 	shown := 0
 	for _, n := range names {
 		n = clipName(n)
-		if shown == maxTruncatedNames || b.Len()+len(n) > maxTruncatedNamesBytes {
+		sep := ""
+		if shown > 0 {
+			sep = ", "
+		}
+		if shown == maxTruncatedNames || b.Len()+len(sep)+len(n) > maxTruncatedNamesBytes {
 			break
 		}
-		if shown > 0 {
-			b.WriteString(", ")
-		}
+		b.WriteString(sep)
 		b.WriteString(n)
 		shown++
 	}

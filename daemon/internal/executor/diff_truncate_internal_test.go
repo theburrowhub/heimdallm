@@ -150,10 +150,13 @@ func TestTruncateDiff_SingleOverLongLineCutsOnARuneBoundary(t *testing.T) {
 
 func TestDiffSectionPath(t *testing.T) {
 	for in, want := range map[string]string{
-		"a/x.go b/x.go\nindex 1..2":    "x.go",
-		"a/old.go b/new/name.go\n":     "new/name.go",
-		"a/gone.go\ndeleted file mode": "gone.go",
-		"":                             "",
+		"a/x.go b/x.go\nindex 1..2": "x.go",
+		// git quotes non-ASCII paths (core.quotePath) with octal escapes.
+		`"a/caf\303\251.go" "b/caf\303\251.go"` + "\nindex 1..2": "café.go",
+		`"a/tab\there.go" "b/tab\there.go"`:                      "tab\there.go",
+		"a/old.go b/new/name.go\n":                               "new/name.go",
+		"a/gone.go\ndeleted file mode":                           "gone.go",
+		"":                                                       "",
 	} {
 		if got := DiffSectionPath(in); got != want {
 			t.Errorf("DiffSectionPath(%q) = %q, want %q", in, got, want)
@@ -166,5 +169,57 @@ func TestTruncationNote_HeaderWithoutAPathKeepsTheGenericMarker(t *testing.T) {
 	_, note := splitTruncated(t, diff, truncateDiff(diff, 40), 40)
 	if note != "... (diff truncated)" {
 		t.Errorf("note = %q, want the generic marker", note)
+	}
+}
+
+// A long last line must not cost the budget: going back to the newline before
+// a 10 KB line would keep only the header. The cut stays within maxLineSnap of
+// the limit, on a rune boundary, and still names the partial file.
+func TestTruncateDiff_LongLastLineStillFillsTheBudget(t *testing.T) {
+	header := "diff --git a/app.min.js b/app.min.js\n--- a/app.min.js\n+++ b/app.min.js\n@@ -0,0 +1 @@\n"
+	diff := header + "+" + strings.Repeat("é", 10*1024) + "\n" + fileSection("next.go", 1, "x")
+	limit := len(header) + maxLineSnap + 1000 // byte limit falls inside a 2-byte rune
+	out := truncateDiff(diff, limit)
+	kept, note, ok := strings.Cut(out, "\n... (diff truncated")
+	if !ok || !strings.HasPrefix(diff, kept) {
+		t.Fatalf("out does not start with a prefix of the diff and the marker:\n%.200q", out)
+	}
+	if len(kept) > limit || len(kept) < limit-utf8.UTFMax {
+		t.Errorf("kept %d bytes of a %d budget, want a rune-boundary cut at the limit", len(kept), limit)
+	}
+	if !utf8.ValidString(out) {
+		t.Error("output is not valid UTF-8")
+	}
+	if !strings.Contains(note, "app.min.js is shown only in part") || !strings.Contains(note, "next.go") {
+		t.Errorf("note = %q, want the partial file and the one not shown", note)
+	}
+}
+
+// A newline within maxLineSnap of the limit is still where the cut goes.
+func TestTruncateDiff_NearbyNewlineStillEndsTheCut(t *testing.T) {
+	diff := fileSection("a.go", 1, strings.Repeat("y", 100)) + "+" + strings.Repeat("z", maxLineSnap) + "\n"
+	limit := len(diff) - 10
+	kept, _ := splitTruncated(t, diff, truncateDiff(diff, limit), limit)
+	if want := fileSection("a.go", 1, strings.Repeat("y", 100)); kept != want {
+		t.Errorf("kept %d bytes, want the cut at the newline %d bytes before the limit", len(kept), limit-len(want))
+	}
+}
+
+// The ", " separators count toward the byte cap.
+func TestListNames_SeparatorsCountTowardTheByteCap(t *testing.T) {
+	// Seven 126-byte names and their separators take 894 bytes. A 130-byte
+	// eighth fits without counting its separator (1024) but not with it (1026).
+	names := make([]string, 8)
+	for i := range names {
+		names[i] = strings.Repeat("n", 126)
+	}
+	names[7] = strings.Repeat("n", 130)
+	got := listNames(names)
+	listed, _, _ := strings.Cut(got, " and ")
+	if len(listed) > maxTruncatedNamesBytes {
+		t.Errorf("listed names take %d bytes, cap is %d", len(listed), maxTruncatedNamesBytes)
+	}
+	if !strings.HasSuffix(got, " and 1 more") {
+		t.Errorf("listNames = %.60q…, want the eighth name counted, not listed", got)
 	}
 }
