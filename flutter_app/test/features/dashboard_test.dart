@@ -605,20 +605,15 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Instances'), findsOneWidget);
-      expect(find.text('Manage instances…'), findsNothing);
-
-      // The extended NavigationRail label sits behind an offstage-during
-      // -animation copy that flutter_test's hit testing can pick instead of
-      // the real one, so drive the destination directly through the rail's
-      // callback rather than simulating a raw tap on the label text.
-      final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
-      // The callback takes a rail position, not a branch index.
-      final instances = appDestinations.indexWhere(
+      final instances = appDestinations.firstWhere(
         (d) => d.label == 'Instances',
       );
-      expect(instances, isNot(-1), reason: 'no Instances destination');
-      rail.onDestinationSelected!(instances);
+      // Collapsed at this width: the entry is an icon with its label as the
+      // tooltip.
+      expect(find.byTooltip('Instances'), findsOneWidget);
+      expect(find.text('Manage instances…'), findsNothing);
+
+      await tester.tap(find.byKey(Key('nav-${instances.branchIndex}')));
       await tester.pumpAndSettle();
 
       expect(find.text('No instances registered'), findsOneWidget);
