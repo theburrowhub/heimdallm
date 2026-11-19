@@ -20,7 +20,7 @@ import '../features/stats/stats_screen.dart';
 import 'layout/app_shell.dart';
 
 /// Each branch's position here is the `branchIndex` of its entry in
-/// `appDestinations` (`app_shell.dart`). The rail may show destinations in a
+/// `appDestinations` (`app_shell.dart`). The sidebar may show destinations in a
 /// different order; `branchIndex` is the only link, and
 /// `test/shared/layout/app_shell_test.dart` checks it covers every branch.
 GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
