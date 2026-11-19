@@ -317,7 +317,9 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
                 return ReviewWorkspace(
                   pr: pr,
                   reviews: reviews,
-                  onReview: pr.repo.isEmpty ? null : _trigger,
+                  // Off while a review runs: the daemon refuses a second one
+                  // and the refusal reads as a failed review.
+                  onReview: pr.repo.isEmpty || reviewing ? null : _trigger,
                   // Merge state comes first in the inspector: a red required
                   // check is the thing the author has to act on.
                   inspectorTop: _MergeChecksPanel(prId: widget.prId),

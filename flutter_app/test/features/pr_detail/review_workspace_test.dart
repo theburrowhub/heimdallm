@@ -198,29 +198,60 @@ void main() {
     ) async {
       await _pumpAt(
         tester,
-        ReviewWorkspace(pr: _pr(), reviews: [_review()], now: () => _now),
+        ReviewWorkspace(
+          pr: _pr(),
+          reviews: [_review()],
+          now: () => _now,
+          inspectorTop: const Text('Merge status'),
+        ),
       );
       final content = tester.getRect(
         find.byKey(const Key('workspace-content')),
       );
-      final inspector = tester.getRect(
-        find.byKey(const Key('workspace-inspector')),
+      final inspector = find.byKey(const Key('workspace-inspector'));
+      expect(
+        tester.getRect(inspector).left,
+        greaterThanOrEqualTo(content.right),
       );
-      expect(inspector.left, greaterThanOrEqualTo(content.right));
-      expect(inspector.width, ReviewWorkspace.inspectorWidth);
+      expect(tester.getRect(inspector).width, ReviewWorkspace.inspectorWidth);
+      // Merge status leads the inspector, above the details.
+      final merge = find.descendant(
+        of: inspector,
+        matching: find.text('Merge status'),
+      );
+      expect(
+        tester.getRect(merge).bottom,
+        lessThan(tester.getRect(find.text('Details')).top),
+      );
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('a narrow window stacks the inspector under the content', (
-      tester,
-    ) async {
+    testWidgets('a narrow window puts merge status under the header and '
+        'details last', (tester) async {
       await _pumpAt(
         tester,
-        ReviewWorkspace(pr: _pr(), reviews: [_review()], now: () => _now),
+        ReviewWorkspace(
+          pr: _pr(),
+          reviews: [_review()],
+          now: () => _now,
+          inspectorTop: const Text('Merge status'),
+        ),
         size: const Size(700, 1000),
       );
       expect(find.byKey(const Key('workspace-inspector')), findsNothing);
+      // As on the old screen, a red required check comes before the review.
+      final title = tester.getRect(
+        find.text('Retry idempotent webhook deliveries'),
+      );
+      final merge = tester.getRect(find.text('Merge status'));
+      final hero = tester.getRect(find.byKey(const Key('verdict-hero')));
+      expect(merge.top, greaterThan(title.bottom));
+      expect(merge.bottom, lessThan(hero.top));
       await tester.ensureVisible(find.text('Details'));
+      expect(
+        tester.getRect(find.text('Details')).top,
+        greaterThan(tester.getRect(find.text('Findings')).bottom),
+      );
       expect(find.text('Open on GitHub'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
@@ -238,6 +269,10 @@ void main() {
     final hero = find.byKey(const Key('verdict-hero'));
     expect(
       find.descendant(of: hero, matching: find.text('Changes requested')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: hero, matching: find.text('HIGH')),
       findsOneWidget,
     );
     expect(
@@ -384,6 +419,74 @@ void main() {
     expect(find.text('Approved'), findsOneWidget);
   });
 
+  // Comment signals can raise a review's severity above its findings'; the
+  // hero shows the review's own, as the old screen did.
+  testWidgets('the hero shows an escalated severity', (tester) async {
+    await _pumpAt(
+      tester,
+      ReviewWorkspace(
+        pr: _pr(),
+        reviews: [
+          _review(
+            severity: 'high',
+            issues: const [
+              Issue(file: 'a.go', line: 1, description: 'd', severity: 'low'),
+            ],
+          ),
+        ],
+        now: () => _now,
+      ),
+    );
+    final hero = find.byKey(const Key('verdict-hero'));
+    expect(
+      find.descendant(of: hero, matching: find.text('HIGH')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: hero, matching: find.text('1 low')),
+      findsOneWidget,
+    );
+  });
+
+  // A peer instance's review is stored as a placeholder without findings; its
+  // findings are on GitHub, so the workspace must not say there are none.
+  testWidgets('a review covered by a peer points to GitHub for findings', (
+    tester,
+  ) async {
+    final peer = Review(
+      id: 9,
+      prId: 1,
+      cliUsed: 'peer',
+      summary:
+          "Covered by @ana's Heimdallm instance: review 77 "
+          '(CHANGES_REQUESTED) on GitHub.',
+      issues: const [],
+      severity: 'peer',
+      createdAt: _now.subtract(const Duration(minutes: 1)),
+      githubReviewId: 77,
+      githubReviewState: 'CHANGES_REQUESTED',
+      headSha: 'c0ffee1234567890',
+    );
+    await _pumpAt(
+      tester,
+      ReviewWorkspace(pr: _pr(), reviews: [peer], now: () => _now),
+    );
+    final hero = find.byKey(const Key('verdict-hero'));
+    expect(
+      find.descendant(of: hero, matching: find.text('Changes requested')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: hero, matching: find.text('PEER')),
+      findsNothing,
+    );
+    expect(
+      find.text("The findings are in the peer instance's review on GitHub."),
+      findsOneWidget,
+    );
+    expect(find.text('No findings in this review.'), findsNothing);
+  });
+
   testWidgets('no review yet offers to review now', (tester) async {
     var asked = 0;
     await _pumpAt(
@@ -446,6 +549,11 @@ void main() {
     );
     expect(find.textContaining('Repo unknown.'), findsOneWidget);
     expect(find.text('(unknown)'), findsOneWidget);
+    // The exact update time, as the old screen showed it.
+    expect(
+      find.text(_pr().updatedAt.toLocal().toString().substring(0, 16)),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Open on GitHub'));
     expect(
       opened.single.toString(),

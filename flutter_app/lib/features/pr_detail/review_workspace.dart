@@ -30,7 +30,8 @@ class ReviewWorkspace extends StatelessWidget {
   /// Starts a review; null when the PR cannot be reviewed (unknown repo).
   final VoidCallback? onReview;
 
-  /// Shown first in the inspector, typically the merge status panel.
+  /// Shown first in the inspector, typically the merge status panel; in a
+  /// narrow window, right under the header.
   final Widget? inspectorTop;
 
   /// Clock for relative times; injectable for tests.
@@ -49,7 +50,8 @@ class ReviewWorkspace extends StatelessWidget {
     this.onOpen = _launch,
   });
 
-  /// From this width the inspector sits beside the content; below it, under.
+  /// From this width the inspector sits beside the content; below it, its
+  /// parts go into the single column.
   static const double wideBreakpoint = 980;
   static const double inspectorWidth = 340;
 
@@ -79,14 +81,7 @@ class ReviewWorkspace extends StatelessWidget {
         ],
       ],
     ];
-    final inspector = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: 16,
-      children: [
-        ?inspectorTop,
-        _DetailsCard(pr: pr, now: at, onOpen: onOpen),
-      ],
-    );
+    final details = _DetailsCard(pr: pr, onOpen: onOpen);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -115,17 +110,35 @@ class ReviewWorkspace extends StatelessWidget {
                   child: ListView(
                     key: const Key('workspace-inspector'),
                     padding: const EdgeInsets.all(20),
-                    children: [inspector],
+                    children: [
+                      if (inspectorTop != null) ...[
+                        inspectorTop!,
+                        const SizedBox(height: 16),
+                      ],
+                      details,
+                    ],
                   ),
                 ),
               ),
             ],
           );
         }
+        // Narrow: the merge status goes right under the header, before the
+        // review, as on the old screen: a red required check is the thing the
+        // author has to act on. Details close the page.
         return ListView(
           key: const Key('workspace-content'),
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
-          children: [...content, const SizedBox(height: 24), inspector],
+          children: [
+            content.first,
+            if (inspectorTop != null) ...[
+              const SizedBox(height: 20),
+              inspectorTop!,
+            ],
+            ...content.skip(1),
+            const SizedBox(height: 24),
+            details,
+          ],
         );
       },
     );
@@ -387,6 +400,9 @@ class _VerdictHero extends StatelessWidget {
                   letterSpacing: 0,
                 ),
               ),
+              // The review's overall severity, which comment signals can
+              // raise above its findings'. A peer row has none of its own.
+              if (!review.isPeer) SeverityBadge(severity: review.severity),
               ReviewPublicationBadge(
                 review: review,
                 prUrl: pr.url,
@@ -476,6 +492,28 @@ class _FindingsSectionState extends State<FindingsSection> {
   @override
   Widget build(BuildContext context) {
     final issues = widget.review.issues;
+    if (widget.review.isPeer) {
+      // The peer instance published its own review; only a placeholder is
+      // stored here, so its findings are on GitHub, not "none".
+      return AppSurface(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Icon(
+              Icons.info_outline,
+              size: 18,
+              color: resolveAppColor(context, AppColors.info),
+            ),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: AppText.muted(
+                "The findings are in the peer instance's review on GitHub.",
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     if (issues.isEmpty) {
       return AppSurface(
         padding: const EdgeInsets.all(16),
@@ -917,14 +955,9 @@ class _HistoryEntry extends StatelessWidget {
 
 class _DetailsCard extends StatelessWidget {
   final PR pr;
-  final DateTime now;
   final void Function(Uri uri) onOpen;
 
-  const _DetailsCard({
-    required this.pr,
-    required this.now,
-    required this.onOpen,
-  });
+  const _DetailsCard({required this.pr, required this.onOpen});
 
   @override
   Widget build(BuildContext context) {
@@ -992,7 +1025,8 @@ class _DetailsCard extends StatelessWidget {
           row('Number', '#${pr.number}'),
           row('Author', pr.author),
           row('State', pr.state),
-          row('Updated', relativeTime(pr.updatedAt, now)),
+          // Exact, as the old screen showed it; the header has the relative.
+          row('Updated', pr.updatedAt.toLocal().toString().substring(0, 16)),
           const SizedBox(height: 4),
           Align(
             alignment: Alignment.centerLeft,
