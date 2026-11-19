@@ -12,6 +12,7 @@ import '../merge_tracking/widgets/merge_phase_badge.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review.dart';
 import '../../core/models/review_status.dart';
+import '../../shared/widgets/review_publication_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -376,7 +377,7 @@ class _ReviewPanel extends StatelessWidget {
           if (reviews.isEmpty)
             const Text('No reviews yet.')
           else
-            ...reviews.map((rev) => _ReviewCard(review: rev)),
+            ...reviews.map((rev) => _ReviewCard(review: rev, prUrl: pr.url)),
         ],
       ),
     );
@@ -453,7 +454,8 @@ class _MergeChecksPanel extends ConsumerWidget {
 
 class _ReviewCard extends StatelessWidget {
   final Review review;
-  const _ReviewCard({required this.review});
+  final String prUrl;
+  const _ReviewCard({required this.review, required this.prUrl});
 
   @override
   Widget build(BuildContext context) {
@@ -466,23 +468,39 @@ class _ReviewCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Text(
-                  'Reviewed by ${review.cliUsed}',
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-                if (review.hasTokenUsage) ...[
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      review.tokenUsageLabel,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                // The badges keep their natural size on the right edge; the
+                // agent and token line gives way (ellipsis) in a narrow window.
+                Expanded(
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          'Reviewed by ${review.cliUsed}',
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
                       ),
-                    ),
+                      if (review.hasTokenUsage) ...[
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            review.tokenUsageLabel,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelSmall
+                                ?.copyWith(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurfaceVariant,
+                                ),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
-                ],
-                const Spacer(),
+                ),
+                const SizedBox(width: 8),
+                ReviewPublicationBadge(review: review, prUrl: prUrl),
+                const SizedBox(width: 8),
                 SeverityBadge(severity: review.severity),
               ],
             ),
