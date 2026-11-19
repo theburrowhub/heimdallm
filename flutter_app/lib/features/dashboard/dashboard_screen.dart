@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -217,6 +218,70 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
   /// the winning instance can change between refreshes, the identity cannot.
   String? _selected;
 
+  /// Holds the wide list's keyboard focus (#913): the keys act only while
+  /// this node itself is focused, so text fields and the preview's buttons
+  /// keep theirs.
+  final _listFocus = FocusNode(debugLabel: 'inbox-list');
+
+  /// Row keys by [_prIdentityKey], to scroll a row picked by keyboard into
+  /// view.
+  final _rowKeys = <String, GlobalKey>{};
+
+  @override
+  void dispose() {
+    _listFocus.dispose();
+    super.dispose();
+  }
+
+  /// Selects the next ([delta] 1) or previous (-1) row of [rows], or the
+  /// first/last when none is selected, and scrolls it into view.
+  void _move(List<InstanceGroup<PR>> rows, int delta) {
+    if (rows.isEmpty) return;
+    final at = rows.indexWhere((g) => _prIdentityKey(g.value) == _selected);
+    final next = at < 0
+        ? (delta > 0 ? 0 : rows.length - 1)
+        : (at + delta).clamp(0, rows.length - 1);
+    final key = _prIdentityKey(rows[next].value);
+    setState(() => _selected = key);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final row = _rowKeys[key]?.currentContext;
+      if (row == null || !row.mounted) return;
+      Scrollable.ensureVisible(
+        row,
+        duration: const Duration(milliseconds: 120),
+        alignmentPolicy: delta > 0
+            ? ScrollPositionAlignmentPolicy.keepVisibleAtEnd
+            : ScrollPositionAlignmentPolicy.keepVisibleAtStart,
+      );
+    });
+  }
+
+  KeyEventResult _onListKey(
+    FocusNode node,
+    KeyEvent event,
+    List<InstanceGroup<PR>> rows,
+    InstanceGroup<PR>? selected,
+  ) {
+    if (!node.hasPrimaryFocus || event is KeyUpEvent) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowDown) {
+      _move(rows, 1);
+    } else if (key == LogicalKeyboardKey.arrowUp) {
+      _move(rows, -1);
+    } else if (event is KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    } else if (key == LogicalKeyboardKey.enter && selected != null) {
+      context.push(prDetailRoute(selected.value.id, selected.instanceId));
+    } else if (key == LogicalKeyboardKey.escape && _selected != null) {
+      setState(() => _selected = null);
+    } else {
+      return KeyEventResult.ignored;
+    }
+    return KeyEventResult.handled;
+  }
+
   @override
   Widget build(BuildContext context) {
     // SSE listener for state changes (open/closed transitions)
@@ -412,42 +477,53 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         } else if (viewMode == 'grid') {
           content = emptyMessage != null ? Center(child: emptyMessage) : grid();
         } else {
-          content = Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(
-                width: inboxListWidth,
-                child: emptyMessage != null
-                    ? Center(child: emptyMessage)
-                    : ListView.builder(
-                        key: const Key('inbox-list'),
-                        itemCount: visible.length,
-                        itemBuilder: (context, i) {
-                          final g = visible[i];
-                          return _InboxRow(
-                            group: g,
-                            reviewing: reviewingKeys.containsKey(
-                              _reviewKeyOf(g),
-                            ),
-                            selected: g == selected,
-                            now: now,
-                            onTap: () => setState(
-                              () => _selected = _prIdentityKey(g.value),
-                            ),
-                          );
-                        },
-                      ),
-              ),
-              const VerticalDivider(width: 1),
-              Expanded(
-                child: selected == null
-                    ? _EmptyPreview(counts: counts)
-                    : _PrPreview(
-                        key: ValueKey(_prIdentityKey(selected.value)),
-                        group: selected,
-                      ),
-              ),
-            ],
+          final ids = {for (final g in visible) _prIdentityKey(g.value)};
+          _rowKeys.removeWhere((id, _) => !ids.contains(id));
+          content = Focus(
+            focusNode: _listFocus,
+            autofocus: true,
+            onKeyEvent: (node, event) =>
+                _onListKey(node, event, visible, selected),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(
+                  width: inboxListWidth,
+                  child: emptyMessage != null
+                      ? Center(child: emptyMessage)
+                      : ListView.builder(
+                          key: const Key('inbox-list'),
+                          itemCount: visible.length,
+                          itemBuilder: (context, i) {
+                            final g = visible[i];
+                            final id = _prIdentityKey(g.value);
+                            return _InboxRow(
+                              key: _rowKeys.putIfAbsent(id, GlobalKey.new),
+                              group: g,
+                              reviewing: reviewingKeys.containsKey(
+                                _reviewKeyOf(g),
+                              ),
+                              selected: g == selected,
+                              now: now,
+                              onTap: () {
+                                _listFocus.requestFocus();
+                                setState(() => _selected = id);
+                              },
+                            );
+                          },
+                        ),
+                ),
+                const VerticalDivider(width: 1),
+                Expanded(
+                  child: selected == null
+                      ? _EmptyPreview(counts: counts)
+                      : _PrPreview(
+                          key: ValueKey(_prIdentityKey(selected.value)),
+                          group: selected,
+                        ),
+                ),
+              ],
+            ),
           );
         }
         return Row(
@@ -863,6 +939,7 @@ class _InboxRow extends StatelessWidget {
   final VoidCallback onTap;
 
   const _InboxRow({
+    super.key,
     required this.group,
     required this.reviewing,
     required this.selected,
@@ -1125,6 +1202,7 @@ class _EmptyPreview extends StatelessWidget {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Icon(Icons.inbox_outlined, size: 44, color: muted),
           const SizedBox(height: 14),
@@ -1138,6 +1216,26 @@ class _EmptyPreview extends StatelessWidget {
             '${counts[InboxBucket.inProgress] ?? 0} in progress · '
             '${counts[InboxBucket.doneToday] ?? 0} done today',
             style: theme.textTheme.bodyMedium?.copyWith(color: muted),
+          ),
+          const SizedBox(height: 18),
+          // Icons, not ↑↓ glyphs: not every bundled font has the arrows. Inline
+          // spans, so the hint wraps in a narrow preview.
+          Text.rich(
+            TextSpan(
+              children: [
+                for (final icon in const [
+                  Icons.arrow_upward,
+                  Icons.arrow_downward,
+                ])
+                  WidgetSpan(
+                    alignment: PlaceholderAlignment.middle,
+                    child: Icon(icon, size: 13, color: muted),
+                  ),
+                const TextSpan(text: ' to move · Enter to open · Esc to clear'),
+              ],
+            ),
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall?.copyWith(color: muted),
           ),
         ],
       ),

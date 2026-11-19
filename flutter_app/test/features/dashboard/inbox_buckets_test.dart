@@ -4,6 +4,7 @@ import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
 import 'package:heimdallm/core/models/review_status.dart';
 import 'package:heimdallm/features/dashboard/inbox_buckets.dart';
+import 'package:heimdallm/features/dashboard/inbox_sidebar.dart';
 import 'package:heimdallm/shared/design_system/tokens.dart';
 
 final _now = DateTime(2026, 11, 19, 23, 50);
@@ -241,6 +242,28 @@ void main() {
         _review(issues: [issue('low'), issue('HIGH'), issue('high')]),
       ),
       '2 high · 1 low',
+    );
+  });
+
+  test('weekReviews sums the daily counts of every instance', () {
+    expect(weekReviews(const []), 0);
+    expect(
+      weekReviews([
+        {
+          'reviews_last_7_days': [
+            {'day': '2026-11-18', 'count': 3},
+            {'day': '2026-11-19', 'count': 1},
+          ],
+        },
+        {
+          'reviews_last_7_days': [
+            {'day': '2026-11-19', 'count': 2},
+          ],
+        },
+        // An older daemon without the field counts as none.
+        <String, dynamic>{},
+      ]),
+      6,
     );
   });
 }

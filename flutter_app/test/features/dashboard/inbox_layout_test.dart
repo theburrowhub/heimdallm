@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
+import 'package:heimdallm/core/models/flow.dart';
 import 'package:heimdallm/core/models/issue.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
@@ -77,6 +79,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
   Size size = const Size(1600, 1000),
   List<PR>? prs,
   List<PR> Function()? load,
+  void Function(_MockApiClient api)? stub,
 }) async {
   SharedPreferences.setMockInitialValues({});
   tester.view.physicalSize = size;
@@ -84,6 +87,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   final api = _MockApiClient();
+  stub?.call(api);
   final container = ProviderContainer(
     overrides: [
       apiClientProvider.overrideWithValue(api),
@@ -103,6 +107,10 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
         routerConfig: GoRouter(
           routes: [
             GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            GoRoute(
+              path: '/server',
+              builder: (_, _) => const Scaffold(body: Text('Server screen')),
+            ),
             GoRoute(
               path: '/prs/:id',
               builder: (_, state) => Scaffold(
@@ -447,5 +455,160 @@ void main() {
     );
 
     expect(find.text('No open PRs.'), findsOneWidget);
+  });
+
+  group('keyboard (#913)', () {
+    String? previewed(WidgetTester tester) {
+      for (final t in ['Summary of review 3', 'Summary of review 4']) {
+        if (find.text(t).evaluate().isNotEmpty) return t;
+      }
+      if (find
+          .byKey(const Key('inbox-preview-failure'))
+          .evaluate()
+          .isNotEmpty) {
+        return 'failed';
+      }
+      if (find.text('Select a PR to read its review').evaluate().isNotEmpty) {
+        return null;
+      }
+      return 'other';
+    }
+
+    Future<void> press(WidgetTester tester, LogicalKeyboardKey key) async {
+      await tester.sendKeyEvent(key);
+      await _settle(tester);
+    }
+
+    testWidgets('arrows move through the list, Esc clears, Enter opens', (
+      tester,
+    ) async {
+      await _pump(tester);
+      // Order: Failed, Running (unreviewed first), then Done, Waiting.
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(previewed(tester), 'failed');
+
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(previewed(tester), 'Summary of review 3');
+
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(
+        previewed(tester),
+        'Summary of review 4',
+        reason: 'stops at the end',
+      );
+
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      expect(previewed(tester), 'Summary of review 3');
+
+      await press(tester, LogicalKeyboardKey.escape);
+      expect(previewed(tester), isNull);
+
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      expect(
+        previewed(tester),
+        'Summary of review 4',
+        reason: 'up starts at the end',
+      );
+
+      await press(tester, LogicalKeyboardKey.enter);
+      expect(find.text('PR detail 4'), findsOneWidget);
+    });
+
+    testWidgets(
+      'a clicked row takes the keys; the search field keeps its own',
+      (tester) async {
+        await _pump(tester);
+        await tester.tap(_inList('Done PR'));
+        await _settle(tester);
+        await press(tester, LogicalKeyboardKey.arrowDown);
+        expect(previewed(tester), 'Summary of review 4');
+
+        await tester.tap(find.byType(TextField));
+        await _settle(tester);
+        await press(tester, LogicalKeyboardKey.arrowUp);
+        await press(tester, LogicalKeyboardKey.enter);
+        expect(previewed(tester), 'Summary of review 4');
+        expect(find.text('PR detail 4'), findsNothing);
+      },
+    );
+  });
+
+  group('daemon card (#913)', () {
+    testWidgets('shows the daemon, its subscription windows and the week', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        stub: (api) {
+          when(
+            () => api.fetchHealth(),
+          ).thenAnswer((_) async => {'status': 'ok', 'version': '0.10.7'});
+          when(() => api.fetchQuotas()).thenAnswer(
+            (_) async => [
+              AgentQuota(
+                agent: 'claude',
+                available: true,
+                windows: [
+                  QuotaWindow(
+                    kind: 'session',
+                    usedPercent: 42,
+                    resetsAt: DateTime(2026, 11, 19, 14, 30),
+                  ),
+                  const QuotaWindow(kind: 'weekly', usedPercent: 91),
+                  const QuotaWindow(
+                    kind: 'model',
+                    label: 'opus',
+                    usedPercent: 75,
+                  ),
+                ],
+              ),
+              const AgentQuota(agent: 'codex', error: 'not_configured'),
+            ],
+          );
+          when(() => api.fetchStats()).thenAnswer(
+            (_) async => {
+              'reviews_last_7_days': [
+                {'day': '2026-11-18', 'count': 3},
+                {'day': '2026-11-19', 'count': 2},
+              ],
+              'tokens_last_7_days': {'cost_usd': 18.4},
+            },
+          );
+        },
+      );
+
+      final card = find.byKey(const Key('inbox-daemon-card'));
+      Finder inCard(String text) =>
+          find.descendant(of: card, matching: find.text(text));
+      expect(inCard('Daemon running'), findsOneWidget);
+      expect(inCard('v0.10.7'), findsOneWidget);
+      expect(inCard('claude 5h'), findsOneWidget);
+      expect(inCard('42%'), findsOneWidget);
+      expect(inCard('claude 7d'), findsOneWidget);
+      expect(inCard('91%'), findsOneWidget);
+      // Only the plan windows, and no dollar figure: a subscription's cost is
+      // its usage window, not the API price.
+      expect(inCard('claude opus'), findsNothing);
+      expect(
+        find.descendant(of: card, matching: find.textContaining(r'$')),
+        findsNothing,
+      );
+      expect(inCard('Last 7 days · 5 reviews'), findsOneWidget);
+
+      await tester.tap(card);
+      await _settle(tester);
+      expect(find.text('Server screen'), findsOneWidget);
+    });
+
+    testWidgets('says when the daemon does not answer', (tester) async {
+      await _pump(
+        tester,
+        stub: (api) =>
+            when(() => api.fetchHealth()).thenAnswer((_) async => null),
+      );
+      expect(find.text('Daemon not reachable'), findsOneWidget);
+    });
   });
 }
