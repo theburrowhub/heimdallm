@@ -241,3 +241,20 @@ func TestResolveCLIPathUsesABinaryNamedDifferently(t *testing.T) {
 		t.Fatalf("ResolveCLIPath(tool) = %q, want the tool-cli binary", p)
 	}
 }
+
+// Custom agents and the Cursor CLI never see the review's checkout, so prompt
+// text about the checkout does not apply to them (#895).
+func TestExploresCheckout(t *testing.T) {
+	registerAider(t)
+	for cli, want := range map[string]bool{
+		"claude":     true,
+		"codex":      true,
+		"openrouter": true,
+		"cursor_cli": false,
+		"aider":      false,
+	} {
+		if got := executor.ExploresCheckout(cli); got != want {
+			t.Errorf("ExploresCheckout(%q) = %v, want %v", cli, got, want)
+		}
+	}
+}

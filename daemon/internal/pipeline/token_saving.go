@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/store"
 )
@@ -86,6 +87,39 @@ func (p *Pipeline) reviewDiff(pr *github.PullRequest, prevReview *store.Review, 
 		}
 	}
 	return diff, incrementalFrom, nil
+}
+
+// checkoutNote warns an agent that explores a repository checkout that the
+// checkout is not the PR head: it is the operator's local_dir as it happens to
+// be, or the tip of the default branch (#894). Without it an agent reports what
+// the PR adds as missing, or reviews the old version of a changed file. The
+// "missing" exception names the partial diffs (incremental, truncated, noise
+// filtered): each says so in the prompt, and absence from it proves nothing.
+const checkoutNote = "The repository checkout in your working directory is context only and may not contain this PR's changes " +
+	"(it can be the default branch or an unrelated local branch). The diff is the authoritative version of the changed code: " +
+	"do not report a file, function or import as missing because the checkout lacks it. It is missing only if the diff lacks it too " +
+	"and the diff is the whole PR: an incremental or truncated diff, or one with files marked not shown, can leave out where the PR defines it.\n"
+
+// reviewHasCheckout reports whether any agent this review may run explores a
+// repository checkout: it has a working directory and is not one of the agents
+// the executor always runs in an empty workspace (custom agents, Cursor).
+func reviewHasCheckout(opts RunOptions) bool {
+	if opts.ExecOpts.WorkDir != "" {
+		if opts.Primary == "" && opts.Fallback == "" {
+			return true // the agent is detected later; assume it explores
+		}
+		for _, cli := range []string{opts.Primary, opts.Fallback} {
+			if cli != "" && executor.ExploresCheckout(cli) {
+				return true
+			}
+		}
+	}
+	for cli, o := range opts.AgentExecOpts {
+		if o.WorkDir != "" && executor.ExploresCheckout(cli) {
+			return true
+		}
+	}
+	return false
 }
 
 // incrementalNote tells the model the diff is partial, so it neither flags
