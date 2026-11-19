@@ -154,7 +154,6 @@ List<Review> newestFirst(List<Review> reviews) =>
 /// The verdict a review shows: GitHub's state, else the event the daemon
 /// decided, else the one its severity implies (high requests changes), which is
 /// the daemon's own fallback for reviews stored before the event was recorded.
-@visibleForTesting
 ReviewVerdict verdictOf(Review review) =>
     review.verdict ??
     (review.severity.toLowerCase() == 'high'
@@ -192,7 +191,6 @@ Uri? findingUri(PR pr, Review review, Issue issue) {
 }
 
 /// "just now", "5 min ago", "3 h ago", "2 d ago", then the date.
-@visibleForTesting
 String relativeTime(DateTime at, DateTime now) {
   final d = now.difference(at);
   if (d.inMinutes < 1) return 'just now';
