@@ -96,7 +96,8 @@ class DesktopPlatformServices
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability,
         NotificationModePlatformCapability,
-        TrayMyPrsPlatformCapability {
+        TrayMyPrsPlatformCapability,
+        WindowChromePlatformCapability {
   DesktopPlatformServices({
     int apiPort = 7842,
     String? tokenPath,
@@ -449,6 +450,24 @@ class DesktopPlatformServices
     }
   }
 
+  /// The height of macOS's standard title bar, where the traffic lights sit.
+  static const macOSTitleBarHeight = 28.0;
+
+  @override
+  double get titleBarHeight => _isMacOS ? macOSTitleBarHeight : 0;
+
+  @override
+  Future<void> startWindowDrag() => windowManager.startDragging();
+
+  @override
+  Future<void> toggleWindowZoom() async {
+    if (await windowManager.isMaximized()) {
+      await windowManager.unmaximize();
+    } else {
+      await windowManager.maximize();
+    }
+  }
+
   @override
   Future<void> setupWindow({
     required String title,
@@ -460,11 +479,14 @@ class DesktopPlatformServices
     // setPreventWindowClose(true), `onWindowClose` hides the window
     // instead of letting it actually close.
     windowManager.addListener(this);
+    // On macOS the app draws the title bar itself (see [titleBarHeight]), so
+    // the system one is hidden; the traffic lights stay native. Linux keeps
+    // its window manager's decorations.
     final options = WindowOptions(
       size: size,
       minimumSize: minimumSize,
       title: title,
-      titleBarStyle: TitleBarStyle.normal,
+      titleBarStyle: _isMacOS ? TitleBarStyle.hidden : TitleBarStyle.normal,
     );
     await windowManager.setSize(size);
     await windowManager.setMinimumSize(minimumSize);

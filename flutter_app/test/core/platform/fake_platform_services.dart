@@ -17,7 +17,8 @@ class FakePlatformServices
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability,
         NotificationModePlatformCapability,
-        TrayMyPrsPlatformCapability {
+        TrayMyPrsPlatformCapability,
+        WindowChromePlatformCapability {
   FakePlatformServices({
     this.apiBaseUrl = 'http://127.0.0.1:7842',
     this.token,
@@ -59,6 +60,19 @@ class FakePlatformServices
   AppUpdateStatus _appUpdateStatus;
   final StreamController<AppUpdateStatus> _appUpdateEvents =
       StreamController<AppUpdateStatus>.broadcast();
+
+  /// Window chrome (#902): 0 keeps the system title bar, as on Linux and the
+  /// web; a macOS-like test sets it to the strip height.
+  @override
+  double titleBarHeight = 0;
+  int startWindowDragCalls = 0;
+  int toggleWindowZoomCalls = 0;
+
+  @override
+  Future<void> startWindowDrag() async => startWindowDragCalls++;
+
+  @override
+  Future<void> toggleWindowZoom() async => toggleWindowZoomCalls++;
 
   // Records of calls for assertions.
   int loadApiTokenCalls = 0;

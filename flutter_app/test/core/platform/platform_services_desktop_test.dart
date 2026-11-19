@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart'
     show NotificationDetails;
 import 'package:flutter_test/flutter_test.dart';
@@ -1160,6 +1162,82 @@ else:
         ),
         isFalse,
       );
+    });
+  });
+
+  // macOS hides its system title bar and has the app draw a strip in its
+  // place; Linux keeps its window manager's decorations (#902).
+  group('window chrome', () {
+    const windowChannel = MethodChannel('window_manager');
+    late List<MethodCall> windowCalls;
+    var maximized = false;
+
+    setUp(() {
+      windowCalls = [];
+      maximized = false;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(windowChannel, (call) async {
+            windowCalls.add(call);
+            if (call.method == 'isMaximized') return maximized;
+            // Every other is* query (isMinimized, isVisible…) answers no.
+            if (call.method.startsWith('is')) return false;
+            return null;
+          });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(windowChannel, null);
+    });
+
+    List<String> methods() => windowCalls.map((c) => c.method).toList();
+
+    test('macOS draws a title bar strip, Linux does not', () {
+      expect(
+        DesktopPlatformServices(isMacOS: true).titleBarHeight,
+        DesktopPlatformServices.macOSTitleBarHeight,
+      );
+      expect(DesktopPlatformServices(isLinux: true).titleBarHeight, 0);
+    });
+
+    test('dragging the strip drags the window', () async {
+      await DesktopPlatformServices(isMacOS: true).startWindowDrag();
+      expect(methods(), contains('startDragging'));
+    });
+
+    test('double-clicking the strip zooms, and again restores', () async {
+      final services = DesktopPlatformServices(isMacOS: true);
+      await services.toggleWindowZoom();
+      expect(methods(), contains('maximize'));
+
+      windowCalls.clear();
+      maximized = true;
+      await services.toggleWindowZoom();
+      expect(methods(), contains('unmaximize'));
+      expect(methods(), isNot(contains('maximize')));
+    });
+
+    test('only macOS hides the system title bar', () async {
+      for (final (isMacOS, style) in [(true, 'hidden'), (false, 'normal')]) {
+        windowCalls.clear();
+        await DesktopPlatformServices(
+          isMacOS: isMacOS,
+          isLinux: !isMacOS,
+        ).setupWindow(
+          title: 'Heimdallm',
+          size: const Size(1200, 800),
+          minimumSize: const Size(800, 600),
+        );
+        // waitUntilReadyToShow applies the options asynchronously.
+        for (var i = 0; i < 5; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        final styles = windowCalls
+            .where((c) => c.method == 'setTitleBarStyle')
+            .map((c) => (c.arguments as Map)['titleBarStyle'])
+            .toList();
+        expect(styles, [style], reason: isMacOS ? 'macOS' : 'Linux');
+      }
     });
   });
 }
