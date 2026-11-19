@@ -90,7 +90,9 @@ func truncationNote(diff string, cut int) string {
 	if len(parts) == 0 { // a header with no path
 		return "... (diff truncated)"
 	}
-	return "... (diff truncated: " + strings.Join(parts, "; ") + ")"
+	// The agent's checkout is not the PR head (#894), so a file it was not
+	// shown must not be reviewed from there either.
+	return "... (diff truncated: " + strings.Join(parts, "; ") + ". Review only the changes shown.)"
 }
 
 // listNames joins as many names as the caps allow and counts the rest. A

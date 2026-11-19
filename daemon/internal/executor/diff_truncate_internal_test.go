@@ -60,7 +60,7 @@ func TestTruncateDiff_NamesThePartialFileAndTheFilesNotShown(t *testing.T) {
 	if lost := limit - len(kept); lost >= len("+a longer line of code 00\n") {
 		t.Errorf("gave up %d bytes, more than one line", lost)
 	}
-	want := "... (diff truncated: pkg/b.go is shown only in part; 2 file(s) not shown: c.go, d.go)"
+	want := "... (diff truncated: pkg/b.go is shown only in part; 2 file(s) not shown: c.go, d.go. Review only the changes shown.)"
 	if note != want {
 		t.Errorf("note = %q\nwant  %q", note, want)
 	}
@@ -74,7 +74,7 @@ func TestTruncateDiff_CutOnAFileBoundaryHasNoPartialFile(t *testing.T) {
 	if kept != first {
 		t.Fatalf("kept = %q, want the whole first file", kept)
 	}
-	if want := "... (diff truncated: 1 file(s) not shown: b.go)"; note != want {
+	if want := "... (diff truncated: 1 file(s) not shown: b.go. Review only the changes shown.)"; note != want {
 		t.Errorf("note = %q, want %q", note, want)
 	}
 }
@@ -85,7 +85,7 @@ func TestTruncateDiff_CapsHowManyNamesItLists(t *testing.T) {
 		diff += fileSection(fmt.Sprintf("f%02d.go", i), 1, "z")
 	}
 	_, note := splitTruncated(t, diff, truncateDiff(diff, 300), 300)
-	if !strings.Contains(note, "30 file(s) not shown: f00.go, ") || !strings.HasSuffix(note, "f19.go and 10 more)") {
+	if !strings.Contains(note, "30 file(s) not shown: f00.go, ") || !strings.HasSuffix(note, "f19.go and 10 more. Review only the changes shown.)") {
 		t.Errorf("note = %q, want 20 names and a count of the rest", note)
 	}
 }
@@ -99,7 +99,7 @@ func TestTruncateDiff_CapsTheBytesOfNamesItLists(t *testing.T) {
 	if len(note) > maxTruncatedNamesBytes+200 {
 		t.Errorf("note is %d bytes, want the listed names capped near %d", len(note), maxTruncatedNamesBytes)
 	}
-	if !strings.Contains(note, "10 file(s) not shown: ") || !strings.Contains(note, " more)") {
+	if !strings.Contains(note, "10 file(s) not shown: ") || !strings.Contains(note, " more. Review only") {
 		t.Errorf("note = %q, want some names and a count of the rest", note)
 	}
 }
