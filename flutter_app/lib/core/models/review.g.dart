@@ -21,6 +21,10 @@ Review _$ReviewFromJson(Map<String, dynamic> json) => Review(
   cacheReadTokens: (json['cache_read_tokens'] as num?)?.toInt() ?? 0,
   costUsd: (json['cost_usd'] as num?)?.toDouble() ?? 0,
   tokensEstimated: json['tokens_estimated'] as bool? ?? false,
+  githubReviewId: (json['github_review_id'] as num?)?.toInt() ?? 0,
+  githubReviewState: json['github_review_state'] as String? ?? '',
+  event: json['event'] as String? ?? '',
+  headSha: json['head_sha'] as String? ?? '',
 );
 
 Map<String, dynamic> _$ReviewToJson(Review instance) => <String, dynamic>{
@@ -36,4 +40,8 @@ Map<String, dynamic> _$ReviewToJson(Review instance) => <String, dynamic>{
   'cache_read_tokens': instance.cacheReadTokens,
   'cost_usd': instance.costUsd,
   'tokens_estimated': instance.tokensEstimated,
+  'github_review_id': instance.githubReviewId,
+  'github_review_state': instance.githubReviewState,
+  'event': instance.event,
+  'head_sha': instance.headSha,
 };

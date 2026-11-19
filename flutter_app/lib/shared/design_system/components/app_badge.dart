@@ -42,7 +42,9 @@ class AppBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     var style = BoxStyler()
         .color(background)
-        .borderRadiusAll(radius != null ? Radius.circular(radius!) : AppRadius.sm())
+        .borderRadiusAll(
+          radius != null ? Radius.circular(radius!) : AppRadius.sm(),
+        )
         .padding(
           EdgeInsetsGeometryMix.value(
             padding ?? const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -65,13 +67,19 @@ class AppBadge extends StatelessWidget {
             ),
             const SizedBox(width: 4),
           ],
-          StyledText(
-            label,
-            style: TextStyler()
-                .color(foreground)
-                .fontSize(fontSize)
-                .fontWeight(fontWeight)
-                .letterSpacing(letterSpacing),
+          // Flexible + one ellipsised line: a badge narrower than its label
+          // shortens it instead of overflowing; unconstrained, nothing changes.
+          Flexible(
+            child: StyledText(
+              label,
+              style: TextStyler()
+                  .color(foreground)
+                  .fontSize(fontSize)
+                  .fontWeight(fontWeight)
+                  .letterSpacing(letterSpacing)
+                  .maxLines(1)
+                  .overflow(TextOverflow.ellipsis),
+            ),
           ),
         ],
       ),

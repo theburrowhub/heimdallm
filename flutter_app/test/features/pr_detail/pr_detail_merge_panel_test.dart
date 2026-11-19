@@ -36,12 +36,16 @@ final _review = Review(
 
 /// Mounts the PR detail screen with the merge-tracking detail the daemon would
 /// serve — or with a failure, for the paths where it serves none.
-Widget _host({MergeTrackingEntry? tracked, Object? detailError}) => ProviderScope(
+Widget _host({
+  MergeTrackingEntry? tracked,
+  Object? detailError,
+  List<Review>? reviews,
+}) => ProviderScope(
   overrides: [
     prDetailProvider((instanceId: '', prId: 1)).overrideWith(
       (_) => Future.value({
         'pr': _pr,
-        'reviews': [_review],
+        'reviews': reviews ?? [_review],
       }),
     ),
     sseStreamProvider.overrideWith((ref) => const Stream.empty()),
@@ -123,7 +127,9 @@ void main() {
 
   // A block that has nothing to do with CI still needs its sentence; the
   // banner is for checks only.
-  testWidgets('a non-check block reads as a line, not a banner', (tester) async {
+  testWidgets('a non-check block reads as a line, not a banner', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _host(
         tracked: _entry(
@@ -137,10 +143,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text(
-        'Draft — Heimdallm never acts on drafts',
-        findRichText: true,
-      ),
+      find.text('Draft — Heimdallm never acts on drafts', findRichText: true),
       findsOneWidget,
     );
   });
@@ -175,10 +178,63 @@ void main() {
   });
 
   // Tracked but never evaluated: there is no decision to render.
-  testWidgets('a tracked PR with no decision yet shows no panel', (tester) async {
+  testWidgets('a tracked PR with no decision yet shows no panel', (
+    tester,
+  ) async {
     await tester.pumpWidget(_host(tracked: _entry()));
     await tester.pumpAndSettle();
 
     expect(find.text('Merge status'), findsNothing);
+  });
+
+  // Each review card says whether it reached GitHub (#899): the verdict and
+  // commit once posted, or that it is still waiting.
+  testWidgets('review cards show whether the review was posted', (
+    tester,
+  ) async {
+    final posted = Review(
+      id: 2,
+      prId: 1,
+      cliUsed: 'claude',
+      summary: 'One problem',
+      issues: const [],
+      severity: 'high',
+      createdAt: DateTime.utc(2026, 8, 29),
+      githubReviewId: 99,
+      githubReviewState: 'CHANGES_REQUESTED',
+      headSha: 'c0ffee1234567',
+    );
+    await tester.pumpWidget(
+      _host(detailError: Exception('not tracked'), reviews: [posted, _review]),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Changes requested · c0ffee1'), findsOneWidget);
+    expect(find.text('Not posted yet'), findsOneWidget);
+  });
+
+  // A narrow web window must not clip the badges: they wrap on their own line.
+  testWidgets('review card badges fit a narrow window', (tester) async {
+    tester.view.physicalSize = const Size(420, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final peer = Review(
+      id: 3,
+      prId: 1,
+      cliUsed: 'peer',
+      summary: 'Covered by a peer.',
+      issues: const [],
+      severity: 'peer',
+      createdAt: DateTime.utc(2026, 8, 30),
+      githubReviewId: 7,
+      githubReviewState: 'CHANGES_REQUESTED',
+      headSha: 'abc1234def',
+    );
+    await tester.pumpWidget(
+      _host(detailError: Exception('not tracked'), reviews: [peer, _review]),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Peer · Changes requested · abc1234'), findsOneWidget);
   });
 }
