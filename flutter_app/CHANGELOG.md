@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.7](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.6...gui/v0.10.7) (2026-11-19)
+
+
+### Features
+
+* **gui:** native desktop chrome (seamless macOS title bar, flat app bar) ([#903](https://github.com/theburrowhub/heimdallm/issues/903)) ([12e70c7](https://github.com/theburrowhub/heimdallm/commit/12e70c7c9af359284ef3b76b62788636eafed57a))
+* **gui:** PR detail as a review workspace ([#905](https://github.com/theburrowhub/heimdallm/issues/905)) ([784d88e](https://github.com/theburrowhub/heimdallm/commit/784d88eb120d1674f5ae307e94343a869fd9f877))
+* **gui:** show on each review whether it reached GitHub ([#901](https://github.com/theburrowhub/heimdallm/issues/901)) ([ea814e7](https://github.com/theburrowhub/heimdallm/commit/ea814e70c9ceeef082f364f53cc62dfdc9c5456b))
+
 ## [0.10.6](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.5...gui/v0.10.6) (2026-11-12)
 
 

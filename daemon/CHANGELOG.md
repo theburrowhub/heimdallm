@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.7](https://github.com/theburrowhub/heimdallm/compare/daemon/v0.10.6...daemon/v0.10.7) (2026-11-19)
+
+
+### Bug Fixes
+
+* **executor:** reject agent answers that are not a review ([#891](https://github.com/theburrowhub/heimdallm/issues/891)) ([775122b](https://github.com/theburrowhub/heimdallm/commit/775122b71de419c0e781d55a27aba7c3b37cb438))
+* **executor:** retry a review that ran out of the token-saving turn cap when claude exits 1 ([#909](https://github.com/theburrowhub/heimdallm/issues/909)) ([6e78e0e](https://github.com/theburrowhub/heimdallm/commit/6e78e0eb43f34cffd9bb093732108d943a064898))
+* **executor:** truncate oversized diffs on line boundaries and name the files cut ([#893](https://github.com/theburrowhub/heimdallm/issues/893)) ([53fe2a1](https://github.com/theburrowhub/heimdallm/commit/53fe2a1c1b04b2b5c5fa6f53478cd08e7a2052cc))
+* **pipeline:** tell the review agent its checkout may not contain the PR ([#896](https://github.com/theburrowhub/heimdallm/issues/896)) ([e4fc083](https://github.com/theburrowhub/heimdallm/commit/e4fc083db31bf93434e1e2677b212d65b0833788))
+* report failing GitHub polls in /health and heimdallm-cli status ([#898](https://github.com/theburrowhub/heimdallm/issues/898)) ([11ae297](https://github.com/theburrowhub/heimdallm/commit/11ae297882b1032f8ad6b5e4546c844268a566de))
+
 ## [0.10.6](https://github.com/theburrowhub/heimdallm/compare/daemon/v0.10.5...daemon/v0.10.6) (2026-11-12)
 
 

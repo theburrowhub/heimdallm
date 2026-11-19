@@ -10,6 +10,24 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.10.7](https://github.com/theburrowhub/heimdallm/compare/v0.10.6...v0.10.7) (2026-11-19)
+
+
+### Features
+
+* **gui:** native desktop chrome (seamless macOS title bar, flat app bar) ([#903](https://github.com/theburrowhub/heimdallm/issues/903)) ([12e70c7](https://github.com/theburrowhub/heimdallm/commit/12e70c7c9af359284ef3b76b62788636eafed57a))
+* **gui:** PR detail as a review workspace ([#905](https://github.com/theburrowhub/heimdallm/issues/905)) ([784d88e](https://github.com/theburrowhub/heimdallm/commit/784d88eb120d1674f5ae307e94343a869fd9f877))
+* **gui:** show on each review whether it reached GitHub ([#901](https://github.com/theburrowhub/heimdallm/issues/901)) ([ea814e7](https://github.com/theburrowhub/heimdallm/commit/ea814e70c9ceeef082f364f53cc62dfdc9c5456b))
+
+
+### Bug Fixes
+
+* **executor:** reject agent answers that are not a review ([#891](https://github.com/theburrowhub/heimdallm/issues/891)) ([775122b](https://github.com/theburrowhub/heimdallm/commit/775122b71de419c0e781d55a27aba7c3b37cb438))
+* **executor:** retry a review that ran out of the token-saving turn cap when claude exits 1 ([#909](https://github.com/theburrowhub/heimdallm/issues/909)) ([6e78e0e](https://github.com/theburrowhub/heimdallm/commit/6e78e0eb43f34cffd9bb093732108d943a064898))
+* **executor:** truncate oversized diffs on line boundaries and name the files cut ([#893](https://github.com/theburrowhub/heimdallm/issues/893)) ([53fe2a1](https://github.com/theburrowhub/heimdallm/commit/53fe2a1c1b04b2b5c5fa6f53478cd08e7a2052cc))
+* **pipeline:** tell the review agent its checkout may not contain the PR ([#896](https://github.com/theburrowhub/heimdallm/issues/896)) ([e4fc083](https://github.com/theburrowhub/heimdallm/commit/e4fc083db31bf93434e1e2677b212d65b0833788))
+* report failing GitHub polls in /health and heimdallm-cli status ([#898](https://github.com/theburrowhub/heimdallm/issues/898)) ([11ae297](https://github.com/theburrowhub/heimdallm/commit/11ae297882b1032f8ad6b5e4546c844268a566de))
+
 ## [0.10.6](https://github.com/theburrowhub/heimdallm/compare/v0.10.5...v0.10.6) (2026-11-12)
 
 
