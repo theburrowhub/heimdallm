@@ -10,8 +10,8 @@ import (
 	"github.com/heimdallm/daemon/internal/executor"
 )
 
-// An answer that decodes as JSON but carries neither a summary nor a finding
-// is not a review. Accepting it turned an empty object, a CLI's error object,
+// An answer that decodes as JSON but carries neither a summary nor an issues
+// list is not a review. Accepting it turned an empty object, a CLI's error object,
 // or the first finding salvaged from a truncated answer into a clean review
 // that approved the PR (#890).
 func TestParseReview_RejectsAnswersThatAreNotAReview(t *testing.T) {
@@ -19,9 +19,10 @@ func TestParseReview_RejectsAnswersThatAreNotAReview(t *testing.T) {
 		"empty object":         `{}`,
 		"error object":         `{"error":"rate limited","code":429}`,
 		"bare finding":         `{"file":"main.go","line":3,"description":"nil deref","severity":"low"}`,
-		"blank summary":        `{"summary":"","issues":[],"severity":"low"}`,
-		"whitespace summary":   `{"summary":" \n\t ","issues":[],"severity":"low"}`,
-		"null summary":         `{"summary":null,"issues":[],"severity":"low"}`,
+		"blank summary":        `{"summary":"","severity":"low"}`,
+		"whitespace summary":   `{"summary":" \n\t ","severity":"low"}`,
+		"null summary":         `{"summary":null,"severity":"low"}`,
+		"null issues":          `{"summary":"","issues":null,"severity":"low"}`,
 		"severity only":        `{"severity":"low"}`,
 		"fenced empty object":  "```json\n{}\n```",
 		"prose around nothing": "Here is my review: {} Thanks!",
@@ -69,8 +70,11 @@ func TestParseReview_AcceptsReviews(t *testing.T) {
 		{"with findings", `{"summary":"One problem","issues":[{"file":"a.go","line":1,"description":"d","severity":"high"}],"severity":"high"}`, 1, "high"},
 		{"fenced", "```json\n{\"summary\":\"ok\",\"issues\":[],\"severity\":\"low\"}\n```", 0, "low"},
 		{"wrapped in prose", "Review follows.\n{\"summary\":\"ok\",\"issues\":[],\"severity\":\"medium\"}\nDone.", 0, "medium"},
-		// A custom prompt may ask only for findings and a severity.
+		// A custom prompt may ask only for findings and a severity, so an
+		// empty list is its clean review.
 		{"findings without a summary", `{"issues":[{"file":"a.go","line":1,"description":"d","severity":"high"}],"severity":"high"}`, 1, "high"},
+		{"clean review without a summary", `{"issues":[],"severity":"low"}`, 0, "low"},
+		{"blank summary with an issues list", `{"summary":" ","issues":[],"severity":"low"}`, 0, "low"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,8 +82,8 @@ func TestParseReview_AcceptsReviews(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseReview(%q): %v", tc.answer, err)
 			}
-			if strings.TrimSpace(result.Summary) == "" && len(result.Issues) == 0 {
-				t.Error("neither a summary nor a finding")
+			if strings.TrimSpace(result.Summary) == "" && result.Issues == nil {
+				t.Error("neither a summary nor an issues list")
 			}
 			if len(result.Issues) != tc.wantIssues {
 				t.Errorf("issues = %d, want %d", len(result.Issues), tc.wantIssues)

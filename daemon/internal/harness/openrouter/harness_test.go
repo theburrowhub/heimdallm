@@ -310,8 +310,10 @@ func TestValidReview(t *testing.T) {
 	for in, want := range map[string]bool{
 		reviewJSON:                         true,
 		"```json\n" + reviewJSON + "\n```": true,
-		`{"issues":[],"severity":"low"}`:   false,
-		`{"summary":"  ","issues":[]}`:     false,
+		`{"issues":[],"severity":"low"}`:   true,
+		`{"summary":"  ","issues":[]}`:     true,
+		`{"summary":"  "}`:                 false,
+		`{"severity":"low"}`:               false,
 		"plain text":                       false,
 	} {
 		if got := validReview(in); got != want {
