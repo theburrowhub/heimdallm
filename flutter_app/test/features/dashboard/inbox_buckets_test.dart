@@ -118,6 +118,31 @@ void main() {
       },
     );
 
+    test('a failure older than the latest review is stale', () {
+      // The daemon clears a failure only for the commit that later succeeded.
+      final pr = _pr(
+        review: _review(),
+        status: ReviewExecutionStatus(
+          headSha: 'old',
+          attempts: 1,
+          failedAt: _now.subtract(const Duration(hours: 3)),
+          retryAt: _now,
+          error: 'boom',
+          active: false,
+        ),
+      );
+      expect(currentFailure(pr), isNull);
+      expect(_bucket(pr), InboxBucket.doneToday);
+      expect(prStatusOf(pr, reviewing: false).label, 'Approved');
+      // A run that failed after the review is current.
+      final later = _pr(
+        review: _review(at: _now.subtract(const Duration(hours: 5))),
+        status: _status(error: 'boom'),
+      );
+      expect(currentFailure(later), isNotNull);
+      expect(_bucket(later), InboxBucket.needsYou);
+    });
+
     test('a closed PR never needs you nor is in progress', () {
       expect(
         _bucket(

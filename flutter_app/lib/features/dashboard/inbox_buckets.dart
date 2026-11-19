@@ -4,6 +4,7 @@ import 'package:mix/mix.dart' show ColorToken;
 
 import '../../core/models/pr.dart';
 import '../../core/models/review.dart';
+import '../../core/models/review_status.dart';
 import '../../core/state/local_state_notifier.dart';
 import '../../shared/design_system/tokens.dart';
 import '../pr_detail/review_workspace.dart' show verdictOf;
@@ -28,12 +29,11 @@ enum InboxBucket {
 InboxBucket? bucketOf(PR pr, {required bool reviewing, required DateTime now}) {
   final open = pr.state == 'open';
   final review = pr.latestReview;
-  final status = pr.reviewStatus;
-  final running = reviewing || (status?.active ?? false);
+  final running = reviewing || (pr.reviewStatus?.active ?? false);
   if (open && !running) {
-    final failed = status != null && status.error.isNotEmpty;
     // On an open PR an abandoned review is one GitHub rejected for good.
-    if (failed || review?.publication == ReviewPublication.abandoned) {
+    if (currentFailure(pr) != null ||
+        review?.publication == ReviewPublication.abandoned) {
       return InboxBucket.needsYou;
     }
   }
@@ -47,6 +47,18 @@ InboxBucket? bucketOf(PR pr, {required bool reviewing, required DateTime now}) {
     return InboxBucket.doneToday;
   }
   return null;
+}
+
+/// The PR's failed or cancelled review run, or null when there is none, it is
+/// running again, or a review was stored after it. The daemon clears a failure
+/// only for the commit whose review later succeeded, so one left on an older
+/// commit is stale.
+ReviewExecutionStatus? currentFailure(PR pr) {
+  final status = pr.reviewStatus;
+  if (status == null || status.active || status.error.isEmpty) return null;
+  final review = pr.latestReview;
+  if (review != null && review.createdAt.isAfter(status.failedAt)) return null;
+  return status;
 }
 
 bool _sameLocalDay(DateTime a, DateTime b) {
@@ -73,8 +85,9 @@ PrStatus prStatusOf(PR pr, {required bool reviewing}) {
       icon: Icons.autorenew,
     );
   }
-  if (status != null && status.error.isNotEmpty) {
-    return status.isCancelled
+  final failure = currentFailure(pr);
+  if (failure != null) {
+    return failure.isCancelled
         ? (
             label: 'Review cancelled',
             color: AppColors.danger,

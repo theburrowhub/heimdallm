@@ -183,7 +183,8 @@ String _emptyBucketText(InboxBucket bucket) => switch (bucket) {
   InboxBucket.needsYou => 'Nothing needs you.',
   InboxBucket.inProgress => 'Nothing in progress.',
   InboxBucket.doneToday => 'No reviews finished today yet.',
-  InboxBucket.all => 'No activity yet',
+  // Only reached under the default Open filter: any other is "filters".
+  InboxBucket.all => 'No open PRs.',
 };
 
 /// Repositories with their PR count under every filter but the repository
@@ -879,12 +880,10 @@ class _InboxRow extends StatelessWidget {
     final muted = resolveAppColor(context, AppColors.textMuted);
     final small = theme.textTheme.bodySmall?.copyWith(color: muted);
     final review = pr.latestReview;
-    final failure = pr.reviewStatus;
-    final running = reviewing || (failure?.active ?? false);
+    final running = reviewing || (pr.reviewStatus?.active ?? false);
     // The counts belong to the review the status describes, not to a run
     // that is going on or failed after it.
-    final findings =
-        review != null && !running && (failure?.error.isEmpty ?? true)
+    final findings = review != null && !running && currentFailure(pr) == null
         ? findingCounts(review)
         : '';
     final row = Semantics(
@@ -1017,12 +1016,9 @@ class _PrPreviewState extends ConsumerState<_PrPreview>
   @override
   Widget build(BuildContext context) {
     final pr = _pr;
-    final status = pr.reviewStatus;
-    final failure = status != null && !status.active && status.error.isNotEmpty
-        ? status
-        : null;
+    final failure = currentFailure(pr);
     final isReviewing =
-        (status?.active ?? false) ||
+        (pr.reviewStatus?.active ?? false) ||
         ref.watch(reviewingPRsProvider).containsKey(_reviewKey);
     final danger = resolveAppColor(context, AppColors.danger);
     final review = pr.latestReview;
@@ -1033,31 +1029,8 @@ class _PrPreviewState extends ConsumerState<_PrPreview>
         Padding(
           padding: const EdgeInsets.fromLTRB(24, 10, 16, 10),
           child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              Expanded(
-                child: failure != null && !isReviewing
-                    ? Tooltip(
-                        message: failure.error,
-                        child: Row(
-                          children: [
-                            Icon(Icons.error_outline, size: 16, color: danger),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                reviewFailureSummary(failure),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(
-                                  context,
-                                ).textTheme.bodySmall?.copyWith(color: danger),
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-              const SizedBox(width: 12),
               if (isReviewing)
                 OutlinedButton.icon(
                   icon: _cancelling
@@ -1099,6 +1072,32 @@ class _PrPreviewState extends ConsumerState<_PrPreview>
             ],
           ),
         ),
+        if (failure != null && !isReviewing)
+          Container(
+            key: const Key('inbox-preview-failure'),
+            color: danger.withValues(alpha: 0.10),
+            padding: const EdgeInsets.fromLTRB(24, 10, 24, 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.error_outline, size: 16, color: danger),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Tooltip(
+                    message: failure.error,
+                    child: Text(
+                      reviewFailureSummary(failure),
+                      maxLines: 4,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: danger),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         const Divider(height: 1),
         Expanded(
           child: ReviewWorkspace(

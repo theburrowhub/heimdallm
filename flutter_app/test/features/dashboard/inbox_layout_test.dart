@@ -395,4 +395,57 @@ void main() {
       await tester.pump(const Duration(seconds: 6));
     });
   }
+
+  testWidgets('the narrowest wide layout previews without overflowing', (
+    tester,
+  ) async {
+    final withFindings = _pr(
+      5,
+      'A PR whose very long title has to wrap inside the narrow preview pane',
+      review: _review(5),
+    );
+    await _pump(
+      tester,
+      size: const Size(1100, 900),
+      prs: [..._prs, withFindings],
+    );
+
+    await tester.tap(_inList(withFindings.title));
+    await _settle(tester);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(_inList('Failed PR'));
+    await _settle(tester);
+    expect(tester.takeException(), isNull);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('inbox-preview-failure')),
+        matching: find.textContaining('agent exited'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('only closed PRs under the default filter say there are none', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      prs: [
+        PR(
+          id: 9,
+          githubId: 9,
+          repo: 'acme/api',
+          number: 9,
+          title: 'Merged PR',
+          author: 'alice',
+          url: 'https://github.com/acme/api/pull/9',
+          state: 'closed',
+          updatedAt: _now,
+        ),
+      ],
+    );
+
+    expect(find.text('No open PRs.'), findsOneWidget);
+  });
 }
