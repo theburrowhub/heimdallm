@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mix/mix.dart';
 import 'package:heimdallm/core/models/review.dart';
@@ -51,7 +52,10 @@ void main() {
         ReviewPublicationBadge(
           review: _review(id: 4242, state: 'APPROVED', sha: '0123456789abcdef'),
           prUrl: _prUrl,
-          onOpen: (uri) => opened = uri,
+          onOpen: (uri) async {
+            opened = uri;
+            return true;
+          },
         ),
       ),
     );
@@ -105,7 +109,10 @@ void main() {
       final badge = ReviewPublicationBadge(
         review: _review(id: entry.key, event: 'APPROVE', sha: 'abcdef1234'),
         prUrl: _prUrl,
-        onOpen: (uri) => opened = uri,
+        onOpen: (uri) async {
+          opened = uri;
+          return true;
+        },
       );
       await tester.pumpWidget(_host(badge));
       expect(find.text(entry.value.$1), findsOneWidget, reason: '${entry.key}');
@@ -165,5 +172,78 @@ void main() {
       findsOneWidget,
     );
     handle.dispose();
+  });
+
+  // Keyboard users reach the link with Tab and open it with Enter.
+  testWidgets('a posted review opens from the keyboard', (tester) async {
+    Uri? opened;
+    await tester.pumpWidget(
+      _host(
+        ReviewPublicationBadge(
+          review: _review(id: 4242, state: 'APPROVED'),
+          prUrl: _prUrl,
+          onOpen: (uri) async {
+            opened = uri;
+            return true;
+          },
+        ),
+      ),
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(opened?.fragment, 'pullrequestreview-4242');
+  });
+
+  // The badge's semantics node is a link that a screen reader can activate.
+  testWidgets('a screen reader can open a posted review', (tester) async {
+    final handle = tester.ensureSemantics();
+    Uri? opened;
+    await tester.pumpWidget(
+      _host(
+        ReviewPublicationBadge(
+          review: _review(id: 4242, state: 'APPROVED'),
+          prUrl: _prUrl,
+          onOpen: (uri) async {
+            opened = uri;
+            return true;
+          },
+        ),
+      ),
+    );
+    final badge = find.byType(ReviewPublicationBadge);
+    expect(
+      tester.getSemantics(badge),
+      isSemantics(isLink: true, hasTapAction: true),
+    );
+    tester.semantics.tap(find.semantics.byLabel(RegExp('^Approved')));
+    await tester.pump();
+    expect(opened?.fragment, 'pullrequestreview-4242');
+    handle.dispose();
+  });
+
+  // When the link cannot open (no browser, or the launch is refused), the
+  // user is told rather than nothing happening.
+  testWidgets('a link that cannot open says so', (tester) async {
+    for (final open in <Future<bool> Function(Uri)>[
+      (_) async => false,
+      (_) async => throw PlatformException(code: 'ACTIVITY_NOT_FOUND'),
+    ]) {
+      await tester.pumpWidget(
+        _host(
+          ReviewPublicationBadge(
+            review: _review(id: 4242, state: 'APPROVED'),
+            prUrl: _prUrl,
+            onOpen: open,
+          ),
+        ),
+      );
+      await tester.tap(find.byType(AppBadge));
+      await tester.pump();
+      expect(find.text('Could not open the review on GitHub.'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 4)); // let the toast expire
+      await tester.pumpAndSettle();
+    }
   });
 }

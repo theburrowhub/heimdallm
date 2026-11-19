@@ -6,6 +6,7 @@ import '../../core/models/review.dart';
 import '../design_system/color_resolver.dart';
 import '../design_system/components/app_badge.dart';
 import '../design_system/tokens.dart';
+import 'toast.dart';
 
 /// Whether a review reached GitHub: its verdict and commit once posted, or why
 /// it was not. A posted review links to itself on GitHub.
@@ -16,17 +17,29 @@ class ReviewPublicationBadge extends StatelessWidget {
   /// https URL on github.com, like the screen's "Open on GitHub" button.
   final String prUrl;
 
-  /// Opens the review. Injectable for tests; defaults to the platform browser.
-  final void Function(Uri uri) onOpen;
+  /// Opens the review and says whether it could. Injectable for tests;
+  /// defaults to the platform browser.
+  final Future<bool> Function(Uri uri) onOpen;
 
   const ReviewPublicationBadge({
     super.key,
     required this.review,
     required this.prUrl,
-    this.onOpen = _launch,
+    this.onOpen = launchUrl,
   });
 
-  static void _launch(Uri uri) => launchUrl(uri);
+  /// Opens [uri], with a toast when it cannot: no browser, or a refused launch.
+  Future<void> _open(BuildContext context, Uri uri) async {
+    var opened = false;
+    try {
+      opened = await onOpen(uri);
+    } catch (_) {
+      // No handler for the link (PlatformException): reported below.
+    }
+    if (!opened && context.mounted) {
+      showToast(context, 'Could not open the review on GitHub.', isError: true);
+    }
+  }
 
   /// The review's own page on GitHub, or null when it is not posted or the PR
   /// URL is not a github.com https URL.
@@ -54,17 +67,22 @@ class ReviewPublicationBadge extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       letterSpacing: 0.2,
     );
+    final onTap = uri == null ? null : () => _open(context, uri);
+    // The node carries the tap itself: excludeSemantics drops the InkWell's.
+    // The InkWell gives keyboard focus and Enter/Space activation.
     return Semantics(
       label: '${look.label}. ${look.tooltip}',
-      button: uri != null,
+      link: onTap != null,
+      onTap: onTap,
       excludeSemantics: true,
       child: Tooltip(
         message: look.tooltip,
-        child: uri == null
+        child: onTap == null
             ? badge
-            : MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(onTap: () => onOpen(uri), child: badge),
+            : InkWell(
+                onTap: onTap,
+                borderRadius: BorderRadius.circular(4),
+                child: badge,
               ),
       ),
     );
@@ -93,8 +111,8 @@ _Look _look(Review review) {
     case ReviewPublication.abandoned:
       return const _Look(
         'Not posted',
-        'Heimdallm will not retry this review: the PR was closed or merged '
-            'first, or GitHub rejected it for good.',
+        'Heimdallm will not retry this review, for example because the PR '
+            'was closed or merged first, or GitHub rejected it for good.',
         Icons.block,
         AppColors.textMuted,
       );
