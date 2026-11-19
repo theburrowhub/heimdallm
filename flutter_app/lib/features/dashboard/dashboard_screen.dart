@@ -9,6 +9,7 @@ import '../../core/instances/models.dart' show RoutingRules;
 import '../instances/widgets/instance_badge.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review_status.dart';
+import '../../shared/design_system/color_resolver.dart';
 import '../../shared/design_system/components/components.dart';
 import '../../shared/design_system/tokens.dart';
 import '../../shared/widgets/severity_badge.dart';
@@ -16,9 +17,12 @@ import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../../shared/widgets/type_badge.dart';
 import '../activity/add_pr_dialog.dart';
+import '../pr_detail/review_workspace.dart';
 import 'activity_filter_bar.dart';
 import 'activity_filters.dart';
 import 'dashboard_providers.dart';
+import 'inbox_buckets.dart';
+import 'inbox_sidebar.dart';
 import '../server/server_actions.dart' as server_actions;
 
 class DashboardScreen extends ConsumerWidget {
@@ -167,6 +171,41 @@ void _sortItems(List<InstanceGroup<PR>> items, SortMode mode) {
   }
 }
 
+/// From this content width Activity shows the inbox sidebar, the compact list
+/// and the preview (#910); below it, the full-width rows.
+const double inboxBreakpoint = 1100;
+const double inboxListWidth = 400;
+
+String _reviewKeyOf(InstanceGroup<PR> g) =>
+    reviewKeyFor(g.instanceId, g.value.repo, g.value.number);
+
+String _emptyBucketText(InboxBucket bucket) => switch (bucket) {
+  InboxBucket.needsYou => 'Nothing needs you.',
+  InboxBucket.inProgress => 'Nothing in progress.',
+  InboxBucket.doneToday => 'No reviews finished today yet.',
+  // Only reached under the default Open filter: any other is "filters".
+  InboxBucket.all => 'No open PRs.',
+};
+
+/// Repositories with their PR count under every filter but the repository
+/// one, most PRs first, so picking one in the sidebar keeps the others listed.
+List<(String, int)> _repoCounts(
+  List<InstanceGroup<PR>> groups,
+  ActivityFilters filters,
+) {
+  final others = filters.copyWith(repos: const {});
+  final counts = <String, int>{};
+  for (final g in groups) {
+    if (_matchesFilters(g.value, others)) {
+      counts[g.value.repo] = (counts[g.value.repo] ?? 0) + 1;
+    }
+  }
+  return [for (final e in counts.entries) (e.key, e.value)]..sort((a, b) {
+    final byCount = b.$2.compareTo(a.$2);
+    return byCount != 0 ? byCount : a.$1.compareTo(b.$1);
+  });
+}
+
 class _ActivityTab extends ConsumerStatefulWidget {
   const _ActivityTab();
   @override
@@ -174,6 +213,10 @@ class _ActivityTab extends ConsumerStatefulWidget {
 }
 
 class _ActivityTabState extends ConsumerState<_ActivityTab> {
+  /// The PR the wide layout previews, by [_prIdentityKey]: the store id and
+  /// the winning instance can change between refreshes, the identity cannot.
+  String? _selected;
+
   @override
   Widget build(BuildContext context) {
     // SSE listener for state changes (open/closed transitions)
@@ -253,69 +296,196 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     // Sort.
     _sortItems(filtered, sort);
 
-    final viewMode = filters.viewMode;
-
-    // Build filter bar + count header (shared between list and grid)
-    final header = [
-      ActivityFilterBar(
-        allRepos: allRepos,
-        sort: sort,
-        onSortChanged: (mode) =>
-            ref.read(reviewsSortProvider.notifier).set(mode),
-        onAddPR: () => showAddPRDialog(context),
-      ),
-      if (filters.hasFilters)
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-          child: AppText.muted(
-            '${filtered.length} item${filtered.length == 1 ? '' : 's'}',
+    // Inbox buckets (#910), over the filtered rows so the counts match what
+    // the list can show.
+    final reviewingKeys = ref.watch(reviewingPRsProvider);
+    final now = DateTime.now();
+    final bucketed = [
+      for (final g in filtered)
+        (
+          group: g,
+          bucket: bucketOf(
+            g.value,
+            reviewing: reviewingKeys.containsKey(_reviewKeyOf(g)),
+            now: now,
           ),
         ),
     ];
+    final counts = {
+      for (final b in InboxBucket.values)
+        b: b == InboxBucket.all
+            ? filtered.length
+            : bucketed.where((e) => e.bucket == b).length,
+    };
+    final bucket = ref.watch(inboxBucketProvider);
+    final visible = [
+      for (final e in bucketed)
+        if (bucket == InboxBucket.all || e.bucket == bucket) e.group,
+    ];
+    void selectBucket(InboxBucket b) =>
+        ref.read(inboxBucketProvider.notifier).set(b);
 
-    if (prs.isEmpty) {
-      return Column(
-        children: [
-          ...header,
-          const Expanded(child: Center(child: Text('No activity yet'))),
-        ],
-      );
-    }
-
-    if (filtered.isEmpty && filters.hasFilters) {
-      return Column(
-        children: [
-          ...header,
-          const Expanded(
-            child: Center(child: Text('No items match the current filters.')),
-          ),
-        ],
-      );
-    }
-
-    if (viewMode == 'grid') {
-      return Column(
-        children: [
-          ...header,
-          Expanded(
-            child: GridView.builder(
-              padding: const EdgeInsets.all(8),
-              gridDelegate: AppGridDelegate.entities(),
-              itemCount: filtered.length,
-              itemBuilder: (ctx, i) => _ActivityGridTile(pr: filtered[i].value),
+    final viewMode = filters.viewMode;
+    final toolbar = ActivityFilterBar(
+      allRepos: allRepos,
+      sort: sort,
+      onSortChanged: (mode) => ref.read(reviewsSortProvider.notifier).set(mode),
+      onAddPR: () => showAddPRDialog(context),
+    );
+    final countLine = filters.hasFilters || bucket != InboxBucket.all
+        ? Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: AppText.muted(
+              '${visible.length} item${visible.length == 1 ? '' : 's'}',
             ),
-          ),
-        ],
-      );
-    }
+          )
+        : null;
+    final Widget? emptyMessage = prs.isEmpty
+        ? const Text('No activity yet')
+        : filtered.isEmpty && filters.hasFilters
+        ? const Text('No items match the current filters.')
+        : visible.isEmpty
+        ? Text(_emptyBucketText(bucket))
+        : null;
 
-    // Default: list mode
-    return ListView(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      children: [
-        ...header,
-        ...filtered.map((group) => _PRTile(group: group)),
-      ],
+    Widget grid() => GridView.builder(
+      padding: const EdgeInsets.all(8),
+      gridDelegate: AppGridDelegate.entities(),
+      itemCount: visible.length,
+      itemBuilder: (ctx, i) => _ActivityGridTile(pr: visible[i].value),
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < inboxBreakpoint) {
+          final header = <Widget>[
+            toolbar,
+            if (prs.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: AppSegmentedFilter<InboxBucket>(
+                    segments: [
+                      for (final b in InboxBucket.values)
+                        AppSegment(value: b, label: b.label, count: counts[b]),
+                    ],
+                    current: bucket,
+                    onChanged: selectBucket,
+                  ),
+                ),
+              ),
+            ?countLine,
+          ];
+          if (emptyMessage != null) {
+            return Column(
+              children: [
+                ...header,
+                Expanded(child: Center(child: emptyMessage)),
+              ],
+            );
+          }
+          if (viewMode == 'grid') {
+            return Column(
+              children: [
+                ...header,
+                Expanded(child: grid()),
+              ],
+            );
+          }
+          return ListView(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            children: [
+              ...header,
+              ...visible.map((group) => _PRTile(group: group)),
+            ],
+          );
+        }
+
+        // Wide: source list, compact rows and the selected PR's review.
+        final selected = visible
+            .where((g) => _prIdentityKey(g.value) == _selected)
+            .firstOrNull;
+        final Widget content;
+        if (emptyMessage != null && (prs.isEmpty || filtered.isEmpty)) {
+          content = Center(child: emptyMessage);
+        } else if (viewMode == 'grid') {
+          content = emptyMessage != null ? Center(child: emptyMessage) : grid();
+        } else {
+          content = Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: inboxListWidth,
+                child: emptyMessage != null
+                    ? Center(child: emptyMessage)
+                    : ListView.builder(
+                        key: const Key('inbox-list'),
+                        itemCount: visible.length,
+                        itemBuilder: (context, i) {
+                          final g = visible[i];
+                          return _InboxRow(
+                            group: g,
+                            reviewing: reviewingKeys.containsKey(
+                              _reviewKeyOf(g),
+                            ),
+                            selected: g == selected,
+                            now: now,
+                            onTap: () => setState(
+                              () => _selected = _prIdentityKey(g.value),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              const VerticalDivider(width: 1),
+              Expanded(
+                child: selected == null
+                    ? _EmptyPreview(counts: counts)
+                    : _PrPreview(
+                        key: ValueKey(_prIdentityKey(selected.value)),
+                        group: selected,
+                      ),
+              ),
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            InboxSidebar(
+              bucket: bucket,
+              counts: counts,
+              onBucket: selectBucket,
+              repos: _repoCounts(prGroups, filters),
+              repo: filters.repos.length == 1 ? filters.repos.first : null,
+              onRepo: (name) => ref
+                  .read(activityFiltersProvider.notifier)
+                  .update(
+                    filters.copyWith(
+                      repos:
+                          filters.repos.length == 1 &&
+                              filters.repos.contains(name)
+                          ? const {}
+                          : {name},
+                    ),
+                  ),
+            ),
+            const VerticalDivider(width: 1),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  toolbar,
+                  ?countLine,
+                  const Divider(height: 1),
+                  Expanded(child: content),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -385,9 +555,15 @@ class _PRTile extends ConsumerStatefulWidget {
   ConsumerState<_PRTile> createState() => _PRTileState();
 }
 
-class _PRTileState extends ConsumerState<_PRTile> {
-  PR get _pr => widget.group.value;
-  String get _instanceId => widget.group.instanceId;
+/// Review, cancel and dismiss for one PR row, shared by the full-width row and
+/// the wide layout's preview.
+mixin _PrActions<W extends ConsumerStatefulWidget> on ConsumerState<W> {
+  /// The PR the actions act on; every instance that reported it is in
+  /// [InstanceGroup.members].
+  InstanceGroup<PR> get group;
+
+  PR get _pr => group.value;
+  String get _instanceId => group.instanceId;
 
   String get _reviewKey => reviewKeyFor(_instanceId, _pr.repo, _pr.number);
 
@@ -420,7 +596,13 @@ class _PRTileState extends ConsumerState<_PRTile> {
   /// primary would leave the others' rows live, and the PR would reappear
   /// (now with one fewer badge) on the next refresh.
   Future<void> _dismiss() async {
-    final members = widget.group.members;
+    final members = group.members;
+    // Undo runs after the reload has dropped the dismissed row, when this
+    // widget's ref can no longer be used (#911): resolve what it needs now.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final clients = {
+      for (final m in members) m: clientForInstanceOf(ref, m.instanceId),
+    };
     final errors = <Object>[];
     await Future.wait(
       members.map((m) async {
@@ -441,12 +623,9 @@ class _PRTileState extends ConsumerState<_PRTile> {
         actionLabel: 'Undo',
         onAction: () async {
           await Future.wait(
-            members.map((m) async {
+            clients.entries.map((e) async {
               try {
-                await clientForInstanceOf(
-                  ref,
-                  m.instanceId,
-                ).undismissPR(m.value.id);
+                await e.value.undismissPR(e.key.value.id);
               } catch (_) {
                 // Best-effort undo: a member that fails to un-dismiss stays
                 // dismissed there, which is recoverable from the Dismissed
@@ -454,7 +633,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
               }
             }),
           );
-          ref.invalidate(prsByInstanceProvider);
+          container.invalidate(prsByInstanceProvider);
         },
       );
     } else {
@@ -499,6 +678,11 @@ class _PRTileState extends ConsumerState<_PRTile> {
       }
     }
   }
+}
+
+class _PRTileState extends ConsumerState<_PRTile> with _PrActions<_PRTile> {
+  @override
+  InstanceGroup<PR> get group => widget.group;
 
   @override
   Widget build(BuildContext context) {
@@ -664,6 +848,300 @@ class _PRTileState extends ConsumerState<_PRTile> {
       default:
         return Colors.green.shade700;
     }
+  }
+}
+
+// ── Wide layout: compact row, preview ─────────────────────────────────────────
+
+/// A PR in the wide layout's list: title, where it is, and what its review
+/// says. Its actions live in the preview.
+class _InboxRow extends StatelessWidget {
+  final InstanceGroup<PR> group;
+  final bool reviewing;
+  final bool selected;
+  final DateTime now;
+  final VoidCallback onTap;
+
+  const _InboxRow({
+    required this.group,
+    required this.reviewing,
+    required this.selected,
+    required this.now,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final pr = group.value;
+    final theme = Theme.of(context);
+    final status = prStatusOf(pr, reviewing: reviewing);
+    final statusColor = resolveAppColor(context, status.color);
+    final accent = resolveAppColor(context, AppColors.accent);
+    final muted = resolveAppColor(context, AppColors.textMuted);
+    final small = theme.textTheme.bodySmall?.copyWith(color: muted);
+    final review = pr.latestReview;
+    final running = reviewing || (pr.reviewStatus?.active ?? false);
+    // The counts belong to the review the status describes, not to a run
+    // that is going on or failed after it.
+    final findings = review != null && !running && currentFailure(pr) == null
+        ? findingCounts(review)
+        : '';
+    final row = Semantics(
+      button: true,
+      selected: selected,
+      child: Material(
+        color: selected ? accent.withValues(alpha: 0.12) : Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            decoration: BoxDecoration(
+              border: Border(
+                left: BorderSide(
+                  color: selected ? accent : Colors.transparent,
+                  width: 3,
+                ),
+                bottom: BorderSide(
+                  color: resolveAppColor(context, AppColors.border),
+                ),
+              ),
+            ),
+            padding: const EdgeInsets.fromLTRB(13, 11, 16, 11),
+            child: Opacity(
+              opacity: pr.state == 'open' ? 1 : 0.6,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: running
+                        ? SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: statusColor,
+                            ),
+                          )
+                        : Icon(status.icon, size: 16, color: statusColor),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                pr.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.3,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(relativeTime(pr.updatedAt, now), style: small),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${pr.repo} #${pr.number} · ${pr.author}'
+                          '${pr.state == 'open' ? '' : ' · ${pr.state}'}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: small,
+                        ),
+                        const SizedBox(height: 5),
+                        Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: status.label,
+                                style: TextStyle(
+                                  color: statusColor,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (findings.isNotEmpty)
+                                TextSpan(text: ' · $findings'),
+                            ],
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: small,
+                        ),
+                        if (group.members.isNotEmpty) ...[
+                          const SizedBox(height: 5),
+                          InstanceBadges(
+                            instances: [
+                              for (final m in group.orderedMembers)
+                                (id: m.instanceId, name: m.instanceName),
+                            ],
+                            compact: true,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return row;
+  }
+}
+
+/// The selected PR's latest review beside the list, with its actions. The
+/// review comes with the list payload, so this makes no request of its own.
+class _PrPreview extends ConsumerStatefulWidget {
+  final InstanceGroup<PR> group;
+  const _PrPreview({super.key, required this.group});
+
+  @override
+  ConsumerState<_PrPreview> createState() => _PrPreviewState();
+}
+
+class _PrPreviewState extends ConsumerState<_PrPreview>
+    with _PrActions<_PrPreview> {
+  @override
+  InstanceGroup<PR> get group => widget.group;
+
+  @override
+  Widget build(BuildContext context) {
+    final pr = _pr;
+    final failure = currentFailure(pr);
+    final isReviewing =
+        (pr.reviewStatus?.active ?? false) ||
+        ref.watch(reviewingPRsProvider).containsKey(_reviewKey);
+    final danger = resolveAppColor(context, AppColors.danger);
+    final review = pr.latestReview;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 10, 16, 10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              if (isReviewing)
+                OutlinedButton.icon(
+                  icon: _cancelling
+                      ? const SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.stop_circle_outlined, size: 16),
+                  label: Text(_cancelling ? 'Cancelling…' : 'Cancel review'),
+                  onPressed: _cancelling ? null : _cancelReview,
+                )
+              else
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: Text(
+                    failure != null
+                        ? 'Retry'
+                        : review == null
+                        ? 'Review'
+                        : 'Re-review',
+                  ),
+                  onPressed: pr.repo.isEmpty ? null : _triggerReview,
+                ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(Icons.close, size: 18),
+                tooltip: 'Dismiss PR',
+                onPressed: _dismiss,
+              ),
+              const SizedBox(width: 4),
+              FilledButton.icon(
+                key: const Key('inbox-preview-open'),
+                icon: const Icon(Icons.open_in_full, size: 16),
+                label: const Text('Open'),
+                onPressed: () =>
+                    context.push(prDetailRoute(pr.id, _instanceId)),
+              ),
+            ],
+          ),
+        ),
+        if (failure != null && !isReviewing)
+          Container(
+            key: const Key('inbox-preview-failure'),
+            color: danger.withValues(alpha: 0.10),
+            padding: const EdgeInsets.fromLTRB(24, 10, 24, 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.error_outline, size: 16, color: danger),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Tooltip(
+                    message: failure.error,
+                    child: Text(
+                      reviewFailureSummary(failure),
+                      maxLines: 4,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: danger),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        const Divider(height: 1),
+        Expanded(
+          child: ReviewWorkspace(
+            pr: pr,
+            reviews: [?review],
+            // The toolbar above starts reviews; the workspace's own button is
+            // for a PR never reviewed, and is off while one runs.
+            onReview: isReviewing || pr.repo.isEmpty ? null : _triggerReview,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The preview before a row is picked: what the buckets hold.
+class _EmptyPreview extends StatelessWidget {
+  final Map<InboxBucket, int> counts;
+  const _EmptyPreview({required this.counts});
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = resolveAppColor(context, AppColors.textMuted);
+    final theme = Theme.of(context);
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.inbox_outlined, size: 44, color: muted),
+          const SizedBox(height: 14),
+          Text(
+            'Select a PR to read its review',
+            style: theme.textTheme.titleMedium,
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '${counts[InboxBucket.needsYou] ?? 0} need you · '
+            '${counts[InboxBucket.inProgress] ?? 0} in progress · '
+            '${counts[InboxBucket.doneToday] ?? 0} done today',
+            style: theme.textTheme.bodyMedium?.copyWith(color: muted),
+          ),
+        ],
+      ),
+    );
   }
 }
 
