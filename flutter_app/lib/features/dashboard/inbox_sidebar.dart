@@ -6,6 +6,7 @@ import 'package:mix/mix.dart' show ColorToken;
 import '../../core/models/flow.dart';
 import '../../shared/design_system/color_resolver.dart';
 import '../../shared/design_system/tokens.dart';
+import '../merge_tracking/merge_tracking_providers.dart';
 import 'dashboard_providers.dart';
 import 'inbox_buckets.dart';
 
@@ -120,16 +121,20 @@ class InboxSidebar extends StatelessWidget {
     padding: const EdgeInsets.fromLTRB(10, 14, 10, 20),
     children: [
       const _SectionLabel('Inbox'),
-      for (final b in InboxBucket.values)
+      for (final b in InboxBucket.values) ...[
         _SidebarItem(
           key: Key('inbox-bucket-${b.name}'),
           icon: b.icon,
           label: b.label,
           count: counts[b] ?? 0,
           selected: b == bucket,
-          alert: b == InboxBucket.needsYou && needsYou > 0,
+          badge: b == InboxBucket.needsYou && needsYou > 0
+              ? AppColors.danger
+              : null,
           onTap: () => onBucket(b),
         ),
+        if (b == InboxBucket.needsYou) const _YourPrsItem(),
+      ],
       if (repos.isNotEmpty) ...[
         const SizedBox(height: 18),
         const _SectionLabel('Repositories'),
@@ -301,6 +306,29 @@ class _QuotaLine extends StatelessWidget {
   }
 }
 
+/// The operator's own PRs that need them (#915), the count of the My PRs
+/// badge: red when one needs action, accent when they are only ready to merge
+/// or stale. Hidden when none does; opens My PRs.
+class _YourPrsItem extends ConsumerWidget {
+  const _YourPrsItem();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final summary = ref.watch(myPrsSummaryProvider);
+    if (summary.isEmpty) return const SizedBox.shrink();
+    return _SidebarItem(
+      key: const Key('inbox-your-prs'),
+      icon: Icons.merge_type,
+      label: 'Your PRs',
+      tooltip: summary.describe(),
+      count: summary.total,
+      selected: false,
+      badge: summary.needAction > 0 ? AppColors.danger : AppColors.accent,
+      onTap: () => context.go('/merge'),
+    );
+  }
+}
+
 class _SectionLabel extends StatelessWidget {
   final String text;
   const _SectionLabel(this.text);
@@ -326,8 +354,9 @@ class _SidebarItem extends StatelessWidget {
   final int count;
   final bool selected;
 
-  /// Shows the count as a filled badge: something waits on the operator.
-  final bool alert;
+  /// Shows the count as a badge in this colour: something waits on the
+  /// operator.
+  final ColorToken? badge;
   final VoidCallback onTap;
 
   const _SidebarItem({
@@ -337,7 +366,7 @@ class _SidebarItem extends StatelessWidget {
     this.tooltip,
     required this.count,
     required this.selected,
-    this.alert = false,
+    this.badge,
     required this.onTap,
   });
 
@@ -345,7 +374,7 @@ class _SidebarItem extends StatelessWidget {
   Widget build(BuildContext context) {
     final accent = resolveAppColor(context, AppColors.accent);
     final muted = resolveAppColor(context, AppColors.textMuted);
-    final danger = resolveAppColor(context, AppColors.danger);
+    final fill = badge == null ? null : resolveAppColor(context, badge!);
     // Dark mode's status colours are light: tint the badge there, as
     // SeverityBadge does, instead of white text on them.
     final dark = Theme.of(context).brightness == Brightness.dark;
@@ -376,20 +405,20 @@ class _SidebarItem extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (alert)
+                if (fill != null)
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 7,
                       vertical: 1,
                     ),
                     decoration: BoxDecoration(
-                      color: dark ? danger.withValues(alpha: 0.2) : danger,
+                      color: dark ? fill.withValues(alpha: 0.2) : fill,
                       borderRadius: BorderRadius.circular(10),
                     ),
                     child: Text(
                       '$count',
                       style: text?.copyWith(
-                        color: dark ? danger : Colors.white,
+                        color: dark ? fill : Colors.white,
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
                       ),

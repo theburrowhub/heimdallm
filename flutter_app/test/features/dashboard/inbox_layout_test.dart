@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
 import 'package:heimdallm/core/models/flow.dart';
+import 'package:heimdallm/core/models/my_prs_summary.dart';
 import 'package:heimdallm/core/models/issue.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
@@ -13,6 +14,9 @@ import 'package:heimdallm/core/models/review_status.dart';
 import 'package:heimdallm/features/dashboard/activity_filters.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
+import 'package:heimdallm/features/merge_tracking/merge_tracking_providers.dart';
+import 'package:heimdallm/shared/design_system/color_resolver.dart';
+import 'package:heimdallm/shared/design_system/tokens.dart';
 import 'package:heimdallm/shared/design_system/components/app_list_row.dart';
 import 'package:heimdallm/shared/design_system/theme.dart';
 import 'package:mocktail/mocktail.dart';
@@ -90,6 +94,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
   List<PR>? prs,
   List<PR> Function()? load,
   void Function(_MockApiClient api)? stub,
+  MyPrsSummary yourPrs = const MyPrsSummary(),
 }) async {
   SharedPreferences.setMockInitialValues({});
   tester.view.physicalSize = size;
@@ -106,6 +111,7 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
       ),
       sseStreamProvider.overrideWith((ref) => const Stream.empty()),
       daemonConnectionProvider.overrideWith(_Connection.new),
+      myPrsSummaryProvider.overrideWith((ref) => yourPrs),
     ],
   );
   addTearDown(container.dispose);
@@ -118,6 +124,10 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
         routerConfig: GoRouter(
           routes: [
             GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            GoRoute(
+              path: '/merge',
+              builder: (_, _) => const Scaffold(body: Text('My PRs screen')),
+            ),
             GoRoute(
               path: '/server',
               builder: (_, _) => const Scaffold(body: Text('Server screen')),
@@ -692,6 +702,7 @@ void main() {
         ),
         sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         daemonConnectionProvider.overrideWith(_Connection.new),
+        myPrsSummaryProvider.overrideWith((ref) => const MyPrsSummary()),
       ],
     );
     addTearDown(container.dispose);
@@ -758,5 +769,58 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await _settle(tester);
     expect(find.textContaining('PR detail'), findsNothing);
+  });
+
+  group('Your PRs (#915)', () {
+    final item = find.byKey(const Key('inbox-your-prs'));
+
+    Color badgeOf(WidgetTester tester) => tester
+        .widgetList<Container>(
+          find.descendant(of: item, matching: find.byType(Container)),
+        )
+        .map((c) => (c.decoration as BoxDecoration?)?.color)
+        .whereType<Color>()
+        .single;
+
+    testWidgets('counts the PRs that need the operator and opens My PRs', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        yourPrs: const MyPrsSummary(needAction: 1, ready: 1, total: 2),
+      );
+
+      expect(
+        find.descendant(of: item, matching: find.text('2')),
+        findsOneWidget,
+      );
+      expect(
+        find.byTooltip('1 needs your action · 1 ready to merge'),
+        findsOneWidget,
+      );
+      expect(
+        badgeOf(tester),
+        resolveAppColor(tester.element(item), AppColors.danger),
+      );
+
+      await tester.tap(item);
+      await _settle(tester);
+      expect(find.text('My PRs screen'), findsOneWidget);
+    });
+
+    testWidgets('is accent-coloured when nothing needs action', (tester) async {
+      await _pump(tester, yourPrs: const MyPrsSummary(ready: 1, total: 1));
+      expect(
+        badgeOf(tester),
+        resolveAppColor(tester.element(item), AppColors.accent),
+      );
+    });
+
+    testWidgets('is hidden when none of them needs the operator', (
+      tester,
+    ) async {
+      await _pump(tester);
+      expect(item, findsNothing);
+    });
   });
 }
