@@ -1,6 +1,6 @@
 name: heimdallm
 description: GitHub PR Auto-Review Desktop App
-version: 0.10.7 # x-release-please-version
+version: 0.10.8 # x-release-please-version
 
 environment:
   sdk: '>=3.11.0 <4.0.0'
