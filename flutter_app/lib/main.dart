@@ -10,6 +10,7 @@ import 'core/state/appearance_preferences.dart';
 import 'core/state/notification_preferences.dart';
 import 'shared/design_system/components/components.dart';
 import 'shared/design_system/theme.dart';
+import 'shared/layout/title_bar_strip.dart';
 import 'shared/router.dart';
 
 /// Global router — accessible via the container so the tray menu +
@@ -529,8 +530,9 @@ class _SplashApp extends ConsumerWidget {
       theme: HeimdallmTheme.light(),
       darkTheme: HeimdallmTheme.dark(),
       themeMode: ref.watch(appearanceProvider),
-      builder: (context, child) =>
-          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => HeimdallmTheme.scope(
+        child: TitleBarStrip(child: child ?? const SizedBox.shrink()),
+      ),
       home: Scaffold(
         body: Center(
           child: Column(
@@ -582,8 +584,9 @@ class _ErrorApp extends ConsumerWidget {
       theme: HeimdallmTheme.light(),
       darkTheme: HeimdallmTheme.dark(),
       themeMode: ref.watch(appearanceProvider),
-      builder: (context, child) =>
-          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => HeimdallmTheme.scope(
+        child: TitleBarStrip(child: child ?? const SizedBox.shrink()),
+      ),
       home: Scaffold(
         body: Center(
           child: ConstrainedBox(
@@ -652,8 +655,9 @@ class HeimdallmApp extends ConsumerWidget {
       theme: HeimdallmTheme.light(),
       darkTheme: HeimdallmTheme.dark(),
       themeMode: ref.watch(appearanceProvider),
-      builder: (context, child) =>
-          HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => HeimdallmTheme.scope(
+        child: TitleBarStrip(child: child ?? const SizedBox.shrink()),
+      ),
       routerConfig: router ?? createRouter(initialLocation: initialLocation),
     );
   }

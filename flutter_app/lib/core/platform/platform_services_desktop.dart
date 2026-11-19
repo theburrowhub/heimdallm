@@ -3,7 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' show VoidCallback;
 import 'package:flutter/foundation.dart'
-    show debugPrint, kReleaseMode, visibleForTesting;
+    show
+        ValueListenable,
+        ValueNotifier,
+        debugPrint,
+        kReleaseMode,
+        visibleForTesting;
 import 'package:flutter/painting.dart' show Size;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -96,7 +101,8 @@ class DesktopPlatformServices
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability,
         NotificationModePlatformCapability,
-        TrayMyPrsPlatformCapability {
+        TrayMyPrsPlatformCapability,
+        WindowChromePlatformCapability {
   DesktopPlatformServices({
     int apiPort = 7842,
     String? tokenPath,
@@ -449,6 +455,59 @@ class DesktopPlatformServices
     }
   }
 
+  /// The height of macOS's standard title bar, where the traffic lights sit.
+  static const macOSTitleBarHeight = 28.0;
+
+  @override
+  double get titleBarHeight => _isMacOS ? macOSTitleBarHeight : 0;
+
+  final ValueNotifier<bool> _fullScreen = ValueNotifier(false);
+
+  @override
+  ValueListenable<bool> get fullScreen => _fullScreen;
+
+  // Window listener (registered in setupWindow): macOS hides the title bar in
+  // native full screen, so the strip collapses.
+  @override
+  void onWindowEnterFullScreen() => _fullScreen.value = true;
+
+  @override
+  void onWindowLeaveFullScreen() => _fullScreen.value = false;
+
+  @override
+  Future<void> startWindowDrag() => windowManager.startDragging();
+
+  /// Follows System Settings › Desktop & Dock › "Double-click a window's title
+  /// bar to", stored as AppleActionOnDoubleClick: "Minimize", "None", or
+  /// "Maximize" (zoom, also when unset). Read on each double-click, so a
+  /// change applies without a restart.
+  @override
+  Future<void> titleBarDoubleClick() async {
+    String? action;
+    try {
+      final result = await _runPlatformProcess('defaults', const [
+        'read',
+        '-g',
+        'AppleActionOnDoubleClick',
+      ]);
+      if (result.exitCode == 0) action = '${result.stdout}'.trim();
+    } catch (_) {
+      // Unreadable setting: zoom, the system default.
+    }
+    switch (action) {
+      case 'Minimize':
+        await windowManager.minimize();
+      case 'None':
+        return;
+      default:
+        if (await windowManager.isMaximized()) {
+          await windowManager.unmaximize();
+        } else {
+          await windowManager.maximize();
+        }
+    }
+  }
+
   @override
   Future<void> setupWindow({
     required String title,
@@ -460,11 +519,14 @@ class DesktopPlatformServices
     // setPreventWindowClose(true), `onWindowClose` hides the window
     // instead of letting it actually close.
     windowManager.addListener(this);
+    // On macOS the app draws the title bar itself (see [titleBarHeight]), so
+    // the system one is hidden; the traffic lights stay native. Linux keeps
+    // its window manager's decorations.
     final options = WindowOptions(
       size: size,
       minimumSize: minimumSize,
       title: title,
-      titleBarStyle: TitleBarStyle.normal,
+      titleBarStyle: _isMacOS ? TitleBarStyle.hidden : TitleBarStyle.normal,
     );
     await windowManager.setSize(size);
     await windowManager.setMinimumSize(minimumSize);

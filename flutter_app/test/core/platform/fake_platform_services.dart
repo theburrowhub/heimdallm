@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:ui' show VoidCallback;
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter/painting.dart' show Size;
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
@@ -17,7 +18,8 @@ class FakePlatformServices
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability,
         NotificationModePlatformCapability,
-        TrayMyPrsPlatformCapability {
+        TrayMyPrsPlatformCapability,
+        WindowChromePlatformCapability {
   FakePlatformServices({
     this.apiBaseUrl = 'http://127.0.0.1:7842',
     this.token,
@@ -59,6 +61,21 @@ class FakePlatformServices
   AppUpdateStatus _appUpdateStatus;
   final StreamController<AppUpdateStatus> _appUpdateEvents =
       StreamController<AppUpdateStatus>.broadcast();
+
+  /// Window chrome (#902): 0 keeps the system title bar, as on Linux and the
+  /// web; a macOS-like test sets it to the strip height.
+  @override
+  double titleBarHeight = 0;
+  @override
+  final ValueNotifier<bool> fullScreen = ValueNotifier(false);
+  int startWindowDragCalls = 0;
+  int titleBarDoubleClickCalls = 0;
+
+  @override
+  Future<void> startWindowDrag() async => startWindowDragCalls++;
+
+  @override
+  Future<void> titleBarDoubleClick() async => titleBarDoubleClickCalls++;
 
   // Records of calls for assertions.
   int loadApiTokenCalls = 0;

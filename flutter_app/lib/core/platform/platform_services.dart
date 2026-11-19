@@ -1,5 +1,6 @@
 import 'dart:async' show Stream;
 import 'dart:ui' show VoidCallback;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
 import '../models/config_model.dart';
@@ -262,6 +263,28 @@ abstract interface class NotificationModePlatformCapability {
   /// Applies [preferences] to every notification raised afterwards, including
   /// ones the platform raises on its own, like "update available".
   void setNotificationModes(NotificationPreferences preferences);
+}
+
+/// Optional window chrome the app draws itself (#902). macOS implements it: its
+/// system title bar is hidden and the app draws a strip in the app bar's colour
+/// in its place, so title bar and app bar read as one native toolbar. Linux and
+/// the web keep their own title bar and report a height of 0 or do not
+/// implement it at all.
+abstract interface class WindowChromePlatformCapability {
+  /// Height of the title-bar strip the app must draw; 0 when the system draws
+  /// its own title bar.
+  double get titleBarHeight;
+
+  /// Whether the window is in native full screen, where the system hides its
+  /// title bar and the strip must take no space.
+  ValueListenable<bool> get fullScreen;
+
+  /// Moves the window with the pointer, as dragging a title bar does.
+  Future<void> startWindowDrag();
+
+  /// Does what double-clicking a title bar does: zoom or restore the window,
+  /// or what the user chose instead in the system settings.
+  Future<void> titleBarDoubleClick();
 }
 
 /// Optional termination path for a process that has already disproved desktop

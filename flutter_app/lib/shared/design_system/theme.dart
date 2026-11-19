@@ -9,6 +9,9 @@ import 'tokens.dart';
 /// brand color.
 const kBrandSeed = Color(0xFF0969DA);
 
+/// Height of every app bar: a desktop toolbar, shorter than Material's 56.
+const kNativeToolbarHeight = 48.0;
+
 /// Builds Heimdallm's Material [ThemeData] and the Mix [MixScope] that sits
 /// on top of it. Material stays authoritative for [ColorScheme]/[TextTheme]
 /// (so built-in widgets like [TextField], [Dialog] and menus keep looking
@@ -26,7 +29,36 @@ class HeimdallmTheme {
       seedColor: kBrandSeed,
       brightness: brightness,
     );
-    return ThemeData(colorScheme: scheme, useMaterial3: true);
+    final base = ThemeData(colorScheme: scheme, useMaterial3: true);
+    // Native desktop chrome (#902): controls highlight on hover and press but
+    // never draw ink ripples; the app bar is a flat toolbar on the surface
+    // colour, so it reads as one piece with the title bar strip macOS draws
+    // above it (see TitleBarStrip) and never tints when content scrolls under.
+    return base.copyWith(
+      splashFactory: NoSplash.splashFactory,
+      appBarTheme: AppBarTheme(
+        backgroundColor: scheme.surface,
+        foregroundColor: scheme.onSurface,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        centerTitle: false,
+        toolbarHeight: kNativeToolbarHeight,
+        titleTextStyle: base.textTheme.titleMedium?.copyWith(
+          fontSize: 15,
+          fontWeight: FontWeight.w600,
+          color: scheme.onSurface,
+        ),
+        shape: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+      ),
+      scrollbarTheme: const ScrollbarThemeData(
+        thickness: WidgetStatePropertyAll(6),
+        radius: Radius.circular(3),
+      ),
+      tooltipTheme: const TooltipThemeData(
+        waitDuration: Duration(milliseconds: 500),
+      ),
+    );
   }
 
   /// Wraps [child] with a [MixScope] whose tokens are derived from the
