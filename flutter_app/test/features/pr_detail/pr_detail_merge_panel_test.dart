@@ -243,4 +243,67 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Posted by a peer · abc1234'), findsOneWidget);
   });
+
+  // A detail that fails to load says so and can be retried in place.
+  testWidgets('a failed load offers to try again', (tester) async {
+    var calls = 0;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          prDetailProvider((instanceId: '', prId: 1)).overrideWith((_) async {
+            calls++;
+            throw Exception('daemon unreachable');
+          }),
+          sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+          mergeTrackingDetailProvider.overrideWith(
+            (ref, id) async => throw Exception('not tracked'),
+          ),
+        ],
+        child: MaterialApp.router(
+          builder: (context, child) =>
+              HeimdallmTheme.scope(child: child ?? const SizedBox.shrink()),
+          routerConfig: GoRouter(
+            initialLocation: '/prs/1',
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const SizedBox()),
+              GoRoute(
+                path: '/prs/:id',
+                builder: (ctx, state) => PRDetailScreen(
+                  prId: int.parse(state.pathParameters['id']!),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Could not load this PR'), findsOneWidget);
+    expect(find.textContaining('daemon unreachable'), findsOneWidget);
+
+    // Riverpod retries a failing provider on its own, so only count what the
+    // button adds on top.
+    final before = calls;
+    await tester.tap(find.text('Try again'));
+    await tester.pump();
+    expect(calls, greaterThan(before));
+  });
+
+  // A block that is not about checks reads as a sentence in the inspector.
+  testWidgets('a non-check block is explained in the inspector', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        tracked: _entry(
+          blockReason: 'review_required',
+          blockDetail: 'Waiting for an approving review',
+          failing: 0,
+          decision: const MergeDecision(ready: false, blocks: []),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Waiting for an approving review'), findsOneWidget);
+  });
 }

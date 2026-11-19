@@ -497,4 +497,28 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.byKey(const Key('verdict-hero')), findsOneWidget);
   });
+
+  testWidgets('a commented or dismissed review shows that verdict', (
+    tester,
+  ) async {
+    for (final (state, label) in [
+      ('COMMENTED', 'Commented'),
+      ('DISMISSED', 'Dismissed'),
+    ]) {
+      await _pumpAt(
+        tester,
+        ReviewWorkspace(
+          pr: _pr(),
+          reviews: [_review(state: state)],
+          now: () => _now,
+        ),
+      );
+      final hero = find.byKey(const Key('verdict-hero'));
+      expect(
+        find.descendant(of: hero, matching: find.text(label)),
+        findsOneWidget,
+        reason: state,
+      );
+    }
+  });
 }
