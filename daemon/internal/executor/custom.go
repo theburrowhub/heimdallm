@@ -81,6 +81,13 @@ func CustomAgentFor(name string) (CustomAgent, bool) {
 	return a, true
 }
 
+// ExploresCheckout reports whether cli is given the review's working directory.
+// Custom agents and the Cursor CLI never are: ExecuteRaw runs them in an empty,
+// daemon-owned workspace and they review from the diff in the prompt alone.
+func ExploresCheckout(cli string) bool {
+	return !IsCustomAgent(cli) && cli != "cursor_cli"
+}
+
 // IsCustomAgent reports whether name is a registered custom agent.
 func IsCustomAgent(name string) bool {
 	p := customAgents.Load()

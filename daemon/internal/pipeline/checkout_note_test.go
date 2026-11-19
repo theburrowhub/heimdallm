@@ -24,7 +24,10 @@ func runForPrompts(t *testing.T, opts pipeline.RunOptions) []string {
 	exec := &fakePromptExec{}
 	p := pipeline.New(s, &fakeGHCounter{diff: fileDiff("main.go", "+func added() {}")}, exec, &fakeNotify{})
 	p.SetBotLogin("heimdallm-bot")
-	opts.Primary, opts.Force = "claude", true
+	if opts.Primary == "" {
+		opts.Primary = "claude"
+	}
+	opts.Force = true
 
 	pr := tokenPR("aaaaaaa1")
 	if _, err := p.Run(pr, opts); err != nil {
@@ -87,5 +90,42 @@ func TestRun_NoCheckoutNoteWithoutAWorkDir(t *testing.T) {
 		if strings.Contains(prompt, checkoutNoteMarker) {
 			t.Errorf("checkout note without a working directory:\n%s", prompt)
 		}
+	}
+}
+
+// Custom agents and Cursor always run in an empty workspace, so a flow made
+// only of them gets no checkout note; one agent that explores is enough.
+func TestRun_CheckoutNoteOnlyForAgentsThatExploreTheCheckout(t *testing.T) {
+	const wd = "/home/heimdallm/repos/repo"
+	for name, tc := range map[string]struct {
+		opts pipeline.RunOptions
+		want bool
+	}{
+		"cursor alone": {pipeline.RunOptions{Primary: "cursor_cli", ExecOpts: executor.ExecOptions{WorkDir: wd}}, false},
+		"cursor in a flow": {pipeline.RunOptions{
+			Primary:       "cursor_cli",
+			AgentExecOpts: map[string]executor.ExecOptions{"cursor_cli": {WorkDir: wd}},
+		}, false},
+		"cursor then claude": {pipeline.RunOptions{Primary: "cursor_cli", Fallback: "claude", ExecOpts: executor.ExecOptions{WorkDir: wd}}, true},
+		"claude in a flow": {pipeline.RunOptions{
+			Primary:       "cursor_cli",
+			AgentExecOpts: map[string]executor.ExecOptions{"cursor_cli": {WorkDir: wd}, "claude": {WorkDir: wd}},
+		}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := strings.Contains(runForPrompts(t, tc.opts)[0], checkoutNoteMarker)
+			if got != tc.want {
+				t.Errorf("checkout note present = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The note must not silence a real finding: a symbol missing from the diff as
+// well as the checkout is still worth reporting.
+func TestCheckoutNoteKeepsSymbolsMissingFromTheDiffReportable(t *testing.T) {
+	prompt := runForPrompts(t, pipeline.RunOptions{ExecOpts: executor.ExecOptions{WorkDir: "/w"}})[0]
+	if !strings.Contains(prompt, "unless the diff lacks it too") {
+		t.Errorf("checkout note lacks the diff exception:\n%s", prompt)
 	}
 }
