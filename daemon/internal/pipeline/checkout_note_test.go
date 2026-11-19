@@ -121,11 +121,15 @@ func TestRun_CheckoutNoteOnlyForAgentsThatExploreTheCheckout(t *testing.T) {
 	}
 }
 
-// The note must not silence a real finding: a symbol missing from the diff as
-// well as the checkout is still worth reporting.
-func TestCheckoutNoteKeepsSymbolsMissingFromTheDiffReportable(t *testing.T) {
+// The note must not silence a real finding: a symbol missing from the whole
+// PR's diff as well as the checkout is still worth reporting. A partial diff
+// (incremental, truncated, or with noise files not shown) proves nothing, so
+// the exception names those cases.
+func TestCheckoutNoteKeepsSymbolsMissingFromTheWholeDiffReportable(t *testing.T) {
 	prompt := runForPrompts(t, pipeline.RunOptions{ExecOpts: executor.ExecOptions{WorkDir: "/w"}})[0]
-	if !strings.Contains(prompt, "unless the diff lacks it too") {
-		t.Errorf("checkout note lacks the diff exception:\n%s", prompt)
+	for _, want := range []string{"missing only if the diff lacks it too", "the diff is the whole PR", "incremental", "truncated", "not shown"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("checkout note lacks %q:\n%s", want, prompt)
+		}
 	}
 }

@@ -92,10 +92,13 @@ func (p *Pipeline) reviewDiff(pr *github.PullRequest, prevReview *store.Review, 
 // checkoutNote warns an agent that explores a repository checkout that the
 // checkout is not the PR head: it is the operator's local_dir as it happens to
 // be, or the tip of the default branch (#894). Without it an agent reports what
-// the PR adds as missing, or reviews the old version of a changed file.
+// the PR adds as missing, or reviews the old version of a changed file. The
+// "missing" exception names the partial diffs (incremental, truncated, noise
+// filtered): each says so in the prompt, and absence from it proves nothing.
 const checkoutNote = "The repository checkout in your working directory is context only and may not contain this PR's changes " +
 	"(it can be the default branch or an unrelated local branch). The diff is the authoritative version of the changed code: " +
-	"do not report a file, function or import as missing because the checkout lacks it, unless the diff lacks it too.\n"
+	"do not report a file, function or import as missing because the checkout lacks it. It is missing only if the diff lacks it too " +
+	"and the diff is the whole PR: an incremental or truncated diff, or one with files marked not shown, can leave out where the PR defines it.\n"
 
 // reviewHasCheckout reports whether any agent this review may run explores a
 // repository checkout: it has a working directory and is not one of the agents
