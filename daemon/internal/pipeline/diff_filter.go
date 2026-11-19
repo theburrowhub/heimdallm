@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/heimdallm/daemon/internal/executor"
 )
 
 // DefaultNoiseGlobs are the files the filter_noise measure drops from the diff
@@ -100,22 +102,6 @@ func matchesNoiseGlob(file string, globs []string) bool {
 	return false
 }
 
-// diffSectionPath extracts the post-image path ("b/...") of a file section,
-// falling back to the pre-image for deletions.
-func diffSectionPath(section string) string {
-	firstLine, _, _ := strings.Cut(section, "\n")
-	// "a/old b/new"; paths with spaces are rare enough that splitting on the
-	// last " b/" is the pragmatic choice git's own porcelain makes.
-	if i := strings.LastIndex(firstLine, " b/"); i >= 0 {
-		return firstLine[i+3:]
-	}
-	fields := strings.Fields(firstLine)
-	if len(fields) == 0 {
-		return ""
-	}
-	return strings.TrimPrefix(fields[0], "a/")
-}
-
 func isBinarySection(section string) bool {
 	return strings.Contains(section, "\nBinary files ") || strings.Contains(section, "\nGIT binary patch")
 }
@@ -161,7 +147,7 @@ func FilterDiffNoise(diff string, globs []string) (string, []string) {
 		}
 		section := diff[loc[0]:end]
 		body := section[len("diff --git "):]
-		file := diffSectionPath(body)
+		file := executor.DiffSectionPath(body)
 		if matchesNoiseGlob(file, globs) || isBinarySection(section) || isGeneratedSection(section) {
 			omitted = append(omitted, file)
 			continue
