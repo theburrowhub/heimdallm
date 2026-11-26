@@ -460,6 +460,24 @@ void main() {
       expect(boardLayout([0, 2, 0], 3000).columns, [0, 2, 0]);
     });
 
+    test('cards stop at their cap and the spare width is not handed out', () {
+      final few = boardLayout([1, 1, 1], 3000);
+      expect(few.columns, [1, 1, 1]);
+      for (final w in few.widths) {
+        expect(w, boardCardMaxWidth + 20);
+      }
+      final one = boardLayout([0, 0, 1], 3000);
+      expect(one.widths, [
+        boardEmptyLaneWidth,
+        boardEmptyLaneWidth,
+        boardCardMaxWidth + 20,
+      ]);
+      // Several columns stop at the cap per card, plus the gaps between.
+      final two = boardLayout([0, 0, 2], 3000);
+      expect(two.columns, [0, 0, 2]);
+      expect(two.widths[2], 2 * boardCardMaxWidth + 8 + 20);
+    });
+
     test('a narrow board keeps one column per lane and still fills it', () {
       final l = boardLayout([3, 3, 3], 904);
       expect(l.columns, [1, 1, 1]);

@@ -188,24 +188,29 @@ const double _boardCardGap = 8;
 /// A lane's horizontal padding around its cards, 10 on each side.
 const double _boardLaneInset = 20;
 
+/// The widest a card gets: past it, a window's spare width is left around the
+/// board instead of stretching a few cards across it.
+const double boardCardMaxWidth = 520;
+
 /// How wide each board lane is and how many card columns it holds (#923),
 /// given the cards in each lane and the width the lanes share.
 ///
 /// An empty lane gets [boardEmptyLaneWidth]. Every other lane gets one column,
 /// then spare columns go one at a time to the lane with the most cards per
 /// column, never beyond its card count, while they fit at
-/// [boardCardMinWidth]. Width left over is shared out by column, so the lanes
-/// with cards fill the row.
+/// [boardCardMinWidth]. Width left over is shared out by column up to
+/// [boardCardMaxWidth] per card; what is left past that is not handed out, so
+/// the lanes then sum to less than [width] and the board is centred.
 ({List<double> widths, List<int> columns}) boardLayout(
   List<int> cards,
   double width,
 ) {
   final columns = [for (final c in cards) c == 0 ? 0 : 1];
-  double need(int cols) =>
-      cols * boardCardMinWidth + (cols - 1) * _boardCardGap + _boardLaneInset;
+  double span(int cols, double card) =>
+      cols * card + (cols - 1) * _boardCardGap + _boardLaneInset;
   double used() => [
     for (final c in columns)
-      if (c > 0) need(c),
+      if (c > 0) span(c, boardCardMinWidth),
   ].fold(0.0, (a, b) => a + b);
   final room = width - cards.where((c) => c == 0).length * boardEmptyLaneWidth;
   while (true) {
@@ -221,14 +226,23 @@ const double _boardLaneInset = 20;
     if (best < 0 || used() + boardCardMinWidth + _boardCardGap > room) break;
     columns[best]++;
   }
-  final total = columns.fold(0, (a, b) => a + b);
-  final spare = room - used();
+  // Every column has the same room to grow (from the minimum to the cap), so
+  // sharing the spare by column brings every lane to its cap at once: one
+  // share per column, at most that room. Negative when the window is too
+  // narrow for the minimum, and every lane gives up its share.
+  final total = columns.fold(0, (n, c) => n + c);
+  final perColumn = total == 0
+      ? 0.0
+      : ((room - used()) / total).clamp(
+          double.negativeInfinity,
+          boardCardMaxWidth - boardCardMinWidth,
+        );
   return (
     widths: [
-      for (var i = 0; i < cards.length; i++)
-        columns[i] == 0
+      for (final c in columns)
+        c == 0
             ? boardEmptyLaneWidth
-            : need(columns[i]) + spare * columns[i] / total,
+            : span(c, boardCardMinWidth) + perColumn * c,
     ],
     columns: columns,
   );
@@ -673,6 +687,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
                     padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
                     child: Row(
                       key: const Key('activity-board'),
+                      // Lanes at their card cap leave spare width: centre it.
+                      mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         for (final (i, l) in BoardLane.values.indexed) ...[
@@ -1115,21 +1131,20 @@ class _Lane extends ConsumerWidget {
             padding: const EdgeInsets.only(bottom: 8),
             child: columns == 1
                 ? card(row.single)
-                // Cards in a row share its height, so the grid reads as rows.
-                : IntrinsicHeight(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        for (var c = 0; c < columns; c++) ...[
-                          if (c > 0) const SizedBox(width: _boardCardGap),
-                          Expanded(
-                            child: c < row.length
-                                ? card(row[c])
-                                : const SizedBox.shrink(),
-                          ),
-                        ],
+                // Tops aligned, each card its own height: no intrinsic layout
+                // pass per row, and nothing a card holds can break it.
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (var c = 0; c < columns; c++) ...[
+                        if (c > 0) const SizedBox(width: _boardCardGap),
+                        Expanded(
+                          child: c < row.length
+                              ? card(row[c])
+                              : const SizedBox.shrink(),
+                        ),
                       ],
-                    ),
+                    ],
                   ),
           ),
       ],
