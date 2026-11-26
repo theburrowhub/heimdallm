@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -31,6 +33,7 @@ Future<void> _settle(WidgetTester tester) async {
 Future<(ProviderContainer, _MockApiClient)> _pump(
   WidgetTester tester, {
   bool running = true,
+  Future<bool> Function()? power,
   bool compact = false,
   void Function(_MockApiClient api)? stub,
 }) async {
@@ -39,7 +42,9 @@ Future<(ProviderContainer, _MockApiClient)> _pump(
   final container = ProviderContainer(
     overrides: [
       apiClientProvider.overrideWithValue(api),
-      daemonHealthProvider.overrideWith((ref) async => running),
+      daemonHealthProvider.overrideWith(
+        (ref) => power?.call() ?? Future.value(running),
+      ),
       sseStreamProvider.overrideWith((ref) => const Stream.empty()),
       daemonConnectionProvider.overrideWith(_Connection.new),
     ],
@@ -137,15 +142,69 @@ void main() {
     expect(find.text('Server screen'), findsOneWidget);
   });
 
-  testWidgets('a stopped daemon says so and is never asked anything', (
+  testWidgets('a stopped daemon says so; its quotas and stats are not read', (
     tester,
   ) async {
-    final (_, api) = await _pump(tester, running: false);
+    final (_, api) = await _pump(
+      tester,
+      running: false,
+      stub: (api) =>
+          when(() => api.fetchHealth()).thenAnswer((_) async => null),
+    );
 
     expect(find.text('Daemon stopped'), findsOneWidget);
-    verifyNever(() => api.fetchHealth());
     verifyNever(() => api.fetchQuotas());
     verifyNever(() => api.fetchStats());
+  });
+
+  testWidgets('it says checking until the daemon answers', (tester) async {
+    final never = Completer<Map<String, dynamic>?>();
+    await _pump(
+      tester,
+      stub: (api) =>
+          when(() => api.fetchHealth()).thenAnswer((_) => never.future),
+    );
+    expect(find.text('Checking daemon…'), findsOneWidget);
+  });
+
+  testWidgets('no answer while the power check loads is not "stopped"', (
+    tester,
+  ) async {
+    final pending = Completer<bool>();
+    await _pump(
+      tester,
+      power: () => pending.future,
+      stub: (api) =>
+          when(() => api.fetchHealth()).thenAnswer((_) async => null),
+    );
+    expect(find.text('Daemon stopped'), findsNothing);
+    expect(find.text('Daemon not reachable'), findsOneWidget);
+  });
+
+  testWidgets('a daemon started after the app shows up without a restart', (
+    tester,
+  ) async {
+    // The power button's check ran before the daemon (a CLI or compose start)
+    // and still says false.
+    Map<String, dynamic>? health;
+    final (container, api) = await _pump(
+      tester,
+      running: false,
+      stub: (api) {
+        _stubRunning(api);
+        when(() => api.fetchHealth()).thenAnswer((_) async => health);
+      },
+    );
+    expect(find.text('Daemon stopped'), findsOneWidget);
+
+    health = {'status': 'ok', 'version': '0.10.8'};
+    (container.read(daemonConnectionProvider.notifier) as _Connection).set(
+      DaemonConnectionPhase.connecting,
+    );
+    await _settle(tester);
+    expect(find.text('Daemon running'), findsOneWidget);
+    expect(find.text('Last 7 days · 5 reviews'), findsOneWidget);
+    verify(() => api.fetchQuotas()).called(1);
   });
 
   testWidgets('checks the daemon again when the event stream drops', (

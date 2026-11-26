@@ -610,6 +610,23 @@ void main() {
     ) async {
       await _pump(tester, prefs: {'activity_view_mode': 'grid'});
       expect(find.byType(GridView), findsOneWidget);
+
+      // The next save stores the view under the new key and drops the old.
+      await tester.tap(find.byTooltip('List view'));
+      await _settle(tester);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('activity_view'), 'list');
+      expect(prefs.getString('activity_view_mode'), isNull);
+    });
+
+    testWidgets('a wider window brings a stored board back', (tester) async {
+      await _pump(tester, size: const Size(boardBreakpoint - 1, 1000));
+      expect(find.byKey(const Key('activity-board')), findsNothing);
+
+      tester.view.physicalSize = const Size(1400, 1000);
+      await _settle(tester);
+      expect(find.byKey(const Key('activity-board')), findsOneWidget);
+      expect(find.byTooltip('Board view'), findsOneWidget);
     });
 
     testWidgets('a list picked after the board stays a list', (tester) async {
@@ -643,6 +660,9 @@ void main() {
 
       expect(find.byKey(const Key('activity-board')), findsNothing);
       expect(find.byType(AppListRow), findsNWidgets(5));
+      // The toggle does not offer a board that cannot show.
+      expect(find.byTooltip('Board view'), findsNothing);
+      expect(find.byTooltip('List view'), findsOneWidget);
 
       await tester.tap(find.text('Needs you'));
       await _settle(tester);

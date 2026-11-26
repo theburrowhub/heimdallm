@@ -75,34 +75,38 @@ final daemonCardQuotasProvider = FutureProvider<List<AgentQuota>>(
 /// version, how much of each agent's subscription windows is used and how many
 /// reviews the last 7 days saw. Opens the Server screen.
 ///
-/// While the daemon is stopped (the state the app bar's power button shows) it
-/// says so and reads nothing, so it never polls a daemon that is not there.
-/// [compact], for the sidebar collapsed to icons, draws the status dot alone
-/// with the rest in its tooltip.
+/// The daemon's own `/health` answer decides what it says, re-read on the
+/// events [daemonCardHealthProvider] lists, so a daemon started after the app
+/// (a CLI or compose start) shows up without a restart. With no answer it says
+/// "stopped" when the app bar's power button agrees and "not reachable"
+/// otherwise; quotas and stats are read only while the daemon answers, so a
+/// daemon that is not there is never polled. [compact], for the sidebar
+/// collapsed to icons, draws the status dot alone with the rest in its tooltip.
 class DaemonCard extends ConsumerWidget {
   final bool compact;
   const DaemonCard({super.key, this.compact = false});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final running = ref.watch(daemonHealthProvider).value ?? false;
-    final health = running
-        ? ref.watch(daemonCardHealthProvider)
-        : const AsyncValue<Map<String, dynamic>?>.data(null);
-    final quotas = running
+    final health = ref.watch(daemonCardHealthProvider);
+    final raw = health.value;
+    final answers = raw != null;
+    final quotas = answers
         ? ref.watch(daemonCardQuotasProvider).value ?? const <AgentQuota>[]
         : const <AgentQuota>[];
-    final week = running
+    final week = answers
         ? ref.watch(daemonCardWeekReviewsProvider).value
         : null;
+    // Only a settled "not running" from the power button's own check means
+    // stopped; while that check loads or fails, no answer is "not reachable".
+    final stopped = ref.watch(daemonHealthProvider).value == false;
     final theme = Theme.of(context);
     final muted = resolveAppColor(context, AppColors.textMuted);
     final small = theme.textTheme.bodySmall?.copyWith(color: muted);
-    final raw = health.value;
-    final status = !running
-        ? (label: 'Daemon stopped', color: AppColors.danger)
-        : health.isLoading && !health.hasValue
+    final status = health.isLoading && !health.hasValue
         ? (label: 'Checking daemon…', color: AppColors.textMuted)
+        : !answers && stopped
+        ? (label: 'Daemon stopped', color: AppColors.danger)
         : daemonStatusOf(raw);
     final dot = resolveAppColor(context, status.color);
     final label = status.label;

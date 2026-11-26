@@ -88,6 +88,8 @@ class ActivityFiltersNotifier extends Notifier<ActivityFilters> {
     prefs.setString(_reposKey, f.repos.join(','));
     prefs.setString(_statesKey, f.states.join(','));
     prefs.setString(_viewKey, f.viewMode);
+    // Read once by the migration above; nothing needs it after a save.
+    prefs.remove(_legacyViewModeKey);
   }
 }
 

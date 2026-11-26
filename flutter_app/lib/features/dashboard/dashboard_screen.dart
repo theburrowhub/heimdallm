@@ -417,11 +417,12 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         ref.read(inboxBucketProvider.notifier).set(b);
 
     final viewMode = filters.viewMode;
-    final toolbar = ActivityFilterBar(
+    Widget toolbarFor(double width) => ActivityFilterBar(
       allRepos: allRepos,
       sort: sort,
       onSortChanged: (mode) => ref.read(reviewsSortProvider.notifier).set(mode),
       onAddPR: () => showAddPRDialog(context),
+      boardFits: width >= boardBreakpoint,
     );
     final countLine = filters.hasFilters || bucket != InboxBucket.all
         ? Padding(
@@ -450,7 +451,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       builder: (context, constraints) {
         if (viewMode != 'board' || constraints.maxWidth < boardBreakpoint) {
           final header = <Widget>[
-            toolbar,
+            toolbarFor(constraints.maxWidth),
             if (prs.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -505,7 +506,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         if (emptyMessage != null && (prs.isEmpty || filtered.isEmpty)) {
           return Column(
             children: [
-              toolbar,
+              toolbarFor(constraints.maxWidth),
               ?boardCount,
               Expanded(child: Center(child: emptyMessage)),
             ],
@@ -567,7 +568,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            toolbar,
+            toolbarFor(constraints.maxWidth),
             ?boardCount,
             Expanded(
               child: Focus(
