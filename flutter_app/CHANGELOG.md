@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.10](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.9...gui/v0.10.10) (2026-11-26)
+
+
+### Features
+
+* **gui:** give empty board lanes less room and spread busy lanes over columns ([#924](https://github.com/theburrowhub/heimdallm/issues/924)) ([10aa81f](https://github.com/theburrowhub/heimdallm/commit/10aa81f271cd9a788d289620e691ecb4e9e90f10))
+
 ## [0.10.9](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.8...gui/v0.10.9) (2026-11-26)
 
 
