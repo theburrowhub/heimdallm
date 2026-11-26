@@ -375,6 +375,25 @@ void main() {
       expect(find.text('My PRs screen'), findsOneWidget);
     });
 
+    testWidgets('does not take a grid column of its own', (tester) async {
+      // 1400 px with one card per lane: an extra column would go to the lane
+      // with the most cards per column, so counting this card as one would
+      // halve the PR card beside an empty cell.
+      await _pump(
+        tester,
+        yourPrs: const MyPrsSummary(needAction: 1, total: 1),
+        prs: [
+          _pr(1, 'Failed PR', status: _status(error: 'agent exited')),
+          _pr(2, 'Running PR', status: _status(active: true)),
+          _pr(3, 'Done PR', review: _review(3)),
+        ],
+      );
+
+      final lane = tester.getSize(_lane('needsYou')).width;
+      expect(tester.getSize(_card('Failed PR')).width, closeTo(lane - 20, 1));
+      expect(tester.getSize(card).width, closeTo(lane - 20, 1));
+    });
+
     testWidgets('says one PR in the singular, and hides at zero', (
       tester,
     ) async {

@@ -615,20 +615,24 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         final laneCounts = [
           for (final lane in sections) lane.fold(0, (n, s) => n + s.$2.length),
         ];
-        // The Your PRs card occupies Needs you even with no PR of its own.
+        // The Your PRs card spans the lane above its grid, so it is not a
+        // grid cell: it only keeps Needs you from shrinking to an empty lane.
         final yours = ref.watch(myPrsSummaryProvider);
         final layout = boardLayout([
-          laneCounts[0] + (yours.isEmpty ? 0 : 1),
+          yours.isEmpty || laneCounts[0] > 0 ? laneCounts[0] : 1,
           laneCounts[1],
           laneCounts[2],
         ], constraints.maxWidth - 32 - 24);
+        // An empty lane has no grid, but still draws its rows as one column.
+        int columnsOf(int lane) =>
+            layout.columns[lane] < 1 ? 1 : layout.columns[lane];
         // Each lane as rows of cards, section by section: what the keys
         // walk and what the lane draws.
         final rows = [
           for (var i = 0; i < sections.length; i++)
             [
               for (final (title, cards) in sections[i])
-                (title, _rowsOf(cards, layout.columns[i].clamp(1, 99))),
+                (title, _rowsOf(cards, columnsOf(i))),
             ],
         ];
         final cells = [
@@ -644,7 +648,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
           child: _Lane(
             lane: l,
             count: laneCounts[i],
-            columns: layout.columns[i].clamp(1, 99),
+            columns: columnsOf(i),
             sections: rows[i],
             selectedId: _selected,
             cardKeys: _cardKeys,
