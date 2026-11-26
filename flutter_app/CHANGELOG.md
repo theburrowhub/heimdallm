@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.9](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.8...gui/v0.10.9) (2026-11-26)
+
+
+### Features
+
+* **gui:** Activity as a board with one sidebar ([#921](https://github.com/theburrowhub/heimdallm/issues/921)) ([aabb2d5](https://github.com/theburrowhub/heimdallm/commit/aabb2d54dfb940153658d2aaddf1231a3dfbd6e7))
+
 ## [0.10.8](https://github.com/theburrowhub/heimdallm/compare/gui/v0.10.7...gui/v0.10.8) (2026-11-19)
 
 
