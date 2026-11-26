@@ -49,6 +49,26 @@ InboxBucket? bucketOf(PR pr, {required bool reviewing, required DateTime now}) {
   return null;
 }
 
+/// The lanes of the Activity board (#920). Every PR is in exactly one.
+enum BoardLane {
+  needsYou('Needs you'),
+  inProgress('In progress'),
+  reviewed('Reviewed');
+
+  const BoardLane(this.label);
+  final String label;
+}
+
+/// The board lane [pr] goes in: the first two buckets as they are, and every
+/// other PR, today's reviews and older ones alike, under Reviewed. Most open
+/// PRs were reviewed before today, so a "done today" lane would leave them out.
+BoardLane laneOf(PR pr, {required bool reviewing, required DateTime now}) =>
+    switch (bucketOf(pr, reviewing: reviewing, now: now)) {
+      InboxBucket.needsYou => BoardLane.needsYou,
+      InboxBucket.inProgress => BoardLane.inProgress,
+      _ => BoardLane.reviewed,
+    };
+
 /// The PR's failed or cancelled review run, or null when there is none, it is
 /// running again, or a review was stored after it. The daemon clears a failure
 /// only for the commit whose review later succeeded, so one left on an older

@@ -9,6 +9,8 @@ import '../../shared/design_system/components/app_view_toggle.dart';
 String _encode(AppViewMode mode) => switch (mode) {
   AppViewMode.list => 'list',
   AppViewMode.grid => 'grid',
+  // Never set here: only Activity's toggle offers the board.
+  AppViewMode.board => 'list',
 };
 
 AppViewMode _decode(String? value) =>
@@ -22,7 +24,7 @@ AppViewMode _decode(String? value) =>
 /// Mirrors `AppearanceNotifier`/`SidebarModeNotifier`: synchronous default,
 /// async load, failures logged and never thrown. Repositories and Activity
 /// keep their own pre-existing, differently-shaped persistence
-/// (`repos_view` in `repos_screen.dart`, `activity_view_mode` inside
+/// (`repos_view` in `repos_screen.dart`, `activity_view` inside
 /// `ActivityFilters`) rather than moving onto this notifier, so their
 /// existing tests and state shape are untouched.
 class ViewModeNotifier extends Notifier<AppViewMode> {

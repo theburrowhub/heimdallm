@@ -15,12 +15,18 @@ class ActivityFilterBar extends ConsumerWidget {
   final ValueChanged<SortMode> onSortChanged;
   final VoidCallback onAddPR;
 
+  /// Whether the board fits the window. When it does not, the toggle offers
+  /// List and Grid only and shows a stored Board as the List on screen; the
+  /// choice is kept, so a wider window brings the board back.
+  final bool boardFits;
+
   const ActivityFilterBar({
     super.key,
     required this.allRepos,
     required this.sort,
     required this.onSortChanged,
     required this.onAddPR,
+    this.boardFits = true,
   });
 
   Set<String> get _allOrgs =>
@@ -111,19 +117,21 @@ class ActivityFilterBar extends ConsumerWidget {
             icon: Icons.clear_all,
             selected: true,
             accent: AppColors.danger,
-            onTap: () => notifier.update(const ActivityFilters()),
+            // Reset clears filters, not the view the operator picked.
+            onTap: () =>
+                notifier.update(ActivityFilters(viewMode: filters.viewMode)),
           ),
       ],
       trailing: [
         AppViewToggle(
-          mode: filters.viewMode == 'grid'
-              ? AppViewMode.grid
-              : AppViewMode.list,
-          onChanged: (mode) => notifier.update(
-            filters.copyWith(
-              viewMode: mode == AppViewMode.grid ? 'grid' : 'list',
-            ),
-          ),
+          showBoard: boardFits,
+          mode: switch (filters.viewMode) {
+            'grid' => AppViewMode.grid,
+            'list' => AppViewMode.list,
+            _ => boardFits ? AppViewMode.board : AppViewMode.list,
+          },
+          onChanged: (mode) =>
+              notifier.update(filters.copyWith(viewMode: mode.name)),
         ),
         const SizedBox(width: 12),
         FilledButton.icon(

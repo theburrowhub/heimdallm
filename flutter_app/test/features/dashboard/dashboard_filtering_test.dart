@@ -105,7 +105,11 @@ double _top(WidgetTester tester, String title) =>
     tester.getTopLeft(find.text(title)).dy;
 
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  // These tests assert the order and content of the full-width rows, so they
+  // run in List view; the board has its own tests.
+  setUp(
+    () => SharedPreferences.setMockInitialValues({'activity_view': 'list'}),
+  );
 
   final prs = [
     _pr(1, repo: 'acme/api', title: 'Add rate limiter', author: 'alice'),

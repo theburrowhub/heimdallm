@@ -88,9 +88,9 @@ Future<void> _pumpDashboard(
   ApiClient? api,
   Map<String, ApiClient>? apiByInstance,
 }) async {
-  // Below the inbox breakpoint: these tests exercise the full-width row and
-  // its own buttons; the wide layout is covered in inbox_layout_test.dart.
-  tester.view.physicalSize = const Size(1000, 1200);
+  // Below the board breakpoint: these tests exercise the full-width row and
+  // its own buttons; the board is covered in activity_board_test.dart.
+  tester.view.physicalSize = const Size(900, 1200);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);

@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 
 import 'app_icon_button.dart';
 
-/// The display mode a listing screen renders its items in.
-enum AppViewMode { list, grid }
+/// The display mode a listing screen renders its items in. [board] is offered
+/// only where a toggle sets `showBoard` (Activity).
+enum AppViewMode { list, grid, board }
 
 /// The list/grid toggle shared by every screen that offers both view modes.
 ///
@@ -17,12 +18,16 @@ class AppViewToggle extends StatelessWidget {
   final Key? listKey;
   final Key? gridKey;
 
+  /// Adds a board button first.
+  final bool showBoard;
+
   const AppViewToggle({
     super.key,
     required this.mode,
     required this.onChanged,
     this.listKey,
     this.gridKey,
+    this.showBoard = false,
   });
 
   @override
@@ -30,6 +35,13 @@ class AppViewToggle extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (showBoard)
+          AppIconButton(
+            icon: Icons.view_kanban_outlined,
+            selected: mode == AppViewMode.board,
+            tooltip: 'Board view',
+            onPressed: () => onChanged(AppViewMode.board),
+          ),
         AppIconButton(
           key: listKey,
           icon: Icons.view_list,

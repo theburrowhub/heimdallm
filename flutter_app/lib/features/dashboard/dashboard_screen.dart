@@ -9,6 +9,7 @@ import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart' show RoutingRules;
 import '../instances/widgets/instance_badge.dart';
 import '../../core/models/pr.dart';
+import '../../core/models/review.dart';
 import '../../core/models/review_status.dart';
 import '../../shared/design_system/color_resolver.dart';
 import '../../shared/design_system/components/components.dart';
@@ -23,7 +24,7 @@ import 'activity_filter_bar.dart';
 import 'activity_filters.dart';
 import 'dashboard_providers.dart';
 import 'inbox_buckets.dart';
-import 'inbox_sidebar.dart';
+import '../merge_tracking/merge_tracking_providers.dart';
 import '../server/server_actions.dart' as server_actions;
 
 class DashboardScreen extends ConsumerWidget {
@@ -172,10 +173,12 @@ void _sortItems(List<InstanceGroup<PR>> items, SortMode mode) {
   }
 }
 
-/// From this content width Activity shows the inbox sidebar, the compact list
-/// and the preview (#910); below it, the full-width rows.
-const double inboxBreakpoint = 1100;
-const double inboxListWidth = 400;
+/// From this content width, in Board view, Activity shows the board (#920);
+/// below it, and in List or Grid view, the full-width rows or cards.
+const double boardBreakpoint = 960;
+
+/// Lanes stop growing here, so a very wide window does not stretch the cards.
+const double boardLaneMaxWidth = 520;
 
 String _reviewKeyOf(InstanceGroup<PR> g) =>
     reviewKeyFor(g.instanceId, g.value.repo, g.value.number);
@@ -188,24 +191,11 @@ String _emptyBucketText(InboxBucket bucket) => switch (bucket) {
   InboxBucket.all => 'No open PRs.',
 };
 
-/// Repositories with their PR count under every filter but the repository
-/// one, most PRs first, so picking one in the sidebar keeps the others listed.
-List<(String, int)> _repoCounts(
-  List<InstanceGroup<PR>> groups,
-  ActivityFilters filters,
-) {
-  final others = filters.copyWith(repos: const {});
-  final counts = <String, int>{};
-  for (final g in groups) {
-    if (_matchesFilters(g.value, others)) {
-      counts[g.value.repo] = (counts[g.value.repo] ?? 0) + 1;
-    }
-  }
-  return [for (final e in counts.entries) (e.key, e.value)]..sort((a, b) {
-    final byCount = b.$2.compareTo(a.$2);
-    return byCount != 0 ? byCount : a.$1.compareTo(b.$1);
-  });
-}
+String _emptyLaneText(BoardLane lane) => switch (lane) {
+  BoardLane.needsYou => 'Nothing needs you.',
+  BoardLane.inProgress => 'Nothing in progress.',
+  BoardLane.reviewed => 'No reviews yet.',
+};
 
 class _ActivityTab extends ConsumerStatefulWidget {
   const _ActivityTab();
@@ -214,52 +204,84 @@ class _ActivityTab extends ConsumerStatefulWidget {
 }
 
 class _ActivityTabState extends ConsumerState<_ActivityTab> {
-  /// The PR the wide layout previews, by [_prIdentityKey]: the store id and
-  /// the winning instance can change between refreshes, the identity cannot.
+  /// The card the board's keyboard selection is on, by [_prIdentityKey]: the
+  /// store id and the winning instance can change between refreshes, the
+  /// identity cannot.
   String? _selected;
 
-  /// Holds the wide list's keyboard focus (#913): the keys act only while
-  /// this node itself is focused, so text fields and the preview's buttons
-  /// keep theirs.
-  final _listFocus = FocusNode(debugLabel: 'inbox-list');
+  /// Holds the board's keyboard focus (#913, #920): the keys act only while
+  /// this node itself is focused, so text fields and the cards' buttons keep
+  /// theirs.
+  final _boardFocus = FocusNode(debugLabel: 'activity-board');
 
-  /// Row keys by [_prIdentityKey], to scroll a row picked by keyboard into
+  /// Card keys by [_prIdentityKey], to scroll a card picked by keyboard into
   /// view.
-  final _rowKeys = <String, GlobalKey>{};
+  final _cardKeys = <String, GlobalKey>{};
 
   @override
   void dispose() {
-    _listFocus.dispose();
+    _boardFocus.dispose();
     super.dispose();
   }
 
-  /// Selects the next ([delta] 1) or previous (-1) row of [rows], or the
-  /// first/last when none is selected, and scrolls it into view.
-  void _move(List<InstanceGroup<PR>> rows, int delta) {
-    if (rows.isEmpty) return;
-    final at = rows.indexWhere((g) => _prIdentityKey(g.value) == _selected);
-    final next = at < 0
-        ? (delta > 0 ? 0 : rows.length - 1)
-        : (at + delta).clamp(0, rows.length - 1);
-    final key = _prIdentityKey(rows[next].value);
-    setState(() => _selected = key);
+  void _select(String id, {required bool forward}) {
+    setState(() => _selected = id);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final row = _rowKeys[key]?.currentContext;
-      if (row == null || !row.mounted) return;
+      final card = _cardKeys[id]?.currentContext;
+      if (card == null || !card.mounted) return;
       Scrollable.ensureVisible(
-        row,
+        card,
         duration: const Duration(milliseconds: 120),
-        alignmentPolicy: delta > 0
+        alignmentPolicy: forward
             ? ScrollPositionAlignmentPolicy.keepVisibleAtEnd
             : ScrollPositionAlignmentPolicy.keepVisibleAtStart,
       );
     });
   }
 
-  KeyEventResult _onListKey(
+  /// Moves the selection [delta] cards within its lane (↑/↓) or [delta] lanes
+  /// sideways at the same position (←/→, skipping empty lanes). With nothing
+  /// selected, any arrow picks the first card on the board.
+  void _move(
+    List<List<InstanceGroup<PR>>> lanes, {
+    int down = 0,
+    int across = 0,
+  }) {
+    var lane = -1, index = 0;
+    for (var l = 0; l < lanes.length && lane < 0; l++) {
+      final i = lanes[l].indexWhere(
+        (g) => _prIdentityKey(g.value) == _selected,
+      );
+      if (i >= 0) (lane, index) = (l, i);
+    }
+    if (lane < 0) {
+      final first = lanes.where((l) => l.isNotEmpty).firstOrNull;
+      if (first != null) {
+        _select(_prIdentityKey(first.first.value), forward: true);
+      }
+      return;
+    }
+    if (down != 0) {
+      final cards = lanes[lane];
+      final next = (index + down).clamp(0, cards.length - 1);
+      _select(_prIdentityKey(cards[next].value), forward: down > 0);
+      return;
+    }
+    for (var l = lane + across; l >= 0 && l < lanes.length; l += across) {
+      if (lanes[l].isEmpty) continue;
+      final cards = lanes[l];
+      _select(
+        _prIdentityKey(cards[index.clamp(0, cards.length - 1)].value),
+        forward: true,
+      );
+      return;
+    }
+  }
+
+  KeyEventResult _onBoardKey(
     FocusNode node,
     KeyEvent event,
-    List<InstanceGroup<PR>> rows,
+    List<List<InstanceGroup<PR>>> lanes,
     InstanceGroup<PR>? selected,
   ) {
     if (!node.hasPrimaryFocus || event is KeyUpEvent) {
@@ -267,9 +289,13 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     }
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.arrowDown) {
-      _move(rows, 1);
+      _move(lanes, down: 1);
     } else if (key == LogicalKeyboardKey.arrowUp) {
-      _move(rows, -1);
+      _move(lanes, down: -1);
+    } else if (key == LogicalKeyboardKey.arrowRight) {
+      _move(lanes, across: 1);
+    } else if (key == LogicalKeyboardKey.arrowLeft) {
+      _move(lanes, across: -1);
     } else if (event is KeyRepeatEvent) {
       return KeyEventResult.ignored;
     } else if (key == LogicalKeyboardKey.enter && selected != null) {
@@ -391,11 +417,12 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         ref.read(inboxBucketProvider.notifier).set(b);
 
     final viewMode = filters.viewMode;
-    final toolbar = ActivityFilterBar(
+    Widget toolbarFor(double width) => ActivityFilterBar(
       allRepos: allRepos,
       sort: sort,
       onSortChanged: (mode) => ref.read(reviewsSortProvider.notifier).set(mode),
       onAddPR: () => showAddPRDialog(context),
+      boardFits: width >= boardBreakpoint,
     );
     final countLine = filters.hasFilters || bucket != InboxBucket.all
         ? Padding(
@@ -422,9 +449,9 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < inboxBreakpoint) {
+        if (viewMode != 'board' || constraints.maxWidth < boardBreakpoint) {
           final header = <Widget>[
-            toolbar,
+            toolbarFor(constraints.maxWidth),
             if (prs.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -467,102 +494,109 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
           );
         }
 
-        // Wide: source list, compact rows and the selected PR's review.
-        final selected = visible
-            .where((g) => _prIdentityKey(g.value) == _selected)
-            .firstOrNull;
-        final Widget content;
+        // Wide, Board view: the lanes (#920).
+        final boardCount = filters.hasFilters
+            ? Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                child: AppText.muted(
+                  '${filtered.length} item${filtered.length == 1 ? '' : 's'}',
+                ),
+              )
+            : null;
         if (emptyMessage != null && (prs.isEmpty || filtered.isEmpty)) {
-          content = Center(child: emptyMessage);
-        } else if (viewMode == 'grid') {
-          content = emptyMessage != null ? Center(child: emptyMessage) : grid();
-        } else {
-          final ids = {for (final g in visible) _prIdentityKey(g.value)};
-          _rowKeys.removeWhere((id, _) => !ids.contains(id));
-          content = Focus(
-            focusNode: _listFocus,
-            autofocus: true,
-            onKeyEvent: (node, event) =>
-                _onListKey(node, event, visible, selected),
-            // A click anywhere in the list or the preview hands the keys back
-            // to the list; a field or text that takes focus on the tap gets it
-            // after this.
-            child: Listener(
-              onPointerDown: (_) => _listFocus.requestFocus(),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  SizedBox(
-                    width: inboxListWidth,
-                    child: emptyMessage != null
-                        ? Center(child: emptyMessage)
-                        : ListView.builder(
-                            key: const Key('inbox-list'),
-                            itemCount: visible.length,
-                            itemBuilder: (context, i) {
-                              final g = visible[i];
-                              final id = _prIdentityKey(g.value);
-                              return _InboxRow(
-                                key: _rowKeys.putIfAbsent(id, GlobalKey.new),
-                                group: g,
-                                reviewing: reviewingKeys.containsKey(
-                                  _reviewKeyOf(g),
-                                ),
-                                selected: g == selected,
-                                now: now,
-                                onTap: () {
-                                  _listFocus.requestFocus();
-                                  setState(() => _selected = id);
-                                },
-                              );
-                            },
-                          ),
-                  ),
-                  const VerticalDivider(width: 1),
-                  Expanded(
-                    child: selected == null
-                        ? _EmptyPreview(counts: counts, keys: _listFocus)
-                        : _PrPreview(
-                            key: ValueKey(_prIdentityKey(selected.value)),
-                            group: selected,
-                          ),
-                  ),
-                ],
-              ),
-            ),
+          return Column(
+            children: [
+              toolbarFor(constraints.maxWidth),
+              ?boardCount,
+              Expanded(child: Center(child: emptyMessage)),
+            ],
           );
         }
-        return Row(
+        final byLane = {
+          for (final l in BoardLane.values) l: <InstanceGroup<PR>>[],
+        };
+        final todayIds = <String>{};
+        for (final e in bucketed) {
+          final reviewing = reviewingKeys.containsKey(_reviewKeyOf(e.group));
+          byLane[laneOf(e.group.value, reviewing: reviewing, now: now)]!.add(
+            e.group,
+          );
+          if (e.bucket == InboxBucket.doneToday) {
+            todayIds.add(_prIdentityKey(e.group.value));
+          }
+        }
+        // Reviewed: today's reviews first, then the earlier ones, each in the
+        // toolbar's sort order.
+        final reviewed = byLane[BoardLane.reviewed]!;
+        final today = [
+          for (final g in reviewed)
+            if (todayIds.contains(_prIdentityKey(g.value))) g,
+        ];
+        final earlier = [
+          for (final g in reviewed)
+            if (!todayIds.contains(_prIdentityKey(g.value))) g,
+        ];
+        final lanes = [
+          byLane[BoardLane.needsYou]!,
+          byLane[BoardLane.inProgress]!,
+          [...today, ...earlier],
+        ];
+        final ids = {for (final g in filtered) _prIdentityKey(g.value)};
+        _cardKeys.removeWhere((id, _) => !ids.contains(id));
+        final selected = filtered
+            .where((g) => _prIdentityKey(g.value) == _selected)
+            .firstOrNull;
+        final laneWidth = ((constraints.maxWidth - 32 - 24) / 3).clamp(
+          0.0,
+          boardLaneMaxWidth,
+        );
+        Widget lane(int i, BoardLane l) => SizedBox(
+          width: laneWidth,
+          child: _Lane(
+            lane: l,
+            count: lanes[i].length,
+            sections:
+                l == BoardLane.reviewed &&
+                    today.isNotEmpty &&
+                    earlier.isNotEmpty
+                ? [('Today', today), ('Earlier', earlier)]
+                : [(null, lanes[i])],
+            selectedId: _selected,
+            cardKeys: _cardKeys,
+          ),
+        );
+        return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            InboxSidebar(
-              bucket: bucket,
-              counts: counts,
-              onBucket: selectBucket,
-              repos: _repoCounts(prGroups, filters),
-              repo: filters.repos.length == 1 ? filters.repos.first : null,
-              onRepo: (name) => ref
-                  .read(activityFiltersProvider.notifier)
-                  .update(
-                    filters.copyWith(
-                      repos:
-                          filters.repos.length == 1 &&
-                              filters.repos.contains(name)
-                          ? const {}
-                          : {name},
+            toolbarFor(constraints.maxWidth),
+            ?boardCount,
+            Expanded(
+              child: Focus(
+                focusNode: _boardFocus,
+                autofocus: true,
+                onKeyEvent: (node, event) =>
+                    _onBoardKey(node, event, lanes, selected),
+                // A click anywhere on the board hands the keys back to it; a
+                // field or button that takes focus on the tap gets it after.
+                child: Listener(
+                  onPointerDown: (_) => _boardFocus.requestFocus(),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                    child: Row(
+                      key: const Key('activity-board'),
+                      // Capped lanes leave room on a very wide window; centre
+                      // them rather than pile them on the left.
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final (i, l) in BoardLane.values.indexed) ...[
+                          if (i > 0) const SizedBox(width: 12),
+                          lane(i, l),
+                        ],
+                      ],
                     ),
                   ),
-            ),
-            const VerticalDivider(width: 1),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  toolbar,
-                  ?countLine,
-                  const Divider(height: 1),
-                  Expanded(child: content),
-                ],
+                ),
               ),
             ),
           ],
@@ -933,328 +967,433 @@ class _PRTileState extends ConsumerState<_PRTile> with _PrActions<_PRTile> {
   }
 }
 
-// ── Wide layout: compact row, preview ─────────────────────────────────────────
+// ── Board ─────────────────────────────────────────────────────────────────────
 
-/// A PR in the wide layout's list: title, where it is, and what its review
-/// says. Its actions live in the preview.
-class _InboxRow extends StatelessWidget {
-  final InstanceGroup<PR> group;
-  final bool reviewing;
-  final bool selected;
-  final DateTime now;
-  final VoidCallback onTap;
+/// One board lane (#920): its name and count, then its cards in sections
+/// (Reviewed splits Today from Earlier), scrolling on its own.
+class _Lane extends ConsumerWidget {
+  final BoardLane lane;
+  final int count;
+  final List<(String?, List<InstanceGroup<PR>>)> sections;
+  final String? selectedId;
+  final Map<String, GlobalKey> cardKeys;
 
-  const _InboxRow({
-    super.key,
-    required this.group,
-    required this.reviewing,
-    required this.selected,
-    required this.now,
-    required this.onTap,
+  const _Lane({
+    required this.lane,
+    required this.count,
+    required this.sections,
+    required this.selectedId,
+    required this.cardKeys,
   });
 
   @override
-  Widget build(BuildContext context) {
-    final pr = group.value;
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final status = prStatusOf(pr, reviewing: reviewing);
-    final statusColor = resolveAppColor(context, status.color);
-    final accent = resolveAppColor(context, AppColors.accent);
     final muted = resolveAppColor(context, AppColors.textMuted);
-    final small = theme.textTheme.bodySmall?.copyWith(color: muted);
-    final review = pr.latestReview;
-    final running = reviewing || (pr.reviewStatus?.active ?? false);
-    // The counts belong to the review the status describes, not to a run
-    // that is going on or failed after it.
-    final findings = review != null && !running && currentFailure(pr) == null
-        ? findingCounts(review)
-        : '';
-    final row = Semantics(
-      button: true,
-      selected: selected,
-      child: Material(
-        color: selected ? accent.withValues(alpha: 0.12) : Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          child: Container(
-            decoration: BoxDecoration(
-              border: Border(
-                left: BorderSide(
-                  color: selected ? accent : Colors.transparent,
-                  width: 3,
-                ),
-                bottom: BorderSide(
-                  color: resolveAppColor(context, AppColors.border),
-                ),
+    final dot = resolveAppColor(context, switch (lane) {
+      BoardLane.needsYou => AppColors.danger,
+      BoardLane.inProgress => AppColors.accent,
+      BoardLane.reviewed => AppColors.success,
+    });
+    final yours = lane == BoardLane.needsYou
+        ? ref.watch(myPrsSummaryProvider)
+        : null;
+    final children = <Widget>[
+      if (yours != null && !yours.isEmpty) ...[
+        const _YourPrsCard(),
+        const SizedBox(height: 8),
+      ],
+      for (final (title, cards) in sections) ...[
+        if (title != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
+            child: Text(
+              title.toUpperCase(),
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: muted,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.6,
               ),
             ),
-            padding: const EdgeInsets.fromLTRB(13, 11, 16, 11),
-            child: Opacity(
-              opacity: pr.state == 'open' ? 1 : 0.6,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(top: 1),
-                    child: running
-                        ? SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: statusColor,
-                            ),
-                          )
-                        : Icon(status.icon, size: 16, color: statusColor),
+          ),
+        for (final g in cards)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: _BoardCard(
+              key: cardKeys.putIfAbsent(_prIdentityKey(g.value), GlobalKey.new),
+              group: g,
+              selected: _prIdentityKey(g.value) == selectedId,
+            ),
+          ),
+      ],
+      if (count == 0)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: Text(
+              _emptyLaneText(lane),
+              style: theme.textTheme.bodyMedium?.copyWith(color: muted),
+            ),
+          ),
+        ),
+    ];
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  lane.label,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: Text(
-                                pr.title,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                  fontWeight: FontWeight.w600,
-                                  height: 1.3,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(relativeTime(pr.updatedAt, now), style: small),
-                          ],
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          '${pr.repo} #${pr.number} · ${pr.author}'
-                          '${pr.state == 'open' ? '' : ' · ${pr.state}'}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: small,
-                        ),
-                        const SizedBox(height: 5),
-                        Text.rich(
-                          TextSpan(
-                            children: [
-                              TextSpan(
-                                text: status.label,
-                                style: TextStyle(
-                                  color: statusColor,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              if (findings.isNotEmpty)
-                                TextSpan(text: ' · $findings'),
-                            ],
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: small,
-                        ),
-                        if (group.members.isNotEmpty) ...[
-                          const SizedBox(height: 5),
-                          InstanceBadges(
-                            instances: [
-                              for (final m in group.orderedMembers)
-                                (id: m.instanceId, name: m.instanceName),
-                            ],
-                            compact: true,
-                          ),
-                        ],
-                      ],
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '$count',
+                  style: theme.textTheme.bodyMedium?.copyWith(color: muted),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              key: Key('board-lane-${lane.name}'),
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
+              children: children,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The operator's own PRs that need them (#915), on top of Needs you: the
+/// count of the My PRs badge, opening My PRs.
+class _YourPrsCard extends ConsumerWidget {
+  const _YourPrsCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final summary = ref.watch(myPrsSummaryProvider);
+    final theme = Theme.of(context);
+    final accent = resolveAppColor(context, AppColors.accent);
+    final muted = resolveAppColor(context, AppColors.textMuted);
+    return Material(
+      color: resolveAppColor(context, AppColors.surfaceRaised),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(color: resolveAppColor(context, AppColors.border)),
+      ),
+      child: InkWell(
+        key: const Key('board-your-prs'),
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => context.go('/merge'),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.merge_type, size: 15, color: accent),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Your PRs',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: accent,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],
               ),
-            ),
+              const SizedBox(height: 6),
+              Text(
+                summary.total == 1
+                    ? '1 of your PRs needs you'
+                    : '${summary.total} of your PRs need you',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                summary.describe(),
+                style: theme.textTheme.bodySmall?.copyWith(color: muted),
+              ),
+            ],
           ),
         ),
       ),
     );
-    return row;
   }
 }
 
-/// The selected PR's latest review beside the list, with its actions. The
-/// review comes with the list payload, so this makes no request of its own.
-class _PrPreview extends ConsumerStatefulWidget {
+/// A PR on the board: what its review says, the PR, and the action that fits.
+/// Clicking it opens the PR.
+class _BoardCard extends ConsumerStatefulWidget {
   final InstanceGroup<PR> group;
-  const _PrPreview({super.key, required this.group});
+  final bool selected;
+  const _BoardCard({super.key, required this.group, required this.selected});
 
   @override
-  ConsumerState<_PrPreview> createState() => _PrPreviewState();
+  ConsumerState<_BoardCard> createState() => _BoardCardState();
 }
 
-class _PrPreviewState extends ConsumerState<_PrPreview>
-    with _PrActions<_PrPreview> {
+class _BoardCardState extends ConsumerState<_BoardCard>
+    with _PrActions<_BoardCard> {
   @override
   InstanceGroup<PR> get group => widget.group;
 
   @override
   Widget build(BuildContext context) {
     final pr = _pr;
+    final theme = Theme.of(context);
     final failure = currentFailure(pr);
     final isReviewing =
         (pr.reviewStatus?.active ?? false) ||
         ref.watch(reviewingPRsProvider).containsKey(_reviewKey);
+    final status = prStatusOf(pr, reviewing: isReviewing);
+    final statusColor = resolveAppColor(context, status.color);
+    final accent = resolveAppColor(context, AppColors.accent);
+    final muted = resolveAppColor(context, AppColors.textMuted);
     final danger = resolveAppColor(context, AppColors.danger);
+    final small = theme.textTheme.bodySmall;
     final review = pr.latestReview;
+    final open = pr.state == 'open';
+    final abandoned =
+        open && review?.publication == ReviewPublication.abandoned;
+    final showFindings = review != null && !isReviewing && failure == null;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 10, 16, 10),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              if (isReviewing)
-                OutlinedButton.icon(
-                  icon: _cancelling
-                      ? const SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.stop_circle_outlined, size: 16),
-                  label: Text(_cancelling ? 'Cancelling…' : 'Cancel review'),
-                  onPressed: _cancelling ? null : _cancelReview,
-                )
-              else
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.refresh, size: 16),
-                  label: Text(
-                    failure != null
-                        ? 'Retry'
-                        : review == null
-                        ? 'Review'
-                        : 'Re-review',
-                  ),
-                  onPressed: pr.repo.isEmpty ? null : _triggerReview,
-                ),
-              const SizedBox(width: 8),
-              IconButton(
-                icon: const Icon(Icons.close, size: 18),
-                tooltip: 'Dismiss PR',
-                onPressed: _dismiss,
-              ),
-              const SizedBox(width: 4),
-              FilledButton.icon(
-                key: const Key('inbox-preview-open'),
-                icon: const Icon(Icons.open_in_full, size: 16),
-                label: const Text('Open'),
-                onPressed: () =>
-                    context.push(prDetailRoute(pr.id, _instanceId)),
-              ),
-            ],
+    Widget actionButton(String label, IconData icon, VoidCallback? onPressed) =>
+        SizedBox(
+          height: 30,
+          child: OutlinedButton.icon(
+            icon: Icon(icon, size: 15),
+            label: Text(label),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              textStyle: theme.textTheme.labelMedium,
+            ),
+            onPressed: onPressed,
           ),
+        );
+    final Widget? action = isReviewing
+        ? actionButton(
+            _cancelling ? 'Cancelling…' : 'Cancel',
+            Icons.stop_circle_outlined,
+            _cancelling ? null : _cancelReview,
+          )
+        : failure != null
+        ? actionButton('Retry', Icons.refresh, _triggerReview)
+        : review == null && open
+        ? actionButton('Review now', Icons.play_arrow, _triggerReview)
+        : null;
+
+    return Material(
+      color: resolveAppColor(context, AppColors.surfaceRaised),
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(
+          color: widget.selected
+              ? accent
+              : resolveAppColor(context, AppColors.border),
+          width: widget.selected ? 2 : 1,
         ),
-        if (failure != null && !isReviewing)
-          Container(
-            key: const Key('inbox-preview-failure'),
-            color: danger.withValues(alpha: 0.10),
-            padding: const EdgeInsets.fromLTRB(24, 10, 24, 10),
-            child: Row(
+      ),
+      child: InkWell(
+        onTap: () => context.push(prDetailRoute(pr.id, _instanceId)),
+        child: Opacity(
+          opacity: open ? 1 : 0.6,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 6, 4, 12),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.error_outline, size: 16, color: danger),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Tooltip(
-                    message: failure.error,
-                    child: Text(
-                      reviewFailureSummary(failure),
-                      maxLines: 4,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: danger),
+                Row(
+                  children: [
+                    if (isReviewing)
+                      SizedBox(
+                        width: 13,
+                        height: 13,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: statusColor,
+                        ),
+                      )
+                    else
+                      Icon(status.icon, size: 15, color: statusColor),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        status.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: small?.copyWith(
+                          color: statusColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      relativeTime(pr.updatedAt, DateTime.now()),
+                      style: small?.copyWith(color: muted),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 15),
+                      tooltip: 'Dismiss PR',
+                      color: muted,
+                      visualDensity: VisualDensity.compact,
+                      onPressed: _dismiss,
+                    ),
+                  ],
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: Text(
+                    pr.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w500,
+                      height: 1.35,
                     ),
                   ),
                 ),
+                const SizedBox(height: 4),
+                Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: Text(
+                    '${pr.repo} #${pr.number} · ${pr.author}'
+                    '${open ? '' : ' · ${pr.state}'}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: small?.copyWith(color: muted),
+                  ),
+                ),
+                if (group.members.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  InstanceBadges(
+                    instances: [
+                      for (final m in group.orderedMembers)
+                        (id: m.instanceId, name: m.instanceName),
+                    ],
+                    compact: true,
+                  ),
+                ],
+                if (isReviewing) ...[
+                  const SizedBox(height: 10),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        minHeight: 3,
+                        color: accent,
+                        backgroundColor: accent.withValues(alpha: 0.16),
+                      ),
+                    ),
+                  ),
+                ] else if (failure != null) ...[
+                  const SizedBox(height: 6),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Tooltip(
+                      message: failure.error,
+                      child: Text(
+                        reviewFailureSummary(failure),
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: small?.copyWith(color: danger),
+                      ),
+                    ),
+                  ),
+                ] else if (abandoned) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'GitHub refused the review for good',
+                    style: small?.copyWith(color: muted),
+                  ),
+                ],
+                if (showFindings || action != null) ...[
+                  const SizedBox(height: 10),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Row(
+                      children: [
+                        if (showFindings)
+                          Expanded(child: _FindingChips(review: review))
+                        else
+                          const Spacer(),
+                        ?action,
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
-        const Divider(height: 1),
-        Expanded(
-          child: ReviewWorkspace(
-            pr: pr,
-            reviews: [?review],
-            // The toolbar above starts reviews; the workspace's own button is
-            // for a PR never reviewed, and is off while one runs.
-            onReview: isReviewing || pr.repo.isEmpty ? null : _triggerReview,
-          ),
         ),
-      ],
+      ),
     );
   }
 }
 
-/// The preview before a row is picked: what the buckets hold.
-class _EmptyPreview extends StatelessWidget {
-  final Map<InboxBucket, int> counts;
-
-  /// The list's focus: the keyboard hint shows only while the keys work.
-  final FocusNode keys;
-  const _EmptyPreview({required this.counts, required this.keys});
+/// "2 high · 1 medium" as tinted chips; nothing when the review found nothing.
+class _FindingChips extends StatelessWidget {
+  final Review review;
+  const _FindingChips({required this.review});
 
   @override
   Widget build(BuildContext context) {
-    final muted = resolveAppColor(context, AppColors.textMuted);
-    final theme = Theme.of(context);
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Icon(Icons.inbox_outlined, size: 44, color: muted),
-          const SizedBox(height: 14),
-          Text(
-            'Select a PR to read its review',
-            style: theme.textTheme.titleMedium,
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '${counts[InboxBucket.needsYou] ?? 0} need you · '
-            '${counts[InboxBucket.inProgress] ?? 0} in progress · '
-            '${counts[InboxBucket.doneToday] ?? 0} done today',
-            style: theme.textTheme.bodyMedium?.copyWith(color: muted),
-          ),
-          const SizedBox(height: 18),
-          // Icons, not ↑↓ glyphs: not every bundled font has the arrows. Inline
-          // spans, so the hint wraps in a narrow preview.
-          ListenableBuilder(
-            listenable: keys,
-            builder: (context, _) => keys.hasPrimaryFocus
-                ? Text.rich(
-                    TextSpan(
-                      children: [
-                        for (final icon in const [
-                          Icons.arrow_upward,
-                          Icons.arrow_downward,
-                        ])
-                          WidgetSpan(
-                            alignment: PlaceholderAlignment.middle,
-                            child: Icon(icon, size: 13, color: muted),
-                          ),
-                        const TextSpan(
-                          text: ' to move · Enter to open · Esc to clear',
-                        ),
-                      ],
-                    ),
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodySmall?.copyWith(color: muted),
-                  )
-                : const SizedBox.shrink(),
-          ),
-        ],
-      ),
+    final counts = <String, int>{};
+    for (final issue in review.issues) {
+      final s = issue.severity.toLowerCase();
+      counts[s] = (counts[s] ?? 0) + 1;
+    }
+    return Wrap(
+      spacing: 4,
+      runSpacing: 4,
+      children: [
+        for (final (severity, token) in const [
+          ('high', AppColors.danger),
+          ('medium', AppColors.warning),
+          ('low', AppColors.success),
+        ])
+          if (counts[severity] != null)
+            Builder(
+              builder: (context) {
+                final color = resolveAppColor(context, token);
+                return AppBadge(
+                  label: '${counts[severity]} $severity',
+                  foreground: color,
+                  background: color.withValues(alpha: 0.14),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 2,
+                  ),
+                  radius: 5,
+                  fontSize: 11,
+                  letterSpacing: 0,
+                );
+              },
+            ),
+      ],
     );
   }
 }

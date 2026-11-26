@@ -192,10 +192,16 @@ List<dynamic> _baseOverrides({
     ),
     myPrsDigestProvider.overrideWith(_NoDigest.new),
     sseStreamProvider.overrideWith((ref) => const Stream.empty()),
-    if (connection != null)
-      daemonConnectionProvider.overrideWith(
-        () => TestDaemonConnectionNotifier(connection),
+    // Always a test notifier: the sidebar's daemon card watches the
+    // connection, and the real one runs a watchdog timer.
+    daemonConnectionProvider.overrideWith(
+      () => TestDaemonConnectionNotifier(
+        connection ??
+            const DaemonConnectionStatus(
+              phase: DaemonConnectionPhase.connected,
+            ),
       ),
+    ),
   ];
 }
 

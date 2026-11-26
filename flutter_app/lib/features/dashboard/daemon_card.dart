@@ -5,17 +5,15 @@ import 'package:mix/mix.dart' show ColorToken;
 
 import '../../core/models/flow.dart';
 import '../../shared/design_system/color_resolver.dart';
-import '../../shared/design_system/components/app_source_list.dart';
 import '../../shared/design_system/tokens.dart';
-import '../merge_tracking/merge_tracking_providers.dart';
+import '../config/config_providers.dart';
 import 'dashboard_providers.dart';
-import 'inbox_buckets.dart';
 
 /// The `/health` answer of the daemon the UI is scoped to, null when it does
 /// not answer. Checked again when a review completes and whenever the event
 /// stream's connection changes state, so a daemon that stops or comes back
 /// shows on the card without polling.
-final inboxDaemonHealthProvider = FutureProvider<Map<String, dynamic>?>(
+final daemonCardHealthProvider = FutureProvider<Map<String, dynamic>?>(
   // No automatic retry: the triggers above re-read it, and a daemon that is
   // down must not be hammered.
   retry: (_, _) => null,
@@ -44,12 +42,13 @@ final inboxDaemonHealthProvider = FutureProvider<Map<String, dynamic>?>(
 /// Reviews the card's daemon made in the last 7 days: the same daemon as its
 /// status and quotas, not the whole fleet. Unfiltered on purpose: the Stats
 /// screen's repo/org filter belongs to that screen.
-final inboxWeekReviewsProvider = FutureProvider<int>(retry: (_, _) => null, (
-  ref,
-) async {
-  ref.watch(prListRefreshProvider);
-  return weekReviews(await ref.watch(apiClientProvider).fetchStats());
-});
+final daemonCardWeekReviewsProvider = FutureProvider<int>(
+  retry: (_, _) => null,
+  (ref) async {
+    ref.watch(prListRefreshProvider);
+    return weekReviews(await ref.watch(apiClientProvider).fetchStats());
+  },
+);
 
 /// Sums the daily counts in a `/stats` answer's `reviews_last_7_days`.
 int weekReviews(Map<String, dynamic> stats) {
@@ -64,7 +63,7 @@ int weekReviews(Map<String, dynamic> stats) {
 /// as the CLI's status line shows them. A review's dollar figure is what the
 /// API would charge, not what a subscription spends, so the card shows these
 /// instead. Read again when a review completes; the daemon caches readings.
-final inboxQuotasProvider = FutureProvider<List<AgentQuota>>(
+final daemonCardQuotasProvider = FutureProvider<List<AgentQuota>>(
   retry: (_, _) => null,
   (ref) async {
     ref.watch(prListRefreshProvider);
@@ -72,114 +71,77 @@ final inboxQuotasProvider = FutureProvider<List<AgentQuota>>(
   },
 );
 
-/// The Activity screen's source list on wide windows (#910): the inbox buckets
-/// with their counts, then the repositories in the list.
-class InboxSidebar extends StatelessWidget {
-  final InboxBucket bucket;
-  final Map<InboxBucket, int> counts;
-  final ValueChanged<InboxBucket> onBucket;
-
-  /// Repositories with the number of PRs each has in the list, in display
-  /// order.
-  final List<(String, int)> repos;
-
-  /// The one repository the list is narrowed to, if any.
-  final String? repo;
-  final ValueChanged<String> onRepo;
-
-  static const double width = 232;
-
-  const InboxSidebar({
-    super.key,
-    required this.bucket,
-    required this.counts,
-    required this.onBucket,
-    required this.repos,
-    required this.repo,
-    required this.onRepo,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final needsYou = counts[InboxBucket.needsYou] ?? 0;
-    return SizedBox(
-      width: width,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(child: _list(needsYou)),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(10, 0, 10, 12),
-            child: _DaemonCard(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _list(int needsYou) => ListView(
-    key: const Key('inbox-sidebar'),
-    padding: const EdgeInsets.fromLTRB(10, 14, 10, 20),
-    children: [
-      const AppSourceListSection('Inbox'),
-      for (final b in InboxBucket.values) ...[
-        AppSourceListItem(
-          key: Key('inbox-bucket-${b.name}'),
-          icon: b.icon,
-          label: b.label,
-          count: counts[b] ?? 0,
-          selected: b == bucket,
-          badge: b == InboxBucket.needsYou && needsYou > 0
-              ? AppColors.danger
-              : null,
-          onTap: () => onBucket(b),
-        ),
-        if (b == InboxBucket.needsYou) const _YourPrsItem(),
-      ],
-      if (repos.isNotEmpty) ...[
-        const SizedBox(height: 18),
-        const AppSourceListSection('Repositories'),
-        for (final (name, count) in repos)
-          AppSourceListItem(
-            icon: Icons.folder_outlined,
-            label: name.contains('/') ? name.split('/').last : name,
-            tooltip: name,
-            count: count,
-            selected: name == repo,
-            onTap: () => onRepo(name),
-          ),
-      ],
-    ],
-  );
-}
-
-/// Whether the daemon answers, its version, how much of each agent's
-/// subscription windows is used and how many reviews the last 7 days saw.
-/// Opens the Server screen.
-class _DaemonCard extends ConsumerWidget {
-  const _DaemonCard();
+/// The daemon at the foot of the app sidebar (#920): whether it answers, its
+/// version, how much of each agent's subscription windows is used and how many
+/// reviews the last 7 days saw. Opens the Server screen.
+///
+/// The daemon's own `/health` answer decides what it says, re-read on the
+/// events [daemonCardHealthProvider] lists, so a daemon started after the app
+/// (a CLI or compose start) shows up without a restart. With no answer it says
+/// "stopped" when the app bar's power button agrees and "not reachable"
+/// otherwise; quotas and stats are read only while the daemon answers, so a
+/// daemon that is not there is never polled. [compact], for the sidebar
+/// collapsed to icons, draws the status dot alone with the rest in its tooltip.
+class DaemonCard extends ConsumerWidget {
+  final bool compact;
+  const DaemonCard({super.key, this.compact = false});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final health = ref.watch(inboxDaemonHealthProvider);
-    final quotas = ref.watch(inboxQuotasProvider).value ?? const [];
-    final week = ref.watch(inboxWeekReviewsProvider).value;
+    final health = ref.watch(daemonCardHealthProvider);
+    final raw = health.value;
+    final answers = raw != null;
+    final quotas = answers
+        ? ref.watch(daemonCardQuotasProvider).value ?? const <AgentQuota>[]
+        : const <AgentQuota>[];
+    final week = answers
+        ? ref.watch(daemonCardWeekReviewsProvider).value
+        : null;
+    // Only a settled "not running" from the power button's own check means
+    // stopped; while that check loads or fails, no answer is "not reachable".
+    final stopped = ref.watch(daemonHealthProvider).value == false;
     final theme = Theme.of(context);
     final muted = resolveAppColor(context, AppColors.textMuted);
     final small = theme.textTheme.bodySmall?.copyWith(color: muted);
-    final raw = health.value;
     final status = health.isLoading && !health.hasValue
         ? (label: 'Checking daemon…', color: AppColors.textMuted)
+        : !answers && stopped
+        ? (label: 'Daemon stopped', color: AppColors.danger)
         : daemonStatusOf(raw);
     final dot = resolveAppColor(context, status.color);
     final label = status.label;
-    final version = (raw?['version'] as String?) ?? '';
+    final version = raw?['version'] is String ? raw!['version'] as String : '';
     final windows = [
       for (final q in quotas)
         if (q.available)
           for (final w in q.windows)
             if (w.kind == 'session' || w.kind == 'weekly') (q.agent, w),
     ];
+    final dotWidget = Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+    );
+    if (compact) {
+      return Tooltip(
+        message: [
+          label,
+          if (version.isNotEmpty) version,
+          for (final (agent, w) in windows)
+            '$agent ${w.shortLabel} ${w.usedPercent.clamp(0, 100).round()}%',
+        ].join(' · '),
+        child: InkWell(
+          key: const Key('daemon-card'),
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => context.push('/server'),
+          child: SizedBox(
+            width: 40,
+            height: 32,
+            child: Center(child: dotWidget),
+          ),
+        ),
+      );
+    }
     return Material(
       color: resolveAppColor(context, AppColors.surfaceRaised),
       shape: RoundedRectangleBorder(
@@ -187,7 +149,7 @@ class _DaemonCard extends ConsumerWidget {
         side: BorderSide(color: resolveAppColor(context, AppColors.border)),
       ),
       child: InkWell(
-        key: const Key('inbox-daemon-card'),
+        key: const Key('daemon-card'),
         borderRadius: BorderRadius.circular(10),
         onTap: () => context.push('/server'),
         child: Padding(
@@ -197,14 +159,7 @@ class _DaemonCard extends ConsumerWidget {
             children: [
               Row(
                 children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: dot,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
+                  dotWidget,
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -303,29 +258,6 @@ class _QuotaLine extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-/// The operator's own PRs that need them (#915), the count of the My PRs
-/// badge: red when one needs action, accent when they are only ready to merge
-/// or stale. Hidden when none does; opens My PRs.
-class _YourPrsItem extends ConsumerWidget {
-  const _YourPrsItem();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final summary = ref.watch(myPrsSummaryProvider);
-    if (summary.isEmpty) return const SizedBox.shrink();
-    return AppSourceListItem(
-      key: const Key('inbox-your-prs'),
-      icon: Icons.merge_type,
-      label: 'Your PRs',
-      tooltip: summary.describe(),
-      count: summary.total,
-      selected: false,
-      badge: summary.needAction > 0 ? AppColors.danger : AppColors.accent,
-      onTap: () => context.go('/merge'),
     );
   }
 }
