@@ -177,8 +177,68 @@ void _sortItems(List<InstanceGroup<PR>> items, SortMode mode) {
 /// below it, and in List or Grid view, the full-width rows or cards.
 const double boardBreakpoint = 960;
 
-/// Lanes stop growing here, so a very wide window does not stretch the cards.
-const double boardLaneMaxWidth = 520;
+/// An empty lane's width: room for its "Nothing …" line, no more (#923).
+const double boardEmptyLaneWidth = 220;
+
+/// The narrowest a card gets before a lane drops a column of cards.
+const double boardCardMinWidth = 300;
+
+const double _boardCardGap = 8;
+
+/// A lane's horizontal padding around its cards, 10 on each side.
+const double _boardLaneInset = 20;
+
+/// How wide each board lane is and how many card columns it holds (#923),
+/// given the cards in each lane and the width the lanes share.
+///
+/// An empty lane gets [boardEmptyLaneWidth]. Every other lane gets one column,
+/// then spare columns go one at a time to the lane with the most cards per
+/// column, never beyond its card count, while they fit at
+/// [boardCardMinWidth]. Width left over is shared out by column, so the lanes
+/// with cards fill the row.
+({List<double> widths, List<int> columns}) boardLayout(
+  List<int> cards,
+  double width,
+) {
+  final columns = [for (final c in cards) c == 0 ? 0 : 1];
+  double need(int cols) =>
+      cols * boardCardMinWidth + (cols - 1) * _boardCardGap + _boardLaneInset;
+  double used() => [
+    for (final c in columns)
+      if (c > 0) need(c),
+  ].fold(0.0, (a, b) => a + b);
+  final room = width - cards.where((c) => c == 0).length * boardEmptyLaneWidth;
+  while (true) {
+    var best = -1;
+    for (var i = 0; i < cards.length; i++) {
+      if (columns[i] == 0 || columns[i] >= cards[i]) continue;
+      if (best < 0 || cards[i] / columns[i] > cards[best] / columns[best]) {
+        best = i;
+      }
+    }
+    // Every extra column costs the same, so if the fullest lane cannot take
+    // one, none can.
+    if (best < 0 || used() + boardCardMinWidth + _boardCardGap > room) break;
+    columns[best]++;
+  }
+  final total = columns.fold(0, (a, b) => a + b);
+  final spare = room - used();
+  return (
+    widths: [
+      for (var i = 0; i < cards.length; i++)
+        columns[i] == 0
+            ? boardEmptyLaneWidth
+            : need(columns[i]) + spare * columns[i] / total,
+    ],
+    columns: columns,
+  );
+}
+
+/// [items] in rows of [size], in order.
+List<List<T>> _rowsOf<T>(List<T> items, int size) => [
+  for (var i = 0; i < items.length; i += size)
+    items.sublist(i, (i + size).clamp(0, items.length)),
+];
 
 String _reviewKeyOf(InstanceGroup<PR> g) =>
     reviewKeyFor(g.instanceId, g.value.repo, g.value.number);
@@ -239,41 +299,48 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     });
   }
 
-  /// Moves the selection [delta] cards within its lane (↑/↓) or [delta] lanes
-  /// sideways at the same position (←/→, skipping empty lanes). With nothing
-  /// selected, any arrow picks the first card on the board.
+  /// Moves the selection on the board's grid (#923): [grid] is lanes, each a
+  /// list of rows of cards. ↑/↓ ([down]) move a row within the lane, keeping
+  /// the column where the row has one; ←/→ ([across]) move along the row and
+  /// past its end into the next lane with cards (its first or last card of
+  /// the same row, or its last row). With nothing selected, any arrow picks
+  /// the first card on the board.
   void _move(
-    List<List<InstanceGroup<PR>>> lanes, {
+    List<List<List<InstanceGroup<PR>>>> grid, {
     int down = 0,
     int across = 0,
   }) {
-    var lane = -1, index = 0;
-    for (var l = 0; l < lanes.length && lane < 0; l++) {
-      final i = lanes[l].indexWhere(
-        (g) => _prIdentityKey(g.value) == _selected,
-      );
-      if (i >= 0) (lane, index) = (l, i);
-    }
-    if (lane < 0) {
-      final first = lanes.where((l) => l.isNotEmpty).firstOrNull;
-      if (first != null) {
-        _select(_prIdentityKey(first.first.value), forward: true);
+    int? lane, row, col;
+    for (var l = 0; l < grid.length && lane == null; l++) {
+      for (var r = 0; r < grid[l].length && lane == null; r++) {
+        final c = grid[l][r].indexWhere(
+          (g) => _prIdentityKey(g.value) == _selected,
+        );
+        if (c >= 0) (lane, row, col) = (l, r, c);
       }
+    }
+    String id(InstanceGroup<PR> g) => _prIdentityKey(g.value);
+    if (lane == null || row == null || col == null) {
+      final first = grid.where((l) => l.isNotEmpty).firstOrNull;
+      if (first != null) _select(id(first.first.first), forward: true);
       return;
     }
     if (down != 0) {
-      final cards = lanes[lane];
-      final next = (index + down).clamp(0, cards.length - 1);
-      _select(_prIdentityKey(cards[next].value), forward: down > 0);
+      final rows = grid[lane];
+      final r = row + down;
+      if (r < 0 || r >= rows.length) return;
+      _select(id(rows[r][col.clamp(0, rows[r].length - 1)]), forward: down > 0);
       return;
     }
-    for (var l = lane + across; l >= 0 && l < lanes.length; l += across) {
-      if (lanes[l].isEmpty) continue;
-      final cards = lanes[l];
-      _select(
-        _prIdentityKey(cards[index.clamp(0, cards.length - 1)].value),
-        forward: true,
-      );
+    final c = col + across;
+    if (c >= 0 && c < grid[lane][row].length) {
+      _select(id(grid[lane][row][c]), forward: across > 0);
+      return;
+    }
+    for (var l = lane + across; l >= 0 && l < grid.length; l += across) {
+      if (grid[l].isEmpty) continue;
+      final cards = grid[l][row.clamp(0, grid[l].length - 1)];
+      _select(id(across > 0 ? cards.first : cards.last), forward: true);
       return;
     }
   }
@@ -281,7 +348,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
   KeyEventResult _onBoardKey(
     FocusNode node,
     KeyEvent event,
-    List<List<InstanceGroup<PR>>> lanes,
+    List<List<List<InstanceGroup<PR>>>> grid,
     InstanceGroup<PR>? selected,
   ) {
     if (!node.hasPrimaryFocus || event is KeyUpEvent) {
@@ -289,13 +356,13 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     }
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.arrowDown) {
-      _move(lanes, down: 1);
+      _move(grid, down: 1);
     } else if (key == LogicalKeyboardKey.arrowUp) {
-      _move(lanes, down: -1);
+      _move(grid, down: -1);
     } else if (key == LogicalKeyboardKey.arrowRight) {
-      _move(lanes, across: 1);
+      _move(grid, across: 1);
     } else if (key == LogicalKeyboardKey.arrowLeft) {
-      _move(lanes, across: -1);
+      _move(grid, across: -1);
     } else if (event is KeyRepeatEvent) {
       return KeyEventResult.ignored;
     } else if (key == LogicalKeyboardKey.enter && selected != null) {
@@ -536,31 +603,49 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
           for (final g in reviewed)
             if (!todayIds.contains(_prIdentityKey(g.value))) g,
         ];
-        final lanes = [
-          byLane[BoardLane.needsYou]!,
-          byLane[BoardLane.inProgress]!,
-          [...today, ...earlier],
+        final sections = <List<(String?, List<InstanceGroup<PR>>)>>[
+          [(null, byLane[BoardLane.needsYou]!)],
+          [(null, byLane[BoardLane.inProgress]!)],
+          today.isNotEmpty && earlier.isNotEmpty
+              ? [('Today', today), ('Earlier', earlier)]
+              : [
+                  (null, [...today, ...earlier]),
+                ],
+        ];
+        final laneCounts = [
+          for (final lane in sections) lane.fold(0, (n, s) => n + s.$2.length),
+        ];
+        // The Your PRs card occupies Needs you even with no PR of its own.
+        final yours = ref.watch(myPrsSummaryProvider);
+        final layout = boardLayout([
+          laneCounts[0] + (yours.isEmpty ? 0 : 1),
+          laneCounts[1],
+          laneCounts[2],
+        ], constraints.maxWidth - 32 - 24);
+        // Each lane as rows of cards, section by section: what the keys
+        // walk and what the lane draws.
+        final rows = [
+          for (var i = 0; i < sections.length; i++)
+            [
+              for (final (title, cards) in sections[i])
+                (title, _rowsOf(cards, layout.columns[i].clamp(1, 99))),
+            ],
+        ];
+        final cells = [
+          for (final lane in rows) [for (final (_, r) in lane) ...r],
         ];
         final ids = {for (final g in filtered) _prIdentityKey(g.value)};
         _cardKeys.removeWhere((id, _) => !ids.contains(id));
         final selected = filtered
             .where((g) => _prIdentityKey(g.value) == _selected)
             .firstOrNull;
-        final laneWidth = ((constraints.maxWidth - 32 - 24) / 3).clamp(
-          0.0,
-          boardLaneMaxWidth,
-        );
         Widget lane(int i, BoardLane l) => SizedBox(
-          width: laneWidth,
+          width: layout.widths[i],
           child: _Lane(
             lane: l,
-            count: lanes[i].length,
-            sections:
-                l == BoardLane.reviewed &&
-                    today.isNotEmpty &&
-                    earlier.isNotEmpty
-                ? [('Today', today), ('Earlier', earlier)]
-                : [(null, lanes[i])],
+            count: laneCounts[i],
+            columns: layout.columns[i].clamp(1, 99),
+            sections: rows[i],
             selectedId: _selected,
             cardKeys: _cardKeys,
           ),
@@ -575,7 +660,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
                 focusNode: _boardFocus,
                 autofocus: true,
                 onKeyEvent: (node, event) =>
-                    _onBoardKey(node, event, lanes, selected),
+                    _onBoardKey(node, event, cells, selected),
                 // A click anywhere on the board hands the keys back to it; a
                 // field or button that takes focus on the tap gets it after.
                 child: Listener(
@@ -584,9 +669,6 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
                     padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
                     child: Row(
                       key: const Key('activity-board'),
-                      // Capped lanes leave room on a very wide window; centre
-                      // them rather than pile them on the left.
-                      mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         for (final (i, l) in BoardLane.values.indexed) ...[
@@ -970,17 +1052,20 @@ class _PRTileState extends ConsumerState<_PRTile> with _PrActions<_PRTile> {
 // ── Board ─────────────────────────────────────────────────────────────────────
 
 /// One board lane (#920): its name and count, then its cards in sections
-/// (Reviewed splits Today from Earlier), scrolling on its own.
+/// (Reviewed splits Today from Earlier), scrolling on its own. A wide lane
+/// lays its cards out in [columns] columns, row by row (#923).
 class _Lane extends ConsumerWidget {
   final BoardLane lane;
   final int count;
-  final List<(String?, List<InstanceGroup<PR>>)> sections;
+  final int columns;
+  final List<(String?, List<List<InstanceGroup<PR>>>)> sections;
   final String? selectedId;
   final Map<String, GlobalKey> cardKeys;
 
   const _Lane({
     required this.lane,
     required this.count,
+    required this.columns,
     required this.sections,
     required this.selectedId,
     required this.cardKeys,
@@ -998,12 +1083,17 @@ class _Lane extends ConsumerWidget {
     final yours = lane == BoardLane.needsYou
         ? ref.watch(myPrsSummaryProvider)
         : null;
+    Widget card(InstanceGroup<PR> g) => _BoardCard(
+      key: cardKeys.putIfAbsent(_prIdentityKey(g.value), GlobalKey.new),
+      group: g,
+      selected: _prIdentityKey(g.value) == selectedId,
+    );
     final children = <Widget>[
       if (yours != null && !yours.isEmpty) ...[
         const _YourPrsCard(),
         const SizedBox(height: 8),
       ],
-      for (final (title, cards) in sections) ...[
+      for (final (title, rows) in sections) ...[
         if (title != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
@@ -1016,14 +1106,27 @@ class _Lane extends ConsumerWidget {
               ),
             ),
           ),
-        for (final g in cards)
+        for (final row in rows)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: _BoardCard(
-              key: cardKeys.putIfAbsent(_prIdentityKey(g.value), GlobalKey.new),
-              group: g,
-              selected: _prIdentityKey(g.value) == selectedId,
-            ),
+            child: columns == 1
+                ? card(row.single)
+                // Cards in a row share its height, so the grid reads as rows.
+                : IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (var c = 0; c < columns; c++) ...[
+                          if (c > 0) const SizedBox(width: _boardCardGap),
+                          Expanded(
+                            child: c < row.length
+                                ? card(row[c])
+                                : const SizedBox.shrink(),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
           ),
       ],
       if (count == 0)
@@ -1055,10 +1158,14 @@ class _Lane extends ConsumerWidget {
                   decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  lane.label,
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w600,
+                Flexible(
+                  child: Text(
+                    lane.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 8),

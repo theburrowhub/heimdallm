@@ -171,13 +171,17 @@ class DaemonCard extends ConsumerWidget {
                       ),
                     ),
                   ),
-                  if (version.isNotEmpty)
-                    Text(
-                      version.startsWith('v') ? version : 'v$version',
-                      style: small,
-                    ),
                 ],
               ),
+              // Its own line: beside the label it cut "Daemon running" short.
+              if (version.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 16, top: 2),
+                  child: Text(
+                    version.startsWith('v') ? version : 'v$version',
+                    style: small,
+                  ),
+                ),
               for (final (agent, w) in windows) ...[
                 const SizedBox(height: 8),
                 _QuotaLine(agent: agent, window: w),
