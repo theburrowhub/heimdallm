@@ -375,6 +375,25 @@ void main() {
       expect(find.text('My PRs screen'), findsOneWidget);
     });
 
+    testWidgets('does not take a grid column of its own', (tester) async {
+      // 1400 px with one card per lane: an extra column would go to the lane
+      // with the most cards per column, so counting this card as one would
+      // halve the PR card beside an empty cell.
+      await _pump(
+        tester,
+        yourPrs: const MyPrsSummary(needAction: 1, total: 1),
+        prs: [
+          _pr(1, 'Failed PR', status: _status(error: 'agent exited')),
+          _pr(2, 'Running PR', status: _status(active: true)),
+          _pr(3, 'Done PR', review: _review(3)),
+        ],
+      );
+
+      final lane = tester.getSize(_lane('needsYou')).width;
+      expect(tester.getSize(_card('Failed PR')).width, closeTo(lane - 20, 1));
+      expect(tester.getSize(card).width, closeTo(lane - 20, 1));
+    });
+
     testWidgets('says one PR in the singular, and hides at zero', (
       tester,
     ) async {
@@ -422,6 +441,50 @@ void main() {
     expect(_inCard('Shared PR', find.byType(InstanceBadges)), findsOneWidget);
   });
 
+  group('boardLayout', () {
+    test('empty lanes stay narrow and the full one spreads over columns', () {
+      final l = boardLayout([0, 0, 31], 1700);
+      expect(l.columns, [0, 0, 4]);
+      expect(l.widths[0], boardEmptyLaneWidth);
+      expect(l.widths[1], boardEmptyLaneWidth);
+      expect(l.widths.reduce((a, b) => a + b), closeTo(1700, 0.01));
+    });
+
+    test('spare columns go to the lane with the most cards per column', () {
+      final l = boardLayout([1, 1, 31], 1450);
+      expect(l.columns, [1, 1, 2]);
+      expect(l.widths[2], greaterThan(l.widths[0]));
+    });
+
+    test('a lane never gets more columns than cards', () {
+      expect(boardLayout([0, 2, 0], 3000).columns, [0, 2, 0]);
+    });
+
+    test('cards stop at their cap and the spare width is not handed out', () {
+      final few = boardLayout([1, 1, 1], 3000);
+      expect(few.columns, [1, 1, 1]);
+      for (final w in few.widths) {
+        expect(w, boardCardMaxWidth + 20);
+      }
+      final one = boardLayout([0, 0, 1], 3000);
+      expect(one.widths, [
+        boardEmptyLaneWidth,
+        boardEmptyLaneWidth,
+        boardCardMaxWidth + 20,
+      ]);
+      // Several columns stop at the cap per card, plus the gaps between.
+      final two = boardLayout([0, 0, 2], 3000);
+      expect(two.columns, [0, 0, 2]);
+      expect(two.widths[2], 2 * boardCardMaxWidth + 8 + 20);
+    });
+
+    test('a narrow board keeps one column per lane and still fills it', () {
+      final l = boardLayout([3, 3, 3], 904);
+      expect(l.columns, [1, 1, 1]);
+      expect(l.widths.reduce((a, b) => a + b), closeTo(904, 0.01));
+    });
+  });
+
   group('keyboard', () {
     Future<void> press(WidgetTester tester, LogicalKeyboardKey key) async {
       await tester.sendKeyEvent(key);
@@ -431,7 +494,8 @@ void main() {
     testWidgets(
       'arrows move within and across lanes, Esc clears, Enter opens',
       (tester) async {
-        await _pump(tester);
+        // Narrow enough for one card column per lane.
+        await _pump(tester, size: const Size(1000, 1000));
         expect(_selectedTitle(tester), isNull);
 
         await press(tester, LogicalKeyboardKey.arrowDown);
@@ -464,6 +528,29 @@ void main() {
         expect(find.text('PR detail 1'), findsOneWidget);
       },
     );
+
+    testWidgets('on a lane with several columns, arrows walk the grid', (
+      tester,
+    ) async {
+      // 1400 px: In progress gets two columns, so its cards share a row.
+      await _pump(tester);
+      final running = tester.getTopLeft(find.text('Running PR'));
+      final waiting = tester.getTopLeft(find.text('Waiting PR'));
+      expect(running.dy, waiting.dy, reason: 'one row');
+      expect(running.dx, lessThan(waiting.dx));
+
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      await press(tester, LogicalKeyboardKey.arrowRight);
+      expect(_selectedTitle(tester), 'Running PR');
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      expect(_selectedTitle(tester), 'Running PR', reason: 'no row below');
+      await press(tester, LogicalKeyboardKey.arrowRight);
+      expect(_selectedTitle(tester), 'Waiting PR', reason: 'along the row');
+      await press(tester, LogicalKeyboardKey.arrowRight);
+      expect(_selectedTitle(tester), 'Done PR', reason: 'into the next lane');
+      await press(tester, LogicalKeyboardKey.arrowLeft);
+      expect(_selectedTitle(tester), 'Waiting PR', reason: 'back to the end');
+    });
 
     testWidgets('sideways skips an empty lane', (tester) async {
       await _pump(
