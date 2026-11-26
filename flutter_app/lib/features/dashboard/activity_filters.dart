@@ -7,14 +7,14 @@ class ActivityFilters {
   final Set<String> repos; // empty = all repos
   final Set<String> states; // 'open', 'closed' — empty = all
   final String search; // free text search
-  final String viewMode; // 'list' or 'grid'
+  final String viewMode; // 'board', 'list' or 'grid'
 
   const ActivityFilters({
     this.orgs = const {},
     this.repos = const {},
     this.states = const {'open'}, // default: only open
     this.search = '',
-    this.viewMode = 'list',
+    this.viewMode = 'board',
   });
 
   ActivityFilters copyWith({
@@ -42,7 +42,12 @@ class ActivityFiltersNotifier extends Notifier<ActivityFilters> {
   static const _orgsKey = 'activity_org_filter';
   static const _reposKey = 'activity_repo_filter';
   static const _statesKey = 'activity_state_filter';
-  static const _viewModeKey = 'activity_view_mode';
+
+  /// The view since the board (#920). A new key, because the old one was
+  /// written on every filter change, so a stored `list` says nothing about a
+  /// choice; only a stored `grid` was picked on purpose and is carried over.
+  static const _viewKey = 'activity_view';
+  static const _legacyViewModeKey = 'activity_view_mode';
 
   @override
   ActivityFilters build() {
@@ -56,12 +61,17 @@ class ActivityFiltersNotifier extends Notifier<ActivityFilters> {
       orgs: _loadSet(prefs, _orgsKey),
       repos: _loadSet(prefs, _reposKey),
       states: _loadSet(prefs, _statesKey, defaultVal: {'open'}),
-      viewMode: prefs.getString(_viewModeKey) ?? 'list',
+      viewMode:
+          prefs.getString(_viewKey) ??
+          (prefs.getString(_legacyViewModeKey) == 'grid' ? 'grid' : 'board'),
     );
   }
 
-  Set<String> _loadSet(SharedPreferences p, String key,
-      {Set<String>? defaultVal}) {
+  Set<String> _loadSet(
+    SharedPreferences p,
+    String key, {
+    Set<String>? defaultVal,
+  }) {
     final v = p.getString(key);
     if (v == null || v.isEmpty) return defaultVal ?? {};
     return v.split(',').toSet();
@@ -77,13 +87,14 @@ class ActivityFiltersNotifier extends Notifier<ActivityFilters> {
     prefs.setString(_orgsKey, f.orgs.join(','));
     prefs.setString(_reposKey, f.repos.join(','));
     prefs.setString(_statesKey, f.states.join(','));
-    prefs.setString(_viewModeKey, f.viewMode);
+    prefs.setString(_viewKey, f.viewMode);
   }
 }
 
 final activityFiltersProvider =
     NotifierProvider<ActivityFiltersNotifier, ActivityFilters>(
-        ActivityFiltersNotifier.new);
+      ActivityFiltersNotifier.new,
+    );
 
 /// Sort mode for the Activity view — shared between dashboard_screen
 /// and activity_filter_bar to avoid duplication.

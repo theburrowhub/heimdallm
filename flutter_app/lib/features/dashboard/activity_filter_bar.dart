@@ -111,19 +111,21 @@ class ActivityFilterBar extends ConsumerWidget {
             icon: Icons.clear_all,
             selected: true,
             accent: AppColors.danger,
-            onTap: () => notifier.update(const ActivityFilters()),
+            // Reset clears filters, not the view the operator picked.
+            onTap: () =>
+                notifier.update(ActivityFilters(viewMode: filters.viewMode)),
           ),
       ],
       trailing: [
         AppViewToggle(
-          mode: filters.viewMode == 'grid'
-              ? AppViewMode.grid
-              : AppViewMode.list,
-          onChanged: (mode) => notifier.update(
-            filters.copyWith(
-              viewMode: mode == AppViewMode.grid ? 'grid' : 'list',
-            ),
-          ),
+          showBoard: true,
+          mode: switch (filters.viewMode) {
+            'grid' => AppViewMode.grid,
+            'list' => AppViewMode.list,
+            _ => AppViewMode.board,
+          },
+          onChanged: (mode) =>
+              notifier.update(filters.copyWith(viewMode: mode.name)),
         ),
         const SizedBox(width: 12),
         FilledButton.icon(

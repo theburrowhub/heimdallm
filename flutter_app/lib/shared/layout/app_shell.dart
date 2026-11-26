@@ -8,6 +8,7 @@ import '../../core/state/sidebar_preferences.dart';
 import '../../features/activity/activity_providers.dart';
 import '../../features/circuit_breaker/circuit_breaker_banner.dart';
 import '../../features/config/config_providers.dart';
+import '../../features/dashboard/daemon_card.dart';
 import '../../features/dashboard/dashboard_providers.dart';
 import '../../features/instances/widgets/instance_selector.dart';
 import '../../features/merge_tracking/merge_tracking_providers.dart';
@@ -327,6 +328,12 @@ class AppSidebar extends ConsumerWidget {
               padding: const EdgeInsets.fromLTRB(10, 14, 10, 12),
               children: items,
             ),
+          ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(10, 0, 10, extended ? 8 : 4),
+            child: extended
+                ? const DaemonCard()
+                : const Center(child: DaemonCard(compact: true)),
           ),
           // The toggle sits at the foot of the sidebar it controls, not in
           // the app bar at the far end of the window.

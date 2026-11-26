@@ -4,7 +4,7 @@ import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
 import 'package:heimdallm/core/models/review_status.dart';
 import 'package:heimdallm/features/dashboard/inbox_buckets.dart';
-import 'package:heimdallm/features/dashboard/inbox_sidebar.dart';
+import 'package:heimdallm/features/dashboard/daemon_card.dart';
 import 'package:heimdallm/shared/design_system/tokens.dart';
 
 final _now = DateTime(2026, 11, 19, 23, 50);
@@ -158,6 +158,35 @@ void main() {
       expect(
         _bucket(_pr(state: 'closed', review: _review(githubReviewId: -1))),
         InboxBucket.doneToday,
+      );
+    });
+  });
+
+  group('laneOf', () {
+    BoardLane lane(PR pr, {bool reviewing = false}) =>
+        laneOf(pr, reviewing: reviewing, now: _now);
+
+    test('the action buckets keep their lanes', () {
+      expect(lane(_pr(status: _status(error: 'boom'))), BoardLane.needsYou);
+      expect(lane(_pr()), BoardLane.inProgress);
+      expect(lane(_pr(), reviewing: true), BoardLane.inProgress);
+    });
+
+    test('every other PR, today or earlier, open or closed, is Reviewed', () {
+      expect(lane(_pr(review: _review())), BoardLane.reviewed);
+      expect(
+        lane(_pr(review: _review(at: DateTime(2026, 11, 1)))),
+        BoardLane.reviewed,
+      );
+      expect(lane(_pr(state: 'closed')), BoardLane.reviewed);
+      expect(
+        lane(
+          _pr(
+            state: 'closed',
+            status: _status(error: 'boom'),
+          ),
+        ),
+        BoardLane.reviewed,
       );
     });
   });
