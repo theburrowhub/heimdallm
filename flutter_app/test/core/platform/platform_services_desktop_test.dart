@@ -1200,6 +1200,33 @@ else:
       expect(DesktopPlatformServices(isLinux: true).titleBarHeight, 0);
     });
 
+    test(
+      'only macOS has a translucent sidebar and takes the app brightness',
+      () async {
+        expect(
+          DesktopPlatformServices(isMacOS: true).translucentSidebar,
+          isTrue,
+        );
+        expect(
+          DesktopPlatformServices(isLinux: true).translucentSidebar,
+          isFalse,
+        );
+
+        await DesktopPlatformServices(
+          isLinux: true,
+        ).setWindowBrightness(Brightness.dark);
+        expect(methods(), isNot(contains('setBrightness')));
+
+        await DesktopPlatformServices(
+          isMacOS: true,
+        ).setWindowBrightness(Brightness.dark);
+        final call = windowCalls.singleWhere(
+          (c) => c.method == 'setBrightness',
+        );
+        expect((call.arguments as Map)['brightness'], 'dark');
+      },
+    );
+
     test('dragging the strip drags the window', () async {
       await DesktopPlatformServices(isMacOS: true).startWindowDrag();
       expect(methods(), contains('startDragging'));

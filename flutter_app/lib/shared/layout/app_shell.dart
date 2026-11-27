@@ -4,6 +4,8 @@ import 'package:go_router/go_router.dart';
 import 'package:mix/mix.dart' show ColorToken;
 
 import '../../core/instances/instances_providers.dart';
+import '../../core/platform/platform_services.dart';
+import '../../core/platform/platform_services_provider.dart';
 import '../../core/state/sidebar_preferences.dart';
 import '../../features/activity/activity_providers.dart';
 import '../../features/circuit_breaker/circuit_breaker_banner.dart';
@@ -170,6 +172,10 @@ class AppShell extends ConsumerWidget {
 
     final width = MediaQuery.sizeOf(context).width;
     final isCompact = width < AppBreakpoints.compact;
+    // On macOS the sidebar paints nothing, so the window's material shows
+    // through it; the content keeps an opaque surface (#927).
+    final translucent =
+        !isCompact && ref.watch(platformServicesProvider).translucentSidebar;
     final sidebarPreference = ref.watch(sidebarModeProvider);
     final effectiveSidebar = effectiveSidebarMode(sidebarPreference, width);
     final isRailExtended = effectiveSidebar == AppSidebarMode.extended;
@@ -200,6 +206,7 @@ class AppShell extends ConsumerWidget {
     );
 
     return Scaffold(
+      backgroundColor: translucent ? Colors.transparent : null,
       appBar: AppBar(
         title: const Text('Heimdallm'),
         actions: [
@@ -262,7 +269,14 @@ class AppShell extends ConsumerWidget {
                       .cycleFrom(effectiveSidebar),
                 ),
                 const VerticalDivider(width: 1),
-                Expanded(child: body),
+                Expanded(
+                  child: translucent
+                      ? ColoredBox(
+                          color: Theme.of(context).colorScheme.surface,
+                          child: body,
+                        )
+                      : body,
+                ),
               ],
             ),
     );

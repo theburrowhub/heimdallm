@@ -29,7 +29,7 @@ class TitleBarStrip extends ConsumerWidget {
     final media = MediaQuery.of(context);
     // The same tree in and out of full screen, so the app below keeps its
     // state; only the strip's height changes.
-    return ValueListenableBuilder<bool>(
+    final strip = ValueListenableBuilder<bool>(
       valueListenable: chrome.fullScreen,
       builder: (context, fullScreen, _) {
         final strip = fullScreen ? 0.0 : height;
@@ -61,5 +61,39 @@ class TitleBarStrip extends ConsumerWidget {
         );
       },
     );
+    return chrome.translucentSidebar
+        ? _WindowBrightnessSync(chrome: chrome, child: strip)
+        : strip;
   }
+}
+
+/// Keeps a translucent window's light or dark look in step with the app's
+/// theme (#927). The sidebar material and the traffic lights follow the
+/// window's appearance, which is the system's unless the app sets it, so an
+/// app in dark mode on a light system would otherwise draw light text on
+/// light glass.
+class _WindowBrightnessSync extends StatefulWidget {
+  final WindowChromePlatformCapability chrome;
+  final Widget child;
+
+  const _WindowBrightnessSync({required this.chrome, required this.child});
+
+  @override
+  State<_WindowBrightnessSync> createState() => _WindowBrightnessSyncState();
+}
+
+class _WindowBrightnessSyncState extends State<_WindowBrightnessSync> {
+  Brightness? _sent;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final brightness = Theme.of(context).brightness;
+    if (brightness == _sent) return;
+    _sent = brightness;
+    widget.chrome.setWindowBrightness(brightness);
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }

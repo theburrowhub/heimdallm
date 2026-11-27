@@ -166,4 +166,28 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),
   );
+
+  // A translucent window takes the app's light or dark look, so the sidebar
+  // material and the traffic lights match the app, not the system (#927).
+  testWidgets('a translucent window follows the app brightness', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices()
+      ..titleBarHeight = 28
+      ..translucentSidebar = true;
+    await tester.pumpWidget(_host(platform));
+    await tester.pumpWidget(_host(platform));
+    expect(platform.windowBrightnessCalls, [Brightness.light]);
+
+    await tester.pumpWidget(_host(platform, mode: ThemeMode.dark));
+    await tester.pumpAndSettle();
+    expect(platform.windowBrightnessCalls, [Brightness.light, Brightness.dark]);
+  });
+
+  testWidgets('an opaque window keeps the system appearance', (tester) async {
+    final platform = FakePlatformServices()..titleBarHeight = 28;
+    await tester.pumpWidget(_host(platform, mode: ThemeMode.dark));
+    await tester.pumpAndSettle();
+    expect(platform.windowBrightnessCalls, isEmpty);
+  });
 }

@@ -338,6 +338,41 @@ void main() {
     expect(find.text('Merge content'), findsOneWidget);
   });
 
+  // On macOS the window's sidebar material shows through the sidebar, so the
+  // shell paints nothing there; the content keeps an opaque surface (#927).
+  testWidgets('a translucent window leaves the sidebar unpainted', (
+    tester,
+  ) async {
+    for (final translucent in [false, true]) {
+      final platform = FakePlatformServices()..translucentSidebar = translucent;
+      await _pumpShell(
+        tester,
+        overrides: _baseOverrides(platform: platform, api: _MockApiClient()),
+      );
+      final shell = tester.widget<Scaffold>(
+        find.ancestor(
+          of: find.byKey(const Key('app-sidebar')),
+          matching: find.byType(Scaffold),
+        ),
+      );
+      final content = find.text('Dashboard content');
+      final surface = Theme.of(tester.element(content)).colorScheme.surface;
+      final opaqueContent = find.ancestor(
+        of: content,
+        matching: find.byWidgetPredicate(
+          (w) => w is ColoredBox && w.color == surface,
+        ),
+      );
+      if (translucent) {
+        expect(shell.backgroundColor, Colors.transparent);
+        expect(opaqueContent, findsOneWidget);
+      } else {
+        expect(shell.backgroundColor, isNull);
+        expect(opaqueContent, findsNothing);
+      }
+    }
+  });
+
   // The sidebar lists destinations in display order, which is not branch
   // order (Flows is shown before Stats but is the last branch), so a position
   // must never be used as a branch index.

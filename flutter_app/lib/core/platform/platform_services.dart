@@ -1,5 +1,5 @@
 import 'dart:async' show Stream;
-import 'dart:ui' show VoidCallback;
+import 'dart:ui' show Brightness, VoidCallback;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
@@ -285,6 +285,15 @@ abstract interface class WindowChromePlatformCapability {
   /// Does what double-clicking a title bar does: zoom or restore the window,
   /// or what the user chose instead in the system settings.
   Future<void> titleBarDoubleClick();
+
+  /// Whether the window shows the platform's sidebar material wherever the app
+  /// paints no background (#927). True on macOS, whose window content is a
+  /// vibrancy view under a clear Flutter view.
+  bool get translucentSidebar;
+
+  /// Gives the window, and with it the sidebar material and the traffic
+  /// lights, the app's light or dark look, which can differ from the system's.
+  Future<void> setWindowBrightness(Brightness brightness);
 }
 
 /// Optional termination path for a process that has already disproved desktop
@@ -322,6 +331,13 @@ extension OptionalPlatformCapabilities on PlatformServices {
     return platform is AppVersionPlatformCapability
         ? (platform as AppVersionPlatformCapability).loadAppVersion()
         : const AppVersionInfo(version: 'unknown');
+  }
+
+  /// False where the window has no sidebar material (Linux, web).
+  bool get translucentSidebar {
+    final platform = this;
+    return platform is WindowChromePlatformCapability &&
+        (platform as WindowChromePlatformCapability).translucentSidebar;
   }
 
   AppUpdateSupport get appUpdateSupport {

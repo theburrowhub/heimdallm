@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:ui' show VoidCallback;
+import 'dart:ui' show Brightness, VoidCallback;
 import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter/painting.dart' show Size;
 import 'package:heimdallm/core/api/api_client.dart';
@@ -76,6 +76,15 @@ class FakePlatformServices
 
   @override
   Future<void> titleBarDoubleClick() async => titleBarDoubleClickCalls++;
+
+  /// Off like Linux and the web; a macOS-like test turns it on.
+  @override
+  bool translucentSidebar = false;
+  final List<Brightness> windowBrightnessCalls = [];
+
+  @override
+  Future<void> setWindowBrightness(Brightness brightness) async =>
+      windowBrightnessCalls.add(brightness);
 
   // Records of calls for assertions.
   int loadApiTokenCalls = 0;

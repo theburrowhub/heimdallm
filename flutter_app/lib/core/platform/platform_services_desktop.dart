@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:ui' show VoidCallback;
+import 'dart:ui' show Brightness, VoidCallback;
 import 'package:flutter/foundation.dart'
     show
         ValueListenable,
@@ -476,6 +476,16 @@ class DesktopPlatformServices
 
   @override
   Future<void> startWindowDrag() => windowManager.startDragging();
+
+  // macos/Runner/MainFlutterWindow.swift puts the sidebar material under the
+  // Flutter view (#927).
+  @override
+  bool get translucentSidebar => _isMacOS;
+
+  @override
+  Future<void> setWindowBrightness(Brightness brightness) async {
+    if (_isMacOS) await windowManager.setBrightness(brightness);
+  }
 
   /// Follows System Settings › Desktop & Dock › "Double-click a window's title
   /// bar to", stored as AppleActionOnDoubleClick: "Minimize", "None", or
