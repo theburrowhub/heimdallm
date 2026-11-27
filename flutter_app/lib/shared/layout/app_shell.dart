@@ -205,80 +205,87 @@ class AppShell extends ConsumerWidget {
       ],
     );
 
-    return Scaffold(
-      backgroundColor: translucent ? Colors.transparent : null,
-      appBar: AppBar(
-        title: const Text('Heimdallm'),
-        actions: [
-          const InstanceSelector(),
-          const CheckForUpdatesButton(),
-          IconButton(
-            icon: daemonStarting
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : Icon(
-                    daemonRunning ? Icons.power_settings_new : Icons.play_arrow,
-                  ),
-            tooltip: daemonRunning ? 'Stop Server' : 'Start Server',
-            onPressed: daemonStarting
-                ? null
-                : daemonRunning
-                ? () => server_actions.confirmShutdown(context, ref)
-                : () => server_actions.startDaemon(context, ref),
+    final appBar = AppBar(
+      title: const Text('Heimdallm'),
+      actions: [
+        const InstanceSelector(),
+        const CheckForUpdatesButton(),
+        IconButton(
+          icon: daemonStarting
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(
+                  daemonRunning ? Icons.power_settings_new : Icons.play_arrow,
+                ),
+          tooltip: daemonRunning ? 'Stop Server' : 'Start Server',
+          onPressed: daemonStarting
+              ? null
+              : daemonRunning
+              ? () => server_actions.confirmShutdown(context, ref)
+              : () => server_actions.startDaemon(context, ref),
+        ),
+        IconButton(
+          icon: const Icon(Icons.dns_outlined),
+          tooltip: 'Server',
+          onPressed: () => context.push('/server'),
+        ),
+        IconButton(
+          icon: const Icon(Icons.settings),
+          onPressed: () => context.push('/config'),
+        ),
+        IconButton(
+          icon: const Icon(Icons.refresh),
+          onPressed: () {
+            // Invalidate the aggregating providers: the flat lists derive
+            // from them, so refreshing only the derived ones would replay
+            // the same cached fan-out.
+            ref.invalidate(daemonInstancesProvider);
+            ref.invalidate(prsByInstanceProvider);
+            ref.invalidate(mergeTrackingByInstanceProvider);
+            ref.invalidate(statsByInstanceProvider);
+            ref.invalidate(githubRateLimitProvider);
+            ref.invalidate(activityEntriesProvider);
+            ref.invalidate(activityOptionsProvider);
+          },
+        ),
+      ],
+    );
+    if (isCompact) {
+      return Scaffold(
+        appBar: appBar,
+        drawer: _NavDrawer(navigationShell: navigationShell),
+        body: body,
+      );
+    }
+    // The sidebar runs the full height of the window, up through the title
+    // bar inset (see TitleBarStrip), and the app bar sits over the content
+    // only, as in a native Mac window (#927). On macOS the sidebar paints
+    // nothing, so the window's material shows through it; elsewhere it has
+    // its own solid colour. The content Scaffold stays opaque.
+    return Material(
+      key: const Key('app-sidebar-surface'),
+      color: translucent
+          ? Colors.transparent
+          : resolveAppColor(context, AppColors.sidebar),
+      child: Row(
+        children: [
+          AppSidebar(
+            currentBranch: navigationShell.currentIndex,
+            extended: isRailExtended,
+            onSelect: _onDestinationSelected,
+            onToggle: () => ref
+                .read(sidebarModeProvider.notifier)
+                .cycleFrom(effectiveSidebar),
           ),
-          IconButton(
-            icon: const Icon(Icons.dns_outlined),
-            tooltip: 'Server',
-            onPressed: () => context.push('/server'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => context.push('/config'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              // Invalidate the aggregating providers: the flat lists derive
-              // from them, so refreshing only the derived ones would replay
-              // the same cached fan-out.
-              ref.invalidate(daemonInstancesProvider);
-              ref.invalidate(prsByInstanceProvider);
-              ref.invalidate(mergeTrackingByInstanceProvider);
-              ref.invalidate(statsByInstanceProvider);
-              ref.invalidate(githubRateLimitProvider);
-              ref.invalidate(activityEntriesProvider);
-              ref.invalidate(activityOptionsProvider);
-            },
+          const VerticalDivider(width: 1),
+          Expanded(
+            child: Scaffold(appBar: appBar, body: body),
           ),
         ],
       ),
-      drawer: isCompact ? _NavDrawer(navigationShell: navigationShell) : null,
-      body: isCompact
-          ? body
-          : Row(
-              children: [
-                AppSidebar(
-                  currentBranch: navigationShell.currentIndex,
-                  extended: isRailExtended,
-                  onSelect: _onDestinationSelected,
-                  onToggle: () => ref
-                      .read(sidebarModeProvider.notifier)
-                      .cycleFrom(effectiveSidebar),
-                ),
-                const VerticalDivider(width: 1),
-                Expanded(
-                  child: translucent
-                      ? ColoredBox(
-                          color: Theme.of(context).colorScheme.surface,
-                          child: body,
-                        )
-                      : body,
-                ),
-              ],
-            ),
     );
   }
 }
@@ -339,7 +346,13 @@ class AppSidebar extends ConsumerWidget {
         children: [
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(10, 14, 10, 12),
+              // Clear of the title bar inset the sidebar runs up through.
+              padding: EdgeInsets.fromLTRB(
+                10,
+                14 + MediaQuery.paddingOf(context).top,
+                10,
+                12,
+              ),
               children: items,
             ),
           ),

@@ -38,24 +38,21 @@ void main() {
     expect(find.text('content'), findsOneWidget);
   });
 
-  testWidgets('macOS gets a strip in the app bar colour above the app bar', (
+  // The title bar band is handed to the app as a top inset: the app bar grows
+  // into it in its own colour and its toolbar starts below it (#927).
+  testWidgets('macOS hands the title bar band to the app as a top inset', (
     tester,
   ) async {
-    for (final mode in [ThemeMode.light, ThemeMode.dark]) {
-      await tester.pumpWidget(
-        _host(FakePlatformServices()..titleBarHeight = 28, mode: mode),
-      );
-      await tester.pumpAndSettle();
-      expect(tester.getSize(_strip).height, 28);
-      expect(tester.getTopLeft(find.byType(AppBar)).dy, 28);
-      final strip = tester.widget<ColoredBox>(
-        find.descendant(of: _strip, matching: find.byType(ColoredBox)),
-      );
-      final appBarColor = Theme.of(
-        tester.element(find.byType(AppBar)),
-      ).appBarTheme.backgroundColor;
-      expect(strip.color, appBarColor, reason: '$mode');
-    }
+    await tester.pumpWidget(_host(FakePlatformServices()..titleBarHeight = 28));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(_strip).height, 28);
+    expect(tester.getTopLeft(find.byType(AppBar)).dy, 0);
+    expect(tester.getTopLeft(find.byType(NavigationToolbar)).dy, 28);
+    expect(
+      find.descendant(of: _strip, matching: find.byType(ColoredBox)),
+      findsNothing,
+      reason: 'the strip itself paints nothing',
+    );
   });
 
   testWidgets('dragging the strip moves the window, double-click acts as a '
@@ -73,15 +70,31 @@ void main() {
     expect(platform.titleBarDoubleClickCalls, 1);
   });
 
-  // The app below the strip is told its real height, so sizes taken from
-  // MediaQuery (dialogs, sheets) fit (#902 review).
-  testWidgets('the app sees the window minus the strip', (tester) async {
+  // The app gets the whole window with the band as its top padding, so
+  // sizes taken from MediaQuery (dialogs, sheets) fit (#902 review, #927).
+  testWidgets('the app gets the window with the band as top padding', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(800, 600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    await tester.pumpWidget(_host(FakePlatformServices()..titleBarHeight = 28));
-    final appSize = MediaQuery.sizeOf(tester.element(find.text('content')));
-    expect(appSize, const Size(800, 572));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          platformServicesProvider.overrideWithValue(
+            FakePlatformServices()..titleBarHeight = 28,
+          ),
+        ],
+        child: MaterialApp(
+          builder: (context, child) =>
+              TitleBarStrip(child: child ?? const SizedBox.shrink()),
+          home: const Text('content'),
+        ),
+      ),
+    );
+    final media = MediaQuery.of(tester.element(find.text('content')));
+    expect(media.size, const Size(800, 600));
+    expect(media.padding.top, 28);
   });
 
   // In native full screen macOS hides its title bar, so the strip collapses;
@@ -108,10 +121,7 @@ void main() {
     platform.fullScreen.value = true;
     await tester.pump();
     expect(tester.getSize(_strip).height, 0);
-    expect(
-      MediaQuery.sizeOf(tester.element(find.byType(TextField))).height,
-      600,
-    );
+    expect(MediaQuery.paddingOf(tester.element(find.byType(Scaffold))).top, 0);
     expect(find.text('draft'), findsOneWidget);
 
     platform.fullScreen.value = false;

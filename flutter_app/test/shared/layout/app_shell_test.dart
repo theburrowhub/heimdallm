@@ -339,7 +339,8 @@ void main() {
   });
 
   // On macOS the window's sidebar material shows through the sidebar, so the
-  // shell paints nothing there; the content keeps an opaque surface (#927).
+  // shell paints nothing there; elsewhere the sidebar has its own solid
+  // colour. The content Scaffold stays opaque either way (#927).
   testWidgets('a translucent window leaves the sidebar unpainted', (
     tester,
   ) async {
@@ -349,28 +350,46 @@ void main() {
         tester,
         overrides: _baseOverrides(platform: platform, api: _MockApiClient()),
       );
-      final shell = tester.widget<Scaffold>(
-        find.ancestor(
-          of: find.byKey(const Key('app-sidebar')),
-          matching: find.byType(Scaffold),
-        ),
+      final surface = tester.widget<Material>(
+        find.byKey(const Key('app-sidebar-surface')),
       );
-      final content = find.text('Dashboard content');
-      final surface = Theme.of(tester.element(content)).colorScheme.surface;
-      final opaqueContent = find.ancestor(
-        of: content,
-        matching: find.byWidgetPredicate(
-          (w) => w is ColoredBox && w.color == surface,
-        ),
+      final sidebar = HeimdallmPalette.light.sidebar;
+      expect(
+        surface.color,
+        translucent ? Colors.transparent : sidebar,
+        reason: '$translucent',
       );
-      if (translucent) {
-        expect(shell.backgroundColor, Colors.transparent);
-        expect(opaqueContent, findsOneWidget);
-      } else {
-        expect(shell.backgroundColor, isNull);
-        expect(opaqueContent, findsNothing);
-      }
+      final content = tester.widget<Scaffold>(
+        find
+            .ancestor(
+              of: find.text('Dashboard content'),
+              matching: find.byType(Scaffold),
+            )
+            .last,
+      );
+      expect(content.appBar, isNotNull, reason: 'the shell content Scaffold');
+      expect(content.backgroundColor, isNull, reason: 'opaque canvas');
     }
+  });
+
+  // As in a native Mac window the sidebar runs the full height and the app
+  // bar sits over the content only (#927).
+  testWidgets('the sidebar runs the full height beside the app bar', (
+    tester,
+  ) async {
+    await _pumpShell(
+      tester,
+      overrides: _baseOverrides(
+        platform: FakePlatformServices(),
+        api: _MockApiClient(),
+      ),
+    );
+    final sidebar = find.byKey(const Key('app-sidebar'));
+    expect(tester.getTopLeft(sidebar).dy, 0);
+    expect(
+      tester.getTopLeft(find.byType(AppBar)).dx,
+      tester.getTopRight(sidebar).dx + 1,
+    );
   });
 
   // The sidebar lists destinations in display order, which is not branch

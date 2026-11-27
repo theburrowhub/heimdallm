@@ -6,13 +6,16 @@ import '../../core/platform/platform_services_provider.dart';
 
 /// The title bar the app draws where the platform hides its own (#902).
 ///
-/// On macOS the system title bar is hidden, so this strip takes its place in
-/// the app bar's colour: title bar and app bar then read as one native toolbar
-/// while the traffic lights stay native. Dragging the strip moves the window
-/// and double-clicking it does what the user's title bar setting says, as a
-/// real title bar does. In native full screen the system hides its title bar,
-/// so the strip collapses. Everywhere else (Linux, the web) the platform keeps
-/// its own title bar and [child] is returned untouched.
+/// On macOS the system title bar is hidden and the window content runs up to
+/// the top edge, under the native traffic lights. This widget hands the app
+/// that title bar band as a top inset (`MediaQuery.padding.top`), the way a
+/// phone status bar is handed over: app bars grow into it in their own colour
+/// and the sidebar runs up through it (#927), so title bar, toolbar and
+/// sidebar read as one native window. A transparent strip over the band drags
+/// the window, and double-clicking it does what the user's title bar setting
+/// says, as a real title bar does. In native full screen the system hides its
+/// title bar, so the inset collapses. Everywhere else (Linux, the web) the
+/// platform keeps its own title bar and [child] is returned untouched.
 class TitleBarStrip extends ConsumerWidget {
   final Widget child;
 
@@ -25,36 +28,35 @@ class TitleBarStrip extends ConsumerWidget {
     final chrome = services as WindowChromePlatformCapability;
     final height = chrome.titleBarHeight;
     if (height <= 0) return child;
-    final theme = Theme.of(context);
     final media = MediaQuery.of(context);
     // The same tree in and out of full screen, so the app below keeps its
-    // state; only the strip's height changes.
+    // state; only the inset changes.
     final strip = ValueListenableBuilder<bool>(
       valueListenable: chrome.fullScreen,
       builder: (context, fullScreen, _) {
-        final strip = fullScreen ? 0.0 : height;
-        return Column(
+        final inset = fullScreen ? 0.0 : height;
+        return Stack(
+          fit: StackFit.expand,
           children: [
-            GestureDetector(
-              key: const Key('title-bar-strip'),
-              behavior: HitTestBehavior.opaque,
-              onPanStart: (_) => chrome.startWindowDrag(),
-              onDoubleTap: chrome.titleBarDoubleClick,
-              child: ColoredBox(
-                color:
-                    theme.appBarTheme.backgroundColor ??
-                    theme.colorScheme.surface,
-                child: SizedBox(height: strip, width: double.infinity),
-              ),
-            ),
-            Expanded(
-              // The app gets the window minus the strip; sizes it reads from
-              // MediaQuery (dialogs, sheets) must say so.
-              child: MediaQuery(
-                data: media.copyWith(
-                  size: Size(media.size.width, media.size.height - strip),
+            MediaQuery(
+              data: media.copyWith(
+                padding: media.padding.copyWith(top: media.padding.top + inset),
+                viewPadding: media.viewPadding.copyWith(
+                  top: media.viewPadding.top + inset,
                 ),
-                child: child,
+              ),
+              child: child,
+            ),
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: inset,
+              child: GestureDetector(
+                key: const Key('title-bar-strip'),
+                behavior: HitTestBehavior.opaque,
+                onPanStart: (_) => chrome.startWindowDrag(),
+                onDoubleTap: chrome.titleBarDoubleClick,
               ),
             ),
           ],
