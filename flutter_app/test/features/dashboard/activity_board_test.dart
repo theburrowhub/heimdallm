@@ -179,6 +179,19 @@ String? _selectedTitle(WidgetTester tester) {
 }
 
 void main() {
+  // The board's summary line (#928).
+  test('boardSummary counts open PRs and, when any, running reviews', () {
+    expect(boardSummary(open: 1, running: 0), '1 open pull request');
+    expect(
+      boardSummary(open: 9, running: 2),
+      '9 open pull requests · 2 reviews running',
+    );
+    expect(
+      boardSummary(open: 3, running: 1),
+      '3 open pull requests · 1 review running',
+    );
+  });
+
   testWidgets('every PR sits in exactly one lane', (tester) async {
     await _pump(tester);
 

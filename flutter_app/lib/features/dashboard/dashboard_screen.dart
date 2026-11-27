@@ -183,6 +183,14 @@ const double boardEmptyLaneWidth = 220;
 /// The narrowest a card gets before a lane drops a column of cards.
 const double boardCardMinWidth = 300;
 
+/// The board's one-line summary (#928): open pull requests and, when any
+/// are, the reviews running.
+String boardSummary({required int open, required int running}) {
+  final prs = '$open open pull request${open == 1 ? '' : 's'}';
+  if (running == 0) return prs;
+  return '$prs · $running review${running == 1 ? '' : 's'} running';
+}
+
 const double _boardCardGap = 8;
 
 /// A lane's horizontal padding around its cards, 10 on each side.
@@ -576,19 +584,31 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         }
 
         // Wide, Board view: the lanes (#920).
-        final boardCount = filters.hasFilters
-            ? Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                child: AppText.muted(
-                  '${filtered.length} item${filtered.length == 1 ? '' : 's'}',
-                ),
-              )
-            : null;
+        // What the board holds at a glance (#928), or how many items the
+        // filters let through.
+        final running = filtered
+            .where(
+              (g) =>
+                  (g.value.reviewStatus?.active ?? false) ||
+                  reviewingKeys.containsKey(_reviewKeyOf(g)),
+            )
+            .length;
+        final boardCount = Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+          child: AppText.muted(
+            filters.hasFilters
+                ? '${filtered.length} item${filtered.length == 1 ? '' : 's'}'
+                : boardSummary(
+                    open: filtered.where((g) => g.value.state == 'open').length,
+                    running: running,
+                  ),
+          ),
+        );
         if (emptyMessage != null && (prs.isEmpty || filtered.isEmpty)) {
           return Column(
             children: [
               toolbarFor(constraints.maxWidth),
-              ?boardCount,
+              boardCount,
               Expanded(child: Center(child: emptyMessage)),
             ],
           );
@@ -672,7 +692,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             toolbarFor(constraints.maxWidth),
-            ?boardCount,
+            boardCount,
             Expanded(
               child: Focus(
                 focusNode: _boardFocus,
@@ -1159,51 +1179,64 @@ class _Lane extends ConsumerWidget {
           ),
         ),
     ];
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-            child: Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+    // Cards sit straight on the canvas; the lane is its header and column
+    // (#928).
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  lane.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-                const SizedBox(width: 8),
-                Flexible(
+              ),
+              const SizedBox(width: 8),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: resolveAppColor(context, AppColors.sidebar),
+                  borderRadius: BorderRadius.all(
+                    AppRadius.pill.resolve(context),
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 1,
+                  ),
                   child: Text(
-                    lane.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleSmall?.copyWith(
+                    '$count',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: muted,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  '$count',
-                  style: theme.textTheme.bodyMedium?.copyWith(color: muted),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
-          Expanded(
-            child: ListView(
-              key: Key('board-lane-${lane.name}'),
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
-              children: children,
-            ),
+        ),
+        Expanded(
+          child: ListView(
+            key: Key('board-lane-${lane.name}'),
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
+            children: children,
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -1305,19 +1338,42 @@ class _BoardCardState extends ConsumerState<_BoardCard>
         open && review?.publication == ReviewPublication.abandoned;
     final showFindings = review != null && !isReviewing && failure == null;
 
-    Widget actionButton(String label, IconData icon, VoidCallback? onPressed) =>
-        SizedBox(
-          height: 30,
-          child: OutlinedButton.icon(
-            icon: Icon(icon, size: 15),
-            label: Text(label),
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              textStyle: theme.textTheme.labelMedium,
-            ),
-            onPressed: onPressed,
-          ),
-        );
+    // Pills (#928): the step that moves the PR on (review, retry) is filled,
+    // stopping one is not.
+    Widget actionButton(
+      String label,
+      IconData icon,
+      VoidCallback? onPressed, {
+      bool primary = false,
+    }) {
+      const padding = EdgeInsets.symmetric(horizontal: 12);
+      final textStyle = theme.textTheme.labelMedium?.copyWith(
+        fontWeight: FontWeight.w600,
+      );
+      return SizedBox(
+        height: 32,
+        child: primary
+            ? FilledButton.icon(
+                icon: Icon(icon, size: 15),
+                label: Text(label),
+                style: FilledButton.styleFrom(
+                  padding: padding,
+                  textStyle: textStyle,
+                ),
+                onPressed: onPressed,
+              )
+            : OutlinedButton.icon(
+                icon: Icon(icon, size: 15),
+                label: Text(label),
+                style: OutlinedButton.styleFrom(
+                  padding: padding,
+                  textStyle: textStyle,
+                ),
+                onPressed: onPressed,
+              ),
+      );
+    }
+
     final Widget? action = isReviewing
         ? actionButton(
             _cancelling ? 'Cancelling…' : 'Cancel',
@@ -1325,16 +1381,21 @@ class _BoardCardState extends ConsumerState<_BoardCard>
             _cancelling ? null : _cancelReview,
           )
         : failure != null
-        ? actionButton('Retry', Icons.refresh, _triggerReview)
+        ? actionButton('Retry', Icons.refresh, _triggerReview, primary: true)
         : review == null && open
-        ? actionButton('Review now', Icons.play_arrow, _triggerReview)
+        ? actionButton(
+            'Review now',
+            Icons.play_arrow,
+            _triggerReview,
+            primary: true,
+          )
         : null;
 
     return Material(
       color: resolveAppColor(context, AppColors.surfaceRaised),
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.all(AppRadius.lg.resolve(context)),
         side: BorderSide(
           color: widget.selected
               ? accent
@@ -1347,7 +1408,7 @@ class _BoardCardState extends ConsumerState<_BoardCard>
         child: Opacity(
           opacity: open ? 1 : 0.6,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 6, 4, 12),
+            padding: const EdgeInsets.fromLTRB(16, 8, 6, 14),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1396,7 +1457,7 @@ class _BoardCardState extends ConsumerState<_BoardCard>
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w500,
+                      fontWeight: FontWeight.w600,
                       height: 1.35,
                     ),
                   ),
@@ -1510,10 +1571,10 @@ class _FindingChips extends StatelessWidget {
                   foreground: color,
                   background: color.withValues(alpha: 0.14),
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 7,
-                    vertical: 2,
+                    horizontal: 9,
+                    vertical: 3,
                   ),
-                  radius: 5,
+                  radius: AppRadius.pill.resolve(context).x,
                   fontSize: 11,
                   letterSpacing: 0,
                 );

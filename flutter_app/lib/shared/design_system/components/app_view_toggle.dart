@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../color_resolver.dart';
+import '../tokens.dart';
 import 'app_icon_button.dart';
 
 /// The display mode a listing screen renders its items in. [board] is offered
@@ -32,31 +34,67 @@ class AppViewToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (showBoard)
-          AppIconButton(
-            icon: Icons.view_kanban_outlined,
-            selected: mode == AppViewMode.board,
-            tooltip: 'Board view',
-            onPressed: () => onChanged(AppViewMode.board),
-          ),
-        AppIconButton(
-          key: listKey,
-          icon: Icons.view_list,
-          selected: mode == AppViewMode.list,
-          tooltip: 'List view',
-          onPressed: () => onChanged(AppViewMode.list),
-        ),
-        AppIconButton(
-          key: gridKey,
-          icon: Icons.grid_view,
-          selected: mode == AppViewMode.grid,
-          tooltip: 'Grid view',
-          onPressed: () => onChanged(AppViewMode.grid),
+    // A segmented pill (#928): the views sit in a grey track and the current
+    // one is a raised thumb.
+    final pill = BorderRadius.all(AppRadius.pill.resolve(context));
+    final thumb = BoxDecoration(
+      color: resolveAppColor(context, AppColors.surfaceRaised),
+      borderRadius: pill,
+      boxShadow: [
+        BoxShadow(
+          color: Theme.of(context).colorScheme.shadow.withValues(alpha: 0.14),
+          blurRadius: 3,
+          offset: const Offset(0, 1),
         ),
       ],
+    );
+    Widget segment(AppViewMode value, Widget button) => DecoratedBox(
+      decoration: mode == value ? thumb : const BoxDecoration(),
+      child: button,
+    );
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: resolveAppColor(context, AppColors.sidebar),
+        borderRadius: pill,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(3),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (showBoard)
+              segment(
+                AppViewMode.board,
+                AppIconButton(
+                  icon: Icons.view_kanban_outlined,
+                  selected: mode == AppViewMode.board,
+                  tooltip: 'Board view',
+                  onPressed: () => onChanged(AppViewMode.board),
+                ),
+              ),
+            segment(
+              AppViewMode.list,
+              AppIconButton(
+                key: listKey,
+                icon: Icons.view_list,
+                selected: mode == AppViewMode.list,
+                tooltip: 'List view',
+                onPressed: () => onChanged(AppViewMode.list),
+              ),
+            ),
+            segment(
+              AppViewMode.grid,
+              AppIconButton(
+                key: gridKey,
+                icon: Icons.grid_view,
+                selected: mode == AppViewMode.grid,
+                tooltip: 'Grid view',
+                onPressed: () => onChanged(AppViewMode.grid),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
