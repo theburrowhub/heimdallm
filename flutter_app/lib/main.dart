@@ -1,4 +1,7 @@
+import 'package:flutter/foundation.dart'
+    show LicenseEntryWithLineBreaks, LicenseRegistry;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'core/api/api_client.dart';
@@ -59,6 +62,12 @@ void applyNotificationPreferences(
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // The bundled Inter font ships under the SIL Open Font License (#926).
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(const [
+      'Inter',
+    ], await rootBundle.loadString('assets/fonts/inter/OFL.txt'));
+  });
 
   final platform = PlatformServices.create();
   if (!await initializePlatformForApp(platform)) return;

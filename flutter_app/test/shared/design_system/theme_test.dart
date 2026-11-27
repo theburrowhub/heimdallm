@@ -110,7 +110,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(AppSpace.md.resolve(captured), 12);
-    expect(AppRadius.lg.resolve(captured), const Radius.circular(12));
+    expect(AppRadius.lg.resolve(captured), const Radius.circular(14));
   });
 
   testWidgets('throws a clear error when resolved outside a MixScope', (

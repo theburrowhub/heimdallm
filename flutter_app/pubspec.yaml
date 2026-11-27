@@ -55,3 +55,16 @@ flutter:
     - assets/icon.png
     - assets/tray_icon.png
     - assets/tray_icon@2x.png
+    - assets/fonts/inter/OFL.txt
+  # Inter 4.1 (https://github.com/rsms/inter/releases/tag/v4.1), the app font
+  # on Linux and the web (#926). SIL Open Font License, see OFL.txt.
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/inter/Inter-Regular.ttf
+        - asset: assets/fonts/inter/Inter-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/inter/Inter-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/inter/Inter-Bold.ttf
+          weight: 700

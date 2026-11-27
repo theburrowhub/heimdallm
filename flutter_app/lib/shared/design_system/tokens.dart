@@ -13,6 +13,8 @@ class AppColors {
   static const canvas = ColorToken('app.color.canvas');
   static const surface = ColorToken('app.color.surface');
   static const surfaceRaised = ColorToken('app.color.surfaceRaised');
+  // The app sidebar where the window has no material behind it (#926).
+  static const sidebar = ColorToken('app.color.sidebar');
   static const border = ColorToken('app.color.border');
 
   // Text.
@@ -61,7 +63,7 @@ class AppRadius {
 
   static const sm = RadiusToken('app.radius.sm'); // 4
   static const md = RadiusToken('app.radius.md'); // 8
-  static const lg = RadiusToken('app.radius.lg'); // 12
+  static const lg = RadiusToken('app.radius.lg'); // 14, cards
   static const pill = RadiusToken(
     'app.radius.pill',
   ); // 999 — fully rounded chips/pills
